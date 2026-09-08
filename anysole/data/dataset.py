@@ -1,0 +1,209 @@
+"""40 Hz BVH windows with cached HRNet features and raw insole tokens."""
+
+from __future__ import annotations
+
+import csv
+import json
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+from anysole.data.bvh_io import resample_session_bvh
+from anysole.data.pressure import load_session_pressure, normalize_raw
+from anysole.geometry import fk_pose6d_np
+from anysole.types import (
+    CONFIG_PROBS,
+    FPS,
+    HRNET_CACHE_ROOT,
+    JOINT_PARENTS,
+    SEQ_ROOT,
+    SPLIT_CSV,
+    TW,
+    V_FEAT_DIM,
+)
+
+
+def load_split_ids(split_csv: Path, column: str) -> List[str]:
+    ids: List[str] = []
+    with Path(split_csv).open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None or column not in reader.fieldnames:
+            raise ValueError("%s missing column %s" % (split_csv, column))
+        for row in reader:
+            value = (row.get(column) or "").strip()
+            if value:
+                ids.append(value)
+    return ids
+
+
+def find_session_dir(seq_root: Path, session_id: str) -> Path:
+    matches = sorted(seq_root.glob("*/*/%s" % session_id))
+    dirs = [path for path in matches if path.is_dir()]
+    if not dirs:
+        raise FileNotFoundError("No sequence dir for %s under %s" % (session_id, seq_root))
+    return dirs[0]
+
+
+def session_time_grid(meta: dict) -> np.ndarray:
+    n = int(meta["n_frames"])
+    start = float(meta["visual_start_s"])
+    return start + np.arange(n, dtype=np.float64) / float(meta.get("target_fps", FPS))
+
+
+def hrnet_cache_path(session_id: str, cache_root: Path = HRNET_CACHE_ROOT) -> Path:
+    return Path(cache_root) / ("%s.pt" % session_id)
+
+
+def sample_config_ids(batch_size: int, generator: Optional[torch.Generator] = None) -> torch.Tensor:
+    probs = torch.tensor(CONFIG_PROBS, dtype=torch.float32)
+    return torch.multinomial(probs, batch_size, replacement=True, generator=generator)
+
+
+def collate_windows(samples: Sequence[dict]) -> dict:
+    out: Dict[str, object] = {}
+    keys = samples[0].keys()
+    for key in keys:
+        if key in ("session_id", "hierarchy"):
+            out[key] = [sample[key] for sample in samples]
+        else:
+            out[key] = torch.stack([sample[key] for sample in samples], dim=0)
+    return out
+
+
+class AnySoleDataset(Dataset):
+    def __init__(
+        self,
+        mode: str,
+        seq_root: Path = SEQ_ROOT,
+        split_csv: Path = SPLIT_CSV,
+        cache_root: Path = HRNET_CACHE_ROOT,
+        window_length: int = TW,
+        session_ids: Optional[Sequence[str]] = None,
+        allow_missing_video: bool = False,
+    ):
+        self.mode = mode
+        self.window_length = int(window_length)
+        self.seq_root = Path(seq_root)
+        self.cache_root = Path(cache_root)
+        self.allow_missing_video = allow_missing_video
+
+        if session_ids is None:
+            column = {"train": "train", "eval": "val", "val": "val", "test": "test"}[mode]
+            session_ids = load_split_ids(split_csv, column)
+        self.session_ids = list(session_ids)
+
+        self.sessions: List[dict] = []
+        self.valid_windows: List[tuple] = []
+        bvh_cache: Dict[str, object] = {}
+
+        for session_id in self.session_ids:
+            seq_dir = find_session_dir(self.seq_root, session_id)
+            meta = json.loads((seq_dir / "align_meta.json").read_text())
+            n_frames = int(meta["n_frames"])
+            t_grid = session_time_grid(meta)
+            t_mocap = t_grid - float(meta["offset_s"])
+
+            bvh = resample_session_bvh(Path(meta["bvh_path"]), t_mocap, hierarchy_cache=bvh_cache)
+            if bvh["pose_6d"].shape[0] != n_frames:
+                raise ValueError(
+                    "%s BVH resample length %d != n_frames %d"
+                    % (session_id, bvh["pose_6d"].shape[0], n_frames)
+                )
+            pressure = load_session_pressure(meta, t_grid)
+            contact = np.load(seq_dir / "contact.npy").astype(np.float32)
+            if contact.shape[0] != n_frames or contact.shape[1] < 8:
+                raise ValueError("Bad contact.npy for %s: %s" % (session_id, contact.shape))
+            fake_path = seq_dir / "fake_mask.npy"
+            if fake_path.is_file():
+                fake_mask = np.load(fake_path).astype(np.uint8).reshape(-1)
+            else:
+                fake_mask = np.zeros((n_frames,), dtype=np.uint8)
+
+            cache_path = hrnet_cache_path(session_id, self.cache_root)
+            if cache_path.is_file():
+                v_feat = torch.load(cache_path, map_location="cpu")
+                if torch.is_tensor(v_feat):
+                    v_feat = v_feat.float().cpu().numpy()
+                else:
+                    v_feat = np.asarray(v_feat, dtype=np.float32)
+            elif self.allow_missing_video:
+                v_feat = np.zeros((n_frames, V_FEAT_DIM), dtype=np.float32)
+            else:
+                raise FileNotFoundError(
+                    "Missing HRNet cache %s. Run `python -m anysole.data.extract_hrnet --cam-id 3`."
+                    % cache_path
+                )
+            if v_feat.shape != (n_frames, V_FEAT_DIM):
+                raise ValueError(
+                    "%s V_feat shape %s != (%d, %d)" % (session_id, v_feat.shape, n_frames, V_FEAT_DIM)
+                )
+
+            kp = fk_pose6d_np(bvh["pose_6d"], bvh["trans_m"], bvh["offsets_m"], bvh["parents"])
+            trans = bvh["trans_m"]
+            vel = np.zeros_like(trans)
+            vel[0] = trans[0]
+            vel[1:] = trans[1:] - trans[:-1]
+
+            session = {
+                "session_id": session_id,
+                "hierarchy": bvh["hierarchy"],
+                "V_feat": v_feat.astype(np.float32),
+                "T_raw": normalize_raw(pressure["T_raw"]),
+                "T_phys": pressure["T_phys"],
+                "pose_gt": bvh["pose_6d"],
+                "trans_gt": trans.astype(np.float32),
+                "vel_gt": vel.astype(np.float32),
+                "kp_gt": kp.astype(np.float32),
+                "contact_gt": contact[:, 6:8].astype(np.float32),
+                "offsets": bvh["offsets_m"].astype(np.float32),
+                "parents": np.asarray(JOINT_PARENTS, dtype=np.int64),
+                "fake_mask": fake_mask,
+            }
+            file_index = len(self.sessions)
+            n_windows = n_frames // self.window_length
+            for window_idx in range(n_windows):
+                left = window_idx * self.window_length
+                right = left + self.window_length
+                if fake_mask[left:right].any():
+                    continue
+                self.valid_windows.append((file_index, left, right))
+            self.sessions.append(session)
+
+        print("%s sessions=%d windows=%d" % (self.mode, len(self.sessions), len(self.valid_windows)))
+
+    def __len__(self) -> int:
+        return len(self.valid_windows)
+
+    def __getitem__(self, idx: int) -> dict:
+        file_index, left, right = self.valid_windows[idx]
+        session = self.sessions[file_index]
+
+        def crop(name: str) -> torch.Tensor:
+            value = session[name][left:right]
+            tensor = torch.from_numpy(np.ascontiguousarray(value))
+            if tensor.dtype == torch.float64:
+                tensor = tensor.float()
+            return tensor
+
+        item = {
+            "V_feat": crop("V_feat"),
+            "T_raw": crop("T_raw"),
+            "T_phys": crop("T_phys"),
+            "pose_gt": crop("pose_gt"),
+            "trans_gt": crop("trans_gt"),
+            "vel_gt": crop("vel_gt"),
+            "kp_gt": crop("kp_gt"),
+            "contact_gt": crop("contact_gt"),
+            "offsets": torch.from_numpy(session["offsets"]).float(),
+            "parents": torch.from_numpy(session["parents"]).long(),
+            "session_id": session["session_id"],
+            "hierarchy": session["hierarchy"],
+            "frame_start": torch.tensor(left, dtype=torch.long),
+        }
+        banned = [key for key in item if key.lower() in ("smpl", "theta", "betas") or "smpl" in key.lower()]
+        if banned:
+            raise RuntimeError("SMPL fields leaked into batch: %s" % banned)
+        return item
