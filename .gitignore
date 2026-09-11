@@ -1,4 +1,38 @@
+# Ignore the entire Baselines tree.
+Baselines/
 
+# Generated artifacts
+*.png
+*.pkl
+*.npy
+*.npz
+*.bvh
+*.csv
+*.gif
+*.mp4
+*.pyc
+__pycache__/
+
+# AnySole is being promoted to the repository root; do not ignore this
+# directory while the migration is in progress.
+
+# Centralized baseline data and generated artifacts. Keep only the workspace
+# manifest/documentation and management tooling under version control.
+/AnysoleWorkspace/dependencies/
+/AnysoleWorkspace/derived/
+/AnysoleWorkspace/sources/
+/AnysoleWorkspace/calibration/
+/AnysoleWorkspace/splits/
+/AnysoleWorkspace/**/workspace_cache/
+
+# Results and visualisation outputs. Keep only the visualisation scripts.
+/results/
+/resultsdisplay/
+!/resultsdisplay/
+!/resultsdisplay/script/
+!/resultsdisplay/script/**
+
+# Large third-party reference repositories.
 /ReferenceWorks/RoHM/
 /ReferenceWorks/deep-high-resolution-net.pytorch/
 /ReferenceWorks/inverse-compositional-STN/
