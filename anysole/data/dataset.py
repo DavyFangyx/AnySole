@@ -23,6 +23,7 @@ from anysole.types import (
     SPLIT_CSV,
     TW,
     V_FEAT_DIM,
+    WORKSPACE_ROOT,
 )
 
 
@@ -47,6 +48,23 @@ def find_session_dir(seq_root: Path, session_id: str) -> Path:
     return dirs[0]
 
 
+def resolve_bvh_path(meta: dict) -> Path:
+    """Resolve migrated BVH metadata without rewriting every align_meta.json."""
+    recorded = Path(meta["bvh_path"])
+    if recorded.is_file():
+        return recorded
+    session_id = str(meta["session_id"])
+    date = str(meta["date"])
+    root = WORKSPACE_ROOT / "sources" / "raw" / date / "mocap_ori_bvh" / session_id
+    candidates = sorted(root.glob("*.bvh"))
+    if not candidates:
+        raise FileNotFoundError(
+            "BVH not found for %s: recorded=%s, workspace raw=%s"
+            % (session_id, recorded, root)
+        )
+    return candidates[0]
+
+
 def session_time_grid(meta: dict) -> np.ndarray:
     n = int(meta["n_frames"])
     start = float(meta["visual_start_s"])
@@ -57,8 +75,26 @@ def hrnet_cache_path(session_id: str, cache_root: Path = HRNET_CACHE_ROOT) -> Pa
     return Path(cache_root) / ("%s.pt" % session_id)
 
 
-def sample_config_ids(batch_size: int, generator: Optional[torch.Generator] = None) -> torch.Tensor:
-    probs = torch.tensor(CONFIG_PROBS, dtype=torch.float32)
+def sample_config_ids(
+    batch_size: int,
+    generator: Optional[torch.Generator] = None,
+    probs: Optional[Sequence[float]] = None,
+) -> torch.Tensor:
+    """Sample config ids in the fixed order ``[VT, V, T]``.
+
+    ``probs`` is configurable for training experiments while the old call
+    ``sample_config_ids(batch_size, generator)`` remains valid.
+    """
+    values = CONFIG_PROBS if probs is None else tuple(float(value) for value in probs)
+    if len(values) != 3:
+        raise ValueError("config probabilities must contain exactly 3 values: [VT, V, T]")
+    if any(value < 0.0 for value in values):
+        raise ValueError("config probabilities must be non-negative")
+    total = sum(values)
+    if not total > 0.0:
+        raise ValueError("config probabilities must have a positive sum")
+    probs = torch.tensor(values, dtype=torch.float32)
+    probs = probs / probs.sum()
     return torch.multinomial(probs, batch_size, replacement=True, generator=generator)
 
 
@@ -106,7 +142,7 @@ class AnySoleDataset(Dataset):
             t_grid = session_time_grid(meta)
             t_mocap = t_grid - float(meta["offset_s"])
 
-            bvh = resample_session_bvh(Path(meta["bvh_path"]), t_mocap, hierarchy_cache=bvh_cache)
+            bvh = resample_session_bvh(resolve_bvh_path(meta), t_mocap, hierarchy_cache=bvh_cache)
             if bvh["pose_6d"].shape[0] != n_frames:
                 raise ValueError(
                     "%s BVH resample length %d != n_frames %d"
@@ -133,7 +169,7 @@ class AnySoleDataset(Dataset):
                 v_feat = np.zeros((n_frames, V_FEAT_DIM), dtype=np.float32)
             else:
                 raise FileNotFoundError(
-                    "Missing HRNet cache %s. Run `python -m anysole.data.extract_hrnet --cam-id 3`."
+                    "Missing AnySole HRNet+bbox cache %s. Run `python -m anysole.data.extract_hrnet --cam-id 3`."
                     % cache_path
                 )
             if v_feat.shape != (n_frames, V_FEAT_DIM):
@@ -144,8 +180,10 @@ class AnySoleDataset(Dataset):
             kp = fk_pose6d_np(bvh["pose_6d"], bvh["trans_m"], bvh["offsets_m"], bvh["parents"])
             trans = bvh["trans_m"]
             vel = np.zeros_like(trans)
-            vel[0] = trans[0]
-            vel[1:] = trans[1:] - trans[:-1]
+            # Store true forward differences in m/s.  The first frame has no
+            # predecessor and is therefore the zero increment.
+            if n_frames > 1:
+                vel[1:] = (trans[1:] - trans[:-1]) * float(FPS)
 
             session = {
                 "session_id": session_id,
@@ -154,7 +192,7 @@ class AnySoleDataset(Dataset):
                 "T_raw": normalize_raw(pressure["T_raw"]),
                 "T_phys": pressure["T_phys"],
                 "pose_gt": bvh["pose_6d"],
-                "trans_gt": trans.astype(np.float32),
+                "trans_global": trans.astype(np.float32),
                 "vel_gt": vel.astype(np.float32),
                 "kp_gt": kp.astype(np.float32),
                 "contact_gt": contact[:, 6:8].astype(np.float32),
@@ -193,7 +231,6 @@ class AnySoleDataset(Dataset):
             "T_raw": crop("T_raw"),
             "T_phys": crop("T_phys"),
             "pose_gt": crop("pose_gt"),
-            "trans_gt": crop("trans_gt"),
             "vel_gt": crop("vel_gt"),
             "kp_gt": crop("kp_gt"),
             "contact_gt": crop("contact_gt"),
@@ -203,6 +240,13 @@ class AnySoleDataset(Dataset):
             "hierarchy": session["hierarchy"],
             "frame_start": torch.tensor(left, dtype=torch.long),
         }
+        # Trajectory targets are relative to the frame immediately before the
+        # window.  Dividing by FPS integrates m/s back to meters.
+        item["trans_gt"] = torch.cumsum(item["vel_gt"], dim=0) / float(FPS)
+        anchor_index = max(left - 1, 0)
+        item["trans_anchor"] = torch.from_numpy(
+            np.ascontiguousarray(session["trans_global"][anchor_index])
+        ).float()
         banned = [key for key in item if key.lower() in ("smpl", "theta", "betas") or "smpl" in key.lower()]
         if banned:
             raise RuntimeError("SMPL fields leaked into batch: %s" % banned)

@@ -58,19 +58,17 @@ class TimestepEmbedding(nn.Module):
 
 
 class SharedEmbeddings(nn.Module):
-    """Time PE, 3-way modality embedding, and one null token per modality."""
+    """Time PE, 2-way modality embedding, and one null token per modality."""
 
     def __init__(self, dim=D_MODEL, tw=TW):
         super().__init__()
         self.dim = dim
         self.tw = tw
-        self.modality = nn.Embedding(3, dim)
+        self.modality = nn.Embedding(2, dim)
         self.null_v = nn.Parameter(torch.zeros(1, 1, dim))
-        self.null_traw = nn.Parameter(torch.zeros(1, 1, dim))
-        self.null_tphys = nn.Parameter(torch.zeros(1, 1, dim))
+        self.null_t = nn.Parameter(torch.zeros(1, 1, dim))
         self.timestep = TimestepEmbedding(dim)
         self.register_buffer("time_pe", sinusoidal_pe(tw, dim), persistent=True)
         nn.init.normal_(self.null_v, std=0.02)
-        nn.init.normal_(self.null_traw, std=0.02)
-        nn.init.normal_(self.null_tphys, std=0.02)
+        nn.init.normal_(self.null_t, std=0.02)
         nn.init.normal_(self.modality.weight, std=0.02)

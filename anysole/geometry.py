@@ -130,16 +130,18 @@ def fk_pose6d(
     if offsets.ndim == 2:
         offsets = offsets.unsqueeze(0).expand(batch, -1, -1)
     n_joints = rotmats.shape[2]
-    global_rot = rotmats.new_zeros(rotmats.shape)
-    global_pos = rotmats.new_zeros(batch, time, n_joints, 3)
+    global_rot = []
+    global_pos = []
     parents_list = parents.detach().cpu().tolist() if parents.ndim == 1 else parents[0].detach().cpu().tolist()
     for j in range(n_joints):
         parent = int(parents_list[j])
         if parent < 0:
-            global_rot[:, :, j] = rotmats[:, :, j]
-            global_pos[:, :, j] = offsets[:, j].unsqueeze(1)
+            joint_rot = rotmats[:, :, j]
+            joint_pos = offsets[:, j].unsqueeze(1).expand(-1, time, -1)
         else:
-            global_rot[:, :, j] = torch.matmul(global_rot[:, :, parent], rotmats[:, :, j])
+            joint_rot = torch.matmul(global_rot[parent], rotmats[:, :, j])
             offset = offsets[:, j].unsqueeze(1).unsqueeze(-1)
-            global_pos[:, :, j] = global_pos[:, :, parent] + torch.matmul(global_rot[:, :, parent], offset).squeeze(-1)
-    return global_pos + trans.unsqueeze(2)
+            joint_pos = global_pos[parent] + torch.matmul(global_rot[parent], offset).squeeze(-1)
+        global_rot.append(joint_rot)
+        global_pos.append(joint_pos)
+    return torch.stack(global_pos, dim=2) + trans.unsqueeze(2)

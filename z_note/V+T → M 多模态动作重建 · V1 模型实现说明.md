@@ -17,7 +17,7 @@ raw 48×2 + 物理──┤── T-Enc ──┘                               
 缺失模态 → 该路 token 全部换成可学习 null token
 ```
 
-- V、T 各自编码成 token 序列,拼在一起过融合 Transformer 得到 `F`。
+- V、T 各自编码成 token 序列,拼在一起过融合 Transformer 得到 `F`。T 路先在特征维拼接 `T_raw` 与 `T_phys`,只生成一组 T token。
 - `F` 分出四个头:两个是真正输出(姿态扩散、轨迹回归),两个是辅助监督(T 重建、V 重建),辅助头是让缺模态支路拿到跨模态信息的机制。
 - 训练时按概率把某一路输入置空(null token),这就是缺失模态鲁棒性的来源。
 
@@ -31,8 +31,8 @@ raw 48×2 + 物理──┤── T-Enc ──┘                               
 - 四机位(top/left/front/right),**只用 front(相机 3)**。
 - 原始 1624×1240、H.264、实测 ~38.1–38.6 fps(非固定 40)。
 - 训练**不读 MP4**:取该机位 JPG,按对齐区间最近邻抽到 40 Hz → crop 256×256 → 冻结 HRNet 提特征。
-- **训练输入 = HRNet 特征,每帧 2048 维**。
-- 窗口张量:`V_feat` **(B, 20, 2048)**。
+- **训练输入 = HRNet 特征 2048 维 + CLIFF 归一化 `bbox_info` 3 维,每帧共 2051 维**。
+- 窗口张量:`V_feat` **(B, 20, 2051)**。
 - 参考:HRNet https://arxiv.org/abs/1902.09212
 {
   代码：one/ReferenceWorks/deep-high-resolution-net.pytorch
@@ -42,7 +42,7 @@ raw 48×2 + 物理──┤── T-Enc ──┘                               
 - 鞋垫 4×12=48 点/脚,左右各一路 CSV(`frame_idx, t_us, 1..48`),左右脚分开、原始帧率不齐。
 - **决定:直接用 48 点原始向量,不做高斯平滑升采样成稠密图**(插值不增信息)。
 - 原始压力(插到 40 Hz):左 48 + 右 48 → 每帧 96 维 → `T_raw` **(B, 20, 96)**。
-- 附加物理特征(从原始压力导出,当额外 token,不并进 raw):
+- 附加物理特征(从原始压力导出,与 raw 在特征维拼接后共同编码):
   - CoP 左/右各 (x,y) → 4 维
   - 总力 左/右 → 2 维
   - 接触包络、压力梯度 → 若干维(窗口/邻域大小当超参,先随手定)
@@ -72,7 +72,7 @@ raw 48×2 + 物理──┤── T-Enc ──┘                               
 L_{\text{angle}} = \cos^{-1}\left(\frac{\text{Tr}(\mathbf{M}\mathbf{M}'^{-1}) - 1}{2}\right)
 **采样后处理：**生成6D向量后通过解码公式转换为旋转矩阵，确保物理有效性
 }
-- **回归目标(轨迹头)**:`transl` → `trans_gt` **(B, 20, 3)**。
+- **回归目标(轨迹头)**:根位移前向差分 → `vel_gt` **(B,20,3, m/s)**，并积分为窗口相对轨迹 `trans_gt` **(B,20,3)**；窗口 anchor 单独保存。
 - `betas`:v1 用 GT(每人常量),不逐帧扩散,只在算 FK/关键点损失时用。
 - 关键点 GT:`keypoints.npy[:, :22]` → `kp_gt` **(B, 20, 22, 3)**。
 
@@ -84,21 +84,20 @@ L_{\text{angle}} = \cos^{-1}\left(\frac{\text{Tr}(\mathbf{M}\mathbf{M}'^{-1}) - 
 
 | 模块 | 输入 | 结构 | 输出 |
 |---|---|---|---|
-| V-Enc | `V_feat` (B,20,2048) | Linear(2048→d) + 时间正弦位置编码 | V token (B,20,d) |
-| T-Enc(raw) | `T_raw` (B,20,96) | Linear(96→d) + 时间 PE | T_raw token (B,20,d) |
-| T-Enc(phys) | `T_phys` (B,20,Kp) | Linear(Kp→d) + 时间 PE | T_phys token (B,20,d) |
+| V-Enc | `V_feat` (B,20,2051) | Linear(2051→d) + 时间正弦位置编码 | V token (B,20,d) |
+| T-Enc | `cat(T_raw,T_phys)` (B,20,96+Kp) | Linear((96+Kp)→d) + 时间 PE | T token (B,20,d) |
 
-- 每路 token 加一个**模态类型嵌入**(V / T_raw / T_phys 三种)。
+- 每路 token 加一个**模态类型嵌入**(V / T 两种)。
 - HRNet 冻结,V-Enc 只是投影 + 位置编码(v1)。解冻/换 SAM 3D Body 列入测试项。
-- T-Enc(raw) v1 用 flat Linear;按脚 4×12 上小卷积列入测试项。
+- T-Enc v1 用 flat Linear;按脚 4×12 上小卷积列入测试项。
 
 ---
 
 ## 3. 融合
 
-- 把当前**可用**模态的 token 沿序列拼接:`[V(20), T_raw(20), T_phys(20)]`(缺失路整段换成该路的**可学习 null token**)。
+- 把当前**可用**模态的 token 沿序列拼接:`[V(20), T(20)]`(缺失路整段换成该路的**可学习 null token**)。
 - 过 N 层融合 Transformer(自注意力,N=4 起步),token 带时间 PE + 模态嵌入。
-- 输出 fused memory `F`:**(B, 60, d)**(三路各 20)。给下游各头做 cross-attn 的 key/value。
+- 输出 fused memory `F`:**(B, 40, d)**(两路各 20)。给下游各头做 cross-attn 的 key/value。
 
 ---
 
@@ -141,45 +140,47 @@ L_{\text{angle}} = \cos^{-1}\left(\frac{\text{Tr}(\mathbf{M}\mathbf{M}'^{-1}) - 
 }
 
 ### 4.2 轨迹回归头
-- 结构:2 层 Transformer encoder,输入 `F`(池化或直接序列)→ 每帧根**速度** `v_hat`(B,20,3)→ `trans_hat = cumsum(v_hat)`。
+- 结构:2 层 Transformer encoder,输入 `F`(池化或直接序列)→ 每帧根速度 `v_hat`(B,20,3, m/s)→ `trans_hat = cumsum(v_hat) / FPS` (米)。
 - 预测速度再积分,比直接回归绝对 transl 更稳,也天然对上累积位移惩罚。
+- 窗口内 `vel_gt[0]=0`、`vel_gt[t]=(trans[t]-trans[t-1])*FPS`; `trans_gt=cumsum(vel_gt)/FPS` 是相对窗口轨迹。`trans_anchor` 不进入轨迹损失；评估/长序列拼接及世界坐标 FK 辅助项使用它恢复全局坐标。
 - 不同输入配置下根位移的最佳来源不同(V 有深度漂移、IMU/压力抗漂移),条件集随可用模态变化。config 自适应条件列入测试项;v1 先统一吃 `F`。
 - 解耦参考:RoHM(CVPR 2024,TrajNet+PoseNet)。
 {
   代码：one/ReferenceWorks/RoHM
 }
+
 ---
 
 ## 5. 辅助头与损失
 
 | 头 | 输入→输出 | 作用 |
 |---|---|---|
-| T 重建头 | `F` → `pressure_hat`(B,20,96) | 强迫共享隐变量在只看 V 时也编码接触结构;`{V}→M+T` 时它就是 T 的真正输出 |
-| V 重建头 | `F` → `Vfeat_hat`(B,20,2048) | 强迫隐变量在只看 T 时携带全局信息 |
+| T 重建头 | `F` → `pressure_hat`(B,20,96) | 重建归一化后的原始触觉压力 `T_raw`(左48+右48);强迫共享隐变量在只看 V 时也编码接触结构 |
+| V 重建头 | `F` → `Vfeat_hat`(B,20,2051) | 重建 HRNet 特征与 `bbox_info`;强迫隐变量在只看 T 时携带视觉全局信息 |
 
 ### 损失表(v1)
 
 | 损失 | 定义 | 激活配置 | 权重 |
 |---|---|---|---|
 | L_pose | MSE(`x0_hat`, `pose_gt`) | 全部 | 1.0 |
-| L_traj | MSE(`trans_hat`,`trans_gt`) + 0.001·Σ 累积位移 MSE | 全部 | λ_traj |
+| L_traj | `λ_v·MSE(v_hat,vel_gt) + λ_d·mean_{Δ∈{2,4,8,19}}[(1/Δ)·MSE(D_Δ(trans_hat),D_Δ(trans_gt))]` | 全部 | λ_traj |
 | L_Trec | MSE(`pressure_hat`,`T_raw`) | 全部 | λ_T |
 | L_Vrec | MSE(`Vfeat_hat`,`V_feat`) | 仅 `{T}→M` | λ_V |
 | L_con | FK(`x0_hat`,GT betas)→脚部速度/高度→软接触 → 与 `contact_gt` 的 BCE | 全部 | λ_con |
 | L_kp | FK(`x0_hat`)→关节位置(22) 与 `kp_gt` 的 MSE | 全部 | λ_kp |
 
-- 累积位移惩罚 λ=0.001,约束长期轨迹稳定(照搬 Step2Motion)。
+- 多尺度位移项覆盖 2/4/8/19 帧，`Δ=19` 约束整窗端点位移；`1/Δ` 做尺度归一化，避免长跨度项主导。
 - L_con 是把"压力→接触→抗漂移"落到损失上的地方,v1 就带简单版,别等 v2,否则看不出压力的贡献。`contact_gt` 直接用 `contact.npy`,不用自己伪标注。
-- T 重建在 T 是输入时是平凡拷贝(损失自然很低),在 T 缺失时才是真正的跨模态预测,不用额外开关。
+- T 重建在 T 是输入时是平凡拷贝(损失自然很低),在 T 缺失时才是真正的跨模态预测,不用额外开关。重建目标始终是 `T_raw` 的 96 维归一化值,不重建 `T_phys`。
 
 ---
 
 ## 6. 模态 dropout 与训练
 
-- **按 config 类别采样**(比独立 Bernoulli + 拒绝更干净):
-  - `{V,T}` : 0.50
-  - `{V}` (丢 T) : 0.25
-  - `{T}` (丢 V) : 0.25
+- **按 config 类别采样**(比独立 Bernoulli + 拒绝更干净),默认比例可由训练配置 `config_probs=[VT,V,T]` 调节:
+  - `{V,T}` : 0.50 (默认)
+  - `{V}` (丢 T) : 0.25 (默认)
+  - `{T}` (丢 V) : 0.25 (默认)
   - **v1 不留全空样本**(至少保一路输入)。全空样本 + CFG 引导采样列入测试项。
 - 丢弃 = 该路 token 换 null token,其余不变。
 - 优化器 Adam,batch 256,lr 1e-3(融合 Transformer 若不稳降到 1e-4)。

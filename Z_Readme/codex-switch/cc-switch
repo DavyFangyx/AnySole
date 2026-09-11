@@ -1,0 +1,626 @@
+#!/usr/bin/env python3
+"""Switch Codex config.toml agents and matching credentials."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+
+HOME = Path.home()
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", HOME / ".codex"))
+ROOT = CODEX_HOME / "cc-switch"
+AGENTS_DIR = ROOT / "agents"
+SECRETS_DIR = ROOT / "secrets"
+BACKUPS_DIR = ROOT / "backups"
+CURRENT_FILE = ROOT / "current"
+LIVE_CONFIG = CODEX_HOME / "config.toml"
+AUTH_JSON = CODEX_HOME / "auth.json"
+BASHRC = HOME / ".bashrc"
+PROFILE = HOME / ".profile"
+
+RESERVED = {"help", "switch", "open", "add", "logout", "token"}
+ACCOUNT_AGENTS = {"openai"}
+
+def export_re(var: str) -> re.Pattern[str]:
+    return re.compile(rf"^(\s*#\s*)?export\s+{re.escape(var)}=.*$")
+
+
+class CcSwitchError(Exception):
+    pass
+
+
+def die(message: str, code: int = 1) -> None:
+    print(f"cc-switch: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def now_stamp() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def ensure_layout() -> None:
+    for path in (ROOT, AGENTS_DIR, SECRETS_DIR, BACKUPS_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(SECRETS_DIR, 0o700)
+    except OSError:
+        pass
+
+
+def valid_name(name: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}", name))
+
+
+def agent_toml(name: str) -> Path:
+    return AGENTS_DIR / f"{name}.toml"
+
+
+def agent_key(name: str) -> Path:
+    return SECRETS_DIR / f"{name}.key"
+
+
+def list_agents() -> list[str]:
+    names = sorted(p.stem for p in AGENTS_DIR.glob("*.toml"))
+    preferred = ["codex", "wenle", "openai"]
+    ordered = [n for n in preferred if n in names]
+    ordered.extend(n for n in names if n not in preferred)
+    return ordered
+
+
+def read_current() -> str | None:
+    if not CURRENT_FILE.exists():
+        return None
+    value = CURRENT_FILE.read_text(encoding="utf-8").strip()
+    return value or None
+
+
+def write_current(name: str) -> None:
+    CURRENT_FILE.write_text(name + "\n", encoding="utf-8")
+
+
+def chmod_private(path: Path) -> None:
+    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+
+
+def copy_private(src: Path, dst: Path) -> None:
+    shutil.copy2(src, dst)
+    chmod_private(dst)
+
+
+def backup_file(path: Path, prefix: str) -> Path | None:
+    if not path.exists():
+        return None
+    dest = BACKUPS_DIR / f"{prefix}.{now_stamp()}"
+    shutil.copy2(path, dest)
+    chmod_private(dest)
+    return dest
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def write_text(path: Path, content: str, private: bool = False) -> None:
+    path.write_text(content, encoding="utf-8")
+    if private:
+        chmod_private(path)
+
+
+def toml_get(text: str, key: str) -> str | None:
+    match = re.search(rf"(?m)^{re.escape(key)}\s*=\s*(.*)$", text)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    return value
+
+
+def provider_base_url(text: str, provider: str | None) -> str | None:
+    if not provider:
+        return None
+    match = re.search(
+        rf"(?ms)^\[model_providers\.{re.escape(provider)}\]\s*(.*?)(?=^\[|\Z)",
+        text,
+    )
+    if not match:
+        return None
+    return toml_get(match.group(1), "base_url")
+
+
+def extract_table(text: str, header: str) -> str | None:
+    match = re.search(
+        rf"(?ms)^{re.escape(header)}\s*\n.*?(?=^\[|\Z)",
+        text,
+    )
+    return match.group(0).rstrip() + "\n" if match else None
+
+
+def extract_all_tables(text: str, prefix: str) -> str:
+    blocks = re.findall(
+        rf"(?ms)^{re.escape(prefix)}.*?(?=^\[|\Z)",
+        text,
+    )
+    return "".join(block.rstrip() + "\n\n" for block in blocks)
+
+
+def shared_machine_blocks(text: str) -> str:
+    parts = []
+    for key in (
+        "network_access",
+        "windows_wsl_setup_acknowledged",
+        "model_context_window",
+        "model_auto_compact_token_limit",
+        "disable_response_storage",
+    ):
+        match = re.search(rf"(?m)^{re.escape(key)}\s*=\s*.*$", text)
+        if match:
+            parts.append(match.group(0))
+    shared = ""
+    if parts:
+        shared += "\n".join(parts) + "\n\n"
+    shared += extract_all_tables(text, "[projects.")
+    tui = extract_table(text, "[tui.model_availability_nux]")
+    if tui:
+        shared += tui + "\n"
+    notice = extract_table(text, "[notice.model_migrations]")
+    if notice:
+        shared += notice + "\n"
+    return shared.rstrip() + "\n"
+
+
+def read_secret(name: str) -> str:
+    path = agent_key(name)
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def write_secret(name: str, value: str) -> None:
+    path = agent_key(name)
+    write_text(path, (value.strip() + "\n") if value.strip() else "", private=True)
+
+
+def secret_present(name: str) -> bool:
+    return bool(read_secret(name))
+
+
+def auth_kind(name: str) -> str:
+    if name in ACCOUNT_AGENTS:
+        return "chatgpt"
+    return "apikey"
+
+
+def provider_env_key(name: str) -> str:
+    if not agent_toml(name).exists():
+        return "OPENAI_API_KEY"
+    text = read_text(agent_toml(name))
+    provider = toml_get(text, "model_provider")
+    if not provider:
+        return "OPENAI_API_KEY"
+    block = re.search(
+        rf"(?ms)^\[model_providers\.{re.escape(provider)}\]\s*(.*?)(?=^\[|\Z)",
+        text,
+    )
+    if not block:
+        return "OPENAI_API_KEY"
+    return toml_get(block.group(1), "env_key") or "OPENAI_API_KEY"
+
+
+def has_command_auth(name: str) -> bool:
+    if not agent_toml(name).exists():
+        return False
+    return bool(re.search(r"(?m)^\[model_providers\.[^\]]+\.auth\]", read_text(agent_toml(name))))
+
+
+def cc_switch_bin() -> str:
+    return str(Path(sys.argv[0]).resolve())
+
+
+def current_env_value(var: str) -> str:
+    env = os.environ.get(var, "").strip()
+    if env:
+        return env
+    for path in (BASHRC, PROFILE):
+        if not path.exists():
+            continue
+        match = re.search(rf"(?m)^export\s+{re.escape(var)}=(.*)$", read_text(path))
+        if match:
+            return match.group(1).strip().strip("\"'" )
+    return ""
+
+
+def current_openai_key() -> str:
+    env = current_env_value("OPENAI_API_KEY")
+    if env:
+        return env
+    if AUTH_JSON.exists():
+        try:
+            data = json.loads(read_text(AUTH_JSON))
+        except json.JSONDecodeError:
+            data = {}
+        value = data.get("OPENAI_API_KEY")
+        if isinstance(value, str):
+            return value.strip()
+    return ""
+
+
+def upsert_export_line(path: Path, var: str, key: str | None) -> None:
+    original = read_text(path) if path.exists() else ""
+    if key is None:
+        replacement = f"# export {var}=  # managed by cc-switch"
+    else:
+        replacement = f'export {var}="{key}"'
+
+    lines = original.splitlines(keepends=True)
+    seen = False
+    new_lines = []
+    for line in lines:
+        raw = line.rstrip("\r\n")
+        ending = line[len(raw):] or "\n"
+        if export_re(var).match(raw):
+            if seen:
+                continue
+            seen = True
+            new_lines.append(replacement + ending)
+        else:
+            new_lines.append(line)
+
+    if not seen:
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines[-1] += "\n"
+        new_lines.append(replacement + "\n")
+
+    updated = "".join(new_lines)
+    if updated != original:
+        write_text(path, updated)
+
+
+def set_shell_api_key(key: str | None, var: str = "OPENAI_API_KEY") -> None:
+    if key is None:
+        os.environ.pop(var, None)
+    else:
+        os.environ[var] = key
+    for path in (BASHRC, PROFILE):
+        upsert_export_line(path, var, key)
+
+
+def load_auth() -> dict:
+    if not AUTH_JSON.exists():
+        return {}
+    try:
+        data = json.loads(read_text(AUTH_JSON))
+    except json.JSONDecodeError as exc:
+        raise CcSwitchError(f"invalid {AUTH_JSON}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise CcSwitchError(f"{AUTH_JSON} is not a JSON object")
+    return data
+
+
+def save_auth(data: dict) -> None:
+    write_text(AUTH_JSON, json.dumps(data, indent=2) + "\n", private=True)
+
+
+def run_codex(args: list[str], stdin_text: str | None = None, drop_api_keys: bool = False) -> None:
+    cmd = ["codex", *args]
+    env = None
+    if drop_api_keys:
+        env = os.environ.copy()
+        env.pop("OPENAI_API_KEY", None)
+        env.pop("CODEX_API_KEY", None)
+    try:
+        result = subprocess.run(
+            cmd,
+            input=stdin_text,
+            text=True,
+            check=False,
+            env=env,
+        )
+    except FileNotFoundError as exc:
+        raise CcSwitchError("codex CLI not found on PATH") from exc
+    if result.returncode != 0:
+        raise CcSwitchError(f"{' '.join(cmd)} failed with exit {result.returncode}")
+
+
+def snapshot_live_to_current() -> None:
+    current = read_current()
+    if not current or not LIVE_CONFIG.exists():
+        return
+    dest = agent_toml(current)
+    copy_private(LIVE_CONFIG, dest)
+
+
+def require_agent(name: str) -> Path:
+    path = agent_toml(name)
+    if not path.exists():
+        available = ", ".join(list_agents()) or "(none)"
+        raise CcSwitchError(f"unknown agent {name!r}. available: {available}")
+    return path
+
+
+def summarize(name: str) -> str:
+    text = read_text(agent_toml(name))
+    model = toml_get(text, "model") or "-"
+    provider = toml_get(text, "model_provider") or "openai"
+    url = provider_base_url(text, provider) or "-"
+    kind = auth_kind(name)
+    if kind == "chatgpt":
+        cred = "account login"
+    elif has_command_auth(name):
+        status = "key ready" if secret_present(name) else "key missing"
+        cred = f"{status}/file"
+    else:
+        env_name = provider_env_key(name)
+        status = "key ready" if secret_present(name) else "key missing"
+        cred = f"{status}/{env_name}"
+    marker = "*" if read_current() == name else " "
+    return f"{marker} {name:12} {kind:8} {cred:14} model={model} provider={provider} url={url}"
+
+
+def cmd_help() -> int:
+    ensure_layout()
+    bootstrap_if_needed()
+    agents = list_agents()
+    current = read_current() or "-"
+    print(f"cc-switch: {len(agents)} agent(s), current={current}")
+    print()
+    print("commands:")
+    print("  cc-switch help")
+    print("  cc-switch switch <name>")
+    print("  cc-switch open")
+    print("  cc-switch add <name>")
+    print("  cc-switch logout")
+    print("  cc-switch token <name>")
+    print()
+    print("agents:")
+    if not agents:
+        print("  (none)")
+    else:
+        for name in agents:
+            print(" " + summarize(name))
+    return 0
+
+
+def cmd_switch(name: str) -> int:
+    ensure_layout()
+    bootstrap_if_needed()
+    if name in RESERVED:
+        raise CcSwitchError(f"{name!r} is a reserved command name")
+    src = require_agent(name)
+    kind = auth_kind(name)
+    key = read_secret(name)
+    if kind == "apikey" and not key:
+        raise CcSwitchError(
+            f"{name} has no API key. write it to {agent_key(name)} first"
+        )
+
+    snapshot_live_to_current()
+    backup_file(LIVE_CONFIG, "config.toml")
+    backup_file(AUTH_JSON, "auth.json")
+    copy_private(src, LIVE_CONFIG)
+
+    write_current(name)
+    if kind == "chatgpt":
+        set_shell_api_key(None)
+        try:
+            run_codex(["logout"], drop_api_keys=True)
+        except CcSwitchError as exc:
+            print(f"cc-switch: warning: {exc}", file=sys.stderr)
+        print("cc-switch: starting Codex device-code login for openai")
+        print("complete the device login, then restart Codex")
+        run_codex(["login", "--device-auth"], drop_api_keys=True)
+    else:
+        if has_command_auth(name):
+            print(f"cc-switch: {name} uses file-backed provider auth; OpenAI login left unchanged")
+        else:
+            env_name = provider_env_key(name)
+            set_shell_api_key(key, env_name)
+            if env_name == "OPENAI_API_KEY":
+                data = load_auth()
+                data["auth_mode"] = "apikey"
+                data["OPENAI_API_KEY"] = key
+                save_auth(data)
+                run_codex(["login", "--with-api-key"], stdin_text=key + "\n")
+            else:
+                print(f"cc-switch: using {env_name} for {name}; OpenAI login left unchanged")
+    print(f"cc-switch: switched to {name}")
+    print("source ~/.bashrc and restart Codex for the new config/credentials")
+    return 0
+
+
+def cmd_open() -> int:
+    ensure_layout()
+    bootstrap_if_needed()
+    current = read_current()
+    if not current:
+        raise CcSwitchError("no current agent; run cc-switch switch <name> first")
+    path = require_agent(current)
+    result = subprocess.run(["nano", str(path)], check=False)
+    if result.returncode != 0:
+        raise CcSwitchError(f"nano exited {result.returncode}")
+    copy_private(path, LIVE_CONFIG)
+    print(f"cc-switch: updated live config from {current}")
+    return 0
+
+
+def cmd_add(name: str) -> int:
+    ensure_layout()
+    bootstrap_if_needed()
+    if name in RESERVED:
+        raise CcSwitchError(f"{name!r} is a reserved command name")
+    if not valid_name(name):
+        raise CcSwitchError("agent name must match [A-Za-z0-9][A-Za-z0-9_-]*")
+    dest = agent_toml(name)
+    if dest.exists():
+        raise CcSwitchError(f"agent {name!r} already exists")
+    if not LIVE_CONFIG.exists():
+        raise CcSwitchError(f"missing {LIVE_CONFIG}")
+    copy_private(LIVE_CONFIG, dest)
+    if name not in ACCOUNT_AGENTS and not agent_key(name).exists():
+        write_secret(name, "")
+    print(f"cc-switch: added {name} from current config.toml")
+    subprocess.run(["nano", str(dest)], check=False)
+    return 0
+
+
+def cmd_logout() -> int:
+    ensure_layout()
+    bootstrap_if_needed()
+    current = read_current() or "codex"
+    kind = auth_kind(current)
+    backup_file(AUTH_JSON, "auth.json")
+    if kind == "chatgpt":
+        run_codex(["logout"], drop_api_keys=True)
+        print("cc-switch: logged out of ChatGPT for openai")
+        return 0
+
+    if has_command_auth(current):
+        print(f"cc-switch: {current} uses file-backed provider auth; secret file kept")
+        return 0
+    env_name = provider_env_key(current)
+    set_shell_api_key(None, env_name)
+    if env_name == "OPENAI_API_KEY":
+        if AUTH_JSON.exists():
+            data = load_auth()
+            data.pop("OPENAI_API_KEY", None)
+            save_auth(data)
+        try:
+            run_codex(["logout"], drop_api_keys=True)
+        except CcSwitchError as exc:
+            print(f"cc-switch: warning: {exc}", file=sys.stderr)
+    print(f"cc-switch: cleared live {env_name} for {current}; secret file kept")
+    print("source ~/.bashrc and restart Codex")
+    return 0
+
+
+def cmd_token(name: str) -> int:
+    key = read_secret(name)
+    if not key:
+        raise CcSwitchError(f"{name} has no API key in {agent_key(name)}")
+    sys.stdout.write(key + "\n")
+    return 0
+
+
+def write_codex_agent() -> None:
+    copy_private(LIVE_CONFIG, agent_toml("codex"))
+    key = current_openai_key()
+    write_secret("codex", key)
+
+
+def write_wenle_agent(live: str) -> None:
+    bin_path = cc_switch_bin()
+    body = f"""model_provider = "wenle"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+disable_response_storage = true
+
+[model_providers.wenle]
+name = "wenle"
+base_url = "https://api.wenle.ai/v1"
+wire_api = "responses"
+
+[model_providers.wenle.auth]
+command = "{bin_path}"
+args = ["token", "wenle"]
+timeout_ms = 5000
+refresh_interval_ms = 0
+
+"""
+    extra = shared_machine_blocks(live)
+    extra = re.sub(r"(?m)^disable_response_storage\s*=\s*.*\n", "", extra)
+    write_text(agent_toml("wenle"), body + extra, private=True)
+    if not agent_key("wenle").exists():
+        write_secret("wenle", "")
+
+
+def write_openai_agent(live: str) -> None:
+    body = """model = "gpt-5.6-luna"
+model_reasoning_effort = "max"
+service_tier = "default"
+approvals_reviewer = "auto_review"
+
+"""
+    extra = shared_machine_blocks(live)
+    extra = re.sub(r"(?m)^disable_response_storage\s*=\s*.*\n", "", extra)
+    write_text(agent_toml("openai"), body + extra, private=True)
+
+
+def bootstrap_if_needed() -> None:
+    ensure_layout()
+    live = read_text(LIVE_CONFIG) if LIVE_CONFIG.exists() else ""
+    if agent_toml("codex").exists() and CURRENT_FILE.exists():
+        source = live or read_text(agent_toml("codex"))
+        if not agent_toml("wenle").exists():
+            write_wenle_agent(source)
+        elif not has_command_auth("wenle"):
+            write_wenle_agent(source)
+        if not agent_toml("openai").exists():
+            write_openai_agent(source)
+        return
+    if not LIVE_CONFIG.exists():
+        raise CcSwitchError(f"missing {LIVE_CONFIG}; cannot bootstrap cc-switch")
+    write_codex_agent()
+    write_wenle_agent(live)
+    write_openai_agent(live)
+    write_current("codex")
+
+
+def parse_args(argv: list[str]) -> tuple[str, list[str]]:
+    if not argv:
+        return "help", []
+    head = argv[0]
+    if head in {"help", "-h", "--help"}:
+        return "help", argv[1:]
+    if head in {"switch", "open", "add", "logout", "token"}:
+        return head, argv[1:]
+    if len(argv) == 1 and valid_name(head):
+        return "switch", [head]
+    raise CcSwitchError(f"unknown command: {head}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        command, args = parse_args(list(sys.argv[1:] if argv is None else argv))
+        if command == "help":
+            if args:
+                raise CcSwitchError("help takes no arguments")
+            return cmd_help()
+        if command == "switch":
+            if len(args) != 1:
+                available = ", ".join(list_agents()) or "(none)"
+                raise CcSwitchError(
+                    f"usage: cc-switch switch <name>. available: {available}"
+                )
+            return cmd_switch(args[0])
+        if command == "open":
+            if args:
+                raise CcSwitchError("open takes no arguments")
+            return cmd_open()
+        if command == "add":
+            if len(args) != 1:
+                raise CcSwitchError("usage: cc-switch add <name>")
+            return cmd_add(args[0])
+        if command == "logout":
+            if args:
+                raise CcSwitchError("logout takes no arguments")
+            return cmd_logout()
+        if command == "token":
+            if len(args) != 1:
+                raise CcSwitchError("usage: cc-switch token <name>")
+            return cmd_token(args[0])
+        raise CcSwitchError(f"unknown command: {command}")
+    except CcSwitchError as exc:
+        die(str(exc))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

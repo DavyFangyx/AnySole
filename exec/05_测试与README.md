@@ -41,7 +41,7 @@ def test_forward_cpu():
     from anysole.models import AnySoleModel
     m = AnySoleModel()
     out = m(
-        torch.randn(2, 20, 2048),
+        torch.randn(2, 20, 2051),
         torch.randn(2, 20, 96),
         torch.randn(2, 20, 12),
         torch.randn(2, 20, 138),

@@ -54,7 +54,7 @@ CLI：
 4. 同目录 `bbox.npy`。每一帧一行，取 `[1:5]`。
 5. 把 MotionPRO 仓库根插入 `sys.path`，import `lib.model.backbone.hrnet.cls_hrnet.HighResolutionNet` 和 `hrnet_config`。用 `HRNET_YAML` `update_config`。
 6. 加载 `CLIFF_CKPT`。state_dict 键带 `module.encoder.` 前缀。剥掉该前缀后 load 进 `HighResolutionNet`。`eval()` + `requires_grad_(False)`。
-7. 按 batch 前向，得到每帧 2048 维。拼成 `(T, 2048)` float32。
+7. 按 batch 前向，得到每帧 HRNet 2048 维；按 MotionPRO/CLIFF 公式计算归一化 `bbox_info=[cx,cy,b]` 3 维，并拼成 `(T, 2051)` float32。
 8. `T` 必须等于 `n_frames`。`torch.save` 到 cache。CPU 也能跑。
 
 不要在训练脚本里提特征。训练只读 cache。
@@ -73,6 +73,6 @@ PYTHONPATH=. /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.d
 PYTHONPATH=. /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.data.extract_hrnet --cam-id 3 --session S12021
 ```
 
-成功后 `data/hrnet_cache/cam3/S12021.pt` 形状是 `(339, 2048)`（S12021 的 n_frames=339）。没有 GPU 时至少 `--help` 和模块 import 必须通。
+成功后 `AnysoleWorkspace/derived/AnySole/hrnet_cache/cam3/S12021.pt` 形状是 `(339, 2051)`（S12021 的 n_frames=339）。没有 GPU 时至少 `--help` 和模块 import 必须通。
 
 不要写测试文件（归 05）。不要改 dataset.py，除非 `hrnet_cache_path` 对不上——若改了，在本文件末尾加「骨架修正」一行。

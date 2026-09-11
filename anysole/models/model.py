@@ -28,8 +28,8 @@ class AnySoleModel(nn.Module):
         self.aux_heads = AuxHeads(dim=d, tw=tw)
 
     def forward(self, V_feat, T_raw, T_phys, x_tau, tau, config_id):
-        v_tok, traw_tok, tphys_tok = self.encoders(V_feat, T_raw, T_phys, config_id)
-        fused = self.fusion(v_tok, traw_tok, tphys_tok)
+        v_tok, t_tok = self.encoders(V_feat, T_raw, T_phys, config_id)
+        fused = self.fusion(v_tok, t_tok)
         x0_hat = self.pose_head(x_tau, tau, fused)
         v_hat, trans_hat = self.traj_head(fused)
         pressure_hat, vfeat_hat = self.aux_heads(fused)

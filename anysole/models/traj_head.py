@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from anysole.types import D_MODEL, TW
+from anysole.types import D_MODEL, FPS, TW
 
 
 def _transformer_encoder(dim, n_layers, nhead, dim_feedforward, dropout):
@@ -33,8 +33,9 @@ class TrajHead(nn.Module):
 
     def forward(self, F):
         batch = F.shape[0]
-        pooled = F.reshape(batch, 3, self.tw, -1).mean(dim=1)
+        pooled = F.reshape(batch, 2, self.tw, -1).mean(dim=1)
         h = self.encoder(pooled)
         v_hat = self.proj(h)
-        trans_hat = torch.cumsum(v_hat, dim=1)
+        # v_hat is m/s; integrate the 40 Hz samples back to meters.
+        trans_hat = torch.cumsum(v_hat, dim=1) / float(FPS)
         return v_hat, trans_hat

@@ -1,4 +1,4 @@
-"""Fuse V / T_raw / T_phys tokens with a 4-layer Transformer encoder."""
+"""Fuse V and combined T tokens with a 4-layer Transformer encoder."""
 
 from __future__ import annotations
 
@@ -38,6 +38,6 @@ class FusionTransformer(nn.Module):
         self.tw = tw
         self.encoder = _transformer_encoder(dim, n_layers, nhead, dim_feedforward, dropout)
 
-    def forward(self, v_tok, traw_tok, tphys_tok):
-        tokens = torch.cat([v_tok, traw_tok, tphys_tok], dim=1)
+    def forward(self, v_tok, t_tok):
+        tokens = torch.cat([v_tok, t_tok], dim=1)
         return self.encoder(tokens)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from anysole.types import FAKE_MARKED_ROOT, PRESSURE_CLIP, T_PHYS_DIM, T_RAW_DIM
+from anysole.types import CONTACT_SUM_THRESH, FAKE_MARKED_ROOT, PRESSURE_CLIP, T_PHYS_DIM, T_RAW_DIM
 
 
 def load_pressure_csv(path: Path) -> dict:
@@ -70,8 +70,8 @@ def _foot_phys(values48: np.ndarray) -> np.ndarray:
     padded = np.pad(force[:, 0], (1, 1), mode="edge")
     envelope = np.maximum.reduce([padded[:-2], padded[1:-1], padded[2:]]).astype(np.float32)[:, None]
     grid = np.clip(values48.reshape(-1, 4, 12), 0.0, None)
-    dx = np.abs(np.diff(grid, axis=1, prepend=grid[:, :1, :])).mean(axis=(1, 2), keepdims=True)
-    dy = np.abs(np.diff(grid, axis=2, prepend=grid[:, :, :1])).mean(axis=(1, 2), keepdims=True)
+    dx = np.abs(np.diff(grid, axis=1, prepend=grid[:, :1, :])).mean(axis=(1, 2))[:, None]
+    dy = np.abs(np.diff(grid, axis=2, prepend=grid[:, :, :1])).mean(axis=(1, 2))[:, None]
     spatial = (dx + dy) / 2.0
     temporal = np.diff(force[:, 0], prepend=force[0, 0])[:, None].astype(np.float32)
     return np.concatenate([cop, force.astype(np.float32), envelope, spatial.astype(np.float32), temporal], axis=1)

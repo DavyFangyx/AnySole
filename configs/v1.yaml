@@ -1,0 +1,25 @@
+d_model: 256
+tw: 20
+batch_size: 256
+lr: 1.0e-3
+epochs: 200
+num_workers: 4
+diffusion_train_steps: 1000
+diffusion_sample_steps: 50
+lambda_pose: 1.0
+lambda_traj: 1.0
+lambda_trec: 0.1
+lambda_vrec: 0.1
+lambda_kp: 1.0
+lambda_con: 0.1
+traj_velocity_w: 1.0
+traj_delta_w: 1.0
+traj_delta_weight_power: 1.0
+traj_deltas: [2, 4, 8, 19]
+# Config order is [VT, V-only, T-only]. Values are normalized when sampled.
+config_probs: [0.50, 0.25, 0.25]
+cam_id: 3
+seq_root: /data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/MotionPRO/sequences/cam3
+split_csv: /data/fangyuxuan/projects/gait/AnysoleWorkspace/splits/default/splits.csv
+cache_root: /data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/AnySole/hrnet_cache/cam3
+out_dir: /data/fangyuxuan/projects/gait/AnySole/outputs/v1

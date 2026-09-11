@@ -6,17 +6,25 @@ from pathlib import Path
 GAIT_ROOT = Path("/data/fangyuxuan/projects/gait")
 ANYSOLE_ROOT = Path(__file__).resolve().parents[1]
 MOTIONPRO_ROOT = GAIT_ROOT / "Baselines" / "MotionPRO"
-SEQ_ROOT = MOTIONPRO_ROOT / "data" / "sequences" / "cam3"
-SPLIT_CSV = MOTIONPRO_ROOT / "data" / "splits" / "splits.csv"
+WORKSPACE_ROOT = GAIT_ROOT / "AnysoleWorkspace"
+SEQ_ROOT = WORKSPACE_ROOT / "derived" / "MotionPRO" / "sequences" / "cam3"
+SPLIT_CSV = WORKSPACE_ROOT / "splits" / "default" / "splits.csv"
 FAKE_MARKED_ROOT = (
-    GAIT_ROOT
+    WORKSPACE_ROOT
+    / "tools"
     / "PressureWasher"
     / "outputs"
     / "fake_marked"
     / "reconstruction_20260817_161459_fake_marked"
 )
-HRNET_CACHE_ROOT = ANYSOLE_ROOT / "data" / "hrnet_cache" / "cam3"
-CLIFF_CKPT = MOTIONPRO_ROOT / "data" / "cliff_ckpt" / "hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt"
+HRNET_CACHE_ROOT = WORKSPACE_ROOT / "derived" / "AnySole" / "hrnet_cache" / "cam3"
+CLIFF_CKPT = (
+    WORKSPACE_ROOT
+    / "dependencies"
+    / "MotionPRO"
+    / "cliff_ckpt"
+    / "hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt"
+)
 HRNET_YAML = (
     MOTIONPRO_ROOT
     / "lib"
@@ -34,8 +42,8 @@ N_JOINTS = 23
 POSE_DIM = N_JOINTS * 6  # 138
 T_RAW_DIM = 96
 T_PHYS_DIM = 12
-V_FEAT_DIM = 2048
-FUSE_LEN = 60
+V_FEAT_DIM = 2051  # HRNet 2048 + normalized CLIFF bbox_info [cx, cy, b]
+FUSE_LEN = 40  # V(20) + combined T(20)
 N_CONTACT = 2
 
 JOINT_NAMES = (
@@ -129,6 +137,7 @@ BATCH_SHAPES = {
     "pose_gt": (TW, POSE_DIM),
     "trans_gt": (TW, 3),
     "vel_gt": (TW, 3),
+    "trans_anchor": (3,),
     "kp_gt": (TW, N_JOINTS, 3),
     "contact_gt": (TW, N_CONTACT),
     "offsets": (N_JOINTS, 3),
