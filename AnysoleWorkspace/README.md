@@ -1,39 +1,54 @@
 # AnysoleWorkspace
 
-## 文件结构
+工作区路径和数据说明。
+
+## 目录索引
+
+`sources/PressureWasher` 只保存触觉清洗、审核及运行产物；`tools/PressureWasher` 仅保存脚本、配置和文档。
 
 ```text
 AnysoleWorkspace/
-├── script/          # 工作区和依赖准备脚本
-├── tools/           # 仍在使用的工具集
-├── sources/         # 原始数据软链接
-├── dependencies/    # 模型和第三方依赖
-├── derived/         # 生成的训练数据和特征
-├── calibration/     # 标定文件
-├── splits/          # 数据划分
-└── workspace.yaml   # 工作区路径记录
+├── sources/raw/                         # 原始触觉 + 视频 + 采集文件
+├── sources/PressureWasher/              # PressureWasher 数据
+│   └── outputs/                         # stats/reconstructed/fake_marked/encoded
+├── sources/published/                   # 发布数据
+├── sources/calibration_artifacts/       # 标定原始文件
+├── tools/PressureWasher/                # 工具代码、配置和文档
+├── derived/MotionPRO/sequences/cam3/    # MotionPRO 序列
+├── derived/AnySole/hrnet_cache/cam3/    # HRNet + bbox 特征
+├── derived/Step2Motion/gait/            # Step2Motion 数据
+├── dependencies/                        # 模型权重和依赖
+├── calibration/                         # 标定摘要
+└── splits/default/                      # 数据划分
 ```
 
-## 准备脚本
+`sources/raw` 是原始采集数据软链接，包含触觉、视频和原始姿态。按记录时间展开如下：
 
-### 构建工作区
+```text
+sources/raw/
+└── {记录日期序列}20260808/
+    ├── mocap_ori_bvh/   # 原始 BVH 姿态
+    ├── mocap_ori_c3d/   # 原始 C3D
+    ├── mocap_ori_cmr/   # 原始 CMR
+    ├── mocap_ori_trc/   # 原始 TRC
+    ├── S9/              # 记录者/被试组
+    └── S11/             # 记录者/被试组
+        └── rec.../      # 触觉 CSV、相机 JPG、视频
+```
+`sources/raw` 当前指向 `/data/lizhe/projects/Tactile/1_Data`，不复制原始数据。
 
-```bash
-python AnysoleWorkspace/script/build_workspace.py init
+## 触觉数据
+
+```text
+sources/PressureWasher/outputs/fake_marked/<run>/<date>/<subject>/<rec...>/
+├── pressure_left.csv
+├── pressure_right.csv
+└── reconstruction_manifest.csv
 ```
 
-参数：`init` 初始化，`migrate` 迁移旧目录，`relink` 修复链接，`doctor` 检查工作区；可加 `--dry-run` 预览操作。
+CSV 的列 `1` 到 `48` 是单脚压力通道，每行是一帧；双脚单帧为 `(2,48)`，AnySole 拼接成 `T_raw` `(T,96)`。`encode` 只生成 `fake_mask_left/right.npy`，不保存压力值。`derived/MotionPRO/.../pressure.npz` 是 `(T,160,120)` 栅格图。
 
-### 生成 HRNet 特征
-
-```bash
-conda activate touch_gait
-python AnysoleWorkspace/script/generate_hrnet_cache.py --cam-id 3
-```
-
-参数：`--cam-id` 相机编号；`--session` 指定 session；`--batch-size` batch 大小；`--device` 使用 `cuda` 或 `cpu`；`--overwrite` 覆盖已有结果；`--limit-sessions` 限制 session 数量。
-
-### 准备压力数据
+## 流程
 
 ```bash
 python AnysoleWorkspace/script/prepare_pressure_data.py inspect
@@ -42,21 +57,12 @@ python AnysoleWorkspace/script/prepare_pressure_data.py mark-fake
 python AnysoleWorkspace/script/prepare_pressure_data.py encode
 ```
 
-参数：`inspect` 统计原始数据；`reconstruct` 重建统一时间轴；`mark-fake` 标记补帧；`encode` 生成 fake mask。`mark-fake` 和 `encode` 默认读取上一步最新输出，也可用 `--input PATH` 指定输入；`--overwrite` 覆盖已有输出。实际处理脚本位于 `AnysoleWorkspace/tools/PressureWasher/`。
+输出依次位于 `sources/PressureWasher/outputs/stats`、`reconstructed`、`fake_marked`、`encoded`；可用 `--input PATH` 指定输入、`--overwrite` 覆盖输出。
 
-推荐顺序：`inspect → reconstruct → mark-fake → encode`。
-
-## AnySole 运行
-
-python AnysoleWorkspace/script/generate_hrnet_cache.py \
-    --cam-id 3 \
-    --device cuda
+## 检查
 
 ```bash
-cd AnySole
-PYTHONPATH=. python -m anysole.train --config configs/v1.yaml
-PYTHONPATH=. python -m anysole.eval --config configs/v1.yaml --ckpt outputs/v1/ckpt_last.pt
-PYTHONPATH=. python -m anysole.infer --ckpt outputs/v1/ckpt_last.pt --session S12021 --config-id 0
+python AnysoleWorkspace/script/build_workspace.py init
+python AnysoleWorkspace/script/build_workspace.py doctor
+python AnysoleWorkspace/script/build_workspace.py relink
 ```
-
-HRNet 特征必须提前生成；训练和推理不会现场提取。视觉 cache 的 shape 为 `(T, 2051)`：HRNet `(2048)` 加 CLIFF 归一化 `bbox_info` `(3)`。

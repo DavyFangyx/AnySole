@@ -23,3 +23,6 @@ seq_root: /data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/MotionPRO/sequ
 split_csv: /data/fangyuxuan/projects/gait/AnysoleWorkspace/splits/default/splits.csv
 cache_root: /data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/AnySole/hrnet_cache/cam3
 out_dir: /data/fangyuxuan/projects/gait/AnySole/outputs/v1
+use_insole_drift: false
+modal: anysolev1
+template_path: /data/fangyuxuan/projects/gait/AnysoleWorkspace/calibration/insole_templates.json

@@ -11,7 +11,7 @@ SEQ_ROOT = WORKSPACE_ROOT / "derived" / "MotionPRO" / "sequences" / "cam3"
 SPLIT_CSV = WORKSPACE_ROOT / "splits" / "default" / "splits.csv"
 FAKE_MARKED_ROOT = (
     WORKSPACE_ROOT
-    / "tools"
+    / "sources"
     / "PressureWasher"
     / "outputs"
     / "fake_marked"

@@ -14,7 +14,8 @@ from anysole.data.bvh_io import load_bvh, pose_trans_to_motion, write_bvh
 from anysole.data.dataset import find_session_dir, hrnet_cache_path, resolve_bvh_path, session_time_grid
 from anysole.data.pressure import load_session_pressure, normalize_raw
 from anysole.diffusion import GaussianDiffusion
-from anysole.models import AnySoleModel
+from anysole.models import AnySoleModel, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_NAMES
+from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.train import load_config, resolve_device
 from anysole.types import (
     ANYSOLE_ROOT,
@@ -113,7 +114,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     saved_config = checkpoint.get("config", {})
     d_model = int(saved_config.get("d_model", config["d_model"]))
     tw = int(saved_config.get("tw", config["tw"]))
-    model = AnySoleModel(d=d_model, tw=tw).to(device)
+    modal = str(saved_config.get("modal", MODEL_ANYSOLEV1))
+    if modal not in MODEL_NAMES:
+        raise ValueError("Unknown checkpoint modal %r" % modal)
+    model_kw = {}
+    if modal == MODEL_ANYSOLEV1_INSOLE_DRIFT:
+        template_path = saved_config.get("template_path", config.get("template_path"))
+        templates, subject_map = load_template_bank(template_path)
+        model_kw.update(templates=templates, subject_to_index=subject_map)
+    model = AnySoleModel(d=d_model, tw=tw, modal=modal, **model_kw).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     model.eval()
     diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
@@ -138,6 +147,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "T_raw": traw_batch,
                 "T_phys": tphys_batch,
                 "config_id": config_id,
+                "session_id": [args.session] * (right - left),
             }
             pred_pose = diffusion.ddim_sample_loop(
                 model,
@@ -148,7 +158,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 device=device,
             )
             tau_zero = torch.zeros(right - left, device=device, dtype=torch.long)
-            out = model(v_batch, traw_batch, tphys_batch, pred_pose, tau_zero, config_id)
+            out = model(v_batch, traw_batch, tphys_batch, pred_pose, tau_zero, config_id, [args.session] * (right - left))
             pose_parts.append(pred_pose.cpu())
             trans_rel = out["trans_hat"].cpu()
             world_windows = []

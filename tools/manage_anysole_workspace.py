@@ -23,6 +23,9 @@ SOURCE_LINKS = {
     WORKSPACE / "sources/pressure_washer": Path("../tools/PressureWasher"),
 }
 
+# PressureWasher runtime data is kept with the other source-side datasets.
+PRESSURE_SOURCE_DIR = WORKSPACE / "sources/PressureWasher"
+
 # Order matters where a child is separated from its former parent.
 MIGRATIONS = (
     (REPO_ROOT / "Baselines/Step2Motion/models/gait_model/predictions", RESULTS / "Step2Motion/predictions/gait_model"),
@@ -51,6 +54,7 @@ MIGRATIONS = (
 )
 
 LOCAL_DIRS = (
+    PRESSURE_SOURCE_DIR,
     WORKSPACE / "derived/pressure_tookit",
     WORKSPACE / "dependencies/pressure_tookit",
     RESULTS / "Step2Motion/checkpoints",

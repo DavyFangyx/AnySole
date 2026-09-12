@@ -11,7 +11,8 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-ANYSOLE_ROOT = REPO_ROOT / "AnySole"
+# AnySole is the project root package after the repository layout migration.
+ANYSOLE_ROOT = REPO_ROOT
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,7 +21,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--session", help="Process only one session.")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", default=None, help="cuda, cuda:0, or cpu.")
-    parser.add_argument("--overwrite", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--skip-existing", action="store_true", help="Skip sessions whose cache exists.")
+    mode.add_argument("--force", "--overwrite", dest="force", action="store_true", help="Recompute and overwrite existing caches.")
     parser.add_argument("--limit-sessions", type=int, default=None)
     return parser.parse_args()
 
@@ -44,8 +47,7 @@ def main() -> int:
         command += ["--session", args.session]
     if args.device:
         command += ["--device", args.device]
-    if args.overwrite:
-        command.append("--overwrite")
+    command.append("--force" if args.force else "--skip-existing")
     if args.limit_sessions is not None:
         command += ["--limit-sessions", str(args.limit_sessions)]
 

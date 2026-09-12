@@ -8,9 +8,11 @@ sources:
   published: /data/lizhe/projects/Tactile/4_Dataset
   calibration_artifacts: /data/lizhe/projects/Tactile/0_Calibration
   pressure_washer: tools/PressureWasher
+  pressure_data: sources/PressureWasher
 splits:
   default: splits/default/splits.csv
 derived:
+  pressure_washer: sources/PressureWasher/outputs
   motionpro_sequences: derived/MotionPRO/sequences
   step2motion_gait: derived/Step2Motion/gait
   anysole_hrnet_cache: derived/AnySole/hrnet_cache

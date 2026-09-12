@@ -1,6 +1,6 @@
 # Reconstructed Tactile Dataset Format
 
-本文说明 `PressureWasher/outputs/reconstructed/` 下重建后的触觉数据组织方式。
+本文说明 `AnysoleWorkspace/sources/PressureWasher/outputs/reconstructed/` 下重建后的触觉数据组织方式。
 
 说明范围：
 - 不同重建参数下，文件组织方式相同。
@@ -14,7 +14,7 @@
 ## 1. 总体目录
 
 ```text
-PressureWasher/outputs/reconstructed/
+AnysoleWorkspace/sources/PressureWasher/outputs/reconstructed/
 └── reconstruction_<timestamp>/
     ├── <date>/
     │   ├── <Sx>/

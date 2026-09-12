@@ -108,6 +108,7 @@ class GaussianDiffusion:
             x_tau,
             tau,
             config_id,
+            batch.get("session_id"),
         )
         out = dict(out)
         out["tau"] = tau
@@ -124,6 +125,7 @@ class GaussianDiffusion:
                 x_tau,
                 tau,
                 cond["config_id"],
+                cond.get("session_id"),
             )
         if "F" in cond:
             return model(x_tau, tau, cond["F"])

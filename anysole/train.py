@@ -17,8 +17,9 @@ from anysole.data.dataset import (
 )
 from anysole.diffusion import GaussianDiffusion
 from anysole.losses import compute_losses
-from anysole.models import AnySoleModel
+from anysole.models import AnySoleModel, MODEL_NAMES, MODEL_ANYSOLEV1
 from anysole.types import ANYSOLE_ROOT, CONFIG_PROBS, CONFIG_T, CONFIG_V, assert_batch_shapes
+from anysole.ablations.insole_drift.templates import load_template_bank
 
 
 DEFAULT_CONFIG = {
@@ -46,6 +47,9 @@ DEFAULT_CONFIG = {
     "split_csv": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/splits/default/splits.csv",
     "cache_root": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/AnySole/hrnet_cache/cam3",
     "out_dir": "/data/fangyuxuan/projects/gait/AnySole/outputs/v1",
+    "use_insole_drift": False,
+    "modal": MODEL_ANYSOLEV1,
+    "template_path": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/calibration/insole_templates.json",
 }
 
 
@@ -103,6 +107,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--limit-sessions", type=int, default=None)
     parser.add_argument("--device", default="auto", help="Device such as cuda, cuda:0, or cpu.")
+    parser.add_argument("--modal", choices=MODEL_NAMES, default=None, help="Model variant to train.")
     return parser.parse_args(argv)
 
 
@@ -115,6 +120,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["batch_size"] = args.batch_size
     if args.config_probs is not None:
         config["config_probs"] = args.config_probs
+    if args.modal is not None:
+        config["modal"] = args.modal
+    if config.get("modal", MODEL_ANYSOLEV1) not in MODEL_NAMES:
+        raise ValueError("Unknown modal %r; expected one of %s" % (config.get("modal"), MODEL_NAMES))
 
     session_ids = None
     if args.limit_sessions is not None:
@@ -151,7 +160,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         collate_fn=collate_windows,
         pin_memory=device.type == "cuda",
     )
-    model = AnySoleModel(d=int(config["d_model"]), tw=int(config["tw"])).to(device)
+    model_kw = {}
+    modal = str(config.get("modal", MODEL_ANYSOLEV1))
+    if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):
+        templates, subject_map = load_template_bank(config["template_path"])
+        model_kw.update(templates=templates, subject_to_index=subject_map)
+    model = AnySoleModel(d=int(config["d_model"]), tw=int(config["tw"]), modal=modal, use_insole_drift=bool(config.get("use_insole_drift", False)), **model_kw).to(device)
     diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))
     out_dir = Path(config["out_dir"])
@@ -177,7 +191,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             x_tau = diffusion.q_sample(batch["pose_gt"], tau)
             optimizer.zero_grad(set_to_none=True)
-            out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id)
+            out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id, batch.get("session_id"))
             losses = compute_losses(out, batch, config_id, config)
 
             finite = torch.isfinite(losses["loss"]) and torch.isfinite(out["F"]).all()

@@ -36,7 +36,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--cam-id", type=int, required=True)
     parser.add_argument("--session", type=str, default=None, help="Only extract this session id.")
-    parser.add_argument("--overwrite", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--skip-existing", action="store_true", help="Skip sessions whose cache exists.")
+    mode.add_argument("--force", "--overwrite", dest="force", action="store_true", help="Recompute and overwrite existing caches.")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", default=None, help="cuda, cuda:0, or cpu.")
     parser.add_argument("--cache-root", type=Path, default=None)
@@ -195,7 +197,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     model = None
     for seq_dir in session_dirs:
         cache_path = hrnet_cache_path(seq_dir.name, cache_root)
-        if cache_path.is_file() and not args.overwrite:
+        if cache_path.is_file() and not args.force:
             print("skip %s (%s exists)" % (seq_dir.name, cache_path))
             continue
         if model is None:

@@ -21,7 +21,6 @@
 │   │   │   └── *.mp4
 │   │   └── ...
 │   ├── mocap_csv/
-│   ├── mocap_ori_bvh/
 │   └── ...
 ├── 20260422/
 │   ├── S2/
@@ -62,6 +61,9 @@ frame_idx,t_us,1,2,3,...,48
 ```
 
 ## 2. Project Layout
+
+脚本位于 `AnysoleWorkspace/tools/PressureWasher/`；运行产物位于
+`AnysoleWorkspace/sources/PressureWasher/outputs/`，不会写回工具目录。
 
 ```text
 PressureWasher/
@@ -132,7 +134,7 @@ PressureWasher/
 运行示例：
 
 ```bash
-/data/fangyuxuan/miniconda3/envs/trident/bin/python PressureWasher/mark_fake_frames_in_reconstruction.py -input PressureWasher/outputs/reconstructed/reconstruction_20260817_161459
+/data/fangyuxuan/miniconda3/envs/trident/bin/python PressureWasher/mark_fake_frames_in_reconstruction.py -input AnysoleWorkspace/sources/PressureWasher/outputs/reconstructed/reconstruction_20260817_161459
 ```
 
 ### 3.4 `encode`
@@ -146,7 +148,7 @@ PressureWasher/
 运行示例：
 
 ```bash
-/data/fangyuxuan/miniconda3/envs/trident/bin/python PressureWasher/encode_fake_marked_reconstruction.py -input PressureWasher/outputs/fake_marked/reconstruction_20260817_161459_fake_marked
+/data/fangyuxuan/miniconda3/envs/trident/bin/python PressureWasher/encode_fake_marked_reconstruction.py -input AnysoleWorkspace/sources/PressureWasher/outputs/fake_marked/reconstruction_20260817_161459_fake_marked
 ```
 
 ## 4. Output Layout
@@ -154,7 +156,7 @@ PressureWasher/
 ### 4.1 Statistics
 
 ```text
-PressureWasher/outputs/stats/pressure_stats_<timestamp>/
+AnysoleWorkspace/sources/PressureWasher/outputs/stats/pressure_stats_<timestamp>/
 ├── overall/
 │   ├── frame_per_second.csv
 │   └── frame_per_second.png
@@ -170,7 +172,7 @@ PressureWasher/outputs/stats/pressure_stats_<timestamp>/
 ### 4.2 Reconstruction
 
 ```text
-PressureWasher/outputs/reconstructed/reconstruction_<timestamp>/
+AnysoleWorkspace/sources/PressureWasher/outputs/reconstructed/reconstruction_<timestamp>/
 └── <date>/<Si>/<rec...>/
     ├── pressure_left.csv
     ├── pressure_right.csv
@@ -180,13 +182,13 @@ PressureWasher/outputs/reconstructed/reconstruction_<timestamp>/
 ### 4.3 Fake Marking / Encoding
 
 ```text
-PressureWasher/outputs/fake_marked/reconstruction_<timestamp>_fake_marked/
+AnysoleWorkspace/sources/PressureWasher/outputs/fake_marked/reconstruction_<timestamp>_fake_marked/
 └── <date>/<Si>/<rec...>/
     ├── pressure_left.csv
     ├── pressure_right.csv
     └── reconstruction_manifest.csv
 
-PressureWasher/outputs/encoded/reconstruction_<timestamp>_fake_marked_encoded/
+AnysoleWorkspace/sources/PressureWasher/outputs/encoded/reconstruction_<timestamp>_fake_marked_encoded/
 └── <date>/<Si>/<rec...>/
     ├── fake_mask_left.npy
     ├── fake_mask_right.npy

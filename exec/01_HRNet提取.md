@@ -4,8 +4,8 @@
 
 先读 [00_总控.md](00_总控.md) 第 1 节冻结接口，再读：
 
-- [anysole/types.py](/data/fangyuxuan/projects/gait/AnySole/anysole/types.py) 里的 `CLIFF_CKPT` `HRNET_YAML` `HRNET_CACHE_ROOT` `IMG_NORM_MEAN` `IMG_NORM_STD` `V_FEAT_DIM` `SEQ_ROOT`
-- [anysole/data/dataset.py](/data/fangyuxuan/projects/gait/AnySole/anysole/data/dataset.py) 的 `hrnet_cache_path` `find_session_dir`
+- [anysole/types.py](/data/fangyuxuan/projects/gait/anysole/types.py) 里的 `CLIFF_CKPT` `HRNET_YAML` `HRNET_CACHE_ROOT` `IMG_NORM_MEAN` `IMG_NORM_STD` `V_FEAT_DIM` `SEQ_ROOT`
+- [anysole/data/dataset.py](/data/fangyuxuan/projects/gait/anysole/data/dataset.py) 的 `hrnet_cache_path` `find_session_dir`
 - MotionPRO [lib/util/gen_image_feature.py](/data/fangyuxuan/projects/gait/Baselines/MotionPRO/lib/util/gen_image_feature.py)
 - MotionPRO [lib/model/cliff/cliff_hr48.py](/data/fangyuxuan/projects/gait/Baselines/MotionPRO/lib/model/cliff/cliff_hr48.py)（只用 `self.encoder`，forward 已直接返回 `xf`）
 

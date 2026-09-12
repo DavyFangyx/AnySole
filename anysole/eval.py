@@ -15,8 +15,9 @@ from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.diffusion import GaussianDiffusion
 from anysole.geometry import fk_pose6d, rot6d_to_rotmat
 from anysole.losses import soft_contact_from_keypoints
-from anysole.models import AnySoleModel
+from anysole.models import AnySoleModel, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_NAMES
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device
+from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.types import (
     ANYSOLE_ROOT,
     CONFIG_NAMES,
@@ -93,7 +94,18 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
     tw = int(saved_config.get("tw", config["tw"]))
     if tw != int(config["tw"]):
         raise ValueError("Checkpoint tw=%d differs from evaluation config tw=%d" % (tw, int(config["tw"])))
-    model = AnySoleModel(d=d_model, tw=tw).to(device)
+    modal = str(saved_config.get("modal", MODEL_ANYSOLEV1))
+    if modal not in MODEL_NAMES:
+        raise ValueError("Unknown checkpoint modal %r" % modal)
+    use_drift = modal == MODEL_ANYSOLEV1_INSOLE_DRIFT
+    model_kw = {}
+    if use_drift:
+        template_path = saved_config.get("template_path", config.get("template_path"))
+        if not template_path:
+            raise ValueError("template_path is required for drift-enabled evaluation")
+        templates, subject_map = load_template_bank(template_path)
+        model_kw.update(templates=templates, subject_to_index=subject_map)
+    model = AnySoleModel(d=d_model, tw=tw, modal=modal, use_insole_drift=use_drift, **model_kw).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     model.eval()
     return model
@@ -150,6 +162,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "T_raw": t_raw,
                     "T_phys": t_phys,
                     "config_id": config_id,
+                    "session_id": batch.get("session_id"),
                 }
                 pred_pose = diffusion.ddim_sample_loop(
                     model,
@@ -160,7 +173,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     device=device,
                 )
                 tau_zero = torch.zeros(batch_size, device=device, dtype=torch.long)
-                out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id)
+                out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id, batch.get("session_id"))
                 pred_trans = out["trans_hat"]
                 anchor = batch["trans_anchor"][:, None, :]
                 pred_trans_world = pred_trans + anchor
