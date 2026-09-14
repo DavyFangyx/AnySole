@@ -19,7 +19,7 @@ from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.train import load_config, resolve_device
 from anysole.types import (
     ANYSOLE_ROOT,
-    CONFIG_NAMES,
+    CONFIG_MODE_NAMES,
     CONFIG_T,
     CONFIG_V,
     CONFIG_VT,
@@ -35,9 +35,15 @@ from anysole.types import (
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Infer a Skeleton3 BVH for one AnySole session.")
     parser.add_argument("--ckpt", type=Path, required=True)
+    parser.add_argument("--modal", choices=MODEL_NAMES, default=None)
     parser.add_argument("--session", required=True)
     parser.add_argument("--config", type=Path, default=ANYSOLE_ROOT / "configs" / "v1.yaml")
-    parser.add_argument("--config-id", type=int, choices=(CONFIG_VT, CONFIG_V, CONFIG_T), default=None)
+    parser.add_argument(
+        "--config-id",
+        default=None,
+        metavar="MODE[,MODE...]",
+        help="Inference mode(s): VT2M, V2M, T2M; comma-separate to export multiple modes.",
+    )
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--sample-steps", type=int, default=None)
@@ -60,9 +66,27 @@ def _pressure_paths(meta: dict) -> tuple:
     return root / "pressure_left.csv", root / "pressure_right.csv"
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    args = parse_args(argv)
+_MODE_TO_CONFIG = dict(zip(CONFIG_MODE_NAMES, (CONFIG_VT, CONFIG_V, CONFIG_T)))
+_CONFIG_TO_MODE = {value: key for key, value in _MODE_TO_CONFIG.items()}
+
+
+def _parse_modes(value: Optional[str]) -> List[str]:
+    if value is None:
+        return []
+    modes = [item.strip().upper() for item in value.split(",") if item.strip()]
+    if not modes:
+        raise ValueError("--config-id must contain at least one mode")
+    unknown = [item for item in modes if item not in _MODE_TO_CONFIG]
+    if unknown:
+        raise ValueError("Unknown mode(s) %s; choose from VT2M,V2M,T2M" % ",".join(unknown))
+    # Preserve command-line order while avoiding duplicate exports.
+    return list(dict.fromkeys(modes))
+
+
+def _run_one(args: argparse.Namespace, config_value: int, output_override: Optional[Path] = None) -> int:
     config = load_config(args.config)
+    if args.modal is not None:
+        config["modal"] = args.modal
     device = resolve_device(args.device)
     seq_dir = find_session_dir(Path(config["seq_root"]), args.session)
     meta = json.loads((seq_dir / "align_meta.json").read_text())
@@ -74,17 +98,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     has_video = cache_path.is_file()
     left_path, right_path = _pressure_paths(meta)
     has_pressure = left_path.is_file() and right_path.is_file()
-    if args.config_id is None:
-        if has_video and has_pressure:
-            config_value = CONFIG_VT
-        elif has_video:
-            config_value = CONFIG_V
-        elif has_pressure:
-            config_value = CONFIG_T
-        else:
-            raise FileNotFoundError("Session %s has neither HRNet cache nor pressure CSVs" % args.session)
-    else:
-        config_value = args.config_id
     if config_value in (CONFIG_VT, CONFIG_V) and not has_video:
         raise FileNotFoundError(
             "Missing %s. Run `python -m anysole.data.extract_hrnet --cam-id %d --session %s`."
@@ -111,6 +124,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     checkpoint = torch.load(args.ckpt, map_location="cpu")
     if not isinstance(checkpoint, dict) or "model" not in checkpoint:
         raise ValueError("Checkpoint must contain a 'model' state dict: %s" % args.ckpt)
+    checkpoint_modal = str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1))
+    if args.modal is not None and args.modal != checkpoint_modal:
+        raise ValueError("--modal %s does not match checkpoint modal %s" % (args.modal, checkpoint_modal))
     saved_config = checkpoint.get("config", {})
     d_model = int(saved_config.get("d_model", config["d_model"]))
     tw = int(saved_config.get("tw", config["tw"]))
@@ -172,9 +188,44 @@ def main(argv: Optional[List[str]] = None) -> int:
     pred_pose_np = torch.cat(pose_parts, dim=0).reshape(-1, POSE_DIM)[:n_frames].numpy()
     pred_trans_np = torch.cat(trans_parts, dim=0).reshape(-1, 3)[:n_frames].numpy()
     hierarchy = load_bvh(resolve_bvh_path(meta)).hierarchy
-    output_path = args.out or args.ckpt.parent / ("%s_%s.bvh" % (args.session, CONFIG_NAMES[config_value]))
+    if output_override is not None:
+        output_path = output_override
+    elif args.out is not None:
+        output_path = args.out
+    else:
+        # Standard results layout: checkpoints live beside predictions.
+        model_root = args.ckpt.parent.parent if args.ckpt.parent.name == "checkpoints" else args.ckpt.parent
+        output_path = model_root / "predictions" / ("%s_%s.bvh" % (args.session, _CONFIG_TO_MODE[config_value]))
     write_bvh(output_path, hierarchy, pose_trans_to_motion(pred_pose_np, pred_trans_np), 1.0 / FPS)
-    print("wrote %s (%d frames, config=%s)" % (output_path, n_frames, CONFIG_NAMES[config_value]))
+    print("wrote %s (%d frames, config=%s)" % (output_path, n_frames, _CONFIG_TO_MODE[config_value]))
+    return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
+    requested_modes = _parse_modes(args.config_id)
+
+    if not requested_modes:
+        # Automatic selection remains available when the mode is omitted.
+        config = load_config(args.config)
+        seq_dir = find_session_dir(Path(config["seq_root"]), args.session)
+        meta = json.loads((seq_dir / "align_meta.json").read_text())
+        cache_path = hrnet_cache_path(args.session, Path(config["cache_root"]))
+        left_path, right_path = _pressure_paths(meta)
+        if cache_path.is_file() and left_path.is_file() and right_path.is_file():
+            requested_modes = ["VT2M"]
+        elif cache_path.is_file():
+            requested_modes = ["V2M"]
+        elif left_path.is_file() and right_path.is_file():
+            requested_modes = ["T2M"]
+        else:
+            raise FileNotFoundError("Session %s has neither HRNet cache nor pressure CSVs" % args.session)
+
+    for mode in requested_modes:
+        output_override = None
+        if args.out is not None and len(requested_modes) > 1:
+            output_override = args.out / ("%s_%s.bvh" % (args.session, mode))
+        _run_one(args, _MODE_TO_CONFIG[mode], output_override)
     return 0
 
 

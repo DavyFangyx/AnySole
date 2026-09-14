@@ -1,0 +1,32 @@
+name: imagepressure2smpl
+loss_name: init
+
+gpu: 0
+
+train_data_dir: workspace://splits/default/train
+eval_data_dir: workspace://splits/default/eval
+cam_id: 3
+seq_root: workspace://derived/MotionPRO/sequences/cam3
+split_csv: workspace://splits/default/splits.csv
+smpl_mean_params: workspace://dependencies/smpl/smpl_mean_params.npz
+smpl_model: workspace://dependencies/smpl/SMPL_NEUTRAL.pkl
+output_dir: results://MotionPRO/debug
+
+checkpoint_dir: results://MotionPRO/checkpoints
+checkpoint_path: None
+result_dir: results://MotionPRO/metrics
+
+epochs: 1000
+batch_size: 16
+learning_rate: 0.00005
+train_continue: False
+scheduler_patience: 5
+
+window_length: 20
+eval_fps: 40
+
+lamda_theta: 1
+lamda_trans: 1
+lamda_joint: 10
+lamda_2d_joint: 5
+lamda_foot: 5

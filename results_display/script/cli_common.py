@@ -1,0 +1,196 @@
+"""Shared CLI conventions and media helpers for results_display scripts.
+
+Every script under ``results_display/script/`` registers its common arguments
+through :func:`add_common_args` and resolves workspace paths through
+:func:`resolve_path`.  This keeps the Test1-Test5 visualization scripts
+aligned on one CLI surface (see ``results_display/README.md``, "统一 CLI 约定").
+
+Path schemes: ``results://``, ``workspace://``, ``display://``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+from pathlib import Path
+
+import cv2
+from PIL import Image
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_ROOT = Path(os.environ.get("ANYSOLE_WORKSPACE", REPO_ROOT / "AnysoleWorkspace")).expanduser()
+RESULTS_ROOT = Path(os.environ.get("ANYSOLE_RESULTS", REPO_ROOT / "results")).expanduser()
+DISPLAY_ROOT = Path(os.environ.get("ANYSOLE_RESULTSDISPLAY", REPO_ROOT / "results_display")).expanduser()
+
+DEFAULT_FPS = 40.0
+DEFAULT_STRIDE = 2
+DEFAULT_SPLIT_CSV = WORKSPACE_ROOT / "splits/default/splits.csv"
+DEFAULT_SEQ_ROOT = WORKSPACE_ROOT / "derived/MotionPRO/sequences/cam3"
+
+PREFIXES = {
+    "workspace://": WORKSPACE_ROOT,
+    "results://": RESULTS_ROOT,
+    "display://": DISPLAY_ROOT,
+}
+
+GEN_CHOICES = ("gif", "mp4")
+GEN_DEFAULT = "gif"
+
+
+def _resolve_raw_bvh(path: Path) -> Path:
+    """Resolve BVHs recorded before the workspace was reorganized."""
+    marker = "/mocap_ori_bvh/"
+    normalized = path.as_posix()
+    if marker not in normalized:
+        return path
+    suffix = normalized.split(marker, 1)[1]
+    matches = sorted((WORKSPACE_ROOT / "sources/raw").glob("*/mocap_ori_bvh/" + suffix))
+    return matches[0] if matches else path
+
+
+def resolve_path(value, base_dir=None) -> Path:
+    """Resolve a path that may use a ``results://``-style scheme.
+
+    Equivalent to the public subset of the Baselines workspace resolvers
+    (without their legacy prefixes, which no results_display script uses).
+    """
+    text = str(value or "")
+    for prefix, root in PREFIXES.items():
+        if text.startswith(prefix):
+            return Path(root) / text[len(prefix):]
+    normalized = text.replace("\\", "/").rstrip("/")
+    path = Path(os.path.expandvars(text)).expanduser()
+    if path.is_absolute():
+        return _resolve_raw_bvh(path)
+    if base_dir is None:
+        candidate = WORKSPACE_ROOT / path
+        if candidate.exists() or "/mocap_ori_bvh/" in candidate.as_posix():
+            return _resolve_raw_bvh(candidate)
+        return path
+    return _resolve_raw_bvh(Path(base_dir) / path)
+
+
+def split_csv_arg(value) -> list:
+    """Split a comma-separated list argument, tolerating braces and semicolons."""
+    text = str(value or "").strip()
+    if not text:
+        return []
+    text = text.replace("{", " ").replace("}", " ").replace(";", ",")
+    out = []
+    for chunk in text.replace(" ", ",").split(","):
+        item = chunk.strip()
+        if item:
+            out.append(item)
+    return out
+
+
+def load_test_sessions(session_arg, split_csv, split="test") -> list:
+    """Return session ids: explicit list when given, else the split column.
+
+    Raises RuntimeError when the split column is empty (instead of silently
+    rendering nothing).
+    """
+    sessions = split_csv_arg(session_arg)
+    if sessions:
+        return sessions
+    with Path(split_csv).open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    ids = []
+    seen = set()
+    for row in rows:
+        sid = (row.get(split) or "").strip()
+        if sid and sid not in seen:
+            seen.add(sid)
+            ids.append(sid)
+    if not ids:
+        raise RuntimeError(f"No {split} sessions in {split_csv}")
+    return ids
+
+
+def add_common_args(
+    parser: argparse.ArgumentParser,
+    *,
+    session: bool = True,
+    split_csv: bool = True,
+    split: bool = True,
+    seq_root: bool = False,
+    modal: bool = False,
+    modal_default: str = "anysolev1,anysolev1_insole_drift",
+    config_id: bool = False,
+    config_default: str = "VT2M,V2M,T2M",
+    gen: bool = True,
+    fps: bool = True,
+    fps_default: float = DEFAULT_FPS,
+    stride: bool = True,
+    stride_default: int = DEFAULT_STRIDE,
+    max_frames: bool = True,
+    force: bool = True,
+    out_dir: bool = True,
+    out_dir_default=None,
+) -> None:
+    """Register the common CLI surface shared by all results_display scripts."""
+    if session:
+        parser.add_argument("--session", type=str, default="", help="Session ids, e.g. S14103,S14023. Empty uses the split column.")
+    if split_csv:
+        parser.add_argument("--split-csv", type=str, default=str(DEFAULT_SPLIT_CSV))
+    if split:
+        parser.add_argument("--split", type=str, default="test", help="Split column used when --session is empty.")
+    if seq_root:
+        parser.add_argument("--seq-root", type=str, default=str(DEFAULT_SEQ_ROOT), help="Centralized sequence root.")
+    if modal:
+        parser.add_argument("--modal", type=str, default=modal_default, help="Modal(s), comma-separated.")
+    if config_id:
+        parser.add_argument("--config-id", type=str, default=config_default, help="Generation configuration(s), comma-separated.")
+    if gen:
+        parser.add_argument(
+            "--gen",
+            choices=GEN_CHOICES,
+            default=GEN_DEFAULT,
+            help=f"Output animation format (single choice, default: {GEN_DEFAULT}).",
+        )
+    if fps:
+        help_text = "Output animation FPS."
+        if fps_default == 0.0:
+            help_text = "Output FPS; 0 = auto (source BVH frame rate)."
+        parser.add_argument("--fps", type=float, default=fps_default, help=help_text)
+    if stride:
+        parser.add_argument("--stride", type=int, default=stride_default, help="Render every Nth frame.")
+    if max_frames:
+        parser.add_argument("--max-frames", type=int, default=0, help="0 means all frames.")
+    if force:
+        parser.add_argument("--force", action="store_true", help="Rebuild and overwrite existing outputs.")
+    if out_dir:
+        parser.add_argument("--out-dir", type=str, default=str(out_dir_default or DISPLAY_ROOT), help="Output directory.")
+
+
+def media_path(base, stem, fmt) -> Path:
+    """Animated output path under the ``{fmt}/`` subdirectory (the one output-directory rule)."""
+    return Path(base) / fmt / f"{stem}.{fmt}"
+
+
+def outputs_ready(paths) -> bool:
+    """True when every path exists and is non-empty (used for skip-without---force)."""
+    paths = list(paths)
+    return bool(paths) and all(Path(p).is_file() and Path(p).stat().st_size > 0 for p in paths)
+
+
+def viz_fps(fps, stride) -> float:
+    return max(fps / max(stride, 1), 1.0)
+
+
+def write_gif(frames, path, fps) -> None:
+    duration_ms = max(int(round(1000.0 / max(fps, 1e-6))), 20)
+    images = [Image.fromarray(frame) for frame in frames]
+    images[0].save(path, save_all=True, append_images=images[1:], duration=duration_ms, loop=0, optimize=False)
+
+
+def write_mp4(frames, path, fps) -> None:
+    h, w = frames[0].shape[:2]
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    if not writer.isOpened():
+        raise RuntimeError(f"Failed to open video writer: {path}")
+    for frame in frames:
+        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+    writer.release()

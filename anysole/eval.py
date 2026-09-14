@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -20,7 +21,7 @@ from anysole.train import condition_inputs, load_config, move_batch, resolve_dev
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.types import (
     ANYSOLE_ROOT,
-    CONFIG_NAMES,
+    CONFIG_MODE_NAMES,
     CONFIG_T,
     CONFIG_V,
     CONFIG_VT,
@@ -80,12 +81,35 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate AnySole V1 with DDIM sampling.")
     parser.add_argument("--config", type=Path, default=ANYSOLE_ROOT / "configs" / "v1.yaml")
     parser.add_argument("--ckpt", type=Path, required=True)
+    parser.add_argument("--modal", choices=MODEL_NAMES, default=None)
+    parser.add_argument("--split", choices=("train", "val", "test"), default="test")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--limit-sessions", type=int, default=None)
     parser.add_argument("--sample-steps", type=int, default=None)
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--config-id",
+        default=None,
+        metavar="MODE[,MODE...]",
+        help="Evaluation mode(s): VT2M, V2M, T2M; omitted means all three.",
+    )
     parser.add_argument("--write-bvh", type=Path, default=None, metavar="DIR")
+    parser.add_argument("--metrics-out", type=Path, default=None, metavar="FILE",
+                        help="Write VT2M/V2M/T2M metrics as JSON (default: model results metrics directory).")
     return parser.parse_args(argv)
+
+
+def _parse_config_values(value: Optional[str]) -> List[int]:
+    mode_to_config = dict(zip(CONFIG_MODE_NAMES, (CONFIG_VT, CONFIG_V, CONFIG_T)))
+    if value is None:
+        return [CONFIG_VT, CONFIG_V, CONFIG_T]
+    modes = [item.strip().upper() for item in value.split(",") if item.strip()]
+    if not modes:
+        raise ValueError("--config-id must contain at least one mode")
+    unknown = [item for item in modes if item not in mode_to_config]
+    if unknown:
+        raise ValueError("Unknown mode(s) %s; choose from VT2M,V2M,T2M" % ",".join(unknown))
+    return list(dict.fromkeys(mode_to_config[item] for item in modes))
 
 
 def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySoleModel:
@@ -113,11 +137,17 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    config_values = _parse_config_values(args.config_id)
     config = load_config(args.config)
+    if args.modal is not None:
+        config["modal"] = args.modal
     device = resolve_device(args.device)
     checkpoint = torch.load(args.ckpt, map_location="cpu")
     if not isinstance(checkpoint, dict) or "model" not in checkpoint:
         raise ValueError("Checkpoint must contain a 'model' state dict: %s" % args.ckpt)
+    checkpoint_modal = str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1))
+    if args.modal is not None and args.modal != checkpoint_modal:
+        raise ValueError("--modal %s does not match checkpoint modal %s" % (args.modal, checkpoint_modal))
     model = _load_model(checkpoint, config, device)
     diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
     sample_steps = int(args.sample_steps or config["diffusion_sample_steps"])
@@ -126,7 +156,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.limit_sessions is not None:
         if args.limit_sessions <= 0:
             raise ValueError("--limit-sessions must be positive")
-        session_ids = load_split_ids(Path(config["split_csv"]), "val")[: args.limit_sessions]
+        session_ids = load_split_ids(Path(config["split_csv"]), args.split)[: args.limit_sessions]
     dataset = AnySoleDataset(
         mode="eval",
         seq_root=Path(config["seq_root"]),
@@ -146,7 +176,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         pin_memory=device.type == "cuda",
     )
 
-    for config_value in (CONFIG_VT, CONFIG_V, CONFIG_T):
+    all_values = {}
+    for config_value in config_values:
         metrics = MetricSums()
         exports = {}
         with torch.inference_mode():
@@ -194,15 +225,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 int(raw_batch["frame_start"][idx]),
                                 pred_pose[idx].cpu().numpy(),
                                 pred_trans_world[idx].cpu().numpy(),
+                                gt_trans_world[idx].cpu().numpy(),
                                 raw_batch["hierarchy"][idx],
                             )
                         )
 
         values = metrics.means()
+        all_values[CONFIG_MODE_NAMES[config_value]] = values
         print(
             "%s MPJPE=%.3fmm PA-MPJPE=%.3fmm MPJRE=%.3fdeg traj_ATE=%.3fmm contact_acc=%.4f"
             % (
-                CONFIG_NAMES[config_value],
+                CONFIG_MODE_NAMES[config_value],
                 values["MPJPE"],
                 values["PA-MPJPE"],
                 values["MPJRE"],
@@ -215,9 +248,30 @@ def main(argv: Optional[List[str]] = None) -> int:
                 windows.sort(key=lambda item: item[0])
                 pose = np.concatenate([item[1] for item in windows], axis=0)
                 trans = np.concatenate([item[2] for item in windows], axis=0)
-                output_path = args.write_bvh / ("%s_%s.bvh" % (session_id, CONFIG_NAMES[config_value]))
-                write_bvh(output_path, windows[0][3], pose_trans_to_motion(pose, trans), 1.0 / FPS)
+                gt_trans = np.concatenate([item[3] for item in windows], axis=0)
+                output_path = args.write_bvh / ("%s_%s.bvh" % (session_id, CONFIG_MODE_NAMES[config_value]))
+                write_bvh(output_path, windows[0][4], pose_trans_to_motion(pose, trans), 1.0 / FPS)
                 print("wrote %s" % output_path)
+                # Test3 trajectory visualization: export the exact world-space
+                # trajectories the traj_ATE metric is computed on (raw BVH frame,
+                # meters).  Same concatenation order as the BVH above.
+                traj_path = args.write_bvh / ("%s_%s_traj.npz" % (session_id, CONFIG_MODE_NAMES[config_value]))
+                np.savez_compressed(
+                    traj_path,
+                    pred_trans_world=trans.astype(np.float32),
+                    gt_trans_world=gt_trans.astype(np.float32),
+                )
+                print("wrote %s" % traj_path)
+    metrics_out = args.metrics_out
+    if metrics_out is None:
+        ckpt_parent = args.ckpt.parent
+        model_root = ckpt_parent.parent if ckpt_parent.name == "checkpoints" else ckpt_parent
+        metrics_out = model_root / "metrics" / ("%s.json" % args.split)
+    metrics_out.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"checkpoint": str(args.ckpt), "modal": str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1)),
+               "split": args.split, "sample_steps": sample_steps, "metrics": all_values}
+    metrics_out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print("wrote %s" % metrics_out)
     return 0
 
 

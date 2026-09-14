@@ -17,7 +17,7 @@ python AnysoleWorkspace/script/build_workspace.py doctor
 ```text
 数据与依赖：AnysoleWorkspace/
 主模型输出：outputs/
-基线模型输出：results/、resultsdisplay/
+基线模型输出：results/、results_display/
 ```
 
 可用 `ANYSOLE_WORKSPACE`、`ANYSOLE_RESULTS` 和 `ANYSOLE_RESULTSDISPLAY` 覆盖这些
@@ -83,11 +83,11 @@ bbox、图像特征、关键点和 AnySole cache 生成命令；后续模型不�
 
 ```bash
 conda activate bbox_scan
-CUDA_VISIBLE_DEVICES="$ANYSOLE_GPU" python -m lib.util.gen_bbox --cam-id 3 --skip-existing
+CUDA_VISIBLE_DEVICES=N python -m lib.util.gen_bbox --cam-id 3 --skip-existing
 
 conda activate touch_gait
-# 图像特征使用 GPU；关键点脚本当前固定使用 CPU
-CUDA_VISIBLE_DEVICES="$ANYSOLE_GPU" python -m lib.util.gen_image_feature --cam-id 3 --skip-existing
+# 图像特征
+CUDA_VISIBLE_DEVICES=N python -m lib.util.gen_image_feature --cam-id 3 --skip-existing
 python -m lib.util.gen_kps --cam-id 3 --skip-existing
 ```
 
@@ -96,7 +96,7 @@ python -m lib.util.gen_kps --cam-id 3 --skip-existing
 ```bash
 cd /data/fangyuxuan/projects/gait
 conda activate touch_gait
-CUDA_VISIBLE_DEVICES="$ANYSOLE_GPU" python AnysoleWorkspace/script/generate_hrnet_cache.py \
+CUDA_VISIBLE_DEVICES=N python AnysoleWorkspace/script/generate_hrnet_cache.py \
   --cam-id 3 --device cuda --batch-size 32 --skip-existing
 ```
 
@@ -146,7 +146,7 @@ pressure toolkit 需要额外准备真实的 essential、标定、floor 参数�
 cd /data/fangyuxuan/projects/gait
 conda activate depthpro
 #  pressure toolkit 生成深度图
-CUDA_VISIBLE_DEVICES="$ANYSOLE_GPU" python Baselines/pressure_tookit/data_prep/rgb2depth.py \
+CUDA_VISIBLE_DEVICES=7 python Baselines/pressure_tookit/data_prep/rgb2depth.py \
   --device cuda \
   --skip-existing
 ```
@@ -161,22 +161,60 @@ CUDA_VISIBLE_DEVICES="$ANYSOLE_GPU" python Baselines/pressure_tookit/data_prep/r
 
 ### 3.1 主模型 AnySole
 
+AnySole 的训练入口需要从仓库根目录执行。`conda activate touch_gait` 只切换
+Python 解释器和依赖环境；它不会自动设置仓库的模块搜索路径。不过从仓库根目录
+运行 `python -m anysole.train` 时，当前目录已经在 Python 的搜索路径中，因此
+从仓库根目录执行时不需要额外设置 `PYTHONPATH`。
+
+`--device cuda` 会启用 GPU。要选择具体的物理 GPU，使用 `CUDA_VISIBLE_DEVICES`；
+例如前文的 `$ANYSOLE_GPU=4` 表示物理 GPU 4。设置后，程序内部的 `cuda` 会指向这张可见卡（即
+`cuda:0`）。如果前面第 2 节已经执行了 `export CUDA_VISIBLE_DEVICES=...`，这里
+可以省略命令前的重复设置。
+
+漂移补偿消融模型还需要按 subject 构建鞋垫模板库。首次训练该模型前执行：
+
 ```bash
+cd /data/fangyuxuan/projects/gait
+conda activate touch_gait
+python -m anysole.ablations.insole_drift.build_templates \
+  --manifest AnysoleWorkspace/manifests/session_manifest.csv \
+  --out AnysoleWorkspace/calibration/insole_templates.json
+```
+
+该命令读取压力数据并写出 `configs/v1.yaml` 中 `template_path` 指向的文件；普通
+`anysolev1` 主模型不依赖此文件。
+
+```bash
+cd /data/fangyuxuan/projects/gait
+conda activate touch_gait
+
 # 主模型
-PYTHONPATH=. python -m anysole.train \
+CUDA_VISIBLE_DEVICES=6 python -m anysole.train \
   --config configs/v1.yaml \
   --modal anysolev1 \
   --device cuda
 
 # 漂移补偿消融模型
-PYTHONPATH=. python -m anysole.train \
+CUDA_VISIBLE_DEVICES=6 python -m anysole.train \
   --config configs/v1.yaml \
   --modal anysolev1_insole_drift \
   --device cuda
+
+# 启用 W&B 在线监控（默认 wandb_mode=disabled，不影响普通训练）
+CUDA_VISIBLE_DEVICES=6 python -m anysole.train \
+  --config configs/v1.yaml \
+  --modal anysolev1 \
+  --device cuda \
+  --wandb_mode online \
+  --wandb_project Anysole
 ```
 
-输出：`outputs/v1/ckpt_last.pt`。训练包含 `VT`（RGB+压力）、`V`（RGB）和
-`T`（压力）三种输入配置。
+输出默认写入 `results/AnySole/anysolev1/checkpoints/ckpt_last.pt`；漂移消融默认写入
+`results/AnySole/anysolev1_insole_drift/checkpoints/ckpt_last.pt`。训练包含 `VT`（RGB+压力）和
+`T`（压力）三种输入配置。W&B 按 epoch 记录 `train/loss_*`、`train/lr`、
+`train/grad_norm`；默认每 5 个 epoch 在验证集记录各配置的 MPJPE、根轨迹 ATE、
+接触 F1、脚滑，以及 `val/gap_mpjpe_dropT` 和 `val/gap_mpjpe_dropV`。可用
+`--wandb_mode offline` 离线缓存，或用 `--wandb_eval_interval N` 调整验证间隔。
 
 ### 3.2 三个基线
 
@@ -184,7 +222,9 @@ PYTHONPATH=. python -m anysole.train \
 
 ```bash
 cd /data/fangyuxuan/projects/gait/Baselines/MotionPRO
-CUDA_VISIBLE_DEVICES="$ANYSOLE_GPU" python -m app.train_frappe
+conda activate touch_gait
+
+CUDA_VISIBLE_DEVICES=3 python -m app.train_frappe
 ```
 
 输出：`results/MotionPRO/checkpoints/`
@@ -193,6 +233,8 @@ CUDA_VISIBLE_DEVICES="$ANYSOLE_GPU" python -m app.train_frappe
 
 ```bash
 cd /data/fangyuxuan/projects/gait/Baselines/Step2Motion
+conda activate touch_gait
+
 python src/train.py --config configs/config_gait.json
 ```
 
@@ -214,25 +256,44 @@ python Baselines/pressure_tookit/main_singleview.py \
 
 ### 4.1 AnySole
 
-评估验证集并导出 BVH：
+训练结束后会自动评估 `test` split，并写入对应模型的 `metrics/test.json`。
+需要单独重测或导出 BVH 时：
 
 ```bash
 cd /data/fangyuxuan/projects/gait
-PYTHONPATH=. python -m anysole.eval \
-  --config configs/v1.yaml --ckpt outputs/v1/ckpt_last.pt --device cuda \
-  --write-bvh outputs/v1/eval_bvh
+conda activate touch_gait
+
+python -m anysole.eval \
+  --config configs/v1.yaml \
+  --modal anysolev1 \
+  --split test \
+  --ckpt results/AnySole/anysolev1/checkpoints/ckpt_last.pt \
+  --device cuda \
+  --config-id VT2M,V2M,T2M \
+  --write-bvh results/AnySole/anysolev1/predictions/eval_bvh
+
+  --modal anysolev1_insole_drift \
 ```
+
+评估指标会自动写入同一模型的 `metrics/test.json`。漂移消融只需将 checkpoint
+路径替换为 `results/AnySole/anysolev1_insole_drift/checkpoints/ckpt_last.pt`，并使用
+对应的 `predictions/eval_bvh` 目录。
 
 单 session 推理：
 
 ```bash
-PYTHONPATH=. python -m anysole.infer \
-  --ckpt outputs/v1/ckpt_last.pt --session S12021 \
-  --config configs/v1.yaml --config-id 0 --device cuda
+python -m anysole.infer \
+  --ckpt results/AnySole/anysolev1/checkpoints/ckpt_last.pt \
+  --session S12021 \
+  --config configs/v1.yaml --config-id VT2M --device cuda
 ```
 
-`config-id` 为 `0=VT`、`1=V-only`、`2=T-only`；默认输出
-`outputs/v1/S12021_VT.bvh`。
+漂移补偿消融使用 `--modal anysolev1_insole_drift`，并将 `--ckpt` 替换为对应模型目录。
+
+`--config-id` 使用模式名：`VT2M`（视觉+压力）、`V2M`（仅视觉）、`T2M`（仅压力）。
+一次选择多个模式时用逗号连接，例如 `--config-id VT2M,V2M,T2M`；程序会在同一次运行中
+分别输出 `S12021_VT2M.bvh`、`S12021_V2M.bvh` 和 `S12021_T2M.bvh`。省略该参数时，
+程序仍会根据可用输入自动选择一种模式。
 
 ### 4.2 MotionPRO
 
@@ -241,15 +302,17 @@ PYTHONPATH=. python -m anysole.infer \
 ```bash
 cd /data/fangyuxuan/projects/gait/Baselines/MotionPRO
 python -m app.test_frappe
-python ../../resultsdisplay/script/visualize_motionpro.py
+python ../../results_display/script/visualize_motionpro.py
 ```
 
-指标写入 `results/MotionPRO/metrics/`，可视化写入 `resultsdisplay/MotionPRO/`。
+指标写入 `results/MotionPRO/metrics/`，可视化写入 `results_display/Test1_visualization/MotionPRO/`。
 
 ### 4.3 Step2Motion
 
 ```bash
 cd /data/fangyuxuan/projects/gait/Baselines/Step2Motion
+conda activate touch_gait
+
 python src/test_model.py \
   results://Step2Motion/checkpoints/gait_model \
   ../../AnysoleWorkspace/derived/Step2Motion/gait/gait_test.pt \
@@ -303,3 +366,31 @@ RTM-pose 观测。
   `Baselines/MotionPRO/` 下执行。
 - 缺少 pressure toolkit 的 essential、标定或 floor 文件：停止拟合，不下载或伪造文件。
 - CUDA 不可用：检查 `CUDA_VISIBLE_DEVICES`、`nvidia-smi` 和当前环境的 PyTorch CUDA 版本。
+
+## 6. 后台训练队列
+
+`offline_train/` 提供退出终端后仍继续运行的串行队列。先生成任务（已有任务文件不会覆盖）：
+
+```bash
+cd /data/fangyuxuan/projects/gait
+python offline_train/create_queue.py \
+  --models anysole,anysole_insole_drift,motionpro,step2motion,pressure_toolkit \
+  --gpu-list 0,1,2,3
+```
+
+每张 GPU 启动一个 scheduler；同卡串行，不同卡并行：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash offline_train/bg.sh
+CUDA_VISIBLE_DEVICES=1 bash offline_train/bg.sh
+```
+
+查看队列状态：
+
+```bash
+python offline_train/status.py
+```
+
+任务日志位于 `offline_train/queues/GPU<N>/logs/`，成功和失败任务分别移动到
+`done/`、`failed/`。每次运行的 checkpoint 和配置快照位于
+`results/offline/<run_name>/`；pressure toolkit 的三个阶段固定在同一张 GPU 上按顺序执行。

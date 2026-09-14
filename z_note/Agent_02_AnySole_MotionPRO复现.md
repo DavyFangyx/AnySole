@@ -18,7 +18,7 @@ AnysoleWorkspace/dependencies/MotionPRO/cliff_ckpt/hr48-PA43.0_MJE69.0_MVE81.2_3
 AnysoleWorkspace/dependencies/MotionPRO/mmdetection/checkpoints/yolox_x_8x8_300e_coco_20211126_140254-1ef88d67.pth
 ```
 
-结果统一写入 `results/MotionPRO/{checkpoints,metrics,logs,tensorboard}/`，动画写入 `resultsdisplay/MotionPRO/`。不要重新下载或复制已存在的权重；路径可由 `ANYSOLE_WORKSPACE`、`ANYSOLE_RESULTS`、`ANYSOLE_RESULTSDISPLAY` 覆盖，但回传时必须说明覆盖值。
+结果统一写入 `results/MotionPRO/{checkpoints,metrics,logs,tensorboard}/`，动画写入 `results_display/Test1_visualization/MotionPRO/`。不要重新下载或复制已存在的权重；路径可由 `ANYSOLE_WORKSPACE`、`ANYSOLE_RESULTS`、`ANYSOLE_RESULTSDISPLAY` 覆盖，但回传时必须说明覆盖值。
 
 ## 执行步骤
 
@@ -82,7 +82,7 @@ AnysoleWorkspace/dependencies/MotionPRO/mmdetection/checkpoints/yolox_x_8x8_300e
 7. 生成 test 可视化（可选但作为完整验收推荐执行）：
 
    ```bash
-   python ../../resultsdisplay/script/visualize_motionpro.py
+   python ../../results_display/script/visualize_motionpro.py
    ```
 
 ## 统一输出清单
@@ -92,7 +92,7 @@ AnysoleWorkspace/dependencies/MotionPRO/mmdetection/checkpoints/yolox_x_8x8_300e
 - `results/MotionPRO/checkpoints/<task>/<loss>/<lr>/imagepressure2smpl_best.pth`
 - `results/MotionPRO/metrics/<task>/<loss>/<lr>/test_metrics.csv` 与 `test_metrics.log`
 - `results/MotionPRO/logs/` 下本次训练日志及配置快照
-- `resultsdisplay/MotionPRO/<task>/<loss>/<lr>/<ckpt_stem>/gif/`、`mp4/`（若执行可视化）
+- `results_display/Test1_visualization/MotionPRO/<task>/<loss>/<lr>/<ckpt_stem>/gif/`、`mp4/`（若执行可视化）
 - 使用的 `AnysoleWorkspace/splits/default/splits.csv` 的 hash、session 数量和 train/val/test 数量
 
 指标须保留 OVERALL 及逐 session 行：MPJPE、P-MPJPE、PVE、W-MPJPE、WA-MPJPE、RTE、WBCE、Accel、Jitter，并注明单位（毫米、m/s²、10^-3 m/s²）和 `eval_fps=40`。不得只回传截图或四舍五入后的单个数字。

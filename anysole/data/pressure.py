@@ -94,9 +94,14 @@ def load_session_pressure(meta: dict, t_grid: np.ndarray) -> dict:
     t_raw = np.concatenate([left48, right48], axis=1)
     if t_raw.shape[1] != T_RAW_DIM:
         raise ValueError("T_raw dim %d != %d" % (t_raw.shape[1], T_RAW_DIM))
+    # T_phys must share T_raw's scale: derive physical tokens from the
+    # normalized pressures (same formula as normalize_raw: clip to
+    # PRESSURE_CLIP, then divide by PRESSURE_CLIP).
+    norm_left = np.clip(left48, 0.0, PRESSURE_CLIP) / PRESSURE_CLIP
+    norm_right = np.clip(right48, 0.0, PRESSURE_CLIP) / PRESSURE_CLIP
     return {
         "T_raw": t_raw.astype(np.float32),
-        "T_phys": physical_tokens(left48, right48),
+        "T_phys": physical_tokens(norm_left, norm_right),
         "left48": left48,
         "right48": right48,
     }

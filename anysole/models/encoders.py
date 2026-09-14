@@ -15,11 +15,14 @@ class LinearTemporalEncoder(nn.Module):
     def __init__(self, in_dim, embeddings, modality_id):
         super().__init__()
         self.proj = nn.Linear(in_dim, embeddings.dim)
+        # Normalize the projection before time PE / modality embedding so an
+        # input-scale mismatch can never propagate through the residual flow.
+        self.norm = nn.LayerNorm(embeddings.dim)
         self.embeddings = embeddings
         self.modality_id = int(modality_id)
 
     def forward(self, x):
-        h = self.proj(x)
+        h = self.norm(self.proj(x))
         h = h + self.embeddings.time_pe.to(dtype=h.dtype)
         modality = self.embeddings.modality(
             torch.tensor(self.modality_id, device=x.device, dtype=torch.long)

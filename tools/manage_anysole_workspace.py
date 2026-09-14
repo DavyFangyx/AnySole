@@ -14,7 +14,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 RESULTS = REPO_ROOT / "results"
-DISPLAY = REPO_ROOT / "resultsdisplay"
+DISPLAY = REPO_ROOT / "results_display"
 
 SOURCE_LINKS = {
     WORKSPACE / "sources/raw": Path("/data/lizhe/projects/Tactile/1_Data"),
@@ -36,7 +36,7 @@ MIGRATIONS = (
     (REPO_ROOT / "Baselines/Step2Motion/data/gait", WORKSPACE / "derived/Step2Motion/gait"),
     (REPO_ROOT / "Baselines/Step2Motion/data/UnderPressure", WORKSPACE / "dependencies/Step2Motion/data/UnderPressure"),
     (REPO_ROOT / "Baselines/Step2Motion/data/dancing", WORKSPACE / "dependencies/Step2Motion/data/dancing"),
-    (REPO_ROOT / "Baselines/Step2Motion/data/exp/viz_compare", DISPLAY / "Step2Motion/gait_model"),
+    (REPO_ROOT / "Baselines/Step2Motion/data/exp/viz_compare", DISPLAY / "Test1_visualization/Step2Motion/gait_model"),
     (REPO_ROOT / "Baselines/Step2Motion/configs/normalizer_dancing.pth", WORKSPACE / "dependencies/Step2Motion/normalizers/normalizer_dancing.pth"),
     (REPO_ROOT / "Baselines/Step2Motion/configs/normalizer_default.pth", WORKSPACE / "dependencies/Step2Motion/normalizers/normalizer_default.pth"),
     (REPO_ROOT / "Baselines/Step2Motion/configs/normalizer_gait.pth", WORKSPACE / "dependencies/Step2Motion/normalizers/normalizer_gait.pth"),
@@ -48,7 +48,7 @@ MIGRATIONS = (
     (REPO_ROOT / "Baselines/MotionPRO/data/mmdetection", WORKSPACE / "dependencies/MotionPRO/mmdetection"),
     (REPO_ROOT / "Baselines/MotionPRO/data/exp/checkpoint", RESULTS / "MotionPRO/checkpoints"),
     (REPO_ROOT / "Baselines/MotionPRO/data/exp/result", RESULTS / "MotionPRO/metrics"),
-    (REPO_ROOT / "Baselines/MotionPRO/data/exp/viz_compare", DISPLAY / "MotionPRO"),
+    (REPO_ROOT / "Baselines/MotionPRO/data/exp/viz_compare", DISPLAY / "Test1_visualization/MotionPRO"),
     (REPO_ROOT / "Baselines/MotionPRO/data/tensorboard", RESULTS / "MotionPRO/tensorboard"),
     (REPO_ROOT / "Baselines/MotionPRO/log", RESULTS / "MotionPRO/logs"),
 )
@@ -62,8 +62,8 @@ LOCAL_DIRS = (
     RESULTS / "Step2Motion/metrics",
     RESULTS / "Step2Motion/logs",
     RESULTS / "pressure_tookit",
-    DISPLAY / "Step2Motion",
-    DISPLAY / "pressure_tookit",
+    DISPLAY / "Test1_visualization/Step2Motion",
+    DISPLAY / "Test1_visualization/pressure_tookit",
 )
 
 
@@ -196,8 +196,8 @@ def doctor() -> int:
         WORKSPACE / "derived/Step2Motion/gait/gait_test.pt",
         RESULTS / "MotionPRO/checkpoints",
         RESULTS / "Step2Motion/checkpoints/gait_model",
-        DISPLAY / "MotionPRO",
-        DISPLAY / "Step2Motion/gait_model",
+        DISPLAY / "Test1_visualization/MotionPRO",
+        DISPLAY / "Test1_visualization/Step2Motion/gait_model",
     ):
         if not path.exists():
             errors.append(f"missing required path: {path}")
@@ -214,7 +214,7 @@ def doctor() -> int:
     )
     print(f"workspace={WORKSPACE}")
     print(f"results={RESULTS}")
-    print(f"resultsdisplay={DISPLAY}")
+    print(f"results_display={DISPLAY}")
     return 0
 
 

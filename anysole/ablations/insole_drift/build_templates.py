@@ -8,6 +8,18 @@ import numpy as np
 from anysole.data.pressure import cop_from_grid
 
 
+def pressure_to_feet(pressure):
+    """Convert MotionPRO raster pressure frames to left/right 48-cell arrays."""
+    pressure = np.asarray(pressure, dtype=np.float32)
+    if pressure.ndim == 2 and pressure.shape[1] == 96:
+        return pressure[:, :48], pressure[:, 48:]
+    if pressure.ndim != 3 or pressure.shape[1:] != (160, 120):
+        raise ValueError("pressure must have shape (frames, 96) or (frames, 160, 120), got %s" % (pressure.shape,))
+    left = pressure[:, 40:120, 6:54].reshape(-1, 4, 20, 12, 4).mean(axis=(2, 4))
+    right = pressure[:, 40:120, 66:114].reshape(-1, 4, 20, 12, 4).mean(axis=(2, 4))
+    return left.reshape(-1, 48), right.reshape(-1, 48)
+
+
 def select_template(left, right, valid):
     force_l, force_r = left.sum(1), right.sum(1)
     cop_l, cop_r = cop_from_grid(left), cop_from_grid(right)
@@ -36,15 +48,19 @@ def main():
         candidates = []
         for sid, path in sessions:
             p = np.load(path)["pressure"].astype(np.float32)
-            if p.ndim != 2 or p.shape[1] != 96: continue
-            left, right = p[:, :48], p[:, 48:]
-            valid = np.isfinite(p).all(1)
+            try:
+                left, right = pressure_to_feet(p)
+            except ValueError:
+                continue
+            valid = np.isfinite(left).all(1) & np.isfinite(right).all(1)
             l, r, frame, span = select_template(left, right, valid)
             candidates.append((float(np.minimum(l.sum(), r.sum())), sid, l, r, frame, span))
         if not candidates: continue
         _, sid, l, r, frame, span = max(candidates, key=lambda x: x[0])
         templates.append(np.stack((l / max(l.max(), 1e-6), r / max(r.max(), 1e-6))))
         records.append({"subject_id": subject, "session_id": sid, "center_frame": frame, "frame_range": span})
+    if not templates:
+        raise RuntimeError("No valid pressure sessions found; cannot build insole templates")
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps({"subject_to_index": {r["subject_id"]: i for i, r in enumerate(records)}, "templates": np.asarray(templates).tolist(), "records": records}, indent=2))
 

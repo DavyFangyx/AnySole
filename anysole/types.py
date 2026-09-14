@@ -117,6 +117,9 @@ CONFIG_VT = 0
 CONFIG_V = 1
 CONFIG_T = 2
 CONFIG_NAMES = ("VT", "V", "T")
+# User-facing names for inference/evaluation exports. CONFIG_NAMES is kept for
+# existing internal logs and checkpoints that use the short names.
+CONFIG_MODE_NAMES = ("VT2M", "V2M", "T2M")
 CONFIG_PROBS = (0.50, 0.25, 0.25)
 
 DIFFUSION_TRAIN_STEPS = 1000

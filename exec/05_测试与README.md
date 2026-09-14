@@ -23,7 +23,7 @@
 2. 提特征：`python -m anysole.data.extract_hrnet --cam-id 3`（可加 `--session S12021`）
 3. 训练：`python -m anysole.train --config configs/v1.yaml`
 4. 评估：`python -m anysole.eval --config configs/v1.yaml --ckpt outputs/v1/ckpt_last.pt`
-5. 推理：`python -m anysole.infer --ckpt ... --session S12021 --config-id 0`
+5. 推理：`python -m anysole.infer --ckpt ... --session S12021 --config-id VT2M,V2M,T2M`
 6. 数据路径各一行：cam3 序列、splits.csv、fake_marked 压力、HRNet cache 目录
 
 不要写原理长文。不要复制「V+T → M 多模态动作重建 · V1 模型实现说明.md」。

@@ -2,7 +2,7 @@ version: 1
 roots:
   workspace: AnysoleWorkspace
   results: results
-  resultsdisplay: resultsdisplay
+  results_display: results_display
 sources:
   raw: /data/lizhe/projects/Tactile/1_Data
   published: /data/lizhe/projects/Tactile/4_Dataset

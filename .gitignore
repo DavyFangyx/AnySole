@@ -1,5 +1,10 @@
 # Ignore the entire Baselines tree.
 Baselines/
+# Step2Motion evaluation imports this maintained visualization entry point.
+!Baselines/
+!Baselines/Step2Motion/
+!Baselines/Step2Motion/src/
+!Baselines/Step2Motion/src/visualize_compare.py
 
 # Generated artifacts
 *.png
@@ -27,10 +32,10 @@ __pycache__/
 
 # Results and visualisation outputs. Keep only the visualisation scripts.
 /results/
-/resultsdisplay/
-!/resultsdisplay/
-!/resultsdisplay/script/
-!/resultsdisplay/script/**
+/results_display/
+!/results_display/
+!/results_display/script/
+!/results_display/script/**
 
 # Large third-party reference repositories.
 /ReferenceWorks/RoHM/
