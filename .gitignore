@@ -18,6 +18,12 @@ Baselines/
 *.pyc
 __pycache__/
 
+# Run logs and model checkpoints
+*.log
+*.ckpt
+*.pt
+*.pth
+
 # AnySole is being promoted to the repository root; do not ignore this
 # directory while the migration is in progress.
 
@@ -32,10 +38,19 @@ __pycache__/
 
 # Results and visualisation outputs. Keep only the visualisation scripts.
 /results/
-/results_display/
-!/results_display/
+/results_display/*
+!/results_display/README.md
 !/results_display/script/
-!/results_display/script/**
+
+# WandB local runs and runtime outputs/caches
+/wandb/
+/outputs/
+/AnySole/outputs/
+/data/hrnet_cache/
+/offline_train/queues/
+
+# Wandb Analyser Thirdparty
+/Wandb_Analyzer/
 
 # Large third-party reference repositories.
 /ReferenceWorks/RoHM/
