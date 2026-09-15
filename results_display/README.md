@@ -22,7 +22,9 @@ results_display/
 │   ├── test7_mean_pose_infer.py # Test7：均值/GT 姿态进入模型的推理 + BVH 导出
 │   ├── test8_input_ablation.py  # Test8：输入-输出相关性消融（条件置换 + 梯度检查）
 │   ├── test9_overfit.py         # Test9：单 batch 过拟合（关 dropout、VT-only）
+│   ├── test9_1_sampler_checks.py # Test9.1：τ0 vs DDIM 差距定位（假模型/同批/τ网格/x0_hat逐元素/6D→SO3）
 │   ├── test10_tgen.py           # Test10：V2T 触觉生成（GT/生成热力图 + 误差分析）
+│   ├── test11_tau_regime.py     # Test11：τ 训练区间消融（τ≡0 恒等映射 / τ~U(0,100) 低噪声带 / U(0,1000) 对照）
 │   └── evaluate_compare.py      # Test2：跨模型/参数对照评估
 ├── Test1_visualization/         # 实验①输出
 │   ├── MotionPRO/<task>/<loss>/<lr>/<ckpt_stem>/{gif,mp4}/
@@ -59,16 +61,27 @@ results_display/
 ├── Test8_input_ablation/        # 实验⑧输出（输入-输出相关性）
 │   ├── <session>/<session>_<variant>_<arm>.bvh  # real/zero/mean/shuffle × ddim/tau0_gt
 │   └── test8_report.json        # 各条件 MPJPE + 输出两两距离 + 梯度范数比
-└── Test9_overfit/               # 实验⑨输出（单 batch 过拟合）
+├── Test9_overfit/               # 实验⑨输出（单 batch 过拟合）
     ├── overfit_log.csv          # 逐步 loss / tau0 MPJPE / DDIM MPJPE
     ├── overfit_curves.png       # 曲线图
     ├── overfit_report.json      # 最终数值 + PASS/FAIL 判定
     └── overfit_ckpt.pt          # 仅 --save-ckpt 时输出
-└── Test10_tgen/                 # 实验⑩输出（V2T 触觉生成）
-    ├── gif|mp4/<session>_<mode>_tgen.{gif,mp4}  # GT | 生成 | |GT-Gen| 三栏动画
-    ├── cells/<session>_<mode>_cells.{npz,png}   # 96 格逐格 MAE + 静态误差图
-    ├── tgen_summary.csv         # 逐会话 × 条件 MAE/RMSE/相关系数
-    └── tgen_report.json         # 跨会话聚合 + v2t（V2M 行）汇总
+├── Test9_1_sampler/             # 实验⑨①输出（Test9 τ0-vs-DDIM 差距的五项定位）
+│   ├── train_log.csv            # 单 lr 过拟合日志（与 Test9 同格式）
+│   ├── check3_tau_grid.csv      # 采样 τ 网格 / ᾱ / 每步‖x_τ‖ vs 训练 q_sample 包络
+│   ├── check4_trace.csv         # 每步模型输出轨迹（τ、‖x_in‖、‖x0_hat-GT‖、‖x0_hat-out0‖、漂移）
+│   ├── test91_report.json       # 五项检查数值 + PASS/FAIL
+│   └── overfit_ckpt_<lr>.pt     # 仅 --save-ckpt 时输出（--ckpt 复用跳过训练）
+├── Test10_tgen/                 # 实验⑩输出（V2T 触觉生成）
+│   ├── gif|mp4/<session>_<mode>_tgen.{gif,mp4}  # GT | 生成 | |GT-Gen| 三栏动画
+│   ├── cells/<session>_<mode>_cells.{npz,png}   # 96 格逐格 MAE + 静态误差图
+│   ├── tgen_summary.csv         # 逐会话 × 条件 MAE/RMSE/相关系数
+│   └── tgen_report.json         # 跨会话聚合 + v2t（V2M 行）汇总
+└── Test11_tau_regime/           # 实验⑪输出（τ 训练区间消融）
+    ├── tau_regime_log.csv       # 逐步 arm × lr × L_pose / tau0 MPJPE（full 臂另有 DDIM）
+    ├── tau_regime_curves.png    # L_pose 与 tau0 MPJPE 曲线 + 各 arm 最终 tau0 柱状图
+    ├── tau_regime_report.json   # 各 arm × lr 最终数值 + PASS/FAIL 判定 + 诊断结论
+    └── tau_regime_ckpt_<arm>_<lr>.pt  # 仅 --save-ckpt 时输出
 ```
 
 ## 时间对齐约定（动捕 ↔ 触觉/视频）
@@ -291,6 +304,31 @@ python results_display/script/test9_overfit.py --batch-size 4 --lrs 1e-3,3e-4,1e
 python results_display/script/test9_overfit.py --save-ckpt
 ```
 
+## Test9.1 τ0 vs DDIM 差距定位（五项检查）
+
+Test9 同一 batch 上 τ0 ≈ 58mm 而 DDIM ≈ 220mm，且 DDIM 在训练中单调变差、τ0 同期变好——两个指标反向走，
+说明除了"模型只输出 g(F)"之外还存在第二个独立故障。`test9_1_sampler_checks.py` 按序跑五项检查：
+
+1. **假模型**：DDIM 每步用 GT x0 替换模型输出，终点必须 ≈0mm（隔离采样器本身）；
+2. **同批**：确认 τ0 与 DDIM 读同一 batch 张量，并测 held-out batch 的 τ0 量化"8 窗不泛化"的代价；
+3. **τ 网格**：打印实际采样 τ、首末步 ᾱ、每步 ‖x_τ‖ 与训练 q_sample 包络对比；
+4. **末步 x0_hat vs τ0 输出**逐元素比 + 每步模型输出轨迹（检验 g(F) 假设与 τ=0 对 x_penultimate 的敏感性）；
+5. **6D→SO(3)**：两条评测路径 FK/正交化一致性 + torch/numpy 转换一致性。
+
+检查 1–3 不需要模型（`--skip-train` 秒级）；检查 2b/4/5 默认重训一个 lr（3e-5 × 3000 步，复现 Test9）或 `--ckpt` 加载已存过拟合模型。
+
+```bash
+conda activate touch_gait
+# 完整：重训 + 五项检查
+python results_display/script/test9_1_sampler_checks.py --save-ckpt
+
+# 只跑模型无关的检查 1-3
+python results_display/script/test9_1_sampler_checks.py --skip-train
+
+# 复用上次的过拟合 checkpoint，跳过训练
+python results_display/script/test9_1_sampler_checks.py --ckpt results_display/Test9_1_sampler/overfit_ckpt_3e-05.pt
+```
+
 ## Test10 触觉生成（V2T）
 
 `test10_tgen.py` 用 V-only 条件（触觉输入置零）跑模型，让辅助头 `pressure_hat` 变成
@@ -322,6 +360,44 @@ python results_display/script/test10_tgen.py --config-id VT2M,V2M --export-sessi
 
 > 注意：首版仅支持主模型 `anysolev1`；`anysolev1_insole_drift` 对零触觉输入先过漂移补偿器，
 > 生成口径不同，暂不支持。
+
+## Test11 τ 训练区间消融（τ≡0 恒等映射 / 低噪声带训练）
+
+`test11_tau_regime.py` 在训练集固定一个 batch（同 Test9 设置：关模态 dropout、VT-only、关模型 dropout、
+pose-only 损失，lr 扫 {1e-3, 3e-4, 1e-4, 3e-5} × 3000 步），把训练时的 τ 采样分布切成三种区间，
+定位「τ0 MPJPE 压不下去」的根因：
+
+| arm | τ 分布 | 问题 |
+| --- | --- | --- |
+| `tau0` | τ ≡ 0（x_tau = x0 干净输入） | 任务退化为恒等映射 x0_hat = x_τ。L_pose 收敛不到 ~0 → x_tau → 输出**没有可用带宽**（分区 Linear 投影丢信息 / cross-attn 把残差流冲掉），门控不是主因 |
+| `tau0-nocond` | τ ≡ 0 且 V/T 置零（`--no-cond` 追加） | 隔离纯 x_tau → 输出路径，排除条件 F 的补偿，进一步定位瓶颈 |
+| `lowband` | τ ~ U(0, 100)（`--tau-band-max` 可调） | 低噪声区训练。τ0 MPJPE 压到**个位数 mm** → 门控 + SNR 是主因，结构改法对症；压不下去 → 同上（结构瓶颈） |
+| `full` | τ ~ U(0, 1000) | 全区间对照（与 Test9 同设置），是「压下去」的参照 |
+
+判定：`tau0` PASS = L_pose < 1e-3 且 tau0 MPJPE < 5 mm（任一 lr 达到即可）；`lowband` PASS = tau0
+MPJPE < 10 mm。tau0 MPJPE = τ=0 干净 GT 姿态直通重建（GT 轨迹、23 关节 FK，mm），与训练侧看板
+`val/tau0_mpjpe` 同口径。DDIM 仅在 `full` 臂采样——τ≡0 / 低噪声带训练的模型没见过高噪声区，
+DDIM 无意义。
+
+```bash
+conda activate touch_gait
+python results_display/script/test11_tau_regime.py                     # tau0 + lowband + full × 4 lr × 3000 步
+python results_display/script/test11_tau_regime.py --arms tau0 --lrs 1e-3 --steps 1000   # 单臂冒烟
+python results_display/script/test11_tau_regime.py --no-cond --save-ckpt                # 追加 tau0-nocond 臂 + 存 ckpt
+```
+
+产出：`tau_regime_log.csv`、`tau_regime_curves.png`、`tau_regime_report.json`（含诊断结论）。
+
+**全数据集重训**：`python -m anysole.train` 新增两个旋钮（写入 checkpoint 配置），用于在完整训练
+分布下验证 Test11 的结论（如 `--tau-max 100` 重训后看 `val/tau0_mpjpe` 能否到个位数）：
+
+```bash
+conda activate touch_gait
+# 低噪声带全量重训
+python -m anysole.train --modal anysolev1 --contact-method joint_and --tau-max 100
+# τ≡0 恒等映射全量重训
+python -m anysole.train --modal anysolev1 --contact-method joint_and --tau-fixed 0
+```
 
 ## 训练侧 dropout 开关（两个独立旋钮）
 

@@ -134,6 +134,20 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "Accepts '--dropoutVT 20 30' or '--dropoutVT 20,30'; '0,0' disables modality dropout.",
     )
     parser.add_argument("--limit-sessions", type=int, default=None)
+    parser.add_argument(
+        "--tau-max",
+        type=int,
+        default=None,
+        help="Upper bound for training-step sampling: tau ~ U(0, tau_max) instead of "
+        "U(0, diffusion_train_steps). Test11 low-noise band training (e.g. --tau-max 100).",
+    )
+    parser.add_argument(
+        "--tau-fixed",
+        type=int,
+        default=None,
+        help="Fix tau to this value for every training step. Test11 tau0 identity training "
+        "(--tau-fixed 0: x_tau = x0 clean input, task degenerates to the identity map).",
+    )
     parser.add_argument("--device", default="auto", help="Device such as cuda, cuda:0, or cpu.")
     parser.add_argument("--modal", choices=MODEL_NAMES, default=None, help="Model variant to train.")
     parser.add_argument(
@@ -256,6 +270,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise ValueError("--limit-sessions must be positive")
         session_ids = load_split_ids(Path(config["split_csv"]), "train")[: args.limit_sessions]
 
+    if args.tau_max is not None:
+        if not 1 <= args.tau_max <= int(config["diffusion_train_steps"]):
+            raise ValueError("--tau-max must be in [1, diffusion_train_steps]")
+        config["tau_max"] = int(args.tau_max)
+    if args.tau_fixed is not None:
+        if not 0 <= args.tau_fixed < int(config["diffusion_train_steps"]):
+            raise ValueError("--tau-fixed must be in [0, diffusion_train_steps)")
+        config["tau_fixed"] = int(args.tau_fixed)
+
     try:
         dataset = AnySoleDataset(
             mode="train",
@@ -360,13 +383,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             assert_batch_shapes(batch, batch_size)
             v_feat, t_raw, t_phys = condition_inputs(batch, config_id)
 
-            tau = torch.randint(
-                0,
-                int(config["diffusion_train_steps"]),
-                (batch_size,),
-                device=device,
-                dtype=torch.long,
-            )
+            # Test11 τ training-regime knobs: --tau-fixed pins every step to one
+            # noise level (0 = identity-mapping training), --tau-max narrows the
+            # sampling band to U(0, tau_max) (low-noise region training).
+            if "tau_fixed" in config:
+                tau = torch.full(
+                    (batch_size,),
+                    int(config["tau_fixed"]),
+                    device=device,
+                    dtype=torch.long,
+                )
+            else:
+                tau = torch.randint(
+                    0,
+                    int(config.get("tau_max", config["diffusion_train_steps"])),
+                    (batch_size,),
+                    device=device,
+                    dtype=torch.long,
+                )
             x_tau = diffusion.q_sample(batch["pose_gt"], tau)
             optimizer.zero_grad(set_to_none=True)
             out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id, batch.get("session_id"))
