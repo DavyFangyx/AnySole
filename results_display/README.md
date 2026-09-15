@@ -103,6 +103,7 @@ results_display/
 
 ```bash
 conda activate touch_gait
+
 # motionpro 可视化
 python results_display/script/visualize_motionpro.py
 --session S14103 
@@ -113,7 +114,7 @@ python results_display/script/visualize_step2motion.py
 --self-test
 
 # 默认 主模型 + 消融，全部 config，全部concat
-python results_display/script/visualize_anysole.py --modal anysolev1 --gen gif
+CUDA_VISIBLE_DEVICES=4 python results_display/script/visualize_anysole.py --modal anysolev1 --gen gif --contact-method joint_and
 --modal anysolev1,anysolev1_insole_drift
 --contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
 --config-id VT2M
@@ -164,7 +165,7 @@ python -m anysole.eval \
   --contact-method tactile_abs
 
 # Test3 渲染（默认 主模型 + 消融 × 全部 config × test split）
-python results_display/script/visualize_anysole_traj.py
+python results_display/script/visualize_anysole_traj.py --modal anysolev1 --gen gif --contact-method joint_and
 # 单 session / 单 config
 python results_display/script/visualize_anysole_traj.py --session S7013 --config-id VT2M
 ```
@@ -258,7 +259,7 @@ MPJPE 差（初值对最终输出的影响）。BVH 写进 `Test7_mean_pose/<ses
 ```bash
 conda activate touch_gait
 # 全部 test，前 4 个 session 出 BVH
-python results_display/script/test7_mean_pose_infer.py                  
+python results_display/script/test7_mean_pose_infer.py
 python results_display/script/test7_mean_pose_infer.py --session S10103 --export-sessions 1
 ```
 

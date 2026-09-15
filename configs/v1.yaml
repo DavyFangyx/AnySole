@@ -7,6 +7,8 @@ epochs: 200
 num_workers: 4
 diffusion_train_steps: 1000
 diffusion_sample_steps: 50
+# PoseHead 解码器层数（MDM/RoHM 式 prepend-timestep + 跨层 cross-attn，默认 6）
+pose_layers: 6
 lambda_pose: 1.0
 lambda_traj: 1.0
 lambda_trec: 0.1

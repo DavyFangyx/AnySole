@@ -22,7 +22,7 @@ MODEL_NAMES = (MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT)
 
 
 class AnySoleModel(nn.Module):
-    def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, modal=MODEL_ANYSOLEV1, use_insole_drift=False, templates=None, subject_to_index=None, drift_kwargs=None):
+    def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, modal=MODEL_ANYSOLEV1, use_insole_drift=False, templates=None, subject_to_index=None, drift_kwargs=None, pose_layers=6):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -38,7 +38,7 @@ class AnySoleModel(nn.Module):
         self.encoders = ModalEncoders(self.embeddings, dim=d, tw=tw)
         self.fusion = FusionTransformer(dim=d, tw=tw, nhead=nhead, dropout=dropout)
         self.pose_head = PoseHead(
-            self.embeddings, dim=d, tw=tw, nhead=nhead, dropout=dropout
+            self.embeddings, dim=d, tw=tw, nhead=nhead, dropout=dropout, n_layers=pose_layers
         )
         self.traj_head = TrajHead(dim=d, tw=tw, nhead=nhead, dropout=dropout)
         self.aux_heads = AuxHeads(dim=d, tw=tw)

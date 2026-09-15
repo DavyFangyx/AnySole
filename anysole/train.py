@@ -19,7 +19,7 @@ from anysole.data.dataset import (
 from anysole.diffusion import GaussianDiffusion
 from anysole.losses import compute_losses
 from anysole.models import AnySoleModel, MODEL_NAMES, MODEL_ANYSOLEV1
-from anysole.types import ANYSOLE_ROOT, CONFIG_PROBS, CONFIG_T, CONFIG_V, anysole_model_dir, assert_batch_shapes
+from anysole.types import ANYSOLE_ROOT, CONFIG_PROBS, CONFIG_T, CONFIG_V, POSE_DIM, anysole_model_dir, assert_batch_shapes
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.geometry import fk_pose6d
 from anysole.losses import soft_contact_from_keypoints
@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
     "num_workers": 4,
     "diffusion_train_steps": 1000,
     "diffusion_sample_steps": 50,
+    "pose_layers": 6,
     "lambda_pose": 1.0,
     "lambda_traj": 1.0,
     "lambda_trec": 0.1,
@@ -101,6 +102,30 @@ def condition_inputs(batch: dict, config_id: torch.Tensor) -> Tuple[torch.Tensor
     t_raw = torch.where(drop_t, torch.zeros_like(batch["T_raw"]), batch["T_raw"])
     t_phys = torch.where(drop_t, torch.zeros_like(batch["T_phys"]), batch["T_phys"])
     return v_feat, t_raw, t_phys
+
+
+def fit_pose_stats(loader: DataLoader, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """One pass over the training loader: per-dim (POSE_DIM,) mean/std of pose_gt.
+
+    The pose head normalizes its 6D input/output with these fixed stats (MDM/RoHM
+    normalize the motion representation before diffusing), so the values are
+    fitted once on the training set and frozen for the whole run.
+    """
+    sums = torch.zeros(POSE_DIM, dtype=torch.float64, device=device)
+    sumsq = torch.zeros(POSE_DIM, dtype=torch.float64, device=device)
+    count = 0
+    with torch.no_grad():
+        for raw_batch in loader:
+            pose = raw_batch["pose_gt"].to(device=device, dtype=torch.float64, non_blocking=True)
+            flat = pose.reshape(-1, POSE_DIM)
+            sums += flat.sum(dim=0)
+            sumsq += flat.square().sum(dim=0)
+            count += flat.shape[0]
+    if count == 0:
+        raise RuntimeError("cannot fit pose stats: training loader is empty")
+    mean = sums / count
+    var = (sumsq / count - mean.square()).clamp(min=0.0)
+    return mean.float(), var.sqrt().float()
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -362,8 +387,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         dropout=float(config.get("dropout", 0.1)),
         modal=modal,
         use_insole_drift=bool(config.get("use_insole_drift", False)),
+        pose_layers=int(config.get("pose_layers", 6)),
         **model_kw,
     ).to(device)
+    # Frozen pose-normalization stats (recorded so eval/infer rebuild the same depth).
+    config["pose_layers"] = int(config.get("pose_layers", 6))
+    pose_mean, pose_std = fit_pose_stats(loader, device)
+    model.pose_head.set_stats(pose_mean, pose_std)
+    print("pose stats: mean %.4f +/- %.4f, std %.4f +/- %.4f (dims floored at 1e-2: %d/%d)"
+          % (pose_mean.mean().item(), pose_mean.std().item(), pose_std.mean().item(),
+             pose_std.std().item(), int((pose_std <= 1e-2).sum().item()), POSE_DIM))
     diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))
     out_dir = Path(config["out_dir"])
@@ -449,6 +482,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Atomic replace: a reader (auto-eval torch.load) must never see a
         # half-written file when several runs share one out_dir.  Each process
         # writes its own temp file, so a concurrent save cannot corrupt it.
+        # Re-mkdir so an externally deleted results dir cannot kill a long run.
+        out_dir.mkdir(parents=True, exist_ok=True)
         ckpt_path = out_dir / "ckpt_last.pt"
         tmp_path = out_dir / ("ckpt_last.pt.tmp%d" % os.getpid())
         torch.save(checkpoint, tmp_path)

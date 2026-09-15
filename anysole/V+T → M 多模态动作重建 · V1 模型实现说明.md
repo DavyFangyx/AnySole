@@ -106,10 +106,11 @@ L_{\text{angle}} = \cos^{-1}\left(\frac{\text{Tr}(\mathbf{M}\mathbf{M}'^{-1}) - 
 ### 4.1 姿态扩散头(去噪器,预测 x0)
 - 输入:加噪姿态 `x_τ`(B,20,144)、扩散步 `τ`。
 - **主体分区编码**:24 关节按 {左腿 / 右腿 / 其余} 分组,每组各自 Linear 投影,加时间正弦 PE + 关节/组嵌入。
-- **自注意力**:处理时空依赖。
-- **时间嵌入**:MLP(τ) 经 AdaLN(或相加)注入。
-- **交叉注意力**:Query=姿态 token,Key/Value=`F`(缺失模态那段是 null token)。
-- FFN → 投影回姿态空间 → `x0_hat`(B,20,144)。
+- **Mean/Std 标准化**:6D 姿态按维做 mean/std 标准化(训练集一次性拟合、冻结,随 checkpoint 保存;std 下限 1e-2)。参考 MDM/RoHM 对 motion 表征的标准化。
+- **Timestep 门控(prepend token)**:`t_emb = MLP(τ)` 作为序列第一个 token 拼在 `[t_emb; x_tokens]` 前面,每层自注意力全程可见——按噪声水平门控对 `x_τ` 的使用(低 τ 复制 x_τ、高 τ 忽略 x_τ 只依赖 F)。参考 MDM/RoHM 的 prepend 方式。
+- **多层 decoder(6 层起步)**:每层 = pre-LayerNorm 自注意力 → pre-LayerNorm 交叉注意力 → pre-LayerNorm FFN,激活 GELU。
+- **交叉注意力(跨层重复)**:每层 Query=姿态 token(+t token),Key/Value=`F`(缺失模态那段是 null token)。
+- 去掉 t token → 投影回姿态空间 → 反标准化 → `x0_hat`(B,20,144)。
 - **预测 x0 而非 ε**:方便在预测的干净姿态上直接加 FK 类几何损失(接触、关键点)。参考 MDM https://arxiv.org/abs/2209.14916
 {
   代码：one/ReferenceWorks/motion-diffusion-model

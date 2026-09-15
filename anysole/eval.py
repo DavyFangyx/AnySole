@@ -216,7 +216,8 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         templates, subject_map = load_template_bank(template_path)
         model_kw.update(templates=templates, subject_to_index=subject_map)
     dropout = float(saved_config.get("dropout", config.get("dropout", 0.1)))
-    model = AnySoleModel(d=d_model, tw=tw, modal=modal, use_insole_drift=use_drift, dropout=dropout, **model_kw).to(device)
+    pose_layers = int(saved_config.get("pose_layers", 6))
+    model = AnySoleModel(d=d_model, tw=tw, modal=modal, use_insole_drift=use_drift, dropout=dropout, pose_layers=pose_layers, **model_kw).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     model.eval()
     return model

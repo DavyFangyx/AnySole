@@ -193,20 +193,17 @@ cd /data/fangyuxuan/projects/gait
 conda activate touch_gait
 
 # 主模型
-CUDA_VISIBLE_DEVICES=7 python -m anysole.train \
+CUDA_VISIBLE_DEVICES=4 python -m anysole.train \
   --modal anysolev1 \
-  --contact-method joint_and
+  --contact-method joint_and \
+  --epoch 2000 \
+  --wandb_mode online \
+  --wandb_project Anysole
 
 # 漂移补偿消融模型
-CUDA_VISIBLE_DEVICES=6 python -m anysole.train \
-  --modal anysolev1_insole_drift
-
-# 启用 W&B 在线监控（默认 wandb_mode=disabled，不影响普通训练）
-CUDA_VISIBLE_DEVICES=7 python -m anysole.train \
   --modal anysolev1 \
-  --wandb_mode online \
-  --contact-method pat_offset \
-  --wandb_project Anysole
+# 不同接触 npy
+  --contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
 ```
 
 ### 3.2 三个基线
@@ -218,7 +215,6 @@ cd /data/fangyuxuan/projects/gait/Baselines/MotionPRO
 conda activate touch_gait
 
 CUDA_VISIBLE_DEVICES=3 python -m app.train_frappe task.contact_method=bvh_h
---contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
 ```
 
 MotionPRO 的 test 指标（MPJPE/PVE/WBCE）不使用接触标签，只有训练期损失与 IoU 受影响。
