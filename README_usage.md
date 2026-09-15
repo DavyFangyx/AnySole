@@ -253,21 +253,40 @@ python Baselines/pressure_tookit/main_singleview.py \
 ### 4.1 AnySole
 
 训练结束后会自动评估 `test` split，并写入对应模型的 `metrics/test.json`。
-需要单独重测或导出 BVH 时：
+不带参数直接运行即自动扫描 `results/AnySole` 下所有 `<modal>_<contact_method>`
+模型目录（跳过缺少 checkpoint 的目录），逐个完成全部评估：BVH/轨迹 npz 与指标
+分别写入各模型自己的 `predictions/eval_bvh` 与 `metrics/test.json`。
+扫描时 `--write-bvh <目录>` 会按模型名建子目录，避免不同模型互相覆盖。
 
 ```bash
 cd /data/fangyuxuan/projects/gait
 conda activate touch_gait
 
-python -m anysole.eval \
-  --ckpt results/AnySole/anysolev1_tactile_abs/checkpoints/ckpt_last.pt \
-  --write-bvh results/AnySole/anysolev1_tactile_abs/predictions/eval_bvh
+python -m anysole.eval
 ```
 
-只有 `--ckpt` 是必需参数；其余均有默认值：`--config` 默认 `configs/v1.yaml`、
-`--device` 默认 `auto`（有 CUDA 自动用 GPU）、`--split` 默认 `test`、
-`--config-id` 默认 `VT2M,V2M,T2M`、`--modal` 默认读取 checkpoint 内保存值、
-`--contact-method` 默认沿用 checkpoint 训练时保存的接触方案。
+需要单独重测某个模型时：
+
+```bash
+python -m anysole.eval \
+  --modal anysolev1 \
+  --contact-method tactile_abs
+
+# 漂移补偿消融模型：只换 --modal
+python -m anysole.eval \
+  --modal anysolev1_insole_drift \
+  --contact-method tactile_abs
+```
+由于 results/AnySole 下的模型存储位置与命名具有明确规则：
+例如：anysolev1_{insole_drift}_{tactile_abs}
+
+模型由 `--modal` 与 `--contact-method` 两个参数唯一确定：自动读取
+`results/AnySole/<modal>_<contact_method>/checkpoints/ckpt_last.pt`，BVH 与轨迹 npz
+默认写入同目录 `predictions/eval_bvh`，指标写入 `metrics/test.json`。其余参数均有默认值：
+`--config` 默认 `configs/v1.yaml`、`--device` 默认 `auto`（有 CUDA 自动用 GPU）、
+`--split` 默认 `test`、`--config-id` 默认 `VT2M,V2M,T2M`。需要评估其他 checkpoint 或
+自定义导出目录时，用 `--ckpt <路径>`、`--write-bvh <目录>` 覆盖；`--no-write-bvh`
+关闭默认的 BVH 导出（训练结束时的自动评估即用此开关，只出指标）。
 
 评估指标会自动写入同一模型的 `metrics/test.json`（含 `contact_method` 字段记录标签口径）。
 每个模式行除 MPJPE/PA-MPJPE/MPJRE/traj_ATE/contact_acc 外，还输出触觉重建指标
@@ -275,17 +294,17 @@ python -m anysole.eval \
 质量**，JSON 顶层 `v2t` 字段为该行摘要。可视化与逐格误差分析见
 `results_display/README.md` 的「## Test10 触觉生成（V2T）」。
 
-漂移消融只需将 checkpoint路径替换为`results/AnySole/anysolev1_insole_drift_tactile_abs/checkpoints/ckpt_last.pt`，并使用对应的 `predictions/eval_bvh` 目录。
-
 单 session 推理：
 
 ```bash
 python -m anysole.infer \
-  --ckpt results/AnySole/anysolev1_tactile_abs/checkpoints/ckpt_last.pt \
+  --modal anysolev1 \
+  --contact-method tactile_abs \
   --session S12021 --config-id VT2M
 ```
 
-漂移补偿消融使用 `--modal anysolev1_insole_drift`，并将 `--ckpt` 替换为对应模型目录。
+漂移补偿消融同样只把 `--modal` 换成 `anysolev1_insole_drift`；输出 BVH 默认写入
+对应模型的 `predictions/`。
 
 `--config-id` 使用模式名：`VT2M`（视觉+压力）、`V2M`（仅视觉）、`T2M`（仅压力）。
 一次选择多个模式时用逗号连接，例如 `--config-id VT2M,V2M,T2M`；程序会在同一次运行中

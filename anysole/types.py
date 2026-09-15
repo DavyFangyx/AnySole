@@ -1,5 +1,6 @@
 """Frozen V1 tensor shapes, joint layout, and path defaults."""
 
+import os
 from pathlib import Path
 
 
@@ -25,6 +26,17 @@ CLIFF_CKPT = (
     / "cliff_ckpt"
     / "hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt"
 )
+
+
+def anysole_model_dir(modal: str, contact_method: str) -> Path:
+    """Centralized results dir for one model variant: AnySole/<modal>_<contact_method>.
+
+    The dir name is self-describing (``anysolev1`` / ``anysolev1_insole_drift``
+    modal plus the training contact-label scheme), so eval/infer only need the
+    two identifiers to locate checkpoints, predictions, and metrics.
+    """
+    results_root = Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results")))
+    return results_root / "AnySole" / ("%s_%s" % (modal, contact_method))
 HRNET_YAML = (
     MOTIONPRO_ROOT
     / "lib"

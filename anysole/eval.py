@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -33,8 +34,10 @@ from anysole.types import (
     CONFIG_V,
     CONFIG_VT,
     FPS,
+    GAIT_ROOT,
     N_JOINTS,
     POSE_DIM,
+    anysole_model_dir,
     assert_batch_shapes,
 )
 
@@ -106,12 +109,19 @@ class MetricSums:
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate AnySole V1 with DDIM sampling.")
     parser.add_argument("--config", type=Path, default=ANYSOLE_ROOT / "configs" / "v1.yaml")
-    parser.add_argument("--ckpt", type=Path, required=True)
+    parser.add_argument(
+        "--ckpt",
+        type=Path,
+        default=None,
+        help="Checkpoint .pt. Omitted when --modal and --contact-method name a model dir "
+        "under results/AnySole (checkpoints/ckpt_last.pt is used).",
+    )
     parser.add_argument("--modal", choices=MODEL_NAMES, default=None)
     parser.add_argument(
         "--contact-method",
         default=None,
-        help="Test5 contact-label scheme for contact_gt (see results_display/README.md). "
+        help="Test5 contact-label scheme for contact_gt (see results_display/README.md), "
+        "and the model-dir suffix when --ckpt is omitted. "
         "Default: the checkpoint's training contact_method, then config, then tactile_abs.",
     )
     parser.add_argument("--split", choices=("train", "val", "test"), default="test")
@@ -125,7 +135,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         metavar="MODE[,MODE...]",
         help="Evaluation mode(s): VT2M, V2M, T2M; omitted means all three.",
     )
-    parser.add_argument("--write-bvh", type=Path, default=None, metavar="DIR")
+    parser.add_argument(
+        "--write-bvh",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="BVH/traj export dir (default: <model>/predictions/eval_bvh).",
+    )
+    parser.add_argument("--no-write-bvh", action="store_true", help="Disable the default BVH/traj export.")
     parser.add_argument("--metrics-out", type=Path, default=None, metavar="FILE",
                         help="Write VT2M/V2M/T2M metrics as JSON (default: model results metrics directory).")
     return parser.parse_args(argv)
@@ -142,6 +159,43 @@ def _parse_config_values(value: Optional[str]) -> List[int]:
     if unknown:
         raise ValueError("Unknown mode(s) %s; choose from VT2M,V2M,T2M" % ",".join(unknown))
     return list(dict.fromkeys(mode_to_config[item] for item in modes))
+
+
+def _discover_model_targets(
+    modal: Optional[str], contact_method: Optional[str]
+) -> List[tuple[str, str, Path]]:
+    """Scan results/AnySole for model dirs named <modal>_<contact_method>.
+
+    Returns (modal, contact_method, ckpt) triples sorted by dir name, so a
+    bare ``python -m anysole.eval`` re-evaluates every trained model.
+    Longest modal names match first (``anysolev1_insole_drift_tactile_abs``
+    is the drift modal plus ``tactile_abs``, not ``anysolev1`` plus a long
+    contact method), and dirs without ``checkpoints/ckpt_last.pt`` are
+    skipped with a warning.
+    """
+    anysole_root = Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results"))) / "AnySole"
+    targets: List[tuple[str, str, Path]] = []
+    if not anysole_root.is_dir():
+        return targets
+    for child in sorted(anysole_root.iterdir()):
+        if not child.is_dir():
+            continue
+        for name in sorted(MODEL_NAMES, key=len, reverse=True):
+            prefix = name + "_"
+            if not (child.name.startswith(prefix) and len(child.name) > len(prefix)):
+                continue
+            contact = child.name[len(prefix):]
+            if (modal is not None and name != modal) or (
+                contact_method is not None and contact != contact_method
+            ):
+                break
+            ckpt = child / "checkpoints" / "ckpt_last.pt"
+            if ckpt.is_file():
+                targets.append((name, contact, ckpt))
+            else:
+                print("skip %s: missing %s" % (child.name, ckpt))
+            break
+    return targets
 
 
 def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySoleModel:
@@ -174,15 +228,69 @@ def main(argv: Optional[List[str]] = None) -> int:
     config = load_config(args.config)
     if args.modal is not None:
         config["modal"] = args.modal
+    if args.ckpt is not None:
+        targets: List[tuple[Optional[str], Optional[str], Path]] = [
+            (args.modal, args.contact_method, args.ckpt)
+        ]
+    elif args.modal is not None and args.contact_method is not None:
+        targets = [
+            (
+                args.modal,
+                args.contact_method,
+                anysole_model_dir(args.modal, args.contact_method) / "checkpoints" / "ckpt_last.pt",
+            )
+        ]
+    else:
+        # Bare `python -m anysole.eval`: auto-scan results/AnySole and
+        # evaluate every model whose dir is named <modal>_<contact_method>.
+        targets = _discover_model_targets(args.modal, args.contact_method)
+        if not targets:
+            raise ValueError(
+                "--ckpt is required unless results/AnySole contains model dirs named "
+                "<modal>_<contact_method> (e.g. anysolev1_tactile_abs) with "
+                "checkpoints/ckpt_last.pt"
+            )
+    multi = len(targets) > 1
+    if multi and args.metrics_out is not None:
+        raise ValueError(
+            "--metrics-out is per-model; omit it when evaluating several models "
+            "(each model's metrics go to its own metrics/test.json)"
+        )
     device = resolve_device(args.device)
-    checkpoint = torch.load(args.ckpt, map_location="cpu")
+    for modal, contact_method, ckpt in targets:
+        _evaluate_one(args, config, config_values, modal, contact_method, ckpt, device, multi=multi)
+    return 0
+
+
+def _evaluate_one(
+    args: argparse.Namespace,
+    config: dict,
+    config_values: List[int],
+    modal: Optional[str],
+    contact_method: Optional[str],
+    ckpt: Path,
+    device: torch.device,
+    multi: bool = False,
+) -> None:
+    """Evaluate one checkpoint under each requested conditioning mode."""
+    ckpt_parent = ckpt.parent
+    model_root = ckpt_parent.parent if ckpt_parent.name == "checkpoints" else ckpt_parent
+    print("== evaluating %s (ckpt %s)" % (model_root.name, ckpt))
+    bvh_out = None
+    if not args.no_write_bvh:
+        bvh_out = args.write_bvh or model_root / "predictions" / "eval_bvh"
+        if multi and args.write_bvh is not None:
+            # Scan mode with an explicit export dir: nest per model so
+            # different checkpoints don't clobber each other's BVHs.
+            bvh_out = args.write_bvh / model_root.name
+    checkpoint = torch.load(ckpt, map_location="cpu")
     if not isinstance(checkpoint, dict) or "model" not in checkpoint:
-        raise ValueError("Checkpoint must contain a 'model' state dict: %s" % args.ckpt)
+        raise ValueError("Checkpoint must contain a 'model' state dict: %s" % ckpt)
     checkpoint_modal = str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1))
-    if args.modal is not None and args.modal != checkpoint_modal:
-        raise ValueError("--modal %s does not match checkpoint modal %s" % (args.modal, checkpoint_modal))
+    if modal is not None and modal != checkpoint_modal:
+        raise ValueError("--modal %s does not match checkpoint modal %s" % (modal, checkpoint_modal))
     ckpt_contact = str(checkpoint.get("config", {}).get("contact_method") or "")
-    contact_method = args.contact_method or ckpt_contact or str(config.get("contact_method", "tactile_abs"))
+    contact_method = contact_method or ckpt_contact or str(config.get("contact_method", "tactile_abs"))
     model = _load_model(checkpoint, config, device)
     diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
     sample_steps = int(args.sample_steps or config["diffusion_sample_steps"])
@@ -264,7 +372,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if bool(corr_valid.any()):
                     metrics.add("T_corr", corr[corr_valid])
 
-                if args.write_bvh is not None:
+                if bvh_out is not None:
                     for idx, session_id in enumerate(raw_batch["session_id"]):
                         exports.setdefault(session_id, []).append(
                             (
@@ -292,19 +400,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 values["T_corr"],
             )
         )
-        if args.write_bvh is not None:
+        if bvh_out is not None:
             for session_id, windows in exports.items():
                 windows.sort(key=lambda item: item[0])
                 pose = np.concatenate([item[1] for item in windows], axis=0)
                 trans = np.concatenate([item[2] for item in windows], axis=0)
                 gt_trans = np.concatenate([item[3] for item in windows], axis=0)
-                output_path = args.write_bvh / ("%s_%s.bvh" % (session_id, CONFIG_MODE_NAMES[config_value]))
+                output_path = bvh_out / ("%s_%s.bvh" % (session_id, CONFIG_MODE_NAMES[config_value]))
                 write_bvh(output_path, windows[0][4], pose_trans_to_motion(pose, trans), 1.0 / FPS)
                 print("wrote %s" % output_path)
                 # Test3 trajectory visualization: export the exact world-space
                 # trajectories the traj_ATE metric is computed on (raw BVH frame,
                 # meters).  Same concatenation order as the BVH above.
-                traj_path = args.write_bvh / ("%s_%s_traj.npz" % (session_id, CONFIG_MODE_NAMES[config_value]))
+                traj_path = bvh_out / ("%s_%s_traj.npz" % (session_id, CONFIG_MODE_NAMES[config_value]))
                 np.savez_compressed(
                     traj_path,
                     pred_trans_world=trans.astype(np.float32),
@@ -313,11 +421,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("wrote %s" % traj_path)
     metrics_out = args.metrics_out
     if metrics_out is None:
-        ckpt_parent = args.ckpt.parent
-        model_root = ckpt_parent.parent if ckpt_parent.name == "checkpoints" else ckpt_parent
         metrics_out = model_root / "metrics" / ("%s.json" % args.split)
     metrics_out.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"checkpoint": str(args.ckpt), "modal": str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1)),
+    payload = {"checkpoint": str(ckpt), "modal": str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1)),
                "contact_method": contact_method,
                "split": args.split, "sample_steps": sample_steps, "metrics": all_values}
     if "V2M" in all_values:

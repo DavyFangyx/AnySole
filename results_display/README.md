@@ -138,17 +138,17 @@ python results_display/script/evaluate_compare.py --auto-scan
 单面板 3D 空间动画（gif/mp4）+ 每 session 一张静态图（png，3D 斜视图 / 俯视 / 高度曲线）。
 动画中 GT 整段显示（橙）、预测轨迹随帧生长（蓝），窗口边界用小点标记（每窗口在 GT 锚点处重新锚定），footer 实时显示当前帧 ATE 与整段 ATE。
 
-**数据来源**：`anysole.eval --write-bvh` 现在会在 BVH 旁同时写出
+**数据来源**：`anysole.eval` 导出 BVH 时会在旁同时写出
 `<session>_<config>_traj.npz`（`pred_trans_world` / `gt_trans_world`，与 `traj_ATE` 指标严格同源）。
 Test3 只读这些 npz，不重新推理；请先重跑 eval 刷新产物：
 
 ```bash
 conda activate touch_gait
 
-# 重新 eval（同时刷新 BVH 与 traj npz，两者与 metrics 保持一致；其余参数均有默认值）
+# 重新 eval（自动推导 ckpt/BVH/metrics 路径，同时刷新 BVH 与 traj npz）
 python -m anysole.eval \
-  --ckpt results/AnySole/anysolev1_tactile_abs/checkpoints/ckpt_last.pt \
-  --write-bvh results/AnySole/anysolev1_tactile_abs/predictions/eval_bvh
+  --modal anysolev1 \
+  --contact-method tactile_abs
 
 # Test3 渲染（默认 主模型 + 消融 × 全部 config × test split）
 python results_display/script/visualize_anysole_traj.py
@@ -210,8 +210,7 @@ python results_display/script/test5_contact.py --methods bvh_h --session S11023
 
 - **A. GT 自洽**：FK(GT 6D, GT offsets) 必须能逐关节还原数据集内的 `kp_gt`。
   A1 numpy FK（数据集构建路径）/ A2 torch FK（train/eval 路径）交叉验证、A3 单位与几何量程、A4 pose↔BVH 回环（cm↔m 换算）、
-  A5 骨骼模板一致性（按受试者分组：同人跨动作/采样必须一致；跨人差异属身体尺寸，只报告不判错——
-  会话 ID 为 `S<人><动作><采样>`，勿混人比较）。
+  A5 骨骼模板一致性（按受试者分组：同人跨动作/采样必须一致——会话 ID 为 `S<人><动作><采样>`）。
   本管线没有 SMPL betas——"GT betas" 的对应物是每个 BVH 自带的 OFFSET 模（`offsets_m`，cm→m）， A3/A5 即其单位与一致性检查。任何系统性偏移（m/mm 混用、层级错误）都会把 MPJPE 顶到一两百且训不下来。
 - **B. 均值姿态基线**：拿训练集均值姿态当预测算 MPJPE。B1 = 均值姿态 + GT 根轨迹（只差姿态）；
   B2 = 完全静态均值姿态。若模型 MPJPE ≈ B1 → 条件被无视；若 B1 明显低于模型 MPJPE →
@@ -278,13 +277,18 @@ python results_display/script/test8_input_ablation.py --session S10103 --export-
 ```bash
 conda activate touch_gait
 python results_display/script/test9_overfit.py
-python results_display/script/test9_overfit.py --steps 300 --log-every 25 --sample-every 150   # 快速冒烟
 ```
 
 Test9 只留 L_pose，λ_con = λ_kp = λ_traj = λ_T = λ_V = 0，batch 降到 4–8 个窗口，lr 扫 {1e-3, 3e-4, 1e-4, 3e-5}，3000 步。CLI指令：
 ```bash
+# 默认：batch=8 窗 × lr{1e-3,3e-4,1e-4,3e-5} × 3000 步
+python results_display/script/test9_overfit.py
 
+# 自定义扫描（batch 4 窗）
+python results_display/script/test9_overfit.py --batch-size 4 --lrs 1e-3,3e-4,1e-4,3e-5 --steps 3000
 
+# 保存每个 lr 的过拟合 checkpoint
+python results_display/script/test9_overfit.py --save-ckpt
 ```
 
 ## Test10 触觉生成（V2T）
@@ -337,7 +341,7 @@ python -m anysole.train --modal anysolev1 --contact-method joint_and \
   --out-dir results/AnySole/anysolev1_joint_and/checkpoints
 ```
 
-> 注意：重训后必须重跑 `python -m anysole.eval ... --write-bvh ...` 刷新 BVH/npz/metrics（见 Test3 说明），
+> 注意：重训后必须重跑 `python -m anysole.eval --modal ... --contact-method ...` 刷新 BVH/npz/metrics（见 Test3 说明），
 > 再重跑 Test7/Test8 才有意义（Test6 与模型无关，只需跑一次）。
 
 ## 历史迁移说明

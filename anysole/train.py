@@ -19,7 +19,7 @@ from anysole.data.dataset import (
 from anysole.diffusion import GaussianDiffusion
 from anysole.losses import compute_losses
 from anysole.models import AnySoleModel, MODEL_NAMES, MODEL_ANYSOLEV1
-from anysole.types import ANYSOLE_ROOT, GAIT_ROOT, CONFIG_PROBS, CONFIG_T, CONFIG_V, assert_batch_shapes
+from anysole.types import ANYSOLE_ROOT, CONFIG_PROBS, CONFIG_T, CONFIG_V, anysole_model_dir, assert_batch_shapes
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.geometry import fk_pose6d
 from anysole.losses import soft_contact_from_keypoints
@@ -325,13 +325,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Keep model variants independent in the centralized results tree. An
     # explicit --out-dir remains authoritative for custom experiments.
     if args.out_dir is None:
-        results_root = Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results")))
         # Model dir naming: anysole_{version/ablation}_{contact_method}. Every
         # contact-label scheme gets its own dir so sweeps never clobber each
         # other's checkpoints/metrics.
         contact_method = str(config.get("contact_method", "tactile_abs"))
-        model_dir = "%s_%s" % (modal, contact_method)
-        config["out_dir"] = str(results_root / "AnySole" / model_dir / "checkpoints")
+        config["out_dir"] = str(anysole_model_dir(modal, contact_method) / "checkpoints")
     if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):
         templates, subject_map = load_template_bank(config["template_path"])
         model_kw.update(templates=templates, subject_to_index=subject_map)
@@ -443,9 +441,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         wandb_run.finish()
     try:
         from anysole.eval import main as eval_main
+        # Training-time auto-eval stays lean: metrics only, no BVH export
+        # (run eval again later to refresh predictions/eval_bvh).
         eval_main(["--config", str(args.config), "--ckpt", str(out_dir / "ckpt_last.pt"),
                    "--modal", modal, "--split", "test", "--device", str(device),
-                   "--contact-method", str(config["contact_method"])])
+                   "--contact-method", str(config["contact_method"]), "--no-write-bvh"])
     except Exception as exc:
         print("automatic test evaluation failed: %s" % exc)
     return 0

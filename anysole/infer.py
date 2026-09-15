@@ -29,13 +29,25 @@ from anysole.types import (
     T_PHYS_DIM,
     T_RAW_DIM,
     V_FEAT_DIM,
+    anysole_model_dir,
 )
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Infer a Skeleton3 BVH for one AnySole session.")
-    parser.add_argument("--ckpt", type=Path, required=True)
+    parser.add_argument(
+        "--ckpt",
+        type=Path,
+        default=None,
+        help="Checkpoint .pt. Omitted when --modal and --contact-method name a model dir "
+        "under results/AnySole (checkpoints/ckpt_last.pt is used).",
+    )
     parser.add_argument("--modal", choices=MODEL_NAMES, default=None)
+    parser.add_argument(
+        "--contact-method",
+        default=None,
+        help="Model-dir suffix when --ckpt is omitted (anysolev1_{ablation}_{contact_method}).",
+    )
     parser.add_argument("--session", required=True)
     parser.add_argument("--config", type=Path, default=ANYSOLE_ROOT / "configs" / "v1.yaml")
     parser.add_argument(
@@ -205,6 +217,14 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     requested_modes = _parse_modes(args.config_id)
+
+    if args.ckpt is None:
+        if args.modal is None or args.contact_method is None:
+            raise ValueError(
+                "--ckpt is required unless both --modal and --contact-method name a "
+                "model dir under results/AnySole (anysolev1_{ablation}_{contact_method})"
+            )
+        args.ckpt = anysole_model_dir(args.modal, args.contact_method) / "checkpoints" / "ckpt_last.pt"
 
     if not requested_modes:
         # Automatic selection remains available when the mode is omitted.
