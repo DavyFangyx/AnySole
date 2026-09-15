@@ -25,4 +25,7 @@ cache_root: /data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/AnySole/hrne
 out_dir: /data/fangyuxuan/projects/gait/AnySole/outputs/v1
 use_insole_drift: false
 modal: anysolev1
+# Test5 接触检测方案（results_display/README.md ## Test5）：tactile_abs = 原 contact.npy 口径；
+# 其他方案读取 contact_<method>.npy，需先用 results_display/script/contact_methods.py 生成。
+contact_method: tactile_abs
 template_path: /data/fangyuxuan/projects/gait/AnysoleWorkspace/calibration/insole_templates.json

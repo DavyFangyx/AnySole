@@ -13,9 +13,11 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
-import cv2
+import numpy as np
 from PIL import Image
 
 
@@ -187,10 +189,28 @@ def write_gif(frames, path, fps) -> None:
 
 
 def write_mp4(frames, path, fps) -> None:
+    """Encode frames to an H.264 MP4 via ffmpeg (widely playable).
+
+    OpenCV's ``mp4v`` writer emits MPEG-4 Part 2, which many modern players
+    cannot open, and this env's OpenCV FFmpeg has no H.264 encoder.  Frames
+    are piped to the system ffmpeg (libx264) instead.
+    """
     h, w = frames[0].shape[:2]
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    if not writer.isOpened():
-        raise RuntimeError(f"Failed to open video writer: {path}")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found on PATH; cannot write H.264 mp4")
+    cmd = [
+        ffmpeg, "-y", "-loglevel", "error",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{w}x{h}", "-r", f"{fps:g}", "-i", "-",
+        "-an", "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+    ]
+    if w % 2 or h % 2:  # yuv420p requires even dimensions
+        cmd += ["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0"]
+    cmd += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", str(path)]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     for frame in frames:
-        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
-    writer.release()
+        proc.stdin.write(np.ascontiguousarray(frame[:, :, ::-1]))  # RGB -> BGR
+    proc.stdin.close()
+    if proc.wait() != 0:
+        raise RuntimeError(f"ffmpeg failed to encode: {path}")

@@ -6,6 +6,9 @@ gpu: 0
 train_data_dir: workspace://splits/default/train
 eval_data_dir: workspace://splits/default/eval
 cam_id: 3
+# Test5 接触检测方案（results_display/README.md ## Test5）：tactile_abs = 原 contact.npy 口径；
+# 其他方案读取 contact_<method>.npy，需先用 results_display/script/contact_methods.py 生成。
+contact_method: tactile_abs
 seq_root: workspace://derived/MotionPRO/sequences/cam3
 split_csv: workspace://splits/default/splits.csv
 smpl_mean_params: workspace://dependencies/smpl/smpl_mean_params.npz

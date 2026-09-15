@@ -52,12 +52,14 @@ DEFAULT_CONFIG = {
     "cache_root": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/AnySole/hrnet_cache/cam3",
     "out_dir": "/data/fangyuxuan/projects/gait/AnySole/outputs/v1",
     "use_insole_drift": False,
+    "contact_method": "tactile_abs",
     "modal": MODEL_ANYSOLEV1,
     "template_path": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/calibration/insole_templates.json",
     "wandb_mode": "disabled",
     "wandb_project": "Anysole",
     "wandb_entity": "davyfangyuxuan-nanjing-university-of-aeronautics-and-ast",
     "wandb_eval_interval": 5,
+    "wandb_experiment_tag": "anysole_v1",
 }
 
 
@@ -116,11 +118,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--limit-sessions", type=int, default=None)
     parser.add_argument("--device", default="auto", help="Device such as cuda, cuda:0, or cpu.")
     parser.add_argument("--modal", choices=MODEL_NAMES, default=None, help="Model variant to train.")
+    parser.add_argument(
+        "--contact-method",
+        default=None,
+        help="Test5 contact-label scheme for contact_gt (see results_display/README.md). "
+        "Default: config contact_method, falling back to tactile_abs (原 contact.npy).",
+    )
     parser.add_argument("--out-dir", type=Path, default=None, help="Override checkpoint output directory.")
     parser.add_argument("--wandb_mode", choices=("disabled", "offline", "online"), default=None)
     parser.add_argument("--wandb_project", default=None)
     parser.add_argument("--wandb_entity", default=None)
     parser.add_argument("--wandb_eval_interval", type=int, default=None)
+    parser.add_argument("--wandb_experiment_tag", default=None, help="Batch tag used by Wandb_Analyzer to group runs.")
     return parser.parse_args(argv)
 
 
@@ -201,9 +210,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["config_probs"] = args.config_probs
     if args.modal is not None:
         config["modal"] = args.modal
+    if args.contact_method is not None:
+        config["contact_method"] = args.contact_method
     if args.out_dir is not None:
         config["out_dir"] = str(args.out_dir)
-    for key in ("wandb_mode", "wandb_project", "wandb_entity", "wandb_eval_interval"):
+    for key in ("wandb_mode", "wandb_project", "wandb_entity", "wandb_eval_interval", "wandb_experiment_tag"):
         value = getattr(args, key)
         if value is not None:
             config[key] = value
@@ -224,6 +235,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             cache_root=Path(config["cache_root"]),
             window_length=int(config["tw"]),
             session_ids=session_ids,
+            contact_method=str(config["contact_method"]),
         )
     except FileNotFoundError as exc:
         if "HRNet cache" in str(exc):
@@ -247,7 +259,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]))
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:
@@ -256,7 +268,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     if str(config.get("wandb_mode", "disabled")) != "disabled":
         try:
             import wandb
-            wandb_run = wandb.init(mode=str(config["wandb_mode"]), project=str(config.get("wandb_project") or "Anysole"), entity=config.get("wandb_entity"), config=dict(config))
+            # Identity fields consumed by Wandb_Analyzer: experiment_tag groups a
+            # training batch, run_kind/model/stage/fold decide the raw/ directory
+            # tree. Single-stage, non-cross-validation runs use stage=single,
+            # fold=fold0.
+            wandb_identity = {
+                "experiment_tag": str(config.get("wandb_experiment_tag") or "anysole_v1"),
+                "run_kind": "train",
+                "model": str(config.get("modal", MODEL_ANYSOLEV1)),
+                "stage": "single",
+                "fold": "fold0",
+            }
+            wandb_run = wandb.init(
+                mode=str(config["wandb_mode"]),
+                project=str(config.get("wandb_project") or "Anysole"),
+                entity=config.get("wandb_entity"),
+                name="%s_%s_%s" % (wandb_identity["model"], wandb_identity["stage"], wandb_identity["fold"]),
+                group="%s_%s" % (wandb_identity["experiment_tag"], wandb_identity["run_kind"]),
+                job_type="train",
+                tags=[wandb_identity["experiment_tag"], wandb_identity["run_kind"], wandb_identity["model"], wandb_identity["stage"], wandb_identity["fold"]],
+                config={**dict(config), **wandb_identity},
+            )
         except ImportError as exc:
             raise RuntimeError("W&B monitoring requested but wandb is not installed") from exc
     model_kw = {}
@@ -265,7 +297,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     # explicit --out-dir remains authoritative for custom experiments.
     if args.out_dir is None:
         results_root = Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results")))
-        config["out_dir"] = str(results_root / "AnySole" / modal / "checkpoints")
+        # Non-default contact-label schemes get their own model dir so sweeps
+        # never clobber each other's checkpoints/metrics.
+        contact_method = str(config.get("contact_method", "tactile_abs"))
+        model_dir = modal if contact_method == "tactile_abs" else "%s_%s" % (modal, contact_method)
+        config["out_dir"] = str(results_root / "AnySole" / model_dir / "checkpoints")
     if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):
         templates, subject_map = load_template_bank(config["template_path"])
         model_kw.update(templates=templates, subject_to_index=subject_map)
@@ -341,8 +377,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             "epoch": epoch + 1,
             "config": dict(config),
         }
-        torch.save(checkpoint, out_dir / "ckpt_last.pt")
-        print("saved %s (epoch %d)" % (out_dir / "ckpt_last.pt", epoch + 1))
+        # Atomic replace: a reader (auto-eval torch.load) must never see a
+        # half-written file when several runs share one out_dir.  Each process
+        # writes its own temp file, so a concurrent save cannot corrupt it.
+        ckpt_path = out_dir / "ckpt_last.pt"
+        tmp_path = out_dir / ("ckpt_last.pt.tmp%d" % os.getpid())
+        torch.save(checkpoint, tmp_path)
+        os.replace(tmp_path, ckpt_path)
+        print("saved %s (epoch %d)" % (ckpt_path, epoch + 1))
         if wandb_run is not None:
             denom = max(epoch_sums["n"], 1)
             log = {"epoch": epoch + 1}
@@ -365,7 +407,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         from anysole.eval import main as eval_main
         eval_main(["--config", str(args.config), "--ckpt", str(out_dir / "ckpt_last.pt"),
-                   "--modal", modal, "--split", "test", "--device", str(device)])
+                   "--modal", modal, "--split", "test", "--device", str(device),
+                   "--contact-method", str(config["contact_method"])])
     except Exception as exc:
         print("automatic test evaluation failed: %s" % exc)
     return 0

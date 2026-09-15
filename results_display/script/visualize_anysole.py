@@ -12,6 +12,7 @@ Usage (run from the repository root):
     python results_display/script/visualize_anysole.py
     python results_display/script/visualize_anysole.py --modal anysolev1 --config-id VT2M
     python results_display/script/visualize_anysole.py --session S7013
+    python results_display/script/visualize_anysole.py --modal anysolev1_bvh_soft,anysolev1_joint_and
 """
 from __future__ import annotations
 
@@ -122,7 +123,14 @@ def render_session(seq_dir: Path, pred_bvh: Path, session_id: str, config_id: st
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize AnySole eval BVH vs tactile input and GT BVH.")
-    cli_common.add_common_args(parser, seq_root=True, modal=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test1_visualization" / "AnySole")
+    cli_common.add_common_args(parser, seq_root=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test1_visualization" / "AnySole")
+    parser.add_argument(
+        "--modal",
+        type=str,
+        default="auto",
+        help="Model dirs under results/AnySole/, comma-separated; 'auto' (default) scans every dir there "
+        "(each trained contact scheme is its own model dir, e.g. anysolev1_bvh_soft).",
+    )
     return parser.parse_args()
 
 
@@ -140,7 +148,15 @@ def main() -> int:
     else:
         log.info(f"Sessions from {args.split} split ({len(session_ids)}): {session_ids}")
 
-    for modal in cli_common.split_csv_arg(args.modal):
+    if args.modal == "auto":
+        modals = sorted(p.name for p in PRED_ROOT.iterdir() if p.is_dir()) if PRED_ROOT.is_dir() else []
+        if not modals:
+            raise SystemExit("No model dirs under %s" % PRED_ROOT)
+        log.info(f"Models from {PRED_ROOT} ({len(modals)}): {modals}")
+    else:
+        modals = cli_common.split_csv_arg(args.modal)
+
+    for modal in modals:
         for config_id in cli_common.split_csv_arg(args.config_id):
             pred_root = PRED_ROOT / modal / "predictions" / "eval_bvh"
             if not pred_root.is_dir():

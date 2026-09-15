@@ -1,27 +1,29 @@
 """Test5: GT BVH + tactile insoles + contact indicator animation (contact label check).
 
-Renders, per session, the ground-truth mocap BVH skeleton aligned to the
-40 Hz session grid next to the tactile insole heatmaps, with a per-foot
-contact indicator driven by ``contact.npy`` (red = contact, green = no
-contact), plus a full-session contact timeline strip.  A per-frame text
-shows the 48-cell CSV pressure sum vs ``CONTACT_SUM_THRESH`` -- the exact
-quantity ``prepare_sequences.py:contact_from_insoles`` thresholds -- so the
-"labels are 97% always 1" issue is visible at a glance.
+Renders, per session and per contact *method*, the ground-truth mocap BVH
+skeleton aligned to the 40 Hz session grid next to the tactile insole
+heatmaps, with a per-foot contact indicator driven by the method's labels
+(red = contact, green = no contact), plus a full-session contact timeline
+strip.  Each method gets its own subfolder so variants can be compared side
+by side; labels come from ``contact_<method>.npy`` (see ``contact_methods.py``).
 
-Threshold analysis outputs (candidate thresholds are applied to the 48-cell
-CSV sums, NOT to the pressure.npz raster):
+Outputs land under ``results_display/Test5_contact/<method>/``:
 
-    gif/ or mp4/ directory          animation (tactile + contact badges | GT
+    <method>/gif/ or mp4/           animation (tactile + contact badges | GT
       <session>_contact.gif / .mp4  skeleton with recolored feet | timeline)
-    contact_summary.csv            per-session contact rates, sum stats,
-                                   contact rate under candidate thresholds
-    threshold_analysis.png         sum histograms + rate-vs-threshold curves
-
-Outputs land under ``results_display/Test5_contact/`` (or the
-``ANYSOLE_RESULTSDISPLAY`` override).
+    <method>/contact_summary.csv   per-session contact rates under this method
+    threshold_analysis.png         (root) tactile 48-cell sum histograms +
+                                   rate-vs-threshold curves (method-independent)
+    threshold_analysis.csv         (root) per-frame left/right 48-cell sums
+                                   behind the histograms (t = frame/40)
+    threshold_analysis_hist.csv    (root) the same 64-bin distribution as
+                                   plotted (bin_start/bin_end/count per side)
+    comparison.csv / comparison.png (root) method scorecard vs bvh_h reference,
+                                   produced by ``contact_methods.py --report``
 
 Usage (run from the repository root):
     python results_display/script/test5_contact.py
+    python results_display/script/test5_contact.py --methods bvh_h,tactile_gmm
     python results_display/script/test5_contact.py --session S10103 --max-frames 100
     python results_display/script/test5_contact.py --force
 """
@@ -46,6 +48,7 @@ import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
 import cli_common  # noqa: E402
+import contact_methods  # noqa: E402
 import cv2  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 from loguru import logger as log  # noqa: E402
@@ -223,26 +226,19 @@ def foot_joint_indices(names: list[str]) -> dict[str, list[int]]:
     return out
 
 
-def contact_from_sums(left48: np.ndarray, right48: np.ndarray) -> np.ndarray:
-    """Replicate prepare_sequences.py:contact_from_insoles for the foot columns."""
-    contact = np.zeros((left48.shape[0], 2), dtype=np.float32)
-    contact[left48.sum(axis=1) > CONTACT_SUM_THRESH, 0] = 1.0
-    contact[right48.sum(axis=1) > CONTACT_SUM_THRESH, 1] = 1.0
-    return contact
+def contact_path(seq_dir: Path, method: str) -> Path:
+    return Path(seq_dir) / f"contact_{method}.npy"
 
 
-def load_contact(seq_dir: Path, n: int, left48, right48) -> tuple[np.ndarray, bool]:
+def load_contact(seq_dir: Path, n: int, left48, right48, method: str) -> tuple[np.ndarray, bool]:
     """Return (n, 2) bool contact [left, right] and an availability flag."""
-    path = Path(seq_dir) / "contact.npy"
+    path = contact_path(seq_dir, method)
     if path.is_file():
         raw = np.load(path).astype(np.float32)
         if raw.ndim == 2 and raw.shape[1] >= 8:
             return raw[:n, [LEFT_CONTACT_COL, RIGHT_CONTACT_COL]] > 0.5, True
-        log.warning(f"{path}: unexpected shape {raw.shape}, deriving contact from CSV sums")
-    if left48 is not None and right48 is not None:
-        log.warning(f"No usable contact.npy under {seq_dir}; deriving contact from 48-cell CSV sums")
-        return contact_from_sums(left48[:n], right48[:n]) > 0.5, True
-    log.warning(f"No contact data under {seq_dir}")
+        log.warning(f"{path}: unexpected shape {raw.shape}")
+    log.warning(f"No contact data for method '{method}' under {seq_dir}")
     return np.zeros((n, 2), dtype=bool), False
 
 
@@ -255,11 +251,12 @@ def side_color(on: bool, valid: bool) -> tuple[int, int, int]:
 def render_tactile_panel(
     left_block, right_block, left_on, right_on, left_sum, right_sum,
     session_id, frame_idx, n_frames, fps, valid, contact_available, csv_available, rate_l, rate_r,
+    method, thr_l, thr_r,
 ):
     canvas = Image.new("RGB", (FOOT_W, CANVAS_H), (12, 12, 16))
     draw = ImageDraw.Draw(canvas)
     draw.rectangle([0, 0, FOOT_W - 1, CANVAS_H - 1], outline=(48, 48, 56))
-    draw_text(draw, (FOOT_W // 2, 12), "Tactile + Contact", TITLE_FONT, fill=(230, 230, 235), anchor="mt")
+    draw_text(draw, (FOOT_W // 2, 12), f"Tactile + Contact ({method})", TITLE_FONT, fill=(230, 230, 235), anchor="mt")
 
     left_img = Image.fromarray(pressure_to_heatmap(left_block))
     right_img = Image.fromarray(pressure_to_heatmap(right_block))
@@ -274,10 +271,10 @@ def render_tactile_panel(
 
     # Contact indicator: colored outline + badge under each insole.
     sides = (
-        (x0, left_img.width, left_on, left_sum),
-        (x0 + left_img.width + gap, right_img.width, right_on, right_sum),
+        (x0, left_img.width, left_on, left_sum, thr_l),
+        (x0 + left_img.width + gap, right_img.width, right_on, right_sum, thr_r),
     )
-    for insole_x, insole_w, on, s in sides:
+    for insole_x, insole_w, on, s, thr in sides:
         color = side_color(bool(on), valid)
         draw.rectangle(
             [insole_x - 3, y0 - 3, insole_x + insole_w + 2, y0 + INSOLE_H + 2],
@@ -294,8 +291,12 @@ def render_tactile_panel(
         if not valid:
             sum_text, sum_color = "invalid", C_GRAY
         elif csv_available:
-            sum_text = f"sum={s:.0f} > thr={CONTACT_SUM_THRESH:.0f}"
-            sum_color = badge_color
+            if thr is not None:
+                sum_text = f"sum={s:.0f} > thr={thr:.0f}"
+                sum_color = badge_color
+            else:
+                sum_text = f"sum={s:.0f} · {method} 判据"
+                sum_color = (180, 180, 190)
         else:
             sum_text, sum_color = "CSV missing", C_GRAY
         draw_text(draw, (center_x, y0 + INSOLE_H + 52), sum_text, INFO_FONT, fill=sum_color, anchor="mt")
@@ -411,12 +412,13 @@ def compose_frame(
     left_block, right_block, left_on, right_on, left_sum, right_sum,
     joints, edges, foot_idx, fake_t, session_id, t, n_frames, fps,
     contact_available, csv_available, rate_l, rate_r, left_contact, right_contact, fake,
-    gt_ok, gt_msg,
+    gt_ok, gt_msg, method, thr_l, thr_r,
 ):
     valid = not bool(fake_t)
     tactile = render_tactile_panel(
         left_block, right_block, left_on, right_on, left_sum, right_sum,
         session_id, t, n_frames, fps, valid, contact_available, csv_available, rate_l, rate_r,
+        method, thr_l, thr_r,
     )
     if gt_ok:
         skeleton = render_skeleton_contact_panel(joints[t], edges, foot_idx, left_on, right_on, valid, t, n_frames)
@@ -500,7 +502,7 @@ def plot_threshold_analysis(out_dir: Path, rows: list[dict]):
         ax_hist.hist(np.concatenate(sums_list), bins=64, color=("tab:blue" if col == 0 else "tab:orange"), alpha=0.75)
         for thr in thresholds:
             linestyle = "-" if thr == CONTACT_SUM_THRESH else "--"
-            label = "thr=100（现行）" if thr == CONTACT_SUM_THRESH else None
+            label = "thr=100（绝对阈值）" if thr == CONTACT_SUM_THRESH else None
             ax_hist.axvline(thr, color="black" if thr == CONTACT_SUM_THRESH else "gray",
                             linestyle=linestyle, linewidth=1.4, label=label)
         if col == 0:
@@ -528,6 +530,29 @@ def plot_threshold_analysis(out_dir: Path, rows: list[dict]):
         ax_rate.legend(loc="lower left", fontsize=9)
         ax_rate.grid(True, which="both", alpha=0.25)
 
+    # Per-frame 48-cell sums (the data behind the histograms) and the same
+    # 64-bin distribution as plotted, so the PNG has matching CSVs.
+    frame_csv = out_dir / "threshold_analysis.csv"
+    with frame_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["session_id", "frame", "sum_left", "sum_right"])
+        for row in plot_rows:
+            sums_l, sums_r = row["_sums_l"], row["_sums_r"]
+            n = min(len(sums_l), len(sums_r))
+            for f in range(n):
+                writer.writerow((row["session_id"], f, f"{float(sums_l[f]):.1f}", f"{float(sums_r[f]):.1f}"))
+    log.info(f"Wrote {frame_csv}")
+
+    hist_csv = out_dir / "threshold_analysis_hist.csv"
+    with hist_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["side", "bin_start", "bin_end", "count"])
+        for side, key in (("left", "_sums_l"), ("right", "_sums_r")):
+            counts, edges = np.histogram(np.concatenate([row[key] for row in plot_rows]), bins=64)
+            for a, b, c in zip(edges[:-1], edges[1:], counts):
+                writer.writerow((side, f"{a:.1f}", f"{b:.1f}", int(c)))
+    log.info(f"Wrote {hist_csv}")
+
     fig.suptitle("Test5 contact 标签阈值分析", fontsize=16)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     path = out_dir / "threshold_analysis.png"
@@ -542,21 +567,26 @@ def plot_threshold_analysis(out_dir: Path, rows: list[dict]):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Test5: GT BVH + tactile insoles + contact indicator animation and threshold analysis.")
     cli_common.add_common_args(parser, seq_root=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test5_contact")
+    parser.add_argument(
+        "--methods",
+        type=str,
+        default="all",
+        help="Contact methods (see contact_methods.py): comma-separated or 'all' (default: all).",
+    )
     return parser.parse_args()
 
 
-def analysis_row(session_id: str, seq_dir: Path, fps: float) -> dict | None:
+def analysis_row(session_id: str, seq_dir: Path, fps: float, method: str) -> dict | None:
     """Compute the summary row without loading pressure.npz / BVH.
 
     Used for sessions whose animation already exists, so re-runs without
-    ``--force`` still regenerate ``contact_summary.csv`` / ``threshold_analysis.png``.
+    ``--force`` still regenerate ``contact_summary.csv``.
     """
     meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
     n = int(meta["n_frames"])
-    contact_raw = None
-    contact_path = Path(seq_dir) / "contact.npy"
-    if contact_path.is_file():
-        contact_raw = np.load(contact_path).astype(np.float32)
+    cpath = contact_path(seq_dir, method)
+    if cpath.is_file():
+        contact_raw = np.load(cpath).astype(np.float32)
         n = min(n, contact_raw.shape[0])
     t_grid = float(meta["visual_start_s"]) + np.arange(n, dtype=np.float64) / float(fps)
     left48 = right48 = None
@@ -571,24 +601,24 @@ def analysis_row(session_id: str, seq_dir: Path, fps: float) -> dict | None:
     if csv_available:
         left48 = left48[:n]
         right48 = right48[:n]
-    contact, _ = load_contact(seq_dir, n, left48, right48)
+    contact, _ = load_contact(seq_dir, n, left48, right48, method)
     return analyze_session(session_id, contact, left48, right48, csv_available)
 
 
-def render_session(args: argparse.Namespace, session_id: str, out_dir: Path) -> tuple[str, dict | None]:
+def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, method: str) -> tuple[str, dict | None]:
     gen_path = cli_common.media_path(out_dir, f"{session_id}_contact", args.gen)
     seq_dir = session_dir(args.seq_root, session_id)
     if cli_common.outputs_ready([gen_path]) and not args.force:
-        log.info(f"Skip {session_id}: outputs already exist under {out_dir}")
-        return "skip", analysis_row(session_id, seq_dir, args.fps)
+        log.info(f"Skip {session_id} [{method}]: outputs already exist under {out_dir}")
+        return "skip", analysis_row(session_id, seq_dir, args.fps, method)
 
     meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
     pressure, fake = load_pressure(seq_dir)
 
     contact_raw = None
-    contact_path = Path(seq_dir) / "contact.npy"
-    if contact_path.is_file():
-        contact_raw = np.load(contact_path).astype(np.float32)
+    cpath = contact_path(seq_dir, method)
+    if cpath.is_file():
+        contact_raw = np.load(cpath).astype(np.float32)
 
     t_grid = float(meta["visual_start_s"]) + np.arange(pressure.shape[0], dtype=np.float64) / float(args.fps)
     csv_available = False
@@ -602,7 +632,7 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path) -> 
 
     n = pressure.shape[0]
     if contact_raw is not None and contact_raw.shape[0] != n:
-        log.warning(f"{session_id}: contact.npy has {contact_raw.shape[0]} frames vs pressure {n}")
+        log.warning(f"{session_id}: {cpath.name} has {contact_raw.shape[0]} frames vs pressure {n}")
     n = min(n, contact_raw.shape[0]) if contact_raw is not None else n
     if fake.shape[0] != n:
         log.warning(f"{session_id}: fake_mask has {fake.shape[0]} frames vs pressure {n}")
@@ -612,7 +642,7 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path) -> 
         n = min(n, left48.shape[0])
     pressure = pressure[:n]
     fake = fake[:n]
-    contact, contact_available = load_contact(seq_dir, n, left48, right48)
+    contact, contact_available = load_contact(seq_dir, n, left48, right48, method)
     if csv_available:
         left48 = left48[:n]
         right48 = right48[:n]
@@ -640,6 +670,8 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path) -> 
         frame_ids = frame_ids[: args.max_frames]
     frame_fps = cli_common.viz_fps(args.fps, args.stride)
 
+    thr_l, thr_r = contact_methods.method_thresholds(seq_dir, method) or (None, None)
+
     frames = []
     for t in frame_ids:
         left_block = crop_foot(pressure[t], LEFT_FOOT_BOX)
@@ -650,7 +682,7 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path) -> 
             left_block, right_block, contact[t, 0], contact[t, 1], left_sum, right_sum,
             joints, edges, foot_idx, fake[t], session_id, t, n, args.fps,
             contact_available, csv_available, rate_l, rate_r,
-            contact[:, 0], contact[:, 1], fake, gt_ok, gt_msg,
+            contact[:, 0], contact[:, 1], fake, gt_ok, gt_msg, method, thr_l, thr_r,
         ))
     if not frames:
         raise RuntimeError(f"No frames rendered for {session_id}")
@@ -681,18 +713,36 @@ def main() -> int:
     else:
         log.info(f"Sessions from {args.split} split ({len(session_ids)}): {session_ids}")
 
-    collected = []
+    wanted = set(cli_common.split_csv_arg(args.methods))
+    methods = [m for m in contact_methods.METHOD_NAMES if args.methods == "all" or m in wanted]
+    log.info(f"Contact methods ({len(methods)}): {methods}")
+
+    # Ensure per-method label files exist for the sessions being rendered.
+    session_dirs = []
     for session_id in session_ids:
         try:
-            status, row = render_session(args, session_id, out_dir)
-        except (FileNotFoundError, ValueError) as exc:
+            session_dirs.append(session_dir(args.seq_root, session_id))
+        except FileNotFoundError as exc:
             log.warning(f"Skip {session_id}: {exc}")
-            continue
-        if row is not None:
-            collected.append(row)
-    if collected:
-        write_summary_csv(out_dir, collected)
-        plot_threshold_analysis(out_dir, collected)
+    contact_methods.ensure_labels(session_dirs, methods)
+
+    for method in methods:
+        method_dir = out_dir / method
+        method_dir.mkdir(parents=True, exist_ok=True)
+        log.info(f"=== method: {method} -> {method_dir}")
+        collected = []
+        for session_id in session_ids:
+            try:
+                status, row = render_session(args, session_id, method_dir, method)
+            except (FileNotFoundError, ValueError) as exc:
+                log.warning(f"Skip {session_id}: {exc}")
+                continue
+            if row is not None:
+                collected.append(row)
+        if collected:
+            write_summary_csv(method_dir, collected)
+        if method == "tactile_abs":
+            plot_threshold_analysis(out_dir, collected)
     return 0
 
 

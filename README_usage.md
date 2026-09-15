@@ -75,6 +75,11 @@ python data_prep/make_splits.py --skip-existing
 - `--ood S11,S10`：将指定 subject 整体放入 OOD 的 val/test。
 - `--exclude S5,S6`：从当前 split 中排除指定 subject。
 
+`prepare_sequences.py` 同时为各 session 生成 `contact.npy`，口径为「48 格压力和 > 100」
+（即 Test5 的 `tactile_abs` 方案）。如需用 Test5 的其他接触检测方案训练/评估
+（见 3.1 与 4.1 的 `--contact-method`），先用 `results_display/script/contact_methods.py`
+额外生成 `contact_<method>.npy`，详见 `results_display/README.md` 的「## Test5 接触检测」。
+
 默认只生成一份中央 split：
 `AnysoleWorkspace/splits/default/splits.csv`。完成 split 后，再运行下面的
 bbox、图像特征、关键点和 AnySole cache 生成命令；后续模型不得自行重新划分数据。
@@ -167,14 +172,12 @@ Python 解释器和依赖环境；它不会自动设置仓库的模块搜索路�
 从仓库根目录执行时不需要额外设置 `PYTHONPATH`。
 
 `--device cuda` 会启用 GPU。要选择具体的物理 GPU，使用 `CUDA_VISIBLE_DEVICES`；
-例如前文的 `$ANYSOLE_GPU=4` 表示物理 GPU 4。设置后，程序内部的 `cuda` 会指向这张可见卡（即
-`cuda:0`）。如果前面第 2 节已经执行了 `export CUDA_VISIBLE_DEVICES=...`，这里
+例如前文的 `$ANYSOLE_GPU=4` 表示物理 GPU 4。设置后，程序内部的 `cuda` 会指向这张可见卡（即`cuda:0`）。如果前面第 2 节已经执行了 `export CUDA_VISIBLE_DEVICES=...`，这里
 可以省略命令前的重复设置。
 
 漂移补偿消融模型还需要按 subject 构建鞋垫模板库。首次训练该模型前执行：
 
 ```bash
-cd /data/fangyuxuan/projects/gait
 conda activate touch_gait
 python -m anysole.ablations.insole_drift.build_templates \
   --manifest AnysoleWorkspace/manifests/session_manifest.csv \
@@ -189,10 +192,13 @@ cd /data/fangyuxuan/projects/gait
 conda activate touch_gait
 
 # 主模型
-CUDA_VISIBLE_DEVICES=6 python -m anysole.train \
+CUDA_VISIBLE_DEVICES=7 python -m anysole.train \
   --config configs/v1.yaml \
   --modal anysolev1 \
+  --contact-method joint_and \
   --device cuda
+
+  --contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
 
 # 漂移补偿消融模型
 CUDA_VISIBLE_DEVICES=6 python -m anysole.train \
@@ -209,13 +215,6 @@ CUDA_VISIBLE_DEVICES=6 python -m anysole.train \
   --wandb_project Anysole
 ```
 
-输出默认写入 `results/AnySole/anysolev1/checkpoints/ckpt_last.pt`；漂移消融默认写入
-`results/AnySole/anysolev1_insole_drift/checkpoints/ckpt_last.pt`。训练包含 `VT`（RGB+压力）和
-`T`（压力）三种输入配置。W&B 按 epoch 记录 `train/loss_*`、`train/lr`、
-`train/grad_norm`；默认每 5 个 epoch 在验证集记录各配置的 MPJPE、根轨迹 ATE、
-接触 F1、脚滑，以及 `val/gap_mpjpe_dropT` 和 `val/gap_mpjpe_dropV`。可用
-`--wandb_mode offline` 离线缓存，或用 `--wandb_eval_interval N` 调整验证间隔。
-
 ### 3.2 三个基线
 
 #### MotionPRO
@@ -224,8 +223,11 @@ CUDA_VISIBLE_DEVICES=6 python -m anysole.train \
 cd /data/fangyuxuan/projects/gait/Baselines/MotionPRO
 conda activate touch_gait
 
-CUDA_VISIBLE_DEVICES=3 python -m app.train_frappe
+CUDA_VISIBLE_DEVICES=3 python -m app.train_frappe task.contact_method=bvh_h
+--contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
 ```
+
+MotionPRO 的 test 指标（MPJPE/PVE/WBCE）不使用接触标签，只有训练期损失与 IoU 受影响。
 
 输出：`results/MotionPRO/checkpoints/`
 
@@ -270,14 +272,17 @@ python -m anysole.eval \
   --ckpt results/AnySole/anysolev1/checkpoints/ckpt_last.pt \
   --device cuda \
   --config-id VT2M,V2M,T2M \
-  --write-bvh results/AnySole/anysolev1/predictions/eval_bvh
+  --write-bvh results/AnySole/anysolev1/predictions/eval_bvh \
+  --contact-method bvh_h
 
   --modal anysolev1_insole_drift \
 ```
 
-评估指标会自动写入同一模型的 `metrics/test.json`。漂移消融只需将 checkpoint
+评估指标会自动写入同一模型的 `metrics/test.json`（含 `contact_method` 字段记录标签口径）。漂移消融只需将 checkpoint
 路径替换为 `results/AnySole/anysolev1_insole_drift/checkpoints/ckpt_last.pt`，并使用
 对应的 `predictions/eval_bvh` 目录。
+
+`--contact-method` 可省略：省略时自动沿用 checkpoint 训练时保存的接触方案。
 
 单 session 推理：
 
@@ -364,6 +369,8 @@ RTM-pose 观测。
 - `Missing AnySole HRNet+bbox cache`：先执行第 2.2 节的 AnySole cache 命令。
 - `No module named 'lib'`：MotionPRO 的 `python -m lib.util.*` 必须在
   `Baselines/MotionPRO/` 下执行。
+- 缺少 `contact_<method>.npy`（指定 `--contact-method` 后报错）：先运行
+  `python results_display/script/contact_methods.py --methods <method>` 生成对应方案标签。
 - 缺少 pressure toolkit 的 essential、标定或 floor 文件：停止拟合，不下载或伪造文件。
 - CUDA 不可用：检查 `CUDA_VISIBLE_DEVICES`、`nvidia-smi` 和当前环境的 PyTorch CUDA 版本。
 

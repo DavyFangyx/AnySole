@@ -31,7 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from anysole.data.bvh_io import load_bvh  # noqa: E402
-from anysole.geometry import euler_yxz_to_rotmat, fk_local_np  # noqa: E402
+from anysole.geometry import euler_yxz_to_rotmat, fk_local_np, resample_bvh_motion  # noqa: E402
 
 METRICS = ("MPJPE_mm", "PA_MPJPE_mm", "WMPJPE_mm", "WAMPJPE_mm", "RTE_mm", "Accel_mps2", "Jitter_1e-3_mps2")
 
@@ -88,12 +88,27 @@ def resolve_repo_path(value: str, base: Path) -> Path:
     return p if p.is_absolute() else ROOT / p
 
 
-def bvh_joints(path: Path) -> np.ndarray:
+def bvh_joints(path: Path, row: dict[str, str] | None = None) -> np.ndarray:
+    """World joints from a BVH; with a manifest row, resampled onto the session grid.
+
+    Without ``row`` the raw BVH is returned as-is.  With ``row`` the motion is
+    queried at ``t_mocap = visual_start_s + i/target_fps - offset_s``, the
+    mocap<->tactile/video bias compensation used by MotionPRO
+    ``prepare_sequences.py`` and ``anysole/data/dataset.py``.  Predictions are
+    exported on the session grid, so comparing them frame-by-frame against the
+    raw BVH would misalign GT by ``mocap_start_s`` (median ~0.08 s, max ~0.9 s).
+    """
     bvh = load_bvh(path)
-    euler = bvh.motion[:, 3:].reshape(-1, 23, 3)
+    motion = bvh.motion
+    if row is not None and "visual_start_s" in row and "offset_s" in row:
+        n = int(float(row.get("n_frames") or len(motion)))
+        fps = float(row.get("target_fps") or 40.0)
+        t_grid = float(row["visual_start_s"]) + np.arange(n, dtype=np.float64) / fps
+        motion = resample_bvh_motion(motion, bvh.frame_time, t_grid - float(row["offset_s"]))
+    euler = motion[:, 3:].reshape(-1, 23, 3)
     local = euler_yxz_to_rotmat(euler)
     positions, _ = fk_local_np(local, bvh.offsets_m, bvh.parents)
-    return positions + bvh.motion[:, None, :3] * 0.01
+    return positions + motion[:, None, :3] * 0.01
 
 
 def array_from_file(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
@@ -357,7 +372,7 @@ def main() -> int:
             sid = row["session_id"]; pred_path = find_prediction(root, sid, model.get("pattern")); base = {"model": name, "variant": model.get("variant", ""), "run_name": model.get("run_name", root.name), "session_id": sid, "subject_id": row.get("subject_id", ""), "action": row.get("action", ""), "split": args.split, "status": "ok", "reason": ""}
             try:
                 if pred_path is None: raise FileNotFoundError(f"no prediction under {root}")
-                gt_path = resolve_repo_path(row["bvh_path"], ROOT); pred, pred_mask = array_from_file(pred_path); gt = bvh_joints(gt_path)
+                gt_path = resolve_repo_path(row["bvh_path"], ROOT); pred, pred_mask = array_from_file(pred_path); gt = bvh_joints(gt_path, row)
                 if pred.ndim != 3 or pred.shape[1:] != (23, 3): raise ValueError(f"expected (T,23,3), got {pred.shape}")
                 keep = valid_mask(row, min(len(pred), len(gt))); keep &= pred_mask[:len(keep)].astype(bool) if pred_mask is not None else True
                 vals = metrics(pred, gt, keep, args.fps); base.update(vals); base["prediction"] = str(pred_path)

@@ -82,6 +82,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=ANYSOLE_ROOT / "configs" / "v1.yaml")
     parser.add_argument("--ckpt", type=Path, required=True)
     parser.add_argument("--modal", choices=MODEL_NAMES, default=None)
+    parser.add_argument(
+        "--contact-method",
+        default=None,
+        help="Test5 contact-label scheme for contact_gt (see results_display/README.md). "
+        "Default: the checkpoint's training contact_method, then config, then tactile_abs.",
+    )
     parser.add_argument("--split", choices=("train", "val", "test"), default="test")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--limit-sessions", type=int, default=None)
@@ -148,6 +154,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     checkpoint_modal = str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1))
     if args.modal is not None and args.modal != checkpoint_modal:
         raise ValueError("--modal %s does not match checkpoint modal %s" % (args.modal, checkpoint_modal))
+    ckpt_contact = str(checkpoint.get("config", {}).get("contact_method") or "")
+    contact_method = args.contact_method or ckpt_contact or str(config.get("contact_method", "tactile_abs"))
     model = _load_model(checkpoint, config, device)
     diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
     sample_steps = int(args.sample_steps or config["diffusion_sample_steps"])
@@ -164,6 +172,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         cache_root=Path(config["cache_root"]),
         window_length=int(config["tw"]),
         session_ids=session_ids,
+        contact_method=contact_method,
     )
     if len(dataset) == 0:
         raise RuntimeError("Evaluation dataset contains no valid windows")
@@ -269,6 +278,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         metrics_out = model_root / "metrics" / ("%s.json" % args.split)
     metrics_out.parent.mkdir(parents=True, exist_ok=True)
     payload = {"checkpoint": str(args.ckpt), "modal": str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1)),
+               "contact_method": contact_method,
                "split": args.split, "sample_steps": sample_steps, "metrics": all_values}
     metrics_out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print("wrote %s" % metrics_out)

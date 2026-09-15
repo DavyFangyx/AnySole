@@ -75,6 +75,7 @@ class ImagePressureDataset(Dataset):
         seq_root = resolve_seq_root(cfg)
         cam_id = cfg['task'].get('cam_id')
         split_csv = cfg['task'].get('split_csv')
+        contact_method = str(cfg['task'].get('contact_method', 'tactile_abs'))
         if split_csv:
             if self.mode == 'train':
                 column = 'train'
@@ -115,12 +116,21 @@ class ImagePressureDataset(Dataset):
             pressure_file = feature_file.replace('feature_hrnet.pth', 'pressure.npz')
             gt_kps_file = feature_file.replace('feature_hrnet.pth', 'keypoints.npy')
             gt_smpl_file = feature_file.replace('feature_hrnet.pth', 'smpl.npy')
-            contact_file = feature_file.replace('feature_hrnet.pth', 'contact.npy')
+            if contact_method == 'tactile_abs':
+                contact_file = feature_file.replace('feature_hrnet.pth', 'contact.npy')
+            else:
+                contact_file = feature_file.replace('feature_hrnet.pth', f'contact_{contact_method}.npy')
             fake_file = feature_file.replace('feature_hrnet.pth', 'fake_mask.npy')
 
             pressure = np.load(pressure_file)['pressure']
             pressure = self._resize_pressure(pressure)
             kps_gt = np.load(gt_kps_file)
+            if not Path(contact_file).is_file():
+                raise FileNotFoundError(
+                    f"Missing contact labels {contact_file} (contact_method={contact_method}). Run "
+                    f"`python results_display/script/contact_methods.py --methods {contact_method}` "
+                    f"to generate them."
+                )
             contact_gt = np.load(contact_file)
             smpl_gt = load_smpl_npy(gt_smpl_file)
             if Path(fake_file).is_file():
