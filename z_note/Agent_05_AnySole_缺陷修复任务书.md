@@ -134,8 +134,8 @@ totals["mpjpe"] += float(torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=
 ```bash
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
   --config configs/v1.yaml \
-  --ckpt results/AnySole/anysolev1/checkpoints/ckpt_last.pt \
-  --split test --write-bvh results/AnySole/anysolev1/predictions/eval_bvh
+  --ckpt results/AnySole/anysolev1_tactile_abs/checkpoints/ckpt_last.pt \
+  --split test --write-bvh results/AnySole/anysolev1_tactile_abs/predictions/eval_bvh
 ```
 
 ---
@@ -169,7 +169,7 @@ totals["mpjpe"] += float(torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=
 
 | 指标 | 实测值 | 来源 |
 |---|---|---|
-| 主模型 test MPJPE（VT2M） | 331.5 mm | `results/AnySole/anysolev1/metrics/test.json` |
+| 主模型 test MPJPE（VT2M） | 331.5 mm | `results/AnySole/anysolev1_tactile_abs/metrics/test.json` |
 | 旧 eval BVH（07:55）同会话 MPJPE | 754 mm | 本地重算（ckpt_last.pt 为 08:35） |
 | tau=0 干净输入重建 MPJPE | 主模型 246 mm / drift 127 mm | 本地重算 |
 | T_phys force 项（原始尺度） | 均值 6255、最大 20362 | 训练 batch 统计 |

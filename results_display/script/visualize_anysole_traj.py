@@ -356,7 +356,7 @@ def render_session(npz_path: Path, session_id: str, config_id: str, args: argpar
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize AnySole root trajectories (pred vs GT) as Test3 outputs.")
-    cli_common.add_common_args(parser, modal=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test3_trajectory" / "AnySole")
+    cli_common.add_common_args(parser, modal=True, contact_method=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test3_trajectory" / "AnySole")
     parser.add_argument("--no-png", action="store_true", help="Skip the static per-session figure (not controlled by --gen).")
     return parser.parse_args()
 
@@ -375,21 +375,23 @@ def main() -> int:
         log.info(f"Sessions from {args.split} split ({len(session_ids)}): {session_ids}")
 
     for modal in cli_common.split_csv_arg(args.modal):
-        for config_id in cli_common.split_csv_arg(args.config_id):
-            pred_root = PRED_ROOT / modal / "predictions" / "eval_bvh"
-            if not pred_root.is_dir():
-                log.warning(f"No prediction directory for {modal}: {pred_root}")
-                continue
-            session_out = out_dir / modal / config_id
-            for session_id in session_ids:
-                npz_path = pred_root / f"{session_id}_{config_id}_traj.npz"
-                if not npz_path.is_file():
-                    log.warning(f"Skip {modal}/{config_id}/{session_id}: no {npz_path.name} (re-run anysole.eval --write-bvh to export)")
+        for contact_method in cli_common.split_csv_arg(args.contact_method):
+            model_dir = cli_common.anysole_model_dir(modal, contact_method)
+            for config_id in cli_common.split_csv_arg(args.config_id):
+                pred_root = PRED_ROOT / model_dir / "predictions" / "eval_bvh"
+                if not pred_root.is_dir():
+                    log.warning(f"No prediction directory for {model_dir}: {pred_root}")
                     continue
-                try:
-                    render_session(npz_path, session_id, config_id, args, session_out)
-                except Exception as exc:  # one bad session must not stop the sweep
-                    log.error(f"{session_id}_{config_id}: {exc}")
+                session_out = out_dir / model_dir / config_id
+                for session_id in session_ids:
+                    npz_path = pred_root / f"{session_id}_{config_id}_traj.npz"
+                    if not npz_path.is_file():
+                        log.warning(f"Skip {model_dir}/{config_id}/{session_id}: no {npz_path.name} (re-run anysole.eval --write-bvh to export)")
+                        continue
+                    try:
+                        render_session(npz_path, session_id, config_id, args, session_out)
+                    except Exception as exc:  # one bad session must not stop the sweep
+                        log.error(f"{session_id}_{config_id}: {exc}")
     return 0
 
 

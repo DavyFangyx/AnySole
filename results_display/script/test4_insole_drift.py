@@ -203,12 +203,13 @@ def run_compensator(comp: InsoleDriftCompensator, t_raw: np.ndarray, subject_id:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Test4: standalone insole-drift compensator (tactile in -> tactile out).")
-    cli_common.add_common_args(parser, seq_root=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test4_insole_drift")
+    cli_common.add_common_args(parser, seq_root=True, contact_method=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test4_insole_drift")
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default=str(cli_common.RESULTS_ROOT / "AnySole/anysolev1_insole_drift/checkpoints/ckpt_last.pt"),
-        help="Trained anysolev1_insole_drift checkpoint; only the drift_compensator weights are used.",
+        default=None,
+        help="Trained anysolev1_insole_drift checkpoint; only the drift_compensator weights are used. "
+        "Default: results/AnySole/anysolev1_insole_drift_<contact-method>/checkpoints/ckpt_last.pt.",
     )
     parser.add_argument("--templates", type=str, default=str(cli_common.WORKSPACE_ROOT / "calibration/insole_templates.json"))
     parser.add_argument(
@@ -321,6 +322,8 @@ def main() -> int:
         log.info(f"Sessions from {args.split} split ({len(session_ids)}): {session_ids}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.checkpoint is None:
+        args.checkpoint = str(cli_common.RESULTS_ROOT / "AnySole" / cli_common.anysole_model_dir("anysolev1_insole_drift", args.contact_method) / "checkpoints" / "ckpt_last.pt")
     comp, subject_map, epoch = load_compensator(args, device)
     log.info(f"Compensator loaded from {args.checkpoint} (epoch {epoch}, {len(subject_map)} subjects), device={device}")
 

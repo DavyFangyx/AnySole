@@ -12,7 +12,7 @@ Usage (run from the repository root):
     python results_display/script/visualize_anysole.py
     python results_display/script/visualize_anysole.py --modal anysolev1 --config-id VT2M
     python results_display/script/visualize_anysole.py --session S7013
-    python results_display/script/visualize_anysole.py --modal anysolev1_bvh_soft,anysolev1_joint_and
+    python results_display/script/visualize_anysole.py --modal anysolev1 --contact-method bvh_soft,joint_and
 """
 from __future__ import annotations
 
@@ -128,9 +128,10 @@ def parse_args() -> argparse.Namespace:
         "--modal",
         type=str,
         default="auto",
-        help="Model dirs under results/AnySole/, comma-separated; 'auto' (default) scans every dir there "
-        "(each trained contact scheme is its own model dir, e.g. anysolev1_bvh_soft).",
+        help="Modal names, comma-separated; 'auto' (default) scans every dir under results/AnySole/. "
+        "Model dir is <modal>_<contact-method> (e.g. anysolev1_bvh_soft).",
     )
+    parser.add_argument("--contact-method", type=str, default="tactile_abs", help="Contact-label scheme(s), comma-separated; ignored when --modal is 'auto'.")
     return parser.parse_args()
 
 
@@ -149,24 +150,28 @@ def main() -> int:
         log.info(f"Sessions from {args.split} split ({len(session_ids)}): {session_ids}")
 
     if args.modal == "auto":
-        modals = sorted(p.name for p in PRED_ROOT.iterdir() if p.is_dir()) if PRED_ROOT.is_dir() else []
-        if not modals:
+        model_dirs = sorted(p.name for p in PRED_ROOT.iterdir() if p.is_dir()) if PRED_ROOT.is_dir() else []
+        if not model_dirs:
             raise SystemExit("No model dirs under %s" % PRED_ROOT)
-        log.info(f"Models from {PRED_ROOT} ({len(modals)}): {modals}")
+        log.info(f"Models from {PRED_ROOT} ({len(model_dirs)}): {model_dirs}")
     else:
-        modals = cli_common.split_csv_arg(args.modal)
+        model_dirs = [
+            cli_common.anysole_model_dir(modal, contact_method)
+            for modal in cli_common.split_csv_arg(args.modal)
+            for contact_method in cli_common.split_csv_arg(args.contact_method)
+        ]
 
-    for modal in modals:
+    for model_dir in model_dirs:
         for config_id in cli_common.split_csv_arg(args.config_id):
-            pred_root = PRED_ROOT / modal / "predictions" / "eval_bvh"
+            pred_root = PRED_ROOT / model_dir / "predictions" / "eval_bvh"
             if not pred_root.is_dir():
-                log.warning(f"No prediction directory for {modal}: {pred_root}")
+                log.warning(f"No prediction directory for {model_dir}: {pred_root}")
                 continue
-            session_out = out_dir / modal / config_id
+            session_out = out_dir / model_dir / config_id
             for session_id in session_ids:
                 pred_bvh = pred_root / f"{session_id}_{config_id}.bvh"
                 if not pred_bvh.is_file():
-                    log.warning(f"Skip {modal}/{config_id}/{session_id}: no {pred_bvh.name}")
+                    log.warning(f"Skip {model_dir}/{config_id}/{session_id}: no {pred_bvh.name}")
                     continue
                 try:
                     seq_dir = session_dir(seq_root, session_id)

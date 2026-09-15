@@ -1,4 +1,11 @@
-"""Evaluate AnySole V1 under VT, V-only, and T-only conditioning."""
+"""Evaluate AnySole V1 under VT, V-only, and T-only conditioning.
+
+Besides the motion metrics, every mode also reports tactile aux-head
+reconstruction quality (T_mae / T_rmse / T_corr over the 96 cells).  Under
+V-only conditioning the tactile input is zeroed, so that row measures V2T
+(vision-to-tactile) generation and is mirrored by the top-level "v2t"
+field of the metrics JSON.
+"""
 
 from __future__ import annotations
 
@@ -56,6 +63,20 @@ def _pa_error(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return torch.linalg.vector_norm(aligned - y, dim=-1)
 
 
+def _tactile_corr(pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-frame Pearson correlation over the 96 pressure cells.
+
+    Returns (correlation, valid): frames where either side is constant
+    (std ~ 0, e.g. a fully off insole) have no defined correlation and are
+    masked out instead of contributing garbage values.
+    """
+    pred_c = pred - pred.mean(dim=-1, keepdim=True)
+    target_c = target - target.mean(dim=-1, keepdim=True)
+    denom = (pred_c.square().sum(dim=-1) * target_c.square().sum(dim=-1)).sqrt()
+    corr = (pred_c * target_c).sum(dim=-1) / denom.clamp_min(1.0e-8)
+    return corr, denom > 1.0e-8
+
+
 def _rotation_error_deg(pred_pose: torch.Tensor, gt_pose: torch.Tensor) -> torch.Tensor:
     pred_rot = rot6d_to_rotmat(pred_pose.reshape(*pred_pose.shape[:2], N_JOINTS, 6))
     gt_rot = rot6d_to_rotmat(gt_pose.reshape(*gt_pose.shape[:2], N_JOINTS, 6))
@@ -66,7 +87,10 @@ def _rotation_error_deg(pred_pose: torch.Tensor, gt_pose: torch.Tensor) -> torch
 
 class MetricSums:
     def __init__(self) -> None:
-        self.sums: Dict[str, float] = {name: 0.0 for name in ("MPJPE", "PA-MPJPE", "MPJRE", "traj_ATE", "contact_acc")}
+        self.sums: Dict[str, float] = {
+            name: 0.0
+            for name in ("MPJPE", "PA-MPJPE", "MPJRE", "traj_ATE", "contact_acc", "T_mae", "T_mse", "T_corr")
+        }
         self.counts: Dict[str, int] = {name: 0 for name in self.sums}
 
     def add(self, name: str, values: torch.Tensor, scale: float = 1.0) -> None:
@@ -74,7 +98,9 @@ class MetricSums:
         self.counts[name] += values.numel()
 
     def means(self) -> Dict[str, float]:
-        return {name: self.sums[name] / max(self.counts[name], 1) for name in self.sums}
+        out = {name: self.sums[name] / max(self.counts[name], 1) for name in self.sums}
+        out["T_rmse"] = float(out.pop("T_mse") ** 0.5)
+        return out
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -135,7 +161,8 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
             raise ValueError("template_path is required for drift-enabled evaluation")
         templates, subject_map = load_template_bank(template_path)
         model_kw.update(templates=templates, subject_to_index=subject_map)
-    model = AnySoleModel(d=d_model, tw=tw, modal=modal, use_insole_drift=use_drift, **model_kw).to(device)
+    dropout = float(saved_config.get("dropout", config.get("dropout", 0.1)))
+    model = AnySoleModel(d=d_model, tw=tw, modal=modal, use_insole_drift=use_drift, dropout=dropout, **model_kw).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     model.eval()
     return model
@@ -227,6 +254,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 pred_contact = soft_contact_from_keypoints(pred_kp) > 0.5
                 metrics.add("contact_acc", (pred_contact == (batch["contact_gt"] > 0.5)).float())
 
+                # Tactile aux-head metrics (normalized 0-1 units).  Under
+                # V-only conditioning the T input is zeroed, so these numbers
+                # measure V2T generation quality (the V2M row in the report).
+                t_ae = (out["pressure_hat"] - batch["T_raw"]).abs()
+                metrics.add("T_mae", t_ae)
+                metrics.add("T_mse", t_ae.square())
+                corr, corr_valid = _tactile_corr(out["pressure_hat"], batch["T_raw"])
+                if bool(corr_valid.any()):
+                    metrics.add("T_corr", corr[corr_valid])
+
                 if args.write_bvh is not None:
                     for idx, session_id in enumerate(raw_batch["session_id"]):
                         exports.setdefault(session_id, []).append(
@@ -242,7 +279,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         values = metrics.means()
         all_values[CONFIG_MODE_NAMES[config_value]] = values
         print(
-            "%s MPJPE=%.3fmm PA-MPJPE=%.3fmm MPJRE=%.3fdeg traj_ATE=%.3fmm contact_acc=%.4f"
+            "%s MPJPE=%.3fmm PA-MPJPE=%.3fmm MPJRE=%.3fdeg traj_ATE=%.3fmm contact_acc=%.4f T_mae=%.3f T_rmse=%.3f T_corr=%.3f"
             % (
                 CONFIG_MODE_NAMES[config_value],
                 values["MPJPE"],
@@ -250,6 +287,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 values["MPJRE"],
                 values["traj_ATE"],
                 values["contact_acc"],
+                values["T_mae"],
+                values["T_rmse"],
+                values["T_corr"],
             )
         )
         if args.write_bvh is not None:
@@ -280,6 +320,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     payload = {"checkpoint": str(args.ckpt), "modal": str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1)),
                "contact_method": contact_method,
                "split": args.split, "sample_steps": sample_steps, "metrics": all_values}
+    if "V2M" in all_values:
+        payload["v2t"] = {name: all_values["V2M"][name] for name in ("T_mae", "T_rmse", "T_corr")}
     metrics_out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print("wrote %s" % metrics_out)
     return 0

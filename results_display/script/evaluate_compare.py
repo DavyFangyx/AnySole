@@ -147,25 +147,27 @@ def find_prediction(root: Path, session_id: str, pattern: str | None = None) -> 
     return matches[0] if matches else None
 
 
-def expand_requested_models(results_root: Path, modals: list[str], config_ids: list[str]) -> list[dict[str, str]]:
-    """Expand AnySole modal/config combinations and retain baseline models."""
+def expand_requested_models(results_root: Path, modals: list[str], config_ids: list[str], contact_methods: list[str]) -> list[dict[str, str]]:
+    """Expand AnySole modal/contact-method/config combinations and retain baseline models."""
     models: list[dict[str, str]] = []
-    requested = set(modals)
     anysole_root = results_root / "AnySole"
     for modal in modals:
-        root = anysole_root / modal
-        if not root.is_dir():
-            continue
-        for config_id in config_ids:
-            models.append({
-                "name": f"AnySole/{modal}/{config_id}",
-                "variant": config_id,
-                "prediction_root": str(root / "predictions" / "eval_bvh"),
-                "pattern": f"{{session_id}}_{config_id}.bvh",
-                "checkpoint": str(root / "checkpoints" / "ckpt_last.pt"),
-                "modal": modal,
-                "config_id": config_id,
-            })
+        for contact_method in contact_methods:
+            model_dir = cli_common.anysole_model_dir(modal, contact_method)
+            root = anysole_root / model_dir
+            if not root.is_dir():
+                continue
+            for config_id in config_ids:
+                models.append({
+                    "name": f"AnySole/{model_dir}/{config_id}",
+                    "variant": config_id,
+                    "prediction_root": str(root / "predictions" / "eval_bvh"),
+                    "pattern": f"{{session_id}}_{config_id}.bvh",
+                    "checkpoint": str(root / "checkpoints" / "ckpt_last.pt"),
+                    "modal": modal,
+                    "contact_method": contact_method,
+                    "config_id": config_id,
+                })
     # Baselines are independent models and remain in the comparison alongside AnySole.
     for model in discover_models(results_root):
         if model["name"].startswith("AnySole/"):
@@ -345,16 +347,18 @@ def main() -> int:
     ap.add_argument("--out-dir", type=Path, default=cli_common.DISPLAY_ROOT / "Test2_comparison")
     ap.add_argument("--fps", type=float, default=40.0)
     ap.add_argument("--modal", default="anysolev1,anysolev1_insole_drift", help="AnySole modal(s), comma-separated")
+    ap.add_argument("--contact-method", default="tactile_abs", help="Contact-label scheme(s), comma-separated; model dir is <modal>_<contact-method>")
     ap.add_argument("--config-id", default="VT2M,V2M,T2M", help="AnySole generation configuration(s), comma-separated")
     args = ap.parse_args()
     modals = cli_common.split_csv_arg(args.modal)
+    contact_methods = cli_common.split_csv_arg(args.contact_method)
     config_ids = cli_common.split_csv_arg(args.config_id)
     allowed_configs = {"VT2M", "V2M", "T2M"}
     invalid = set(config_ids) - allowed_configs
     if invalid:
         raise SystemExit(f"Unsupported --config-id: {sorted(invalid)}; choices={sorted(allowed_configs)}")
     if args.auto_scan or args.models_config is None:
-        configs = {"models": expand_requested_models(args.results_root, modals, config_ids)}
+        configs = {"models": expand_requested_models(args.results_root, modals, contact_methods, config_ids)}
     else:
         try:
             import yaml
@@ -388,7 +392,7 @@ def main() -> int:
             w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows({k: r.get(k, "") for k in fields} for r in rows)
     (args.out_dir / "evaluation.log").write_text(
         f"split={args.split}\nsessions={len(manifest)}\nmodels={len(configs.get('models', configs))}\n"
-        f"modal={','.join(modals)}\nconfig_id={','.join(config_ids)}\n"
+        f"modal={','.join(modals)}\ncontact_method={','.join(contact_methods)}\nconfig_id={','.join(config_ids)}\n"
         + "".join(f"checkpoint[{row['model']}]={row['checkpoint']}\n" for row in summaries),
         encoding="utf-8",
     )

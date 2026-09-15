@@ -88,6 +88,11 @@ def split_csv_arg(value) -> list:
     return out
 
 
+def anysole_model_dir(modal: str, contact_method: str) -> str:
+    """Results dir name: anysole_{version/ablation}_{contact_method}."""
+    return f"{modal}_{contact_method}"
+
+
 def load_test_sessions(session_arg, split_csv, split="test") -> list:
     """Return session ids: explicit list when given, else the split column.
 
@@ -120,6 +125,8 @@ def add_common_args(
     seq_root: bool = False,
     modal: bool = False,
     modal_default: str = "anysolev1,anysolev1_insole_drift",
+    contact_method: bool = False,
+    contact_method_default: str = "tactile_abs",
     config_id: bool = False,
     config_default: str = "VT2M,V2M,T2M",
     gen: bool = True,
@@ -143,6 +150,8 @@ def add_common_args(
         parser.add_argument("--seq-root", type=str, default=str(DEFAULT_SEQ_ROOT), help="Centralized sequence root.")
     if modal:
         parser.add_argument("--modal", type=str, default=modal_default, help="Modal(s), comma-separated.")
+    if contact_method:
+        parser.add_argument("--contact-method", type=str, default=contact_method_default, help="Contact-label scheme(s), comma-separated; model dir is <modal>_<contact-method>.")
     if config_id:
         parser.add_argument("--config-id", type=str, default=config_default, help="Generation configuration(s), comma-separated.")
     if gen:

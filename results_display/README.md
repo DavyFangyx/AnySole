@@ -18,6 +18,11 @@ results_display/
 │   ├── test4_insole_drift.py    # Test4：鞋垫漂移补偿器测试
 │   ├── test5_contact.py         # Test5：接触标签动画 + 阈值分析（按方案分目录）
 │   ├── contact_methods.py       # Test5：多方案接触标签生成 + 对比报告
+│   ├── test6_dataset_check.py   # Test6：数据集自检（GT FK 自洽 + 均值姿态基线）
+│   ├── test7_mean_pose_infer.py # Test7：均值/GT 姿态进入模型的推理 + BVH 导出
+│   ├── test8_input_ablation.py  # Test8：输入-输出相关性消融（条件置换 + 梯度检查）
+│   ├── test9_overfit.py         # Test9：单 batch 过拟合（关 dropout、VT-only）
+│   ├── test10_tgen.py           # Test10：V2T 触觉生成（GT/生成热力图 + 误差分析）
 │   └── evaluate_compare.py      # Test2：跨模型/参数对照评估
 ├── Test1_visualization/         # 实验①输出
 │   ├── MotionPRO/<task>/<loss>/<lr>/<ckpt_stem>/{gif,mp4}/
@@ -43,6 +48,27 @@ results_display/
     ├── threshold_analysis.csv       # 逐帧左右脚 48 格压力和（直方图原始数据，t=frame/40）
     ├── threshold_analysis_hist.csv  # 与直方图一致的 64 分箱分布（side/bin_start/bin_end/count）
     └── comparison.{csv,png}         # 各方案 vs bvh_h 参考的一致率/假接触率/假离地率
+├── Test6_dataset_check/         # 实验⑥输出（数据集自检，不加载模型）
+│   ├── fk_selfcheck.json        # A1-A5 FK/单位/回环检查逐项最大误差
+│   ├── mean_baseline.json       # B1/B2 均值姿态基线 MPJPE + 逐关节明细
+│   ├── mean_pose.npz            # 训练集均值姿态（有效 6D + 相对 Hips kp），Test7 复用
+│   └── input_means.npz          # 训练集 V/T 逐帧均值，Test8 复用
+├── Test7_mean_pose/             # 实验⑦输出（均值姿态推理）
+│   ├── <session>/<session>_<arm>.bvh   # tau0_mean/tau0_gt/ddim_noise/ddim_mean500/ddim_gt500
+│   └── test7_report.json        # 各 arm MPJPE + 输出两两距离
+├── Test8_input_ablation/        # 实验⑧输出（输入-输出相关性）
+│   ├── <session>/<session>_<variant>_<arm>.bvh  # real/zero/mean/shuffle × ddim/tau0_gt
+│   └── test8_report.json        # 各条件 MPJPE + 输出两两距离 + 梯度范数比
+└── Test9_overfit/               # 实验⑨输出（单 batch 过拟合）
+    ├── overfit_log.csv          # 逐步 loss / tau0 MPJPE / DDIM MPJPE
+    ├── overfit_curves.png       # 曲线图
+    ├── overfit_report.json      # 最终数值 + PASS/FAIL 判定
+    └── overfit_ckpt.pt          # 仅 --save-ckpt 时输出
+└── Test10_tgen/                 # 实验⑩输出（V2T 触觉生成）
+    ├── gif|mp4/<session>_<mode>_tgen.{gif,mp4}  # GT | 生成 | |GT-Gen| 三栏动画
+    ├── cells/<session>_<mode>_cells.{npz,png}   # 96 格逐格 MAE + 静态误差图
+    ├── tgen_summary.csv         # 逐会话 × 条件 MAE/RMSE/相关系数
+    └── tgen_report.json         # 跨会话聚合 + v2t（V2M 行）汇总
 ```
 
 ## 时间对齐约定（动捕 ↔ 触觉/视频）
@@ -64,11 +90,12 @@ results_display/
 
 ```bash
 conda activate touch_gait
-
+# motionpro 可视化
 python results_display/script/visualize_motionpro.py
 --session S14103 
 --checkpoint results://MotionPRO/checkpoints/imagepressure2smpl/init/5e-05/imagepressure2smpl_best.pth
 
+# step2motion 可视化
 python results_display/script/visualize_step2motion.py
 --self-test
 
@@ -109,8 +136,7 @@ python results_display/script/evaluate_compare.py --auto-scan
 
 `visualize_anysole_traj.py` 可视化 AnySole 生成的根轨迹（真实轨迹 vs 预测轨迹）：
 单面板 3D 空间动画（gif/mp4）+ 每 session 一张静态图（png，3D 斜视图 / 俯视 / 高度曲线）。
-动画中 GT 整段显示（橙）、预测轨迹随帧生长（蓝），窗口边界用小点标记（每窗口在 GT 锚点处重新锚定），
-footer 实时显示当前帧 ATE 与整段 ATE。
+动画中 GT 整段显示（橙）、预测轨迹随帧生长（蓝），窗口边界用小点标记（每窗口在 GT 锚点处重新锚定），footer 实时显示当前帧 ATE 与整段 ATE。
 
 **数据来源**：`anysole.eval --write-bvh` 现在会在 BVH 旁同时写出
 `<session>_<config>_traj.npz`（`pred_trans_world` / `gt_trans_world`，与 `traj_ATE` 指标严格同源）。
@@ -119,15 +145,10 @@ Test3 只读这些 npz，不重新推理；请先重跑 eval 刷新产物：
 ```bash
 conda activate touch_gait
 
-# 重新 eval（同时刷新 BVH 与 traj npz，两者与 metrics 保持一致）
-python -m anysole.eval --ckpt results/AnySole/anysolev1/checkpoints/ckpt_last.pt \
-  --modal anysolev1 --config-id VT2M,V2M,T2M --split test \
-  --write-bvh results/AnySole/anysolev1/predictions/eval_bvh \
-  --metrics-out results/AnySole/anysolev1/metrics/test.json
-python -m anysole.eval --ckpt results/AnySole/anysolev1_insole_drift/checkpoints/ckpt_last.pt \
-  --modal anysolev1_insole_drift --config-id VT2M,V2M,T2M --split test \
-  --write-bvh results/AnySole/anysolev1_insole_drift/predictions/eval_bvh \
-  --metrics-out results/AnySole/anysolev1_insole_drift/metrics/test.json
+# 重新 eval（同时刷新 BVH 与 traj npz，两者与 metrics 保持一致；其余参数均有默认值）
+python -m anysole.eval \
+  --ckpt results/AnySole/anysolev1_tactile_abs/checkpoints/ckpt_last.pt \
+  --write-bvh results/AnySole/anysolev1_tactile_abs/predictions/eval_bvh
 
 # Test3 渲染（默认 主模型 + 消融 × 全部 config × test split）
 python results_display/script/visualize_anysole_traj.py
@@ -182,6 +203,142 @@ python results_display/script/test5_contact.py --methods bvh_soft --gen mp4 --se
 # 单方案 / 单 session 冒烟
 python results_display/script/test5_contact.py --methods bvh_h --session S11023
 ```
+
+## Test6 数据集自检（GT 自洽 + 均值姿态基线）
+
+`test6_dataset_check.py` 只读数据集、不加载任何模型，回答两个问题：
+
+- **A. GT 自洽**：FK(GT 6D, GT offsets) 必须能逐关节还原数据集内的 `kp_gt`。
+  A1 numpy FK（数据集构建路径）/ A2 torch FK（train/eval 路径）交叉验证、A3 单位与几何量程、A4 pose↔BVH 回环（cm↔m 换算）、
+  A5 骨骼模板一致性（按受试者分组：同人跨动作/采样必须一致；跨人差异属身体尺寸，只报告不判错——
+  会话 ID 为 `S<人><动作><采样>`，勿混人比较）。
+  本管线没有 SMPL betas——"GT betas" 的对应物是每个 BVH 自带的 OFFSET 模（`offsets_m`，cm→m）， A3/A5 即其单位与一致性检查。任何系统性偏移（m/mm 混用、层级错误）都会把 MPJPE 顶到一两百且训不下来。
+- **B. 均值姿态基线**：拿训练集均值姿态当预测算 MPJPE。B1 = 均值姿态 + GT 根轨迹（只差姿态）；
+  B2 = 完全静态均值姿态。若模型 MPJPE ≈ B1 → 条件被无视；若 B1 明显低于模型 MPJPE →
+  模型比"啥也不干"还差，更像 bug（脚本会自动与 `anysolev1_joint_and/metrics/test.json` 对比）。
+
+产出：`fk_selfcheck.json`、`mean_baseline.json`、`mean_pose.npz`、`input_means.npz`（后两者被 Test7/Test8 复用为"均值输入"）。
+
+```bash
+conda activate touch_gait
+python results_display/script/test6_dataset_check.py
+# 单 session 冒烟
+python results_display/script/test6_dataset_check.py --session S10103 --limit-sessions 1 --max-windows 16
+```
+
+## Test7 均值姿态推理（模型输出 vs 输入姿态）
+
+`test7_mean_pose_infer.py` 用 `results/AnySole/anysolev1_joint_and/checkpoints/ckpt_last.pt`（`--ckpt` 可换）
+把不同输入姿态送进模型（条件固定为真实 VT），导出 BVH：
+
+| arm | 输入 | 说明 |
+| --- | --- | --- |
+| `tau0_mean` | 均值姿态，tau=0 | 干净输入直通重建 |
+| `tau0_gt` | GT 姿态，tau=0 | 干净 GT 重建（应→0，否则欠训/条件弱） |
+| `ddim_noise` | 纯噪声 | 标准 DDIM（与 eval VT2M 同路径，复现性检查） |
+| `ddim_mean500` | 均值姿态加噪到 tau=500 再 DDIM | 均值姿态"真正进入"模型做完整推理 |
+| `ddim_gt500` | GT 姿态加噪到 tau=500 再 DDIM | 推理初值上界 |
+
+看两件事：`tau0_mean` vs `tau0_gt` 输出距离（输出对输入姿态的敏感度）；`ddim_mean500` vs `ddim_gt500` 的
+MPJPE 差（初值对最终输出的影响）。BVH 写进 `Test7_mean_pose/<session>/`，可用
+`visualize_gt_bvh.py --bvh <路径>` 快速查看骨架动画。
+
+```bash
+conda activate touch_gait
+# 全部 test，前 4 个 session 出 BVH
+python results_display/script/test7_mean_pose_infer.py                  
+python results_display/script/test7_mean_pose_infer.py --session S10103 --export-sessions 1
+```
+
+## Test8 输入-输出相关性消融（输出是否与输入无关）
+
+`test8_input_ablation.py` 固定模型与初始噪声，置换条件输入（`real` / `zero` / `mean` / `shuffle`，
+shuffle = batch 内错位配对，真实输入、错误窗口），各跑一遍 DDIM 与 tau=0 GT 重建，
+并对第一个 batch 做梯度检查（∂L/∂V、∂L/∂T vs ∂L/∂x）：
+
+- shuffle MPJPE ≈ real MPJPE → 输入被无视；
+- 四种条件输出两两距离 ≈ 0 → 输出与输入无关；
+- 输入梯度范数比 ≈ 0 → 条件路径梯度死区。
+
+```bash
+conda activate touch_gait
+python results_display/script/test8_input_ablation.py
+python results_display/script/test8_input_ablation.py --session S10103 --export-sessions 1
+```
+
+## Test9 单 batch 过拟合（目标/管线可用性）
+
+`test9_overfit.py` 取训练集固定一个 batch（默认 256 窗），关闭模态 dropout（固定 VT 配置，等价训练侧 `--dropoutVT 0,0`）与模型内部 dropout（`--dropout 0.0`），单 batch 反复训练。
+训到 loss≈0 → 目标/管线正常，泛化差是欠训/条件弱；
+训不下去 → 目标/管线有问题。
+
+产出：`overfit_log.csv`、`overfit_curves.png`（loss 与 MPJPE 曲线）、`overfit_report.json`（PASS/FAIL 判定），
+`--save-ckpt` 时额外存 `overfit_ckpt.pt`。
+
+```bash
+conda activate touch_gait
+python results_display/script/test9_overfit.py
+python results_display/script/test9_overfit.py --steps 300 --log-every 25 --sample-every 150   # 快速冒烟
+```
+
+Test9 只留 L_pose，λ_con = λ_kp = λ_traj = λ_T = λ_V = 0，batch 降到 4–8 个窗口，lr 扫 {1e-3, 3e-4, 1e-4, 3e-5}，3000 步。CLI指令：
+```bash
+
+
+```
+
+## Test10 触觉生成（V2T）
+
+`test10_tgen.py` 用 V-only 条件（触觉输入置零）跑模型，让辅助头 `pressure_hat` 变成
+**视觉→触觉（V2T）生成器**：模型仅凭 HRNet 视觉特征输出 96 格足底压力。触觉头不经过
+扩散采样，每个窗口一次 tau=0 前向即可得到确定性的生成触觉，无需 DDIM。
+
+三种条件（与 eval.py 的 `--config-id` 同名）：
+
+| 条件 | 输入 | 意义 |
+| --- | --- | --- |
+| `VT2M` | 真 V + 真 T | 重建 sanity（上界参考） |
+| `V2M` | 真 V + 零 T | **V2T 生成本身（主指标）** |
+| `T2M` | 零 V + 真 T | 触觉自重建（输入端 sanity） |
+
+产出：`tgen_summary.csv`（逐会话 × 条件 MAE/RMSE/相关系数）、`tgen_report.json`
+（跨会话聚合，`v2t` 字段 = V2M 行汇总）、每个 session 的 96 格逐格 MAE
+（`cells/*.npz` + 静态误差图 `*.png`），以及前 `--export-sessions`（默认 4）个
+session 的 GT | 生成 | |GT-Gen| 三栏热力图动画。
+
+与 `anysole.eval` 的关系：eval 在 `metrics/test.json` 每个模式行输出 `T_mae/T_rmse/T_corr`
+（V2M 行即 V2T，JSON 顶层 `v2t` 字段），Test10 是该指标的逐格/逐帧可视化解剖。
+
+```bash
+conda activate touch_gait
+python results_display/script/test10_tgen.py                     # 全部 test split
+python results_display/script/test10_tgen.py --session S10103    # 单 session 冒烟
+python results_display/script/test10_tgen.py --config-id VT2M,V2M --export-sessions 2
+```
+
+> 注意：首版仅支持主模型 `anysolev1`；`anysolev1_insole_drift` 对零触觉输入先过漂移补偿器，
+> 生成口径不同，暂不支持。
+
+## 训练侧 dropout 开关（两个独立旋钮）
+
+`python -m anysole.train` 现在有两个独立 dropout 参数，都会写入 checkpoint 配置（eval/infer 自动读取）：
+
+- `--dropout 0.1`：模型内部 nn.Dropout（fusion/pose/traj transformer）。`0.0` 关闭。
+- `--dropoutVT DROP_V_PCT DROP_T_PCT`（或逗号写法 `--dropoutVT 20,30`）：**模态 dropout**，
+  V 丢弃 DROP_V_PCT%、T 丢弃 DROP_T_PCT%（映射为 config_probs `[1-v-t, t, v]`，即 VT/V-only/T-only）。
+  `--dropoutVT 0,0` 关闭模态 dropout。
+
+重训实验示例（关全部 dropout + 更多轮次）：
+
+```bash
+conda activate touch_gait
+python -m anysole.train --modal anysolev1 --contact-method joint_and \
+  --dropoutVT 0,0 --epochs 400 \
+  --out-dir results/AnySole/anysolev1_joint_and/checkpoints
+```
+
+> 注意：重训后必须重跑 `python -m anysole.eval ... --write-bvh ...` 刷新 BVH/npz/metrics（见 Test3 说明），
+> 再重跑 Test7/Test8 才有意义（Test6 与模型无关，只需跑一次）。
 
 ## 历史迁移说明
 

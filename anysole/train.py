@@ -28,6 +28,7 @@ from anysole.types import CONFIG_NAMES
 
 DEFAULT_CONFIG = {
     "d_model": 256,
+    "dropout": 0.1,
     "tw": 20,
     "batch_size": 256,
     "lr": 1.0e-3,
@@ -108,12 +109,29 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument(
+        "--dropout",
+        type=float,
+        default=None,
+        help="Model dropout rate (0 disables dropout; used by Test9 overfitting and retrain experiments). Saved into the checkpoint config.",
+    )
+    parser.add_argument(
         "--config-probs",
         type=float,
         nargs=3,
         metavar=("VT", "V", "T"),
         default=None,
         help="Sampling probabilities for VT, V-only, and T-only configs.",
+    )
+    parser.add_argument(
+        "--dropoutVT",
+        dest="dropout_vt",
+        type=str,
+        nargs="+",
+        metavar=("DROP_V_PCT", "DROP_T_PCT"),
+        default=None,
+        help="Modality dropout as percentages: V is dropped DROP_V_PCT%% of steps, T is dropped "
+        "DROP_T_PCT%% (config_probs becomes [1-v-t, t, v] in VT/V/T order; overrides --config-probs). "
+        "Accepts '--dropoutVT 20 30' or '--dropoutVT 20,30'; '0,0' disables modality dropout.",
     )
     parser.add_argument("--limit-sessions", type=int, default=None)
     parser.add_argument("--device", default="auto", help="Device such as cuda, cuda:0, or cpu.")
@@ -206,8 +224,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["epochs"] = args.epochs
     if args.batch_size is not None:
         config["batch_size"] = args.batch_size
+    if args.dropout is not None:
+        config["dropout"] = float(args.dropout)
     if args.config_probs is not None:
         config["config_probs"] = args.config_probs
+    if args.dropout_vt is not None:
+        tokens = [item for item in " ".join(args.dropout_vt).replace(",", " ").split() if item]
+        if len(tokens) != 2:
+            raise ValueError("--dropoutVT needs two percentages (e.g. '--dropoutVT 20 30' or '--dropoutVT 20,30')")
+        drop_v, drop_t = float(tokens[0]) / 100.0, float(tokens[1]) / 100.0
+        if drop_v < 0.0 or drop_t < 0.0 or drop_v + drop_t > 1.0:
+            raise ValueError("--dropoutVT percentages must be non-negative and sum to at most 100")
+        config["config_probs"] = [1.0 - drop_v - drop_t, drop_t, drop_v]
+        config["dropout_vt"] = [drop_v * 100.0, drop_t * 100.0]
     if args.modal is not None:
         config["modal"] = args.modal
     if args.contact_method is not None:
@@ -297,15 +326,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     # explicit --out-dir remains authoritative for custom experiments.
     if args.out_dir is None:
         results_root = Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results")))
-        # Non-default contact-label schemes get their own model dir so sweeps
-        # never clobber each other's checkpoints/metrics.
+        # Model dir naming: anysole_{version/ablation}_{contact_method}. Every
+        # contact-label scheme gets its own dir so sweeps never clobber each
+        # other's checkpoints/metrics.
         contact_method = str(config.get("contact_method", "tactile_abs"))
-        model_dir = modal if contact_method == "tactile_abs" else "%s_%s" % (modal, contact_method)
+        model_dir = "%s_%s" % (modal, contact_method)
         config["out_dir"] = str(results_root / "AnySole" / model_dir / "checkpoints")
     if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):
         templates, subject_map = load_template_bank(config["template_path"])
         model_kw.update(templates=templates, subject_to_index=subject_map)
-    model = AnySoleModel(d=int(config["d_model"]), tw=int(config["tw"]), modal=modal, use_insole_drift=bool(config.get("use_insole_drift", False)), **model_kw).to(device)
+    model = AnySoleModel(
+        d=int(config["d_model"]),
+        tw=int(config["tw"]),
+        dropout=float(config.get("dropout", 0.1)),
+        modal=modal,
+        use_insole_drift=bool(config.get("use_insole_drift", False)),
+        **model_kw,
+    ).to(device)
     diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))
     out_dir = Path(config["out_dir"])

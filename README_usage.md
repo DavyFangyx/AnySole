@@ -102,7 +102,7 @@ python -m lib.util.gen_kps --cam-id 3 --skip-existing
 cd /data/fangyuxuan/projects/gait
 conda activate touch_gait
 CUDA_VISIBLE_DEVICES=N python AnysoleWorkspace/script/generate_hrnet_cache.py \
-  --cam-id 3 --device cuda --batch-size 32 --skip-existing
+  --cam-id 3 --batch-size 32 --skip-existing
 ```
 
 主要输出：
@@ -152,7 +152,6 @@ cd /data/fangyuxuan/projects/gait
 conda activate depthpro
 #  pressure toolkit 生成深度图
 CUDA_VISIBLE_DEVICES=7 python Baselines/pressure_tookit/data_prep/rgb2depth.py \
-  --device cuda \
   --skip-existing
 ```
 
@@ -171,9 +170,11 @@ Python 解释器和依赖环境；它不会自动设置仓库的模块搜索路�
 运行 `python -m anysole.train` 时，当前目录已经在 Python 的搜索路径中，因此
 从仓库根目录执行时不需要额外设置 `PYTHONPATH`。
 
-`--device cuda` 会启用 GPU。要选择具体的物理 GPU，使用 `CUDA_VISIBLE_DEVICES`；
-例如前文的 `$ANYSOLE_GPU=4` 表示物理 GPU 4。设置后，程序内部的 `cuda` 会指向这张可见卡（即`cuda:0`）。如果前面第 2 节已经执行了 `export CUDA_VISIBLE_DEVICES=...`，这里
-可以省略命令前的重复设置。
+`--device` 默认 `auto`：有 CUDA 时自动使用 GPU，无需显式传入。要选择具体的物理
+GPU，使用 `CUDA_VISIBLE_DEVICES`；例如前文的 `$ANYSOLE_GPU=4` 表示物理 GPU 4。
+设置后，程序内部的 `cuda` 会指向这张可见卡（即`cuda:0`）。如果前面第 2 节已经执行了
+`export CUDA_VISIBLE_DEVICES=...`，这里可以省略命令前的重复设置。需要覆盖自动选择时，
+可显式传 `--device cuda`、`--device cuda:N` 或 `--device cpu`。
 
 漂移补偿消融模型还需要按 subject 构建鞋垫模板库。首次训练该模型前执行：
 
@@ -193,25 +194,18 @@ conda activate touch_gait
 
 # 主模型
 CUDA_VISIBLE_DEVICES=7 python -m anysole.train \
-  --config configs/v1.yaml \
   --modal anysolev1 \
-  --contact-method joint_and \
-  --device cuda
-
-  --contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
+  --contact-method joint_and
 
 # 漂移补偿消融模型
 CUDA_VISIBLE_DEVICES=6 python -m anysole.train \
-  --config configs/v1.yaml \
-  --modal anysolev1_insole_drift \
-  --device cuda
+  --modal anysolev1_insole_drift
 
 # 启用 W&B 在线监控（默认 wandb_mode=disabled，不影响普通训练）
-CUDA_VISIBLE_DEVICES=6 python -m anysole.train \
-  --config configs/v1.yaml \
+CUDA_VISIBLE_DEVICES=7 python -m anysole.train \
   --modal anysolev1 \
-  --device cuda \
   --wandb_mode online \
+  --contact-method pat_offset \
   --wandb_project Anysole
 ```
 
@@ -266,31 +260,29 @@ cd /data/fangyuxuan/projects/gait
 conda activate touch_gait
 
 python -m anysole.eval \
-  --config configs/v1.yaml \
-  --modal anysolev1 \
-  --split test \
-  --ckpt results/AnySole/anysolev1/checkpoints/ckpt_last.pt \
-  --device cuda \
-  --config-id VT2M,V2M,T2M \
-  --write-bvh results/AnySole/anysolev1/predictions/eval_bvh \
-  --contact-method bvh_h
-
-  --modal anysolev1_insole_drift \
+  --ckpt results/AnySole/anysolev1_tactile_abs/checkpoints/ckpt_last.pt \
+  --write-bvh results/AnySole/anysolev1_tactile_abs/predictions/eval_bvh
 ```
 
-评估指标会自动写入同一模型的 `metrics/test.json`（含 `contact_method` 字段记录标签口径）。漂移消融只需将 checkpoint
-路径替换为 `results/AnySole/anysolev1_insole_drift/checkpoints/ckpt_last.pt`，并使用
-对应的 `predictions/eval_bvh` 目录。
+只有 `--ckpt` 是必需参数；其余均有默认值：`--config` 默认 `configs/v1.yaml`、
+`--device` 默认 `auto`（有 CUDA 自动用 GPU）、`--split` 默认 `test`、
+`--config-id` 默认 `VT2M,V2M,T2M`、`--modal` 默认读取 checkpoint 内保存值、
+`--contact-method` 默认沿用 checkpoint 训练时保存的接触方案。
 
-`--contact-method` 可省略：省略时自动沿用 checkpoint 训练时保存的接触方案。
+评估指标会自动写入同一模型的 `metrics/test.json`（含 `contact_method` 字段记录标签口径）。
+每个模式行除 MPJPE/PA-MPJPE/MPJRE/traj_ATE/contact_acc 外，还输出触觉重建指标
+`T_mae`/`T_rmse`/`T_corr`（96 格归一化压力）；其中 **V2M 行即 V2T（仅视觉生成触觉）
+质量**，JSON 顶层 `v2t` 字段为该行摘要。可视化与逐格误差分析见
+`results_display/README.md` 的「## Test10 触觉生成（V2T）」。
+
+漂移消融只需将 checkpoint路径替换为`results/AnySole/anysolev1_insole_drift_tactile_abs/checkpoints/ckpt_last.pt`，并使用对应的 `predictions/eval_bvh` 目录。
 
 单 session 推理：
 
 ```bash
 python -m anysole.infer \
-  --ckpt results/AnySole/anysolev1/checkpoints/ckpt_last.pt \
-  --session S12021 \
-  --config configs/v1.yaml --config-id VT2M --device cuda
+  --ckpt results/AnySole/anysolev1_tactile_abs/checkpoints/ckpt_last.pt \
+  --session S12021 --config-id VT2M
 ```
 
 漂移补偿消融使用 `--modal anysolev1_insole_drift`，并将 `--ckpt` 替换为对应模型目录。
