@@ -219,6 +219,10 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
     pose_layers = int(saved_config.get("pose_layers", 6))
     model = AnySoleModel(d=d_model, tw=tw, modal=modal, use_insole_drift=use_drift, dropout=dropout, pose_layers=pose_layers, **model_kw).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
+    # E4: sampling init scale must match the checkpoint's training noise scale
+    # (train.py saves noise_scaled=True when it scales q_sample noise by
+    # pose_std; older checkpoints lack the flag and sample unscaled).
+    model.noise_scaled = bool(saved_config.get("noise_scaled", False))
     model.eval()
     return model
 
@@ -407,6 +411,31 @@ def _evaluate_one(
                 pose = np.concatenate([item[1] for item in windows], axis=0)
                 trans = np.concatenate([item[2] for item in windows], axis=0)
                 gt_trans = np.concatenate([item[3] for item in windows], axis=0)
+                # E4: windows are non-overlapping (stride = window_length), so
+                # the seam between consecutive windows is a hard cut between
+                # two independent predictions (measured 213mm jump vs 8.8mm
+                # GT frame-to-frame).  Crossfade F frames on both sides of
+                # every seam; 6D poses are re-orthonormalized after blending.
+                FADE = 4
+                n_windows = len(windows)
+                if n_windows > 1:
+                    for w in range(1, n_windows):
+                        seam = w * int(config["tw"])
+                        if seam + FADE > pose.shape[0]:
+                            break
+                        for j in range(FADE):
+                            alpha = (j + 1) / (FADE + 1)
+                            a, b = seam - FADE + j, seam + j
+                            old_a, old_b = pose[a].copy(), pose[b].copy()
+                            pose[a] = (1 - alpha) * old_a + alpha * old_b
+                            pose[b] = (1 - alpha) * old_b + alpha * old_a
+                            old_ta, old_tb = trans[a].copy(), trans[b].copy()
+                            trans[a] = (1 - alpha) * old_ta + alpha * old_tb
+                            trans[b] = (1 - alpha) * old_tb + alpha * old_ta
+                # re-orthonormalize the blended 6D vectors
+                # (Gram-Schmidt via rot6d_to_rotmat, first two matrix columns)
+                R = rot6d_to_rotmat(torch.from_numpy(pose.reshape(-1, N_JOINTS, 6)).float())
+                pose = R[..., :, :2].reshape(-1, POSE_DIM).numpy()
                 output_path = bvh_out / ("%s_%s.bvh" % (session_id, CONFIG_MODE_NAMES[config_value]))
                 write_bvh(output_path, windows[0][4], pose_trans_to_motion(pose, trans), 1.0 / FPS)
                 print("wrote %s" % output_path)

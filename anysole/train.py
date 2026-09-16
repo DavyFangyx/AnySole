@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -185,8 +186,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--wandb_mode", choices=("disabled", "offline", "online"), default=None)
     parser.add_argument("--wandb_project", default=None)
     parser.add_argument("--wandb_entity", default=None)
-    parser.add_argument("--wandb_eval_interval", type=int, default=None)
+    parser.add_argument("--wandb_eval_interval", type=int, default=None,
+                        help="Epochs between validation evals (3 condition configs x full val set, "
+                             "DDIM sampling). One eval costs ~16 normal epochs of wall-clock, so this "
+                             "knob dominates total time: 10 -> 57s stall every 10 epochs (~64%% overhead), "
+                             "50 -> ~26%% overhead. Runs regardless of wandb mode.")
     parser.add_argument("--wandb_experiment_tag", default=None, help="Batch tag used by Wandb_Analyzer to group runs.")
+    parser.add_argument("--loss-cap", type=float, default=None,
+                        help="If set, clip the logged train loss metrics (loss_total, loss_pose, loss_traj, "
+                             "loss_con, loss_kp, loss_Trec_Tmissing, loss_Vrec_Vmissing, grad_norm) at this "
+                             "value, keeping their original names (no *_cap duplicates). Raw charts get "
+                             "y-squashed by the first epochs' spike (loss_total 30 -> 0.1, loss_pose 1.5 -> "
+                             "0.01), hiding convergence; e.g. --loss-cap 1.0 pins the y-axis to 0-1.")
     return parser.parse_args(argv)
 
 
@@ -303,6 +314,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not 0 <= args.tau_fixed < int(config["diffusion_train_steps"]):
             raise ValueError("--tau-fixed must be in [0, diffusion_train_steps)")
         config["tau_fixed"] = int(args.tau_fixed)
+    if args.loss_cap is not None:
+        if not args.loss_cap > 0.0:
+            raise ValueError("--loss-cap must be positive")
+        config["loss_cap"] = float(args.loss_cap)
 
     try:
         dataset = AnySoleDataset(
@@ -392,6 +407,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ).to(device)
     # Frozen pose-normalization stats (recorded so eval/infer rebuild the same depth).
     config["pose_layers"] = int(config.get("pose_layers", 6))
+    # E4: training noise is scaled by pose_std (see q_sample below).  The flag
+    # is saved in every checkpoint so eval/infer can match the sampling init
+    # scale; checkpoints trained without it (E3 and earlier) sample unscaled.
+    config["noise_scaled"] = True
+    model.noise_scaled = True
     pose_mean, pose_std = fit_pose_stats(loader, device)
     model.pose_head.set_stats(pose_mean, pose_std)
     print("pose stats: mean %.4f +/- %.4f, std %.4f +/- %.4f (dims floored at 1e-2: %d/%d)"
@@ -405,6 +425,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     global_step = 0
     for epoch in range(int(config["epochs"])):
         model.train()
+        # E4: cosine LR decay over the whole run (was constant lr; E3 showed
+        # val metrics still improving at epoch 800 with lr pinned at 1e-3).
+        progress = epoch / float(config["epochs"])
+        cos_lr = float(config["lr"]) * 0.5 * (1.0 + math.cos(math.pi * progress))
+        for group in optimizer.param_groups:
+            group["lr"] = cos_lr
         epoch_start_step = global_step
         nonfinite_skips = 0
         epoch_sums = {"loss_total": 0.0, "loss_pose": 0.0, "loss_traj": 0.0, "loss_con": 0.0, "loss_kp": 0.0, "loss_Trec_Tmissing": 0.0, "loss_Vrec_Vmissing": 0.0, "grad_norm": 0.0, "n": 0, "n_tmissing": 0, "n_vmissing": 0}
@@ -434,7 +460,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     device=device,
                     dtype=torch.long,
                 )
-            x_tau = diffusion.q_sample(batch["pose_gt"], tau)
+            # E4: diffuse with per-dim noise scaled by the pose std (Step2Motion
+            # normalizes the data before diffusing; scaling the noise is the
+            # same thing here since the head normalizes its input internally).
+            # Without this, N(0,1) noise lands on a signal of std ~0.118 (8.5x
+            # SNR mismatch) and the DDIM chain injects per-frame jitter.
+            noise = torch.randn_like(batch["pose_gt"]) * model.pose_head.pose_std.view(1, 1, -1)
+            x_tau = diffusion.q_sample(batch["pose_gt"], tau, noise=noise)
             optimizer.zero_grad(set_to_none=True)
             out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id, batch.get("session_id"))
             losses = compute_losses(out, batch, config_id, config)
@@ -489,6 +521,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         torch.save(checkpoint, tmp_path)
         os.replace(tmp_path, ckpt_path)
         print("saved %s (epoch %d)" % (ckpt_path, epoch + 1))
+        # Val eval cadence is the wall-clock knob: one _evaluate pass (3
+        # condition configs x full val set, DDIM sampling) costs ~16 normal
+        # epochs of wall-clock.  Triggered by --wandb_eval_interval but runs
+        # regardless of wandb mode; results go to the console and, when a
+        # wandb run is active, to its log.
+        eval_results = None
+        eval_interval = max(int(config.get("wandb_eval_interval", 5)), 1)
+        if val_loader is not None and (epoch + 1) % eval_interval == 0:
+            model.eval()
+            eval_results = _evaluate(model, diffusion, val_loader, config, device)
+            print("epoch %d eval: %s" % (epoch + 1,
+                  "  ".join("%s=%.4f" % (key, value) for key, value in sorted(eval_results.items()))))
         if wandb_run is not None:
             denom = max(epoch_sums["n"], 1)
             log = {"epoch": epoch + 1}
@@ -503,8 +547,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if key == "loss_Vrec_Vmissing": metric_denom = max(epoch_sums["n_vmissing"], 1)
                 log[f"train/{key}"] = value / metric_denom
             log["train/lr"] = optimizer.param_groups[0]["lr"]
-            if val_loader is not None and (epoch + 1) % max(int(config.get("wandb_eval_interval", 5)), 1) == 0:
-                model.eval(); log.update(_evaluate(model, diffusion, val_loader, config, device))
+            # Optional capped logging (--loss-cap): the first epochs spike far
+            # above the converged range (loss_total 30 -> 0.1, loss_pose 1.5 ->
+            # 0.01), which stretches the raw charts' y-axis and hides
+            # convergence.  When set, clip the train losses in place under
+            # their original names so the wandb view stays within 0-cap and
+            # Wandb_Analyzer picks up the clipped series directly.
+            loss_cap = config.get("loss_cap")
+            if loss_cap is not None:
+                for key in ("loss_total", "loss_pose", "loss_traj", "loss_con", "loss_kp",
+                            "loss_Trec_Tmissing", "loss_Vrec_Vmissing", "grad_norm"):
+                    full_key = "train/%s" % key
+                    if full_key in log:
+                        log[full_key] = min(float(log[full_key]), float(loss_cap))
+            if eval_results is not None:
+                log.update(eval_results)
             wandb_run.log(log, step=epoch + 1)
     if wandb_run is not None:
         wandb_run.finish()

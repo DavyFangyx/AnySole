@@ -128,8 +128,11 @@ class PoseHead(nn.Module):
         x_tau = (x_tau - self.pose_mean) / self.pose_std
         h = self._embed(x_tau)
         # Prepended timestep token: every decoder layer's self-attention can see
-        # the noise level and gate x_tau accordingly.
-        t_tok = self.embeddings.timestep(tau).unsqueeze(1) + self.timestep_token
+        # the noise level and gate x_tau accordingly.  The timestep embedding is
+        # LayerNorm'd (embeddings.py) to sqrt(dim)=16; *0.05 keeps |t_tok| ~0.8,
+        # the same scale as the pose tokens, so the t-token neither dominates
+        # self-attention nor gets nulled out (tau-blind head, E1/E2 diagnosis).
+        t_tok = self.embeddings.timestep(tau).unsqueeze(1) * 0.05 + self.timestep_token
         h = torch.cat([t_tok, h], dim=1)
         h = self.decoder(h, F)
         h = h[:, 1:]  # drop the timestep token before unembedding

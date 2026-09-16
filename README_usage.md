@@ -196,14 +196,16 @@ conda activate touch_gait
 CUDA_VISIBLE_DEVICES=4 python -m anysole.train \
   --modal anysolev1 \
   --contact-method joint_and \
-  --epoch 2000 \
+  --tau-max 100 --epoch 500 \
   --wandb_mode online \
-  --wandb_project Anysole
+  --wandb_project Anysole --wandb_experiment_tag e1_taumax100 --wandb_eval_interval 100
 
 # 漂移补偿消融模型
   --modal anysolev1 \
 # 不同接触 npy
   --contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
+# 调整评估间隔，减少时间开销
+  --wandb_eval_interval 100
 ```
 
 ### 3.2 三个基线
@@ -266,12 +268,13 @@ python -m anysole.eval
 ```bash
 python -m anysole.eval \
   --modal anysolev1 \
-  --contact-method tactile_abs
+  --contact-method joint_and
 
 # 漂移补偿消融模型：只换 --modal
-python -m anysole.eval \
   --modal anysolev1_insole_drift \
-  --contact-method tactile_abs
+
+python -m anysole.eval \
+  --ckpt results/AnySole/E4_normdiff/checkpoints/ckpt_last.pt
 ```
 由于 results/AnySole 下的模型存储位置与命名具有明确规则：
 例如：anysolev1_{insole_drift}_{tactile_abs}

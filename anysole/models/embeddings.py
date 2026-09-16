@@ -26,7 +26,15 @@ def sinusoidal_pe(length, dim, device=None, dtype=None):
 
 
 class TimestepEmbedding(nn.Module):
-    """Sinusoidal encoding of scalar diffusion step tau in [0, 999], then MLP."""
+    """Sinusoidal encoding of scalar diffusion step tau in [0, 999], then MLP.
+
+    The trailing LayerNorm bounds the embedding magnitude: without it the MLP
+    output grew unboundedly during training (|emb| 0.11 at init -> ~37-40,
+    ~50x the pose-token scale), and the pose head learned to null the t-token
+    in attention, making the head tau-blind and killing the noise-level gating
+    (E1/E2 diagnosis 2026-09: see pose_head.forward for the matching 0.05
+    scale that keeps |t_tok| ~ |x_tokens|).
+    """
 
     def __init__(self, dim=D_MODEL, max_period=10000):
         super().__init__()
@@ -36,6 +44,7 @@ class TimestepEmbedding(nn.Module):
             nn.Linear(dim, dim * 4),
             nn.SiLU(),
             nn.Linear(dim * 4, dim),
+            nn.LayerNorm(dim),
         )
 
     def _sinusoidal(self, tau):

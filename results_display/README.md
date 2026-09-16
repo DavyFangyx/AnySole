@@ -119,6 +119,8 @@ CUDA_VISIBLE_DEVICES=4 python results_display/script/visualize_anysole.py --moda
 --contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
 --config-id VT2M
 
+--modal E3 --contact-method normdiff
+
 # BVH可视化测试脚本（纯BVH可视化）
 python results_display/script/visualize_gt_bvh.py       
 python results_display/script/visualize_gt_bvh.py 
@@ -296,7 +298,7 @@ python results_display/script/test9_overfit.py
 Test9 只留 L_pose，λ_con = λ_kp = λ_traj = λ_T = λ_V = 0，batch 降到 4–8 个窗口，lr 扫 {1e-3, 3e-4, 1e-4, 3e-5}，3000 步。CLI指令：
 ```bash
 # 默认：batch=8 窗 × lr{1e-3,3e-4,1e-4,3e-5} × 3000 步
-python results_display/script/test9_overfit.py
+CUDA_VISIBLE_DEVICES=4 python results_display/script/test9_overfit.py
 
 # 自定义扫描（batch 4 窗）
 python results_display/script/test9_overfit.py --batch-size 4 --lrs 1e-3,3e-4,1e-4,3e-5 --steps 3000
@@ -307,8 +309,7 @@ python results_display/script/test9_overfit.py --save-ckpt
 
 ## Test9.1 τ0 vs DDIM 差距定位（五项检查）
 
-Test9 同一 batch 上 τ0 ≈ 58mm 而 DDIM ≈ 220mm，且 DDIM 在训练中单调变差、τ0 同期变好——两个指标反向走，
-说明除了"模型只输出 g(F)"之外还存在第二个独立故障。`test9_1_sampler_checks.py` 按序跑五项检查：
+Test9 同一 batch 上 τ0 ≈ 58mm 而 DDIM ≈ 220mm，且 DDIM 在训练中单调变差、τ0 同期变好——两个指标反向走，说明除了"模型只输出 g(F)"之外还存在第二个独立故障。`test9_1_sampler_checks.py` 按序跑五项检查：
 
 1. **假模型**：DDIM 每步用 GT x0 替换模型输出，终点必须 ≈0mm（隔离采样器本身）；
 2. **同批**：确认 τ0 与 DDIM 读同一 batch 张量，并测 held-out batch 的 τ0 量化"8 窗不泛化"的代价；
@@ -321,7 +322,7 @@ Test9 同一 batch 上 τ0 ≈ 58mm 而 DDIM ≈ 220mm，且 DDIM 在训练中�
 ```bash
 conda activate touch_gait
 # 完整：重训 + 五项检查
-python results_display/script/test9_1_sampler_checks.py --save-ckpt
+CUDA_VISIBLE_DEVICES=5 python results_display/script/test9_1_sampler_checks.py --save-ckpt
 
 # 只跑模型无关的检查 1-3
 python results_display/script/test9_1_sampler_checks.py --skip-train

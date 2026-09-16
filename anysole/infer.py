@@ -154,6 +154,8 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     pose_layers = int(saved_config.get("pose_layers", 6))
     model = AnySoleModel(d=d_model, tw=tw, modal=modal, dropout=dropout, pose_layers=pose_layers, **model_kw).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
+    # E4: match the checkpoint's training noise scale (see train.py noise_scaled).
+    model.noise_scaled = bool(saved_config.get("noise_scaled", False))
     model.eval()
     diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
     sample_steps = int(args.sample_steps or config["diffusion_sample_steps"])

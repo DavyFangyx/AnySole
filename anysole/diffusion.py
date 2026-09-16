@@ -17,6 +17,14 @@ def get_named_beta_schedule(schedule_name, num_diffusion_timesteps):
             num_diffusion_timesteps,
             lambda t: math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2,
         )
+    if schedule_name == "linear":
+        # Step2Motion schedule (T=200, 1e-4 -> 0.02): abar at the top stays
+        # ~0.13, so the signal is present in x_t throughout training.  This
+        # makes x0-prediction informative at every step and lets the DDIM
+        # chain decay per-frame noise instead of recycling it (the cosine-1000
+        # schedule kept abar~0 for most steps, which is what produced the
+        # per-frame jitter in E4).
+        return np.linspace(1e-4, 0.02, num_diffusion_timesteps)
     raise NotImplementedError("unknown beta schedule: %s" % schedule_name)
 
 
@@ -63,7 +71,7 @@ def _timestep_schedule(n_train_steps, steps):
 
 
 class GaussianDiffusion:
-    def __init__(self, n_train_steps=DIFFUSION_TRAIN_STEPS, schedule="cosine"):
+    def __init__(self, n_train_steps=DIFFUSION_TRAIN_STEPS, schedule="linear"):
         self.n_train_steps = int(n_train_steps)
         self.schedule = schedule
         betas = np.array(get_named_beta_schedule(schedule, self.n_train_steps), dtype=np.float64)
@@ -189,7 +197,15 @@ class GaussianDiffusion:
                     device = next(model.parameters()).device
                 except (StopIteration, AttributeError):
                     device = torch.device("cpu")
+            # E4: initial noise must match the training noise scale (per-dim
+            # pose_std, see train.py), but only for checkpoints trained with
+            # scaled noise (model.noise_scaled); older checkpoints sample
+            # unscaled so their chains see the same distribution as training.
             x_T = torch.randn(*shape, device=device)
+            if getattr(model, "noise_scaled", False):
+                pose_std = getattr(getattr(model, "pose_head", None), "pose_std", None)
+                if pose_std is not None and pose_std.shape == (x_T.shape[-1],):
+                    x_T = x_T * pose_std.to(x_T.device).view(1, 1, -1)
         x = x_T
         batch_size = x.shape[0]
         device = x.device
@@ -222,7 +238,13 @@ class GaussianDiffusion:
                 device = next(model.parameters()).device
             except (StopIteration, AttributeError):
                 device = torch.device("cpu")
+        # E4: initial noise scaled to the training noise scale only for
+        # checkpoints trained with scaled noise (see ddim_sample_loop).
         x_T = torch.randn(*shape, device=device)
+        if getattr(model, "noise_scaled", False):
+            pose_std = getattr(getattr(model, "pose_head", None), "pose_std", None)
+            if pose_std is not None and pose_std.shape == (x_T.shape[-1],):
+                x_T = x_T * pose_std.to(x_T.device).view(1, 1, -1)
         return self.ddim_sample_loop(
             model,
             x_T=x_T,
