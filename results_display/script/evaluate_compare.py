@@ -345,6 +345,7 @@ def main() -> int:
     ap.add_argument("--auto-scan", action="store_true", help="Scan results/ model directories instead of YAML")
     ap.add_argument("--split", default="test")
     ap.add_argument("--out-dir", type=Path, default=cli_common.DISPLAY_ROOT / "Test2_comparison")
+    ap.add_argument("--force", action="store_true", help="Rebuild and overwrite existing outputs.")
     ap.add_argument("--fps", type=float, default=40.0)
     ap.add_argument("--modal", default="anysolev1,anysolev1_insole_drift", help="AnySole modal(s), comma-separated")
     ap.add_argument("--contact-method", default="tactile_abs", help="Contact-label scheme(s), comma-separated; model dir is <modal>_<contact-method>")
@@ -368,6 +369,10 @@ def main() -> int:
     manifest = read_manifest(args.manifest, args.split)
     if not manifest: raise SystemExit(f"No '{args.split}' sessions found in {args.manifest}")
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    outputs = [args.out_dir / name for name in ("comparison_per_session.csv", "comparison_summary.csv", "comparison_summary.png", "evaluation.log")]
+    if cli_common.outputs_ready(outputs) and not args.force:
+        print(f"Skip Test2: outputs already exist under {args.out_dir} (use --force to overwrite)")
+        return 0
     details, summaries = [], []
     for model in configs.get("models", configs):
         name, root = model["name"], resolve_repo_path(model["prediction_root"], ROOT)

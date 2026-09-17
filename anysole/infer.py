@@ -10,11 +10,12 @@ from typing import List, Optional
 import numpy as np
 import torch
 
-from anysole.data.bvh_io import load_bvh, pose_trans_to_motion, write_bvh
+from anysole.data.bvh_io import load_bvh, pose_trans_to_motion, resample_session_bvh, write_bvh
 from anysole.data.dataset import find_session_dir, hrnet_cache_path, resolve_bvh_path, session_time_grid
 from anysole.data.pressure import load_session_pressure, normalize_raw
+from anysole.data.tactile_s2m import build_t_s2m
 from anysole.diffusion import GaussianDiffusion
-from anysole.models import AnySoleModel, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_NAMES
+from anysole.models import AnySoleModel, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_NAMES
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.train import load_config, resolve_device
 from anysole.types import (
@@ -28,6 +29,8 @@ from anysole.types import (
     POSE_DIM,
     T_PHYS_DIM,
     T_RAW_DIM,
+    T_S2M_DIM,
+    T_S2M_NOIMU_DIM,
     V_FEAT_DIM,
     anysole_model_dir,
 )
@@ -71,6 +74,18 @@ def _right_pad_windows(values: np.ndarray, tw: int) -> torch.Tensor:
         pad = np.repeat(values[-1:], n_padded - n_frames, axis=0)
         values = np.concatenate([values, pad], axis=0)
     return torch.from_numpy(np.ascontiguousarray(values.reshape(-1, tw, values.shape[-1]))).float()
+
+
+def _stride_windows(values: np.ndarray, tw: int, half: int):
+    """E6.4: overlapping windows at stride=half; tail repeat-padded."""
+    n_frames = values.shape[0]
+    starts = list(range(0, max(n_frames - tw + 1, 1), half))
+    needed = starts[-1] + tw
+    if needed > n_frames:
+        pad = np.repeat(values[-1:], needed - n_frames, axis=0)
+        values = np.concatenate([values, pad], axis=0)
+    out = np.stack([values[s : s + tw] for s in starts], axis=0)
+    return torch.from_numpy(np.ascontiguousarray(out)).float(), starts
 
 
 def _pressure_paths(meta: dict) -> tuple:
@@ -132,6 +147,9 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     else:
         t_raw = np.zeros((n_frames, T_RAW_DIM), dtype=np.float32)
         t_phys = np.zeros((n_frames, T_PHYS_DIM), dtype=np.float32)
+    # E6.6: unused for raw108 checkpoints (zeros are ignored); synthesized from
+    # the GT BVH below when the checkpoint was trained with tactile_input=s2m50.
+    t_s2m = np.zeros((n_frames, T_S2M_DIM), dtype=np.float32)
 
     checkpoint = torch.load(args.ckpt, map_location="cpu")
     if not isinstance(checkpoint, dict) or "model" not in checkpoint:
@@ -152,58 +170,128 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
         model_kw.update(templates=templates, subject_to_index=subject_map)
     dropout = float(saved_config.get("dropout", config.get("dropout", 0.1)))
     pose_layers = int(saved_config.get("pose_layers", 6))
-    model = AnySoleModel(d=d_model, tw=tw, modal=modal, dropout=dropout, pose_layers=pose_layers, **model_kw).to(device)
+    tactile_input = str(saved_config.get("tactile_input", "raw108"))
+    tactile_direct = bool(saved_config.get("tactile_direct", False))
+    no_imu = bool(saved_config.get("no_imu", False))
+    if tactile_input == "s2m50" and no_imu:
+        # --no-imu checkpoint: the tactile channel is 38-dim. Rebuild the zero
+        # placeholder (used for V-only rows) at the deleted-channel width.
+        t_s2m = np.zeros((n_frames, T_S2M_NOIMU_DIM), dtype=np.float32)
+    model = AnySoleModel(
+        d=d_model, tw=tw, modal=modal, dropout=dropout, pose_layers=pose_layers,
+        tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
+        **model_kw,
+    ).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     # E4: match the checkpoint's training noise scale (see train.py noise_scaled).
     model.noise_scaled = bool(saved_config.get("noise_scaled", False))
     model.eval()
-    diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
+    diffusion = GaussianDiffusion(n_train_steps=int(saved_config.get("diffusion_train_steps", config["diffusion_train_steps"])))
     sample_steps = int(args.sample_steps or config["diffusion_sample_steps"])
+    pos_mode = modal == MODEL_ANYSOLEV1_POS
+    continuation = bool(config.get("continuation", False)) and pos_mode
+    warm_start = bool(config.get("warm_start", False))
+    if tactile_input == "s2m50" and config_value in (CONFIG_VT, CONFIG_T):
+        # E6.6a: synthesize the IMU channels from the session's GT BVH — the
+        # same convention as the training/eval dataset (Step2Motion evaluates
+        # identically; see anysole/data/tactile_s2m.py for the leakage note).
+        # --no-imu: no_imu=True builds the 38-dim channel without any IMU.
+        t_mocap = session_time_grid(meta) - float(meta["offset_s"])
+        bvh_s = resample_session_bvh(resolve_bvh_path(meta), t_mocap, hierarchy_cache={})
+        t_s2m = build_t_s2m(
+            bvh_s["pose_6d"], bvh_s["trans_m"], bvh_s["offsets_m"], bvh_s["parents"], t_raw,
+            no_imu=no_imu,
+        )
+    bvh = load_bvh(resolve_bvh_path(meta)) if pos_mode else None
 
-    v_windows = _right_pad_windows(v_feat, tw)
-    traw_windows = _right_pad_windows(t_raw, tw)
-    tphys_windows = _right_pad_windows(t_phys, tw)
+    if continuation:
+        # E6.4: overlapping windows (stride = tw/2) with chain continuation;
+        # only the fresh half of each window is exported.
+        half = tw // 2
+        v_windows, _ = _stride_windows(v_feat, tw, half)
+        traw_windows, _ = _stride_windows(t_raw, tw, half)
+        tphys_windows, _ = _stride_windows(t_phys, tw, half)
+        ts2m_windows, _ = _stride_windows(t_s2m, tw, half)
+        root_init = euler_yxz_to_rotmat(bvh.motion[0, 3:6][None, :])[0]
+    else:
+        v_windows = _right_pad_windows(v_feat, tw)
+        traw_windows = _right_pad_windows(t_raw, tw)
+        tphys_windows = _right_pad_windows(t_phys, tw)
+        ts2m_windows = _right_pad_windows(t_s2m, tw)
     pose_parts, trans_parts = [], []
     # Each window is relative to the preceding frame.  Stitch windows in
-    # order by carrying forward the last predicted world-space position.
+    # order by carrying forward the last predicted world-space position
+    # (continuation: local frame half-1).
     stitch_anchor = torch.zeros(3)
+    carry = None
     with torch.inference_mode():
         for left in range(0, v_windows.shape[0], args.batch_size):
             right = min(left + args.batch_size, v_windows.shape[0])
             v_batch = v_windows[left:right].to(device)
             traw_batch = traw_windows[left:right].to(device)
             tphys_batch = tphys_windows[left:right].to(device)
+            ts2m_batch = ts2m_windows[left:right].to(device)
             config_id = torch.full((right - left,), config_value, device=device, dtype=torch.long)
             cond = {
                 "V_feat": v_batch,
                 "T_raw": traw_batch,
                 "T_phys": tphys_batch,
+                "T_s2m": ts2m_batch,
                 "config_id": config_id,
                 "session_id": [args.session] * (right - left),
             }
-            pred_pose = diffusion.ddim_sample_loop(
-                model,
-                tau_related_kwargs=cond,
-                shape=(right - left, tw, POSE_DIM),
-                steps=sample_steps,
-                eta=0.0,
-                device=device,
-            )
+            prior = model.pose_head.pose_mean.view(1, 1, -1).expand(right - left, tw, -1) if warm_start else None
+            if continuation:
+                x_T = torch.randn(right - left, tw, model.pose_head.pose_dim, device=device)
+                if model.noise_scaled:
+                    x_T = x_T * model.pose_head.pose_std.to(device).view(1, 1, -1)
+                pred_pose, carry = diffusion.ddim_sample_loop_continue(
+                    model, x_T=x_T, tau_related_kwargs=cond,
+                    steps=sample_steps, half=half, carry=carry)
+            else:
+                pred_pose = diffusion.ddim_sample_loop(
+                    model,
+                    tau_related_kwargs=cond,
+                    shape=(right - left, tw, model.pose_head.pose_dim),
+                    steps=sample_steps,
+                    eta=0.0,
+                    device=device,
+                    prior=prior,
+                )
             tau_zero = torch.zeros(right - left, device=device, dtype=torch.long)
-            out = model(v_batch, traw_batch, tphys_batch, pred_pose, tau_zero, config_id, [args.session] * (right - left))
-            pose_parts.append(pred_pose.cpu())
+            out = model(v_batch, traw_batch, tphys_batch, pred_pose, tau_zero, config_id,
+                        [args.session] * (right - left), T_s2m=ts2m_batch)
             trans_rel = out["trans_hat"].cpu()
-            world_windows = []
-            for window_rel in trans_rel:
-                window_world = window_rel + stitch_anchor.view(1, 3)
-                world_windows.append(window_world)
-                stitch_anchor = window_world[-1].clone()
-            trans_world = torch.stack(world_windows, dim=0)
-            trans_parts.append(trans_world)
+            if pos_mode:
+                for w in range(right - left):
+                    first = (left == 0 and w == 0)
+                    sl = slice(0, tw) if (first or not continuation) else slice(half, tw)
+                    sixd = positions_to_6d_np(
+                        pred_pose[w, sl].cpu().numpy(), bvh.offsets_m, bvh.parents
+                    )
+                    root_local = rot6d_to_rotmat_np(sixd.reshape(-1, 23, 6)[:, 0:1, :])[:, 0]
+                    world_root = np.einsum("ij,tjk->tik", root_init, root_local)
+                    sixd[:, 0:6] = rotmat_to_6d_np(world_root)
+                    pose_parts.append(torch.from_numpy(sixd))
+                    window_world = trans_rel[w, sl] + stitch_anchor.view(1, 3)
+                    trans_parts.append(window_world)
+                    if continuation:
+                        stitch_anchor = (trans_rel[w, half - 1] + stitch_anchor).clone()
+                    else:
+                        stitch_anchor = window_world[-1].clone()
+            else:
+                pose_parts.append(pred_pose.cpu())
+                world_windows = []
+                for window_rel in trans_rel:
+                    window_world = window_rel + stitch_anchor.view(1, 3)
+                    world_windows.append(window_world)
+                    stitch_anchor = window_world[-1].clone()
+                trans_world = torch.stack(world_windows, dim=0)
+                trans_parts.append(trans_world)
 
     pred_pose_np = torch.cat(pose_parts, dim=0).reshape(-1, POSE_DIM)[:n_frames].numpy()
     pred_trans_np = torch.cat(trans_parts, dim=0).reshape(-1, 3)[:n_frames].numpy()
-    hierarchy = load_bvh(resolve_bvh_path(meta)).hierarchy
+    hierarchy = bvh.hierarchy if pos_mode else load_bvh(resolve_bvh_path(meta)).hierarchy
     if output_override is not None:
         output_path = output_override
     elif args.out is not None:

@@ -117,6 +117,7 @@ class GaussianDiffusion:
             tau,
             config_id,
             batch.get("session_id"),
+            T_s2m=batch.get("T_s2m"),
         )
         out = dict(out)
         out["tau"] = tau
@@ -134,6 +135,7 @@ class GaussianDiffusion:
                 tau,
                 cond["config_id"],
                 cond.get("session_id"),
+                T_s2m=cond.get("T_s2m"),
             )
         if "F" in cond:
             return model(x_tau, tau, cond["F"])
@@ -180,8 +182,14 @@ class GaussianDiffusion:
         steps=DIFFUSION_SAMPLE_STEPS,
         eta=0.0,
         device=None,
+        prior=None,
     ) -> Tensor:
-        """Deterministic DDIM. model is called like AnySoleModel.forward."""
+        """Deterministic DDIM. model is called like AnySoleModel.forward.
+
+        E6.5: ``prior`` (B, tw, dim) initializes the chain on the training
+        marginal instead of pure noise: x_T = sqrt(abar_top) * prior +
+        sqrt(1 - abar_top) * noise. None keeps the original pure-noise start.
+        """
         cond = dict(tau_related_kwargs or {})
         if x_T is None:
             if shape is None:
@@ -206,6 +214,11 @@ class GaussianDiffusion:
                 pose_std = getattr(getattr(model, "pose_head", None), "pose_std", None)
                 if pose_std is not None and pose_std.shape == (x_T.shape[-1],):
                     x_T = x_T * pose_std.to(x_T.device).view(1, 1, -1)
+        if prior is not None:
+            sqrt_abar_top = float(np.sqrt(self.alphas_cumprod[self.n_train_steps - 1]))
+            x_T = sqrt_abar_top * prior.to(x_T.device) + np.sqrt(
+                1.0 - self.alphas_cumprod[self.n_train_steps - 1]
+            ) * x_T
         x = x_T
         batch_size = x.shape[0]
         device = x.device
@@ -221,6 +234,47 @@ class GaussianDiffusion:
             tau_prev = torch.full((batch_size,), int(t_prev), device=device, dtype=torch.long)
             x = self.ddim_step(x, tau, tau_prev, x0_hat, eta=eta)
         return x
+
+    def ddim_sample_loop_continue(
+        self,
+        model,
+        x_T,
+        tau_related_kwargs=None,
+        steps=DIFFUSION_SAMPLE_STEPS,
+        half=None,
+        carry=None,
+        eta=0.0,
+    ):
+        """E6.4: DDIM over consecutive windows with continuation.
+
+        At every step, window i's first half is seeded with window i-1's
+        second-half latent at the same noise level (pre-update), so
+        consecutive windows share one chain (Step2Motion metrics.py prev_x_t
+        mechanism). Window 0 keeps its own chain. ``carry`` (list of
+        (1, half, dim) per step) passes the last window's latents across
+        chunks; returns (x0, carry_out). Representation-agnostic.
+        """
+        cond = dict(tau_related_kwargs or {})
+        x = x_T
+        batch_size, tw, _ = x.shape
+        if half is None:
+            half = tw // 2
+        timesteps = _timestep_schedule(self.n_train_steps, int(steps))
+        carry_out = []
+        for i, t in enumerate(timesteps):
+            if carry is not None and i < len(carry):
+                x[0, :half] = carry[i]
+            x[1:, :half] = x[:-1, half:].clone()
+            tau = torch.full((batch_size,), int(t), device=x.device, dtype=torch.long)
+            out = self._call_model(model, x, tau, cond)
+            x0_hat = self._unpack_x0(out, x)
+            carry_out.append(x[:, half:].clone())  # pre-update latents for next chunk
+            if int(t) == 0:
+                return x0_hat, carry_out
+            t_prev = timesteps[i + 1] if i + 1 < len(timesteps) else 0
+            tau_prev = torch.full((batch_size,), int(t_prev), device=x.device, dtype=torch.long)
+            x = self.ddim_step(x, tau, tau_prev, x0_hat, eta=eta)
+        return x, carry_out
 
     def ddim_sample(self, model, F_or_inputs, shape, steps=DIFFUSION_SAMPLE_STEPS, eta=0.0) -> Tensor:
         """Return x0 (B,20,138). eta defaults to 0."""

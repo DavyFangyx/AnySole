@@ -156,7 +156,6 @@ def parse_args() -> argparse.Namespace:
         fps=False,
         stride=False,
         max_frames=False,
-        force=False,
         out_dir=True,
         out_dir_default=cli_common.DISPLAY_ROOT / "Test9_overfit",
     )
@@ -177,6 +176,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    out_dir = Path(cli_common.resolve_path(args.out_dir))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if cli_common.outputs_ready([out_dir / "overfit_report.json"]) and not args.force:
+        log.info("Skip Test9: {} already exists (use --force to overwrite)", out_dir / "overfit_report.json")
+        return 0
     config = load_config(Path(args.config))
     if args.contact_method:
         config["contact_method"] = str(args.contact_method)
@@ -205,8 +209,6 @@ def main() -> int:
 
     all_rows = []
     per_lr = {}
-    out_dir = Path(cli_common.resolve_path(args.out_dir))
-    out_dir.mkdir(parents=True, exist_ok=True)
     for lr in lrs:
         seed_everything(args.seed)
         model = AnySoleModel(

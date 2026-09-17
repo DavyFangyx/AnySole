@@ -22,9 +22,9 @@ from torch.utils.data import DataLoader
 from anysole.data.bvh_io import pose_trans_to_motion, write_bvh
 from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.diffusion import GaussianDiffusion
-from anysole.geometry import fk_pose6d, rot6d_to_rotmat
+from anysole.geometry import fk_pose6d, positions_to_6d_np, rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np
 from anysole.losses import soft_contact_from_keypoints
-from anysole.models import AnySoleModel, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_NAMES
+from anysole.models import AnySoleModel, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_NAMES
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.types import (
@@ -201,9 +201,9 @@ def _discover_model_targets(
 def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySoleModel:
     saved_config = checkpoint.get("config", {})
     d_model = int(saved_config.get("d_model", config["d_model"]))
+    # tw always comes from the checkpoint, so evaluating an older model stays
+    # correct even after configs/v1.yaml has moved on.
     tw = int(saved_config.get("tw", config["tw"]))
-    if tw != int(config["tw"]):
-        raise ValueError("Checkpoint tw=%d differs from evaluation config tw=%d" % (tw, int(config["tw"])))
     modal = str(saved_config.get("modal", MODEL_ANYSOLEV1))
     if modal not in MODEL_NAMES:
         raise ValueError("Unknown checkpoint modal %r" % modal)
@@ -217,7 +217,15 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         model_kw.update(templates=templates, subject_to_index=subject_map)
     dropout = float(saved_config.get("dropout", config.get("dropout", 0.1)))
     pose_layers = int(saved_config.get("pose_layers", 6))
-    model = AnySoleModel(d=d_model, tw=tw, modal=modal, use_insole_drift=use_drift, dropout=dropout, pose_layers=pose_layers, **model_kw).to(device)
+    tactile_input = str(saved_config.get("tactile_input", "raw108"))
+    tactile_direct = bool(saved_config.get("tactile_direct", False))
+    no_imu = bool(saved_config.get("no_imu", False))
+    model = AnySoleModel(
+        d=d_model, tw=tw, modal=modal, use_insole_drift=use_drift, dropout=dropout,
+        pose_layers=pose_layers, tactile_input=tactile_input, tactile_direct=tactile_direct,
+        no_imu=no_imu,
+        **model_kw,
+    ).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     # E4: sampling init scale must match the checkpoint's training noise scale
     # (train.py saves noise_scaled=True when it scales q_sample noise by
@@ -267,6 +275,47 @@ def main(argv: Optional[List[str]] = None) -> int:
     return 0
 
 
+def _positions_to_6d_batch(pred_pos: torch.Tensor, batch: dict, device: torch.device) -> torch.Tensor:
+    """E6.1 export conversion: root-local positions -> WORLD 6D, per sample.
+
+    positions_to_6d_np recovers rest-frame rotations; pre-multiplying the root
+    by the session frame-0 rotation (dataset root_rot_init) yields world
+    rotations for FK metrics and BVH export.
+    """
+    out = []
+    for i in range(pred_pos.shape[0]):
+        sixd = positions_to_6d_np(
+            pred_pos[i].cpu().numpy(),
+            batch["offsets"][i].cpu().numpy(),
+            batch["parents"][i].cpu().numpy(),
+        )
+        root_init = batch["root_rot_init"][i].cpu().numpy()  # (3,3)
+        root_local = rot6d_to_rotmat_np(sixd.reshape(-1, N_JOINTS, 6)[:, 0:1, :])[:, 0]
+        world_root = np.einsum("ij,tjk->tik", root_init, root_local)
+        sixd[:, 0:6] = rotmat_to_6d_np(world_root)
+        out.append(torch.from_numpy(sixd))
+    return torch.stack(out, dim=0).to(device)
+
+
+def _session_window_groups(dataset: AnySoleDataset) -> dict:
+    """{session_id: [dataset indices]} in dataset order (consecutive windows)."""
+    groups: dict = {}
+    for i in range(len(dataset)):
+        groups.setdefault(dataset[i]["session_id"], []).append(i)
+    return groups
+
+
+def _sample_x_t_init(model, bsz, tw, device, prior=None):
+    """Sampling init: pure noise, or E6.5 marginal start with a prior."""
+    x_T = torch.randn(bsz, tw, model.pose_head.pose_dim, device=device)
+    if getattr(model, "noise_scaled", False):
+        x_T = x_T * model.pose_head.pose_std.to(device).view(1, 1, -1)
+    if prior is not None:
+        sqrt_abar = float(np.sqrt(model.diffusion_abar_top))
+        x_T = sqrt_abar * prior.to(device) + float(np.sqrt(1.0 - model.diffusion_abar_top)) * x_T
+    return x_T
+
+
 def _evaluate_one(
     args: argparse.Namespace,
     config: dict,
@@ -297,8 +346,16 @@ def _evaluate_one(
     ckpt_contact = str(checkpoint.get("config", {}).get("contact_method") or "")
     contact_method = contact_method or ckpt_contact or str(config.get("contact_method", "tactile_abs"))
     model = _load_model(checkpoint, config, device)
-    diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
+    # --no-imu checkpoints: the eval dataset must build the 38-dim T_s2m
+    # (IMU channels deleted) to match the checkpoint's encoder input width.
+    no_imu = bool(checkpoint.get("config", {}).get("no_imu", False))
+    tw = int(checkpoint.get("config", {}).get("tw", config["tw"]))
+    diffusion = GaussianDiffusion(n_train_steps=int(checkpoint.get("config", {}).get("diffusion_train_steps", config["diffusion_train_steps"])))
     sample_steps = int(args.sample_steps or config["diffusion_sample_steps"])
+    model.diffusion_abar_top = float(diffusion.alphas_cumprod[diffusion.n_train_steps - 1])
+    pos_mode = checkpoint_modal == MODEL_ANYSOLEV1_POS
+    continuation = bool(config.get("continuation", False))
+    warm_start = bool(config.get("warm_start", False))
 
     session_ids = None
     if args.limit_sessions is not None:
@@ -310,9 +367,13 @@ def _evaluate_one(
         seq_root=Path(config["seq_root"]),
         split_csv=Path(config["split_csv"]),
         cache_root=Path(config["cache_root"]),
-        window_length=int(config["tw"]),
+        window_length=tw,
         session_ids=session_ids,
         contact_method=contact_method,
+        no_imu=no_imu,
+        # E6.4: continuation eval uses overlapping windows (stride = tw/2);
+        # without it the stride stays non-overlapping (E3 behavior).
+        stride=(tw // 2) if (pos_mode and continuation) else None,
     )
     if len(dataset) == 0:
         raise RuntimeError("Evaluation dataset contains no valid windows")
@@ -330,64 +391,174 @@ def _evaluate_one(
         metrics = MetricSums()
         exports = {}
         with torch.inference_mode():
-            for raw_batch in loader:
-                batch = move_batch(raw_batch, device)
-                batch_size = batch["pose_gt"].shape[0]
-                config_id = torch.full((batch_size,), config_value, device=device, dtype=torch.long)
-                batch["config_id"] = config_id
-                assert_batch_shapes(batch, batch_size)
-                v_feat, t_raw, t_phys = condition_inputs(batch, config_id)
-                cond = {
-                    "V_feat": v_feat,
-                    "T_raw": t_raw,
-                    "T_phys": t_phys,
-                    "config_id": config_id,
-                    "session_id": batch.get("session_id"),
-                }
-                pred_pose = diffusion.ddim_sample_loop(
-                    model,
-                    tau_related_kwargs=cond,
-                    shape=(batch_size, int(config["tw"]), POSE_DIM),
-                    steps=sample_steps,
-                    eta=0.0,
-                    device=device,
-                )
-                tau_zero = torch.zeros(batch_size, device=device, dtype=torch.long)
-                out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id, batch.get("session_id"))
-                pred_trans = out["trans_hat"]
-                anchor = batch["trans_anchor"][:, None, :]
-                pred_trans_world = pred_trans + anchor
-                gt_trans_world = batch["trans_gt"] + anchor
-                pred_kp = fk_pose6d(pred_pose, pred_trans_world, batch["offsets"], batch["parents"])
+            if pos_mode:
+                # E6.1 position mode: sample positions, convert to world 6D
+                # per window (R_init composition), then reuse all 6D metrics.
+                if continuation:
+                    # E6.4: each session's windows share one DDIM chain.
+                    half = tw // 2
+                    for session_id, idxs in _session_window_groups(dataset).items():
+                        raw = [dataset[i] for i in idxs]
+                        batch = move_batch(collate_windows(raw), device)
+                        bsz = batch["pose_gt"].shape[0]
+                        config_id = torch.full((bsz,), config_value, device=device, dtype=torch.long)
+                        batch["config_id"] = config_id
+                        assert_batch_shapes(batch, bsz, tw=tw)
+                        v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+                        cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
+                                "T_s2m": t_s2m, "config_id": config_id,
+                                "session_id": batch.get("session_id")}
+                        prior = model.pose_head.pose_mean.view(1, 1, -1).expand(bsz, tw, -1) if warm_start else None
+                        x_T = _sample_x_t_init(model, bsz, tw, device, prior=prior)
+                        pred_pose = diffusion.ddim_sample_loop_continue(
+                            model, x_T=x_T, tau_related_kwargs=cond,
+                            steps=sample_steps, half=half)[0]
+                        tau_zero = torch.zeros(bsz, device=device, dtype=torch.long)
+                        out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id,
+                                    batch.get("session_id"), T_s2m=t_s2m)
+                        anchor = batch["trans_anchor"][:, None, :]
+                        pred_trans = out["trans_hat"] + anchor
+                        gt_trans = batch["trans_gt"] + anchor
+                        pred6d = _positions_to_6d_batch(pred_pose, batch, device)
+                        t_ae = (out["pressure_hat"] - batch["T_raw"]).abs()
+                        corr, corr_valid = _tactile_corr(out["pressure_hat"], batch["T_raw"])
+                        for w in range(bsz):
+                            sl = slice(0, tw) if w == 0 else slice(half, tw)
+                            p6 = pred6d[w : w + 1, sl]
+                            pt = pred_trans[w : w + 1, sl]
+                            gtt = gt_trans[w : w + 1, sl]
+                            kp = fk_pose6d(p6, pt, batch["offsets"][w : w + 1], batch["parents"][w : w + 1])
+                            kp_gt = batch["kp_gt"][w : w + 1, sl]
+                            metrics.add("MPJPE", torch.linalg.vector_norm(kp - kp_gt, dim=-1), 1000.0)
+                            metrics.add("PA-MPJPE", _pa_error(kp, kp_gt), 1000.0)
+                            metrics.add("MPJRE", _rotation_error_deg(p6, batch["pose_gt"][w : w + 1, sl]))
+                            metrics.add("traj_ATE", torch.linalg.vector_norm(pt - gtt, dim=-1), 1000.0)
+                            pred_contact = soft_contact_from_keypoints(kp) > 0.5
+                            metrics.add("contact_acc", (pred_contact == (batch["contact_gt"][w : w + 1, sl] > 0.5)).float())
+                            metrics.add("T_mae", t_ae[w : w + 1, sl])
+                            metrics.add("T_mse", t_ae[w : w + 1, sl].square())
+                            if bool(corr_valid[w : w + 1, sl].any()):
+                                metrics.add("T_corr", corr[w : w + 1, sl][corr_valid[w : w + 1, sl]])
+                            if bvh_out is not None:
+                                exports.setdefault(session_id, []).append(
+                                    (
+                                        int(raw[w]["frame_start"]) + (0 if w == 0 else half),
+                                        p6[0].cpu().numpy(),
+                                        pt[0].cpu().numpy(),
+                                        gtt[0].cpu().numpy(),
+                                        raw[w]["hierarchy"],
+                                    )
+                                )
+                else:
+                    for raw_batch in loader:
+                        batch = move_batch(raw_batch, device)
+                        batch_size = batch["pose_gt"].shape[0]
+                        config_id = torch.full((batch_size,), config_value, device=device, dtype=torch.long)
+                        batch["config_id"] = config_id
+                        assert_batch_shapes(batch, batch_size, tw=tw)
+                        v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+                        cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
+                                "T_s2m": t_s2m, "config_id": config_id,
+                                "session_id": batch.get("session_id")}
+                        prior = model.pose_head.pose_mean.view(1, 1, -1).expand(batch_size, tw, -1) if warm_start else None
+                        x_T = _sample_x_t_init(model, batch_size, tw, device, prior=prior)
+                        pred_pose = diffusion.ddim_sample_loop(
+                            model, x_T=x_T, tau_related_kwargs=cond,
+                            steps=sample_steps, eta=0.0, device=device)
+                        tau_zero = torch.zeros(batch_size, device=device, dtype=torch.long)
+                        out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id,
+                                    batch.get("session_id"), T_s2m=t_s2m)
+                        anchor = batch["trans_anchor"][:, None, :]
+                        pred_trans = out["trans_hat"] + anchor
+                        gt_trans = batch["trans_gt"] + anchor
+                        pred6d = _positions_to_6d_batch(pred_pose, batch, device)
+                        pred_kp = fk_pose6d(pred6d, pred_trans, batch["offsets"], batch["parents"])
+                        metrics.add("MPJPE", torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1), 1000.0)
+                        metrics.add("PA-MPJPE", _pa_error(pred_kp, batch["kp_gt"]), 1000.0)
+                        metrics.add("MPJRE", _rotation_error_deg(pred6d, batch["pose_gt"]))
+                        metrics.add("traj_ATE", torch.linalg.vector_norm(pred_trans - gt_trans, dim=-1), 1000.0)
+                        pred_contact = soft_contact_from_keypoints(pred_kp) > 0.5
+                        metrics.add("contact_acc", (pred_contact == (batch["contact_gt"] > 0.5)).float())
+                        t_ae = (out["pressure_hat"] - batch["T_raw"]).abs()
+                        metrics.add("T_mae", t_ae)
+                        metrics.add("T_mse", t_ae.square())
+                        corr, corr_valid = _tactile_corr(out["pressure_hat"], batch["T_raw"])
+                        if bool(corr_valid.any()):
+                            metrics.add("T_corr", corr[corr_valid])
+                        if bvh_out is not None:
+                            for idx, session_id in enumerate(raw_batch["session_id"]):
+                                exports.setdefault(session_id, []).append(
+                                    (
+                                        int(raw_batch["frame_start"][idx]),
+                                        pred6d[idx].cpu().numpy(),
+                                        pred_trans[idx].cpu().numpy(),
+                                        gt_trans[idx].cpu().numpy(),
+                                        raw_batch["hierarchy"][idx],
+                                    )
+                                )
+            else:
+                for raw_batch in loader:
+                    batch = move_batch(raw_batch, device)
+                    batch_size = batch["pose_gt"].shape[0]
+                    config_id = torch.full((batch_size,), config_value, device=device, dtype=torch.long)
+                    batch["config_id"] = config_id
+                    assert_batch_shapes(batch, batch_size, tw=tw)
+                    v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+                    cond = {
+                        "V_feat": v_feat,
+                        "T_raw": t_raw,
+                        "T_phys": t_phys,
+                        "T_s2m": t_s2m,
+                        "config_id": config_id,
+                        "session_id": batch.get("session_id"),
+                    }
+                    prior = model.pose_head.pose_mean.view(1, 1, -1).expand(batch_size, tw, -1) if warm_start else None
+                    pred_pose = diffusion.ddim_sample_loop(
+                        model,
+                        tau_related_kwargs=cond,
+                        shape=(batch_size, tw, POSE_DIM),
+                        steps=sample_steps,
+                        eta=0.0,
+                        device=device,
+                        prior=prior,
+                    )
+                    tau_zero = torch.zeros(batch_size, device=device, dtype=torch.long)
+                    out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id,
+                                batch.get("session_id"), T_s2m=t_s2m)
+                    pred_trans = out["trans_hat"]
+                    anchor = batch["trans_anchor"][:, None, :]
+                    pred_trans_world = pred_trans + anchor
+                    gt_trans_world = batch["trans_gt"] + anchor
+                    pred_kp = fk_pose6d(pred_pose, pred_trans_world, batch["offsets"], batch["parents"])
 
-                metrics.add("MPJPE", torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1), 1000.0)
-                metrics.add("PA-MPJPE", _pa_error(pred_kp, batch["kp_gt"]), 1000.0)
-                metrics.add("MPJRE", _rotation_error_deg(pred_pose, batch["pose_gt"]))
-                metrics.add("traj_ATE", torch.linalg.vector_norm(pred_trans_world - gt_trans_world, dim=-1), 1000.0)
-                pred_contact = soft_contact_from_keypoints(pred_kp) > 0.5
-                metrics.add("contact_acc", (pred_contact == (batch["contact_gt"] > 0.5)).float())
+                    metrics.add("MPJPE", torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1), 1000.0)
+                    metrics.add("PA-MPJPE", _pa_error(pred_kp, batch["kp_gt"]), 1000.0)
+                    metrics.add("MPJRE", _rotation_error_deg(pred_pose, batch["pose_gt"]))
+                    metrics.add("traj_ATE", torch.linalg.vector_norm(pred_trans_world - gt_trans_world, dim=-1), 1000.0)
+                    pred_contact = soft_contact_from_keypoints(pred_kp) > 0.5
+                    metrics.add("contact_acc", (pred_contact == (batch["contact_gt"] > 0.5)).float())
 
-                # Tactile aux-head metrics (normalized 0-1 units).  Under
-                # V-only conditioning the T input is zeroed, so these numbers
-                # measure V2T generation quality (the V2M row in the report).
-                t_ae = (out["pressure_hat"] - batch["T_raw"]).abs()
-                metrics.add("T_mae", t_ae)
-                metrics.add("T_mse", t_ae.square())
-                corr, corr_valid = _tactile_corr(out["pressure_hat"], batch["T_raw"])
-                if bool(corr_valid.any()):
-                    metrics.add("T_corr", corr[corr_valid])
+                    # Tactile aux-head metrics (normalized 0-1 units).  Under
+                    # V-only conditioning the T input is zeroed, so these numbers
+                    # measure V2T generation quality (the V2M row in the report).
+                    t_ae = (out["pressure_hat"] - batch["T_raw"]).abs()
+                    metrics.add("T_mae", t_ae)
+                    metrics.add("T_mse", t_ae.square())
+                    corr, corr_valid = _tactile_corr(out["pressure_hat"], batch["T_raw"])
+                    if bool(corr_valid.any()):
+                        metrics.add("T_corr", corr[corr_valid])
 
-                if bvh_out is not None:
-                    for idx, session_id in enumerate(raw_batch["session_id"]):
-                        exports.setdefault(session_id, []).append(
-                            (
-                                int(raw_batch["frame_start"][idx]),
-                                pred_pose[idx].cpu().numpy(),
-                                pred_trans_world[idx].cpu().numpy(),
-                                gt_trans_world[idx].cpu().numpy(),
-                                raw_batch["hierarchy"][idx],
+                    if bvh_out is not None:
+                        for idx, session_id in enumerate(raw_batch["session_id"]):
+                            exports.setdefault(session_id, []).append(
+                                (
+                                    int(raw_batch["frame_start"][idx]),
+                                    pred_pose[idx].cpu().numpy(),
+                                    pred_trans_world[idx].cpu().numpy(),
+                                    gt_trans_world[idx].cpu().numpy(),
+                                    raw_batch["hierarchy"][idx],
+                                )
                             )
-                        )
 
         values = metrics.means()
         all_values[CONFIG_MODE_NAMES[config_value]] = values
@@ -416,11 +587,11 @@ def _evaluate_one(
                 # two independent predictions (measured 213mm jump vs 8.8mm
                 # GT frame-to-frame).  Crossfade F frames on both sides of
                 # every seam; 6D poses are re-orthonormalized after blending.
-                FADE = 4
+                FADE = 0 if pos_mode else 4
                 n_windows = len(windows)
-                if n_windows > 1:
+                if n_windows > 1 and FADE > 0:
                     for w in range(1, n_windows):
-                        seam = w * int(config["tw"])
+                        seam = w * tw
                         if seam + FADE > pose.shape[0]:
                             break
                         for j in range(FADE):
@@ -433,9 +604,14 @@ def _evaluate_one(
                             trans[a] = (1 - alpha) * old_ta + alpha * old_tb
                             trans[b] = (1 - alpha) * old_tb + alpha * old_ta
                 # re-orthonormalize the blended 6D vectors
-                # (Gram-Schmidt via rot6d_to_rotmat, first two matrix columns)
+                # (Gram-Schmidt via rot6d_to_rotmat).  Column-concatenate the
+                # first two matrix columns (rotmat_to_6d): the 6D convention
+                # is [col0; col1] per joint.  (The old `R[..., :, :2].reshape`
+                # interleaved rows [col0.x, col1.x, col0.y, ...], corrupting
+                # every exported BVH for rotations away from identity - GT
+                # through that line measured 460mm MPJPE.)
                 R = rot6d_to_rotmat(torch.from_numpy(pose.reshape(-1, N_JOINTS, 6)).float())
-                pose = R[..., :, :2].reshape(-1, POSE_DIM).numpy()
+                pose = rotmat_to_6d(R).reshape(-1, POSE_DIM).numpy()
                 output_path = bvh_out / ("%s_%s.bvh" % (session_id, CONFIG_MODE_NAMES[config_value]))
                 write_bvh(output_path, windows[0][4], pose_trans_to_motion(pose, trans), 1.0 / FPS)
                 print("wrote %s" % output_path)

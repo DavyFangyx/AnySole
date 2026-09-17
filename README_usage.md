@@ -229,7 +229,8 @@ MotionPRO 的 test 指标（MPJPE/PVE/WBCE）不使用接触标签，只有训�
 cd /data/fangyuxuan/projects/gait/Baselines/Step2Motion
 conda activate touch_gait
 
-python src/train.py --config configs/config_gait.json
+python src/train.py --config configs/config_gait.json --no-imu
+--config configs/config_gait.json
 ```
 
 输出：`results/Step2Motion/checkpoints/gait_model/`

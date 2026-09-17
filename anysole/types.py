@@ -52,8 +52,20 @@ FPS = 40.0
 D_MODEL = 256
 N_JOINTS = 23
 POSE_DIM = N_JOINTS * 6  # 138
+# E6.1: root-local 3D positions of the 22 non-root joints (meters, session
+# frame-0 orientation). The position representation removes the FK error
+# amplification of the 6D space (verified per-joint profile: hip 60mm ->
+# hand 398mm in 6D vs no amplification in positions).
+POSE_POS_DIM = 22 * 3  # 66
 T_RAW_DIM = 96
 T_PHYS_DIM = 12
+# E6.6a: Step2Motion-口径触觉通道（每脚 25 维 = 16 压力池化[heel8 toes8] +
+# 合成 IMU acc3/gyro3 + 总力1 + CoP2）。IMU 由 GT BVH 脚部运动学合成
+# （anysole/data/tactile_s2m.py），与 Step2Motion 的 gait 导出同口径。
+T_S2M_DIM = 50
+# --no-imu：真删 IMU 通道后的布局（每脚 19 维 = 16 压力池化 + 总力1 + CoP2）。
+# 数据侧不合成、模型侧不编码 IMU；编码器按 38 维分组（无 IMU 组）。
+T_S2M_NOIMU_DIM = 38
 V_FEAT_DIM = 2051  # HRNet 2048 + normalized CLIFF bbox_info [cx, cy, b]
 FUSE_LEN = 40  # V(20) + combined T(20)
 N_CONTACT = 2
@@ -150,9 +162,11 @@ BATCH_SHAPES = {
     "T_raw": (TW, T_RAW_DIM),
     "T_phys": (TW, T_PHYS_DIM),
     "pose_gt": (TW, POSE_DIM),
+    "pose_gt_pos": (TW, POSE_POS_DIM),
     "trans_gt": (TW, 3),
     "vel_gt": (TW, 3),
     "trans_anchor": (3,),
+    "root_rot_init": (3, 3),
     "kp_gt": (TW, N_JOINTS, 3),
     "contact_gt": (TW, N_CONTACT),
     "offsets": (N_JOINTS, 3),
@@ -162,7 +176,7 @@ BATCH_SHAPES = {
 }
 
 
-def assert_batch_shapes(batch, batch_size=None):
+def assert_batch_shapes(batch, batch_size=None, tw=TW):
     """Raise if a training batch is missing a frozen field or has the wrong shape."""
     import torch
 
@@ -176,6 +190,9 @@ def assert_batch_shapes(batch, batch_size=None):
             raise TypeError("%s must be a tensor, got %s" % (name, type(value)))
         if batch_size is None:
             batch_size = value.shape[0]
+        # Temporal fields use the runtime window length (E6.3: tw may differ
+        # from the frozen TW=20).
+        expected = tuple(int(tw) if dim == TW else dim for dim in expected)
         got = tuple(value.shape[1:])
         if got != expected:
             raise ValueError("%s shape %s != %s" % (name, (value.shape[0],) + got, (batch_size,) + expected))

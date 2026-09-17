@@ -326,7 +326,6 @@ def parse_args() -> argparse.Namespace:
         fps=False,
         stride=False,
         max_frames=False,
-        force=False,
         out_dir=True,
         out_dir_default=cli_common.DISPLAY_ROOT / "Test6_dataset_check",
     )
@@ -346,6 +345,10 @@ def main() -> int:
     split_csv = Path(cli_common.resolve_path(args.split_csv))
     out_dir = Path(cli_common.resolve_path(args.out_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
+    outputs = [out_dir / name for name in ("fk_selfcheck.json", "mean_baseline.json", "mean_pose.npz", "input_means.npz")]
+    if cli_common.outputs_ready(outputs) and not args.force:
+        log.info("Skip Test6: outputs already exist under {} (use --force to overwrite)", out_dir)
+        return 0
 
     test_ids = cli_common.load_test_sessions(args.session, split_csv, args.split)
     if args.limit_sessions:

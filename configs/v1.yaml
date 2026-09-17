@@ -1,19 +1,39 @@
+# AnySole V1 配置（E3 基础，2026-09-16 起）
+#
+# 基础 = E3_nocontact 训练口径（其输出 BVH 验证良好：脚踝贴地、无踢腿）：
+#   cosine-1000 schedule、噪声不缩放（noise_scaled=false）、恒定 lr、
+#   λ_pose=3.0 / λ_kp=1.0 / λ_con=0.0、sample 50 步。
+#   注意：E4 的"噪声×pose_std"与 E5 的 linear-200 被证实在输出上引入了
+#   "向天空踢腿"（E4 BVH 实测脚踝平均悬空 +0.013m，E3 为 -0.606m 贴地），
+#   因此本配置保持 E3 口径，不启用这两个改动。
+#
+# E6.x 系列开关（默认全部关闭 = 纯 E3 行为；各实验单点开启，互不依赖，
+# 详见 anysole/model_fix_note/E6x_series_plan.md）：
+#   E6.1: pose_repr: pos + modal: anysolev1_pos（表示切换）
+#   E6.2: lambda_pose_vel / lambda_bone > 0（帧间平滑 + 骨长刚性，pos 模式）
+#   E6.3: tw / stride（窗口长度与训练步长）
+#   E6.4: continuation: true（eval/infer 续写式推理）
+#   E6.5: warm_start: true（采样起点对齐训练边缘分布）
 d_model: 256
 dropout: 0.1
 tw: 20
 batch_size: 256
 lr: 1.0e-3
-epochs: 200
+epochs: 800
 num_workers: 4
-# E5 实测（epoch 850）：DDIM 链步数越少越好——10 步 114.5mm vs 50 步 141.4mm
-# （每步注入一次 head 的 F 读出误差并沿运动链累积，远端踝部放大到 168-202mm）。
-diffusion_train_steps: 200
-diffusion_sample_steps: 10
-# PoseHead 解码器层数（MDM/RoHM 式 prepend-timestep + 跨层 cross-attn，默认 6）
+diffusion_train_steps: 1000
+diffusion_sample_steps: 50
 pose_layers: 6
-# E2 多任务损失均衡：姿态是主任务，加大权重（原 1.0）。
-# E3：接触损失彻底移除（原 0.1）——E2 中 BCE 爆炸到 61-87，即使 0.01 权重仍
-# 占总 loss 0.6-0.9，是 dominant 噪声源且梯度经 1/0.02 的 sigmoid 斜率放大。
+# ---- E6.x 系列开关 ----
+pose_repr: 6d
+stride: 20
+lambda_pose_vel: 0.0
+lambda_bone: 0.0
+continuation: false
+warm_start: false
+noise_scaled: false
+lr_schedule: constant
+# ----
 lambda_pose: 3.0
 lambda_traj: 1.0
 lambda_trec: 0.1
@@ -30,10 +50,7 @@ cam_id: 3
 seq_root: /data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/MotionPRO/sequences/cam3
 split_csv: /data/fangyuxuan/projects/gait/AnysoleWorkspace/splits/default/splits.csv
 cache_root: /data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/AnySole/hrnet_cache/cam3
-out_dir: /data/fangyuxuan/projects/gait/AnySole/outputs/v1
 use_insole_drift: false
 modal: anysolev1
-# Test5 接触检测方案（results_display/README.md ## Test5）：tactile_abs = 原 contact.npy 口径；
-# 其他方案读取 contact_<method>.npy，需先用 results_display/script/contact_methods.py 生成。
-contact_method: tactile_abs
+contact_method: joint_and
 template_path: /data/fangyuxuan/projects/gait/AnysoleWorkspace/calibration/insole_templates.json

@@ -263,7 +263,6 @@ def parse_args() -> argparse.Namespace:
         fps=False,
         stride=False,
         max_frames=False,
-        force=False,
         out_dir=True,
         out_dir_default=cli_common.DISPLAY_ROOT / "Test11_tau_regime",
     )
@@ -287,6 +286,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    out_dir = Path(cli_common.resolve_path(args.out_dir))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if cli_common.outputs_ready([out_dir / "tau_regime_report.json"]) and not args.force:
+        log.info("Skip Test11: {} already exists (use --force to overwrite)", out_dir / "tau_regime_report.json")
+        return 0
     config = load_config(Path(args.config))
     if args.contact_method:
         config["contact_method"] = str(args.contact_method)
@@ -327,8 +331,6 @@ def main() -> int:
 
     all_rows = []
     per_arm = {}
-    out_dir = Path(cli_common.resolve_path(args.out_dir))
-    out_dir.mkdir(parents=True, exist_ok=True)
     for arm in arms:
         per_arm[arm] = {}
         for lr in lrs:

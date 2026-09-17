@@ -618,7 +618,6 @@ def parse_args() -> argparse.Namespace:
         fps=False,
         stride=False,
         max_frames=False,
-        force=False,
         out_dir=True,
         out_dir_default=cli_common.DISPLAY_ROOT / "Test9_1_sampler",
     )
@@ -648,6 +647,9 @@ def main() -> int:
     device = resolve_device(args.device)
     out_dir = Path(cli_common.resolve_path(args.out_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
+    if cli_common.outputs_ready([out_dir / "test91_report.json"]) and not args.force:
+        log.info("Skip Test9.1: {} already exists (use --force to overwrite)", out_dir / "test91_report.json")
+        return 0
 
     dataset = AnySoleDataset(
         mode="train",

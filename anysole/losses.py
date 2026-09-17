@@ -11,8 +11,10 @@ from anysole.geometry import fk_pose6d
 from anysole.types import (
     CONFIG_T,
     FPS,
+    JOINT_PARENTS,
     LEFT_FOOT_JOINT,
     LEFT_TOE_JOINT,
+    N_JOINTS,
     RIGHT_FOOT_JOINT,
     RIGHT_TOE_JOINT,
 )
@@ -100,10 +102,38 @@ def compute_losses(out, batch, config_id, weights) -> dict:
     """Return all frozen V1 loss terms as scalar tensors."""
     pose_gt = batch["pose_gt"]
     trans_gt = batch["trans_gt"]
+    # E6.1: pose_repr "pos" switches the pose target to root-local positions.
+    # 6D is the default and keeps the original MSE loss.
+    pos_mode = str(weights.get("pose_repr", "6d")) == "pos"
 
-    l_pose = F.mse_loss(out["x0_hat"], pose_gt)
+    if pos_mode:
+        l_pose = F.l1_loss(out["x0_hat"], batch["pose_gt_pos"])
+        target = batch["pose_gt_pos"]
+    else:
+        l_pose = F.mse_loss(out["x0_hat"], pose_gt)
+        target = pose_gt
     l_traj, l_traj_vel, l_traj_delta = _trajectory_losses(out, batch, weights)
     l_trec = F.mse_loss(out["pressure_hat"], batch["T_raw"])
+
+    # E6.2: frame-to-frame smoothness of the diffused target (works for both
+    # representations; default weight 0 keeps the E5 behavior).
+    diff_pred = out["x0_hat"][:, 1:] - out["x0_hat"][:, :-1]
+    diff_gt = target[:, 1:] - target[:, :-1]
+    l_pose_vel = F.mse_loss(diff_pred, diff_gt)
+
+    # E6.2: bone-length rigidity (pos mode only - positions are the output
+    # space, so rigid skeleton lengths are a direct constraint; default 0).
+    l_bone = l_pose.new_zeros(())
+    if pos_mode:
+        pos3 = out["x0_hat"].reshape(*out["x0_hat"].shape[:2], 22, 3)
+        par_ids = [int(JOINT_PARENTS[j]) - 1 for j in range(1, N_JOINTS)]
+        ppos = torch.zeros_like(pos3)
+        for k, p in enumerate(par_ids):
+            if p >= 0:
+                ppos[..., k, :] = pos3[..., p, :]
+        len_pred = torch.linalg.vector_norm(pos3 - ppos, dim=-1)
+        len_gt = torch.linalg.vector_norm(batch["offsets"][:, 1:, :], dim=-1)
+        l_bone = F.mse_loss(len_pred, len_gt.unsqueeze(1).expand_as(len_pred))
 
     vrec_per_sample = (out["vfeat_hat"] - batch["V_feat"]).square().flatten(1).mean(dim=1)
     vrec_mask = config_id.to(device=vrec_per_sample.device).reshape(-1) == CONFIG_T
@@ -117,12 +147,23 @@ def compute_losses(out, batch, config_id, weights) -> dict:
     anchor = batch.get("trans_anchor")
     if anchor is None:
         anchor = trans_gt.new_zeros((trans_gt.shape[0], 3))
-    pred_kp = fk_pose6d(
-        out["x0_hat"], trans_gt + anchor[:, None, :], batch["offsets"], batch["parents"]
-    )
-    l_kp = F.mse_loss(pred_kp, batch["kp_gt"])
-    soft_contact = soft_contact_from_keypoints(pred_kp)
-    l_con = F.binary_cross_entropy(soft_contact, batch["contact_gt"])
+    trans_world = trans_gt + anchor[:, None, :]
+    if pos_mode:
+        # The E6 series keeps the FK keypoint supervision of the 6D lineage
+        # (lambda_kp): world kp = R_init @ local + trans, with the session
+        # frame-0 rotation from the dataset.  Contact loss stays disabled
+        # (lambda_con=0, E3/E5 convention) in pos experiments.
+        world = torch.einsum(
+            "bij,btpj->btpi", batch["root_rot_init"], pos3
+        ) + trans_world.unsqueeze(2)
+        pred_kp = torch.cat([trans_world.unsqueeze(2), world], dim=2)
+        l_kp = F.mse_loss(pred_kp, batch["kp_gt"])
+        l_con = l_pose.new_zeros(())
+    else:
+        pred_kp = fk_pose6d(out["x0_hat"], trans_world, batch["offsets"], batch["parents"])
+        l_kp = F.mse_loss(pred_kp, batch["kp_gt"])
+        soft_contact = soft_contact_from_keypoints(pred_kp)
+        l_con = F.binary_cross_entropy(soft_contact, batch["contact_gt"])
 
     total = (
         _weight(weights, "lambda_pose", 1.0) * l_pose
@@ -131,6 +172,8 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         + _weight(weights, "lambda_vrec", 0.1) * l_vrec
         + _weight(weights, "lambda_kp", 1.0) * l_kp
         + _weight(weights, "lambda_con", 0.1) * l_con
+        + _weight(weights, "lambda_pose_vel", 0.0) * l_pose_vel
+        + _weight(weights, "lambda_bone", 0.0) * l_bone
     )
     return {
         "L_pose": l_pose,
@@ -141,5 +184,7 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         "L_Vrec": l_vrec,
         "L_kp": l_kp,
         "L_con": l_con,
+        "L_pose_vel": l_pose_vel,
+        "L_bone": l_bone,
         "loss": total,
     }

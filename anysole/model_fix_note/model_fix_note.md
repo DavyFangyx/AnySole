@@ -1,7 +1,7 @@
 # AnySole V1 模型修复笔记（E 系列实验）
 
-> 时间：2026-09-15 ~ 2026-09-16。基线：wandb run yg01hyju（anysolev1_joint_and, 2000 epoch）。
-> 每个实验的 wandb tag：e1_taumax100 / e2_tnorm / e3_nocontact / e4_normdiff / e5_sched200。
+> 时间：2026-09-15 ~ 2026-09-17。基线：wandb run yg01hyju（anysolev1_joint_and, 2000 epoch）。
+> 每个实验的 wandb tag：e1_taumax100 / e2_tnorm / e3_nocontact / e4_normdiff / e5_sched200 / e6_6a / e6_6b。
 
 ## 起点问题（yg01hyju 基线，2000 epoch）
 
@@ -106,3 +106,50 @@
 2. **schedule 回退**：linear-200 的 x_T 纯噪声起步与训练分布（36% 信号）不一致；
    cosine-1000 + 10-20 步在 E4 上曾到 80mm，可作对照。
 3. 接触项软形式放回；训练拉满 2000 epoch 看 F 读出是否继续收敛。
+
+---
+
+## E6.6 系列：触觉路径重建（2026-09-17）
+
+> 动机：E6 笔记实测 T2M 链 211mm（S2M 同款鞋垫 133mm）→ 触觉通路基本是坏的；
+> echo 0.293（S2M 0.007）→ 条件弱时 head 只能回显输入噪声。治理 echo 的正路 =
+> 做强触觉条件（echo 是 Bayes 行为，不是损失可罚的）。
+> 根因三条：无 IMU 通道（S2M 的 IMU 由 GT BVH 脚部运动学合成，`process_gait.py`）、
+> 108 维单 Linear 无分组结构、V 主导融合稀释 T。
+> 执行手册：`E6x_tactile_loss_plan.md`（叠加链 E3→6.6a→6.6b→E6.1 pos→E6.3→E6.7，
+> 纯 CLI、单步回退、v1.yaml 不动）。E6.1/E6.3 为既有开关，本系列只新增触觉两步。
+
+### E6.6a（--tactile-input s2m50，200 ep 训练完成）
+
+- 改动：**只换通道，pipeline 不动**。t_enc 输入 108 维（96 压力 + 12 物理量）→
+  **T_s2m 50 维**，与 S2M `input_dim=50` 同口径：每脚 25 = 压力16（4×12 池化、
+  heel[8] toes[8]）+ acc3 + gyro3 + 力1 + CoP2。
+- IMU 由 **GT BVH 合成**（脚部世界位置二阶差分 + 全局旋转差分；`anysole/data/tactile_s2m.py`
+  照抄 `process_gait.py`，含世界系转换与减重力的两段式往返）。**泄漏口径与 S2M 评估
+  完全相同**；部署时需真实鞋垫 IMU，须补 IMU 置零消融。
+- 结果：用户观察有提升，eval 验收表待填（T2M one-shot 154 为 E3 参照）。
+
+### E6.6b（--tactile-input s2m50 --tactile-direct，200 ep 训练完成）
+
+- 改动：在 6.6a 之上，**pipeline 加旁路（纯加法）**：
+  1. 新 `TactileEncoder`（`anysole/models/tactile_encoder.py`）：8 组
+     （左右 × 脚跟压/脚掌压/IMU/其他）各自 MLP（S2M 分组）→ 求和合并为 t_tok；
+  2. pose head 记忆 `F → cat([F, t_tok])`（40→60 token）。
+- **关键语义（曾误解，已澄清）**：fusion 输入未动，t_tok 仍进 fusion →
+  **F 仍是 V+T 融合，不是纯 V**；触觉在 6.6b 有**两条通路**：① t_tok→fusion→F→pose head，
+  ② t_tok→直达→pose head 记忆。traj/aux 头仍读 V+T 的 F。
+- 梯度证据：direct 开/关对比，触觉编码器梯度 214.7 vs 35.8（6×）——稀释修复直接可见。
+- 结果：用户观察有提升，eval 验收表待填。
+- 判别信号（待 eval 后读）：T2M(6.6b) − T2M(6.6a) = 直达路径在"F 已含 T"之上的增量。
+  若 b≫a → F 里的 T 仍是稀释的 → 值得试 **E6.6d 变体**（T 撤出 fusion、F 纯 V、
+  pose/traj/aux 三头统一读 cat([F_v, t_tok])，S2M 的独立模态流哲学；代价：traj/aux
+  在 T-only 口径需改读合并记忆，且 T 失去 fusion 的跨帧 self-attn 上下文）。
+
+### 实现与验证状态
+
+- 新开关默认关闭 = 纯 E3 行为；`--stride`、`--lambda-*`×8 同批加入 train.py（E6.3/E6.7 用）。
+- 已验：E2–E6.3 全部现代 ckpt strict 加载通过（raw108 架构逐参数不变）；单测
+  （池化方向、gyro 3.49rad/s 精确、acc 0.402g 理论一致）；train/eval/infer 全链路集成。
+- 已知 bug（已修）：`_evaluate` 的 tau0 首批检查漏传 T_s2m，两实验在 epoch 10 首次
+  eval 崩溃后重跑修复版完成。
+- echo 探针接入 train.py 仍未做（`z_note/probe_head_generation_floor.py` 逻辑可用）。

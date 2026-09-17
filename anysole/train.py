@@ -19,8 +19,8 @@ from anysole.data.dataset import (
 )
 from anysole.diffusion import GaussianDiffusion
 from anysole.losses import compute_losses
-from anysole.models import AnySoleModel, MODEL_NAMES, MODEL_ANYSOLEV1
-from anysole.types import ANYSOLE_ROOT, CONFIG_PROBS, CONFIG_T, CONFIG_V, POSE_DIM, anysole_model_dir, assert_batch_shapes
+from anysole.models import AnySoleModel, MODEL_NAMES, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_POS
+from anysole.types import ANYSOLE_ROOT, CONFIG_PROBS, CONFIG_T, CONFIG_V, POSE_DIM, T_S2M_DIM, anysole_model_dir, assert_batch_shapes
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.geometry import fk_pose6d
 from anysole.losses import soft_contact_from_keypoints
@@ -38,6 +38,16 @@ DEFAULT_CONFIG = {
     "diffusion_train_steps": 1000,
     "diffusion_sample_steps": 50,
     "pose_layers": 6,
+    # ---- E6.x 系列开关（默认值保持既有行为；E3 基础用 noise_scaled=false +
+    # lr_schedule=constant，详见 model_fix_note/E6x_series_plan.md）----
+    "pose_repr": "6d",          # E6.1: "pos" = 根局部位置表示
+    "stride": None,             # E6.3: 训练窗 stride（None = 非重叠）
+    "lambda_pose_vel": 0.0,     # E6.2: 帧间平滑损失权重（0 = 关闭）
+    "lambda_bone": 0.0,         # E6.2: 骨长刚性损失权重（0 = 关闭，仅 pos 模式）
+    "continuation": False,      # E6.4: eval/infer 续写式推理
+    "warm_start": False,        # E6.5: 采样起点对齐训练边缘分布
+    "noise_scaled": True,       # E4 起的噪声缩放；E3 基础 = False
+    "lr_schedule": "cosine",    # E4 起的余弦衰减；E3 基础 = "constant"
     "lambda_pose": 1.0,
     "lambda_traj": 1.0,
     "lambda_trec": 0.1,
@@ -95,30 +105,46 @@ def move_batch(batch: dict, device: torch.device) -> dict:
     }
 
 
-def condition_inputs(batch: dict, config_id: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Zero absent modalities without modifying reconstruction targets in batch."""
+def condition_inputs(batch: dict, config_id: torch.Tensor, t_s2m_dim: int = T_S2M_DIM) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Zero absent modalities without modifying reconstruction targets in batch.
+
+    Returns (v_feat, t_raw, t_phys, t_s2m); t_s2m is only consumed when the
+    model was trained with tactile_input="s2m50" and is zeroed for V-only rows.
+    ``t_s2m_dim`` selects the fallback width for hand-built batches that omit
+    the E6.6 channel (50 by default, 38 for --no-imu checkpoints).
+    """
     drop_v = (config_id == CONFIG_T).view(-1, 1, 1)
     drop_t = (config_id == CONFIG_V).view(-1, 1, 1)
     v_feat = torch.where(drop_v, torch.zeros_like(batch["V_feat"]), batch["V_feat"])
     t_raw = torch.where(drop_t, torch.zeros_like(batch["T_raw"]), batch["T_raw"])
     t_phys = torch.where(drop_t, torch.zeros_like(batch["T_phys"]), batch["T_phys"])
-    return v_feat, t_raw, t_phys
+    t_s2m = batch.get("T_s2m")
+    if t_s2m is None:
+        # Manually-built batches (probes) may omit the E6.6 channel.
+        t_s2m = t_raw.new_zeros((t_raw.shape[0], t_raw.shape[1], t_s2m_dim))
+    else:
+        t_s2m = torch.where(drop_t, torch.zeros_like(t_s2m), t_s2m)
+    return v_feat, t_raw, t_phys, t_s2m
 
 
-def fit_pose_stats(loader: DataLoader, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
-    """One pass over the training loader: per-dim (POSE_DIM,) mean/std of pose_gt.
+def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt") -> Tuple[torch.Tensor, torch.Tensor]:
+    """One pass over the training loader: per-dim mean/std of the pose target.
 
-    The pose head normalizes its 6D input/output with these fixed stats (MDM/RoHM
+    The pose head normalizes its input/output with these fixed stats (MDM/RoHM
     normalize the motion representation before diffusing), so the values are
-    fitted once on the training set and frozen for the whole run.
+    fitted once on the training set and frozen for the whole run. ``key``
+    selects "pose_gt" (6D) or "pose_gt_pos" (E6.1 positions).
     """
     sums = torch.zeros(POSE_DIM, dtype=torch.float64, device=device)
     sumsq = torch.zeros(POSE_DIM, dtype=torch.float64, device=device)
     count = 0
     with torch.no_grad():
         for raw_batch in loader:
-            pose = raw_batch["pose_gt"].to(device=device, dtype=torch.float64, non_blocking=True)
-            flat = pose.reshape(-1, POSE_DIM)
+            pose = raw_batch[key].to(device=device, dtype=torch.float64, non_blocking=True)
+            if sums.shape[0] != pose.shape[-1]:
+                sums = torch.zeros(pose.shape[-1], dtype=torch.float64, device=device)
+                sumsq = torch.zeros(pose.shape[-1], dtype=torch.float64, device=device)
+            flat = pose.reshape(-1, pose.shape[-1])
             sums += flat.sum(dim=0)
             sumsq += flat.square().sum(dim=0)
             count += flat.shape[0]
@@ -134,6 +160,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=ANYSOLE_ROOT / "configs" / "v1.yaml")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument(
+        "--tw",
+        type=int,
+        default=None,
+        help="Window length in frames; overrides the config tw (e.g. --tw 100).",
+    )
     parser.add_argument(
         "--dropout",
         type=float,
@@ -174,6 +206,53 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Fix tau to this value for every training step. Test11 tau0 identity training "
         "(--tau-fixed 0: x_tau = x0 clean input, task degenerates to the identity map).",
     )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=None,
+        help="E6.3: training window stride (None = non-overlapping, stride == tw; "
+        "1 = every-frame alignment, Step2Motion-style).",
+    )
+    parser.add_argument(
+        "--tactile-input",
+        choices=("raw108", "s2m50"),
+        default=None,
+        help="E6.6a: tactile encoder input. raw108 = cat([T_raw, T_phys]) (E3); "
+        "s2m50 = Step2Motion-口径 50-dim channel (16 pooled pressure + synthesized "
+        "IMU + force + CoP, anysole/data/tactile_s2m.py). Saved into the checkpoint.",
+    )
+    parser.add_argument(
+        "--tactile-direct",
+        action="store_true",
+        default=None,
+        help="E6.6b: per-group tactile encoder (TactileEncoder) + direct pose-head "
+        "cross-attention to cat([F, t_tok]). Requires --tactile-input s2m50.",
+    )
+    parser.add_argument(
+        "--no-imu",
+        action="store_true",
+        default=None,
+        help="E6.8: delete the synthesized IMU channels (acc3+gyro3 per foot) from "
+        "the s2m50 tactile input — the data is built as 38-dim (pressure16+force+CoP "
+        "per foot, no IMU values computed or stored) and the encoder's IMU groups are "
+        "removed. Requires --tactile-input s2m50. Saved into the checkpoint.",
+    )
+    parser.add_argument("--lambda-pose", type=float, default=None, metavar="W",
+                        help="E6.7: override yaml loss weight lambda_pose.")
+    parser.add_argument("--lambda-kp", type=float, default=None, metavar="W",
+                        help="E6.7: override yaml loss weight lambda_kp.")
+    parser.add_argument("--lambda-traj", type=float, default=None, metavar="W",
+                        help="E6.7: override yaml loss weight lambda_traj.")
+    parser.add_argument("--lambda-trec", type=float, default=None, metavar="W",
+                        help="E6.7: override yaml loss weight lambda_trec.")
+    parser.add_argument("--lambda-vrec", type=float, default=None, metavar="W",
+                        help="E6.7: override yaml loss weight lambda_vrec.")
+    parser.add_argument("--lambda-con", type=float, default=None, metavar="W",
+                        help="E6.7: override yaml loss weight lambda_con.")
+    parser.add_argument("--lambda-pose-vel", type=float, default=None, metavar="W",
+                        help="E6.7: override yaml loss weight lambda_pose_vel (E6.2, pos mode).")
+    parser.add_argument("--lambda-bone", type=float, default=None, metavar="W",
+                        help="E6.7: override yaml loss weight lambda_bone (E6.2, pos mode).")
     parser.add_argument("--device", default="auto", help="Device such as cuda, cuda:0, or cpu.")
     parser.add_argument("--modal", choices=MODEL_NAMES, default=None, help="Model variant to train.")
     parser.add_argument(
@@ -203,6 +282,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 def _evaluate(model, diffusion, loader, config, device):
     """Return the epoch-level VT/V/T metrics used by the training dashboard."""
+    pos_mode = getattr(model.pose_head, "repr", "6d") == "pos"
     result = {}
     with torch.inference_mode():
         for config_value, config_name in zip((0, 1, 2), CONFIG_NAMES):
@@ -213,46 +293,73 @@ def _evaluate(model, diffusion, loader, config, device):
                 batch = move_batch(raw_batch, device)
                 bsz = batch["pose_gt"].shape[0]
                 cid = torch.full((bsz,), config_value, device=device, dtype=torch.long)
-                v_feat, t_raw, t_phys = condition_inputs(batch, cid)
+                v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, cid)
+                warm_prior = None
+                if bool(config.get("warm_start", False)):
+                    # E6.5: initialize the chain on the training marginal
+                    # (mean pose), not pure noise.
+                    warm_prior = model.pose_head.pose_mean.view(1, 1, -1).expand(
+                        bsz, int(config["tw"]), -1)
                 pred_pose = diffusion.ddim_sample_loop(
                     model, tau_related_kwargs={"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
-                    "config_id": cid, "session_id": batch.get("session_id")},
-                    shape=(bsz, int(config["tw"]), int(batch["pose_gt"].shape[-1])),
-                    steps=int(config["diffusion_sample_steps"]), eta=0.0, device=device)
+                    "T_s2m": t_s2m, "config_id": cid, "session_id": batch.get("session_id")},
+                    shape=(bsz, int(config["tw"]), model.pose_head.pose_dim),
+                    steps=int(config["diffusion_sample_steps"]), eta=0.0, device=device,
+                    prior=warm_prior)
                 zero = torch.zeros(bsz, device=device, dtype=torch.long)
-                out = model(v_feat, t_raw, t_phys, pred_pose, zero, cid, batch.get("session_id"))
+                out = model(v_feat, t_raw, t_phys, pred_pose, zero, cid, batch.get("session_id"), T_s2m=t_s2m)
                 anchor = batch["trans_anchor"][:, None, :]
                 pred_trans = out["trans_hat"] + anchor
                 gt_trans = batch["trans_gt"] + anchor
-                pred_kp = fk_pose6d(pred_pose, pred_trans, batch["offsets"], batch["parents"])
                 n = bsz
-                totals["mpjpe"] += float(torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1).mean().item()) * n * 1000.0
+                if pos_mode:
+                    # E6.1: compare in the metric space directly (22 joints,
+                    # root-local; root covered by root_ate below).
+                    err = torch.linalg.vector_norm(
+                        pred_pose.reshape(bsz, -1, 22, 3)
+                        - batch["pose_gt_pos"].reshape(bsz, -1, 22, 3),
+                        dim=-1,
+                    )
+                    totals["mpjpe"] += float(err.mean().item()) * n * 1000.0
+                else:
+                    pred_kp = fk_pose6d(pred_pose, pred_trans, batch["offsets"], batch["parents"])
+                    totals["mpjpe"] += float(torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1).mean().item()) * n * 1000.0
                 if first_batch:
                     # tau=0 clean-input reconstruction MPJPE on one batch (no
                     # diffusion sampling): tells apart "cannot fit the training
                     # data" from "cannot denoise", on the same joint scope as
                     # eval.py (all 23 joints).
-                    out0 = model(v_feat, t_raw, t_phys, batch["pose_gt"], zero, cid, batch.get("session_id"))
-                    kp0 = fk_pose6d(out0["x0_hat"], batch["trans_gt"] + anchor, batch["offsets"], batch["parents"])
-                    tau0_mpjpe = float(torch.linalg.vector_norm(kp0 - batch["kp_gt"], dim=-1).mean().item()) * 1000.0
+                    pose_in = batch["pose_gt_pos"] if pos_mode else batch["pose_gt"]
+                    out0 = model(v_feat, t_raw, t_phys, pose_in, zero, cid, batch.get("session_id"), T_s2m=t_s2m)
+                    if pos_mode:
+                        err0 = torch.linalg.vector_norm(
+                            out0["x0_hat"].reshape(bsz, -1, 22, 3)
+                            - batch["pose_gt_pos"].reshape(bsz, -1, 22, 3),
+                            dim=-1,
+                        )
+                        tau0_mpjpe = float(err0.mean().item()) * 1000.0
+                    else:
+                        kp0 = fk_pose6d(out0["x0_hat"], batch["trans_gt"] + anchor, batch["offsets"], batch["parents"])
+                        tau0_mpjpe = float(torch.linalg.vector_norm(kp0 - batch["kp_gt"], dim=-1).mean().item()) * 1000.0
                     first_batch = False
                 pred_rel = pred_trans - pred_trans[:, :1]
                 gt_rel = gt_trans - gt_trans[:, :1]
                 totals["root_ate"] += float(torch.linalg.vector_norm(pred_rel - gt_rel, dim=-1).mean().item()) * n
-                pred_contact = soft_contact_from_keypoints(pred_kp) > 0.5
-                gt_contact = batch["contact_gt"] > 0.5
-                tp = (pred_contact & gt_contact).sum().item()
-                fp = (pred_contact & ~gt_contact).sum().item()
-                fn = (~pred_contact & gt_contact).sum().item()
-                totals.setdefault("tp", 0); totals.setdefault("fp", 0); totals.setdefault("fn", 0)
-                totals["tp"] += tp; totals["fp"] += fp; totals["fn"] += fn
-                foot = pred_kp[:, :, (17, 18, 21, 22), :][:, :, :, [0, 2]]
-                # Keypoints are meters; report horizontal contact speed in cm/s.
-                speed = torch.linalg.vector_norm(foot[:, 1:] - foot[:, :-1], dim=-1).mean(dim=-1) * 40.0 * 100.0
-                contact_frames = pred_contact[:, 1:].any(dim=-1)
-                slide = speed[contact_frames]
-                if slide.numel():
-                    totals["foot_slide"] += float(slide.mean().item()) * n
+                if not pos_mode:
+                    pred_contact = soft_contact_from_keypoints(pred_kp) > 0.5
+                    gt_contact = batch["contact_gt"] > 0.5
+                    tp = (pred_contact & gt_contact).sum().item()
+                    fp = (pred_contact & ~gt_contact).sum().item()
+                    fn = (~pred_contact & gt_contact).sum().item()
+                    totals.setdefault("tp", 0); totals.setdefault("fp", 0); totals.setdefault("fn", 0)
+                    totals["tp"] += tp; totals["fp"] += fp; totals["fn"] += fn
+                    foot = pred_kp[:, :, (17, 18, 21, 22), :][:, :, :, [0, 2]]
+                    # Keypoints are meters; report horizontal contact speed in cm/s.
+                    speed = torch.linalg.vector_norm(foot[:, 1:] - foot[:, :-1], dim=-1).mean(dim=-1) * 40.0 * 100.0
+                    contact_frames = pred_contact[:, 1:].any(dim=-1)
+                    slide = speed[contact_frames]
+                    if slide.numel():
+                        totals["foot_slide"] += float(slide.mean().item()) * n
                 totals["n"] += n
             count = max(totals["n"], 1)
             p = totals.get("tp", 0) / max(totals.get("tp", 0) + totals.get("fp", 0), 1)
@@ -274,6 +381,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["epochs"] = args.epochs
     if args.batch_size is not None:
         config["batch_size"] = args.batch_size
+    if args.tw is not None:
+        if args.tw < 1:
+            raise ValueError("--tw must be positive")
+        config["tw"] = int(args.tw)
     if args.dropout is not None:
         config["dropout"] = float(args.dropout)
     if args.config_probs is not None:
@@ -318,6 +429,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not args.loss_cap > 0.0:
             raise ValueError("--loss-cap must be positive")
         config["loss_cap"] = float(args.loss_cap)
+    if args.stride is not None:
+        if not 1 <= args.stride <= int(config["tw"]):
+            raise ValueError("--stride must be in [1, tw]")
+        config["stride"] = int(args.stride)
+    if args.tactile_input is not None:
+        config["tactile_input"] = args.tactile_input
+    if args.tactile_direct:
+        config["tactile_direct"] = True
+    if args.no_imu:
+        if str(config.get("tactile_input", "raw108")) != "s2m50":
+            raise ValueError("--no-imu requires --tactile-input s2m50 (raw108 has no IMU channels)")
+        config["no_imu"] = True
+    for key in ("lambda_pose", "lambda_kp", "lambda_traj", "lambda_trec", "lambda_vrec",
+                "lambda_con", "lambda_pose_vel", "lambda_bone"):
+        value = getattr(args, key)
+        if value is not None:
+            config[key] = float(value)
 
     try:
         dataset = AnySoleDataset(
@@ -328,6 +456,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             window_length=int(config["tw"]),
             session_ids=session_ids,
             contact_method=str(config["contact_method"]),
+            stride=config.get("stride"),
+            no_imu=bool(config.get("no_imu", False)),
         )
     except FileNotFoundError as exc:
         if "HRNet cache" in str(exc):
@@ -351,7 +481,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]))
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), no_imu=bool(config.get("no_imu", False)))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:
@@ -403,20 +533,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         modal=modal,
         use_insole_drift=bool(config.get("use_insole_drift", False)),
         pose_layers=int(config.get("pose_layers", 6)),
+        tactile_input=str(config.get("tactile_input", "raw108")),
+        tactile_direct=bool(config.get("tactile_direct", False)),
+        no_imu=bool(config.get("no_imu", False)),
         **model_kw,
     ).to(device)
     # Frozen pose-normalization stats (recorded so eval/infer rebuild the same depth).
     config["pose_layers"] = int(config.get("pose_layers", 6))
-    # E4: training noise is scaled by pose_std (see q_sample below).  The flag
-    # is saved in every checkpoint so eval/infer can match the sampling init
-    # scale; checkpoints trained without it (E3 and earlier) sample unscaled.
-    config["noise_scaled"] = True
-    model.noise_scaled = True
-    pose_mean, pose_std = fit_pose_stats(loader, device)
+    # E6.1: pose_repr follows the modal so losses/eval agree with the head.
+    config["pose_repr"] = "pos" if modal == MODEL_ANYSOLEV1_POS else str(config.get("pose_repr", "6d"))
+    pos_mode = config["pose_repr"] == "pos"
+    if pos_mode and float(config.get("lambda_pose_vel", 0.0)) == 0.0 and float(config.get("lambda_bone", 0.0)) == 0.0:
+        # Guard against repeating the 2026-09-16 misconfigured E6.2 launches:
+        # three runs went out with the E6.2 losses at 0 (yaml default) and
+        # were indistinguishable from E6.1.  E6.2 without these losses is
+        # E6.1 - make that impossible to miss.
+        print("=" * 79)
+        print("WARNING: pos modal with lambda_pose_vel=0 AND lambda_bone=0")
+        print("         this trains plain E6.1, not E6.2 (smooth/rigidity off).")
+        print("         pass --lambda-pose-vel 10.0 --lambda-bone 1.0 for E6.2.")
+        print("=" * 79)
+    # noise_scaled is a config knob now: E3 base = False (unscaled N(0,1)
+    # noise, the regime whose output was verified good), E4+ = True.  Saved in
+    # every checkpoint so eval/infer match the sampling init scale.
+    config["noise_scaled"] = bool(config.get("noise_scaled", True))
+    model.noise_scaled = config["noise_scaled"]
+    pose_mean, pose_std = fit_pose_stats(
+        loader, device, key="pose_gt_pos" if pos_mode else "pose_gt"
+    )
     model.pose_head.set_stats(pose_mean, pose_std)
     print("pose stats: mean %.4f +/- %.4f, std %.4f +/- %.4f (dims floored at 1e-2: %d/%d)"
           % (pose_mean.mean().item(), pose_mean.std().item(), pose_std.mean().item(),
-             pose_std.std().item(), int((pose_std <= 1e-2).sum().item()), POSE_DIM))
+             pose_std.std().item(), int((pose_std <= 1e-2).sum().item()), pose_mean.shape[0]))
     diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))
     out_dir = Path(config["out_dir"])
@@ -425,22 +573,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     global_step = 0
     for epoch in range(int(config["epochs"])):
         model.train()
-        # E4: cosine LR decay over the whole run (was constant lr; E3 showed
-        # val metrics still improving at epoch 800 with lr pinned at 1e-3).
-        progress = epoch / float(config["epochs"])
-        cos_lr = float(config["lr"]) * 0.5 * (1.0 + math.cos(math.pi * progress))
+        # E4 cosine LR decay over the whole run; E3 base uses lr_schedule
+        # "constant" (E3's regime, whose output was verified good).
+        if str(config.get("lr_schedule", "cosine")) == "constant":
+            epoch_lr = float(config["lr"])
+        else:
+            progress = epoch / float(config["epochs"])
+            epoch_lr = float(config["lr"]) * 0.5 * (1.0 + math.cos(math.pi * progress))
         for group in optimizer.param_groups:
-            group["lr"] = cos_lr
+            group["lr"] = epoch_lr
         epoch_start_step = global_step
         nonfinite_skips = 0
-        epoch_sums = {"loss_total": 0.0, "loss_pose": 0.0, "loss_traj": 0.0, "loss_con": 0.0, "loss_kp": 0.0, "loss_Trec_Tmissing": 0.0, "loss_Vrec_Vmissing": 0.0, "grad_norm": 0.0, "n": 0, "n_tmissing": 0, "n_vmissing": 0}
+        epoch_sums = {"loss_total": 0.0, "loss_pose": 0.0, "loss_traj": 0.0, "loss_con": 0.0, "loss_kp": 0.0, "loss_pose_vel": 0.0, "loss_bone": 0.0, "loss_Trec_Tmissing": 0.0, "loss_Vrec_Vmissing": 0.0, "grad_norm": 0.0, "n": 0, "n_tmissing": 0, "n_vmissing": 0}
         for raw_batch in loader:
             batch = move_batch(raw_batch, device)
             batch_size = batch["pose_gt"].shape[0]
             config_id = sample_config_ids(batch_size, probs=config["config_probs"]).to(device)
             batch["config_id"] = config_id
-            assert_batch_shapes(batch, batch_size)
-            v_feat, t_raw, t_phys = condition_inputs(batch, config_id)
+            assert_batch_shapes(batch, batch_size, tw=int(config["tw"]))
+            v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
 
             # Test11 τ training-regime knobs: --tau-fixed pins every step to one
             # noise level (0 = identity-mapping training), --tau-max narrows the
@@ -465,10 +616,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             # same thing here since the head normalizes its input internally).
             # Without this, N(0,1) noise lands on a signal of std ~0.118 (8.5x
             # SNR mismatch) and the DDIM chain injects per-frame jitter.
-            noise = torch.randn_like(batch["pose_gt"]) * model.pose_head.pose_std.view(1, 1, -1)
-            x_tau = diffusion.q_sample(batch["pose_gt"], tau, noise=noise)
+            pose_target = batch["pose_gt_pos"] if pos_mode else batch["pose_gt"]
+            noise = torch.randn_like(pose_target)
+            if model.noise_scaled:
+                noise = noise * model.pose_head.pose_std.view(1, 1, -1)
+            x_tau = diffusion.q_sample(pose_target, tau, noise=noise)
             optimizer.zero_grad(set_to_none=True)
-            out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id, batch.get("session_id"))
+            out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id, batch.get("session_id"), T_s2m=t_s2m)
             losses = compute_losses(out, batch, config_id, config)
 
             finite = torch.isfinite(losses["loss"]) and torch.isfinite(out["F"]).all()
@@ -490,7 +644,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             optimizer.step()
             n = batch_size
             epoch_sums["n"] += n
-            for key, name in (("loss", "loss_total"), ("L_pose", "loss_pose"), ("L_traj", "loss_traj"), ("L_con", "loss_con"), ("L_kp", "loss_kp")):
+            for key, name in (("loss", "loss_total"), ("L_pose", "loss_pose"), ("L_traj", "loss_traj"), ("L_con", "loss_con"), ("L_kp", "loss_kp"), ("L_pose_vel", "loss_pose_vel"), ("L_bone", "loss_bone")):
                 epoch_sums[name] += float(losses[key].detach().item()) * n
             n_tmissing = int((config_id == CONFIG_T).sum().item())
             n_vmissing = int((config_id == CONFIG_V).sum().item())

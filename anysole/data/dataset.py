@@ -13,12 +13,14 @@ from torch.utils.data import Dataset
 
 from anysole.data.bvh_io import resample_session_bvh
 from anysole.data.pressure import load_session_pressure, normalize_raw
-from anysole.geometry import fk_pose6d_np
+from anysole.data.tactile_s2m import build_t_s2m
+from anysole.geometry import fk_pose6d_np, rot6d_to_rotmat_np
 from anysole.types import (
     CONFIG_PROBS,
     FPS,
     HRNET_CACHE_ROOT,
     JOINT_PARENTS,
+    N_JOINTS,
     SEQ_ROOT,
     SPLIT_CSV,
     TW,
@@ -133,9 +135,20 @@ class AnySoleDataset(Dataset):
         session_ids: Optional[Sequence[str]] = None,
         allow_missing_video: bool = False,
         contact_method: str = "tactile_abs",
+        stride: Optional[int] = None,
+        no_imu: bool = False,
     ):
         self.mode = mode
         self.window_length = int(window_length)
+        # --no-imu: T_s2m is built without the synthesized IMU channels
+        # (38-dim instead of 50-dim; see tactile_s2m.py).
+        self.no_imu = bool(no_imu)
+        # E6.3: window stride. None = non-overlapping (stride == window_length,
+        # the pre-E6 behavior). Training may use stride=1 (every frame
+        # alignment, Step2Motion-style); continuation eval uses tw//2.
+        self.stride = int(stride) if stride is not None else self.window_length
+        if not 1 <= self.stride <= self.window_length:
+            raise ValueError("stride must be in [1, window_length]")
         self.seq_root = Path(seq_root)
         self.cache_root = Path(cache_root)
         self.allow_missing_video = allow_missing_video
@@ -200,6 +213,27 @@ class AnySoleDataset(Dataset):
                 )
 
             kp = fk_pose6d_np(bvh["pose_6d"], bvh["trans_m"], bvh["offsets_m"], bvh["parents"])
+            t_raw_norm = normalize_raw(pressure["T_raw"])
+            # E6.6a: Step2Motion-口径触觉通道（50 维/帧：16 压力池化 + 合成 IMU
+            # + 总力 + CoP）。IMU 由本会话 GT BVH 脚部运动学合成（与
+            # Step2Motion gait 导出同口径，含 GT 派生信息，见 tactile_s2m.py）。
+            # --no-imu：38 维/帧，IMU 通道真删（不合成、不存储）。
+            t_s2m = build_t_s2m(
+                bvh["pose_6d"], bvh["trans_m"], bvh["offsets_m"], bvh["parents"], t_raw_norm,
+                no_imu=self.no_imu,
+            )
+            # E6.1: root-local positions of the 22 non-root joints, in the
+            # session frame-0 root frame (Step2Motion initial_global_rot
+            # convention).  World(t) = R_init @ local(t), so turns stay in the
+            # local yaw and are learned from the condition.
+            root_rot = rot6d_to_rotmat_np(
+                bvh["pose_6d"].reshape(n_frames, N_JOINTS, 6)[:, 0:1, :]
+            )[:, 0]  # (T,3,3) world root rotation
+            root_rot_init = root_rot[0].astype(np.float32)
+            rel = kp[:, 1:, :] - kp[:, 0:1, :]  # (T,22,3) world-relative
+            pose_pos = np.einsum(
+                "ij,tpj->tpi", root_rot_init.T, rel
+            ).reshape(n_frames, -1).astype(np.float32)
             trans = bvh["trans_m"]
             vel = np.zeros_like(trans)
             # Store true forward differences in m/s.  The first frame has no
@@ -211,9 +245,12 @@ class AnySoleDataset(Dataset):
                 "session_id": session_id,
                 "hierarchy": bvh["hierarchy"],
                 "V_feat": v_feat.astype(np.float32),
-                "T_raw": normalize_raw(pressure["T_raw"]),
+                "T_raw": t_raw_norm,
                 "T_phys": pressure["T_phys"],
+                "T_s2m": t_s2m,
                 "pose_gt": bvh["pose_6d"],
+                "pose_gt_pos": pose_pos,
+                "root_rot_init": root_rot_init,
                 "trans_global": trans.astype(np.float32),
                 "vel_gt": vel.astype(np.float32),
                 "kp_gt": kp.astype(np.float32),
@@ -223,16 +260,20 @@ class AnySoleDataset(Dataset):
                 "fake_mask": fake_mask,
             }
             file_index = len(self.sessions)
-            n_windows = n_frames // self.window_length
+            if n_frames >= self.window_length:
+                n_windows = (n_frames - self.window_length) // self.stride + 1
+            else:
+                n_windows = 0
             for window_idx in range(n_windows):
-                left = window_idx * self.window_length
+                left = window_idx * self.stride
                 right = left + self.window_length
                 if fake_mask[left:right].any():
                     continue
                 self.valid_windows.append((file_index, left, right))
             self.sessions.append(session)
 
-        print("%s sessions=%d windows=%d contact_method=%s" % (self.mode, len(self.sessions), len(self.valid_windows), self.contact_method))
+        print("%s sessions=%d windows=%d contact_method=%s no_imu=%s" % (
+            self.mode, len(self.sessions), len(self.valid_windows), self.contact_method, self.no_imu))
 
     def __len__(self) -> int:
         return len(self.valid_windows)
@@ -252,12 +293,15 @@ class AnySoleDataset(Dataset):
             "V_feat": crop("V_feat"),
             "T_raw": crop("T_raw"),
             "T_phys": crop("T_phys"),
+            "T_s2m": crop("T_s2m"),
             "pose_gt": crop("pose_gt"),
+            "pose_gt_pos": crop("pose_gt_pos"),
             "vel_gt": crop("vel_gt"),
             "kp_gt": crop("kp_gt"),
             "contact_gt": crop("contact_gt"),
             "offsets": torch.from_numpy(session["offsets"]).float(),
             "parents": torch.from_numpy(session["parents"]).long(),
+            "root_rot_init": torch.from_numpy(session["root_rot_init"]).float(),
             "session_id": session["session_id"],
             "hierarchy": session["hierarchy"],
             "frame_start": torch.tensor(left, dtype=torch.long),
