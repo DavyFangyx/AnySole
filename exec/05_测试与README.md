@@ -9,7 +9,7 @@
 ## 写哪些文件
 
 1. `README.md`
-2. 可选：`tests/test_smoke.py` 只留一个 CPU dummy forward。不要写 geometry/dataset 的长测试套。
+2. 可选：一个 CPU dummy forward smoke（放 `z_note/`，如 `z_note/smoke_*.py`）。不要写 geometry/dataset 的长测试套。
 
 ---
 
@@ -35,7 +35,7 @@
 若需要一个文件让 import 链可见，最多：
 
 ```python
-# tests/test_smoke.py
+# z_note/smoke_forward.py
 def test_forward_cpu():
     import torch
     from anysole.models import AnySoleModel

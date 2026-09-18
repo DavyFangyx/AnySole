@@ -15,7 +15,7 @@ from anysole.data.dataset import find_session_dir, hrnet_cache_path, resolve_bvh
 from anysole.data.pressure import load_session_pressure, normalize_raw
 from anysole.data.tactile_s2m import build_t_s2m
 from anysole.diffusion import GaussianDiffusion
-from anysole.models import AnySoleModel, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_NAMES
+from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.train import load_config, resolve_device
 from anysole.types import (
@@ -26,6 +26,7 @@ from anysole.types import (
     CONFIG_VT,
     FAKE_MARKED_ROOT,
     FPS,
+    GAIT_ROOT,
     POSE_DIM,
     T_PHYS_DIM,
     T_RAW_DIM,
@@ -52,7 +53,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Model-dir suffix when --ckpt is omitted (anysolev1_{ablation}_{contact_method}).",
     )
     parser.add_argument("--session", required=True)
-    parser.add_argument("--config", type=Path, default=ANYSOLE_ROOT / "configs" / "v1.yaml")
+    parser.add_argument("--config", type=Path, default=GAIT_ROOT / "configs" / "v1.yaml")
     parser.add_argument(
         "--config-id",
         default=None,
@@ -177,11 +178,19 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
         # --no-imu checkpoint: the tactile channel is 38-dim. Rebuild the zero
         # placeholder (used for V-only rows) at the deleted-channel width.
         t_s2m = np.zeros((n_frames, T_S2M_NOIMU_DIM), dtype=np.float32)
-    model = AnySoleModel(
-        d=d_model, tw=tw, modal=modal, dropout=dropout, pose_layers=pose_layers,
-        tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
-        **model_kw,
-    ).to(device)
+    if modal == MODEL_ANYSOLEV2:
+        # F0b: regression model — the regress pose head is implied by the
+        # modal; forward takes no diffusion pair.
+        model = AnySoleModelV2(
+            d=d_model, tw=tw, dropout=dropout, pose_layers=pose_layers,
+            tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
+        ).to(device)
+    else:
+        model = AnySoleModel(
+            d=d_model, tw=tw, modal=modal, dropout=dropout, pose_layers=pose_layers,
+            tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
+            **model_kw,
+        ).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     # E4: match the checkpoint's training noise scale (see train.py noise_scaled).
     model.noise_scaled = bool(saved_config.get("noise_scaled", False))
@@ -240,27 +249,33 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
                 "config_id": config_id,
                 "session_id": [args.session] * (right - left),
             }
-            prior = model.pose_head.pose_mean.view(1, 1, -1).expand(right - left, tw, -1) if warm_start else None
-            if continuation:
-                x_T = torch.randn(right - left, tw, model.pose_head.pose_dim, device=device)
-                if model.noise_scaled:
-                    x_T = x_T * model.pose_head.pose_std.to(device).view(1, 1, -1)
-                pred_pose, carry = diffusion.ddim_sample_loop_continue(
-                    model, x_T=x_T, tau_related_kwargs=cond,
-                    steps=sample_steps, half=half, carry=carry)
+            if modal == MODEL_ANYSOLEV2:
+                # F0b: one regression forward per window, no sampling chain.
+                out = model(v_batch, traw_batch, tphys_batch, config_id,
+                            [args.session] * (right - left), T_s2m=ts2m_batch)
+                pred_pose = out["x0_hat"]
             else:
-                pred_pose = diffusion.ddim_sample_loop(
-                    model,
-                    tau_related_kwargs=cond,
-                    shape=(right - left, tw, model.pose_head.pose_dim),
-                    steps=sample_steps,
-                    eta=0.0,
-                    device=device,
-                    prior=prior,
-                )
-            tau_zero = torch.zeros(right - left, device=device, dtype=torch.long)
-            out = model(v_batch, traw_batch, tphys_batch, pred_pose, tau_zero, config_id,
-                        [args.session] * (right - left), T_s2m=ts2m_batch)
+                prior = model.pose_head.pose_mean.view(1, 1, -1).expand(right - left, tw, -1) if warm_start else None
+                if continuation:
+                    x_T = torch.randn(right - left, tw, model.pose_head.pose_dim, device=device)
+                    if model.noise_scaled:
+                        x_T = x_T * model.pose_head.pose_std.to(device).view(1, 1, -1)
+                    pred_pose, carry = diffusion.ddim_sample_loop_continue(
+                        model, x_T=x_T, tau_related_kwargs=cond,
+                        steps=sample_steps, half=half, carry=carry)
+                else:
+                    pred_pose = diffusion.ddim_sample_loop(
+                        model,
+                        tau_related_kwargs=cond,
+                        shape=(right - left, tw, model.pose_head.pose_dim),
+                        steps=sample_steps,
+                        eta=0.0,
+                        device=device,
+                        prior=prior,
+                    )
+                tau_zero = torch.zeros(right - left, device=device, dtype=torch.long)
+                out = model(v_batch, traw_batch, tphys_batch, pred_pose, tau_zero, config_id,
+                            [args.session] * (right - left), T_s2m=ts2m_batch)
             trans_rel = out["trans_hat"].cpu()
             if pos_mode:
                 for w in range(right - left):

@@ -24,7 +24,7 @@ from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.diffusion import GaussianDiffusion
 from anysole.geometry import fk_pose6d, positions_to_6d_np, rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np
 from anysole.losses import soft_contact_from_keypoints
-from anysole.models import AnySoleModel, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_NAMES
+from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.types import (
@@ -108,7 +108,7 @@ class MetricSums:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate AnySole V1 with DDIM sampling.")
-    parser.add_argument("--config", type=Path, default=ANYSOLE_ROOT / "configs" / "v1.yaml")
+    parser.add_argument("--config", type=Path, default=GAIT_ROOT / "configs" / "v1.yaml")
     parser.add_argument(
         "--ckpt",
         type=Path,
@@ -145,6 +145,25 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--no-write-bvh", action="store_true", help="Disable the default BVH/traj export.")
     parser.add_argument("--metrics-out", type=Path, default=None, metavar="FILE",
                         help="Write VT2M/V2M/T2M metrics as JSON (default: model results metrics directory).")
+    parser.add_argument(
+        "--no-protocol",
+        action="store_true",
+        help="F0a: skip the extended protocol pass (eval_protocol.py, "
+        "metrics/<split>_fseries.json).",
+    )
+    parser.add_argument(
+        "--protocol-seed",
+        type=int,
+        default=0,
+        help="F0a: RNG seed for the protocol pass (matters for diffusion sampling). "
+        "Sigma-seed needs three runs with seeds 0/1/2.",
+    )
+    parser.add_argument(
+        "--no-robustness",
+        action="store_true",
+        help="F0a: skip the protocol robustness rows (contiguous 20-40%% V / T frame "
+        "dropout under VT2M).",
+    )
     return parser.parse_args(argv)
 
 
@@ -220,12 +239,20 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
     tactile_input = str(saved_config.get("tactile_input", "raw108"))
     tactile_direct = bool(saved_config.get("tactile_direct", False))
     no_imu = bool(saved_config.get("no_imu", False))
-    model = AnySoleModel(
-        d=d_model, tw=tw, modal=modal, use_insole_drift=use_drift, dropout=dropout,
-        pose_layers=pose_layers, tactile_input=tactile_input, tactile_direct=tactile_direct,
-        no_imu=no_imu,
-        **model_kw,
-    ).to(device)
+    if modal == MODEL_ANYSOLEV2:
+        # F0b: regression model (model_v2.py); the regress pose head is
+        # implied by the modal, and forward takes no diffusion pair.
+        model = AnySoleModelV2(
+            d=d_model, tw=tw, dropout=dropout, pose_layers=pose_layers,
+            tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
+        ).to(device)
+    else:
+        model = AnySoleModel(
+            d=d_model, tw=tw, modal=modal, use_insole_drift=use_drift, dropout=dropout,
+            pose_layers=pose_layers, tactile_input=tactile_input, tactile_direct=tactile_direct,
+            no_imu=no_imu,
+            **model_kw,
+        ).to(device)
     model.load_state_dict(checkpoint["model"], strict=True)
     # E4: sampling init scale must match the checkpoint's training noise scale
     # (train.py saves noise_scaled=True when it scales q_sample noise by
@@ -354,6 +381,7 @@ def _evaluate_one(
     sample_steps = int(args.sample_steps or config["diffusion_sample_steps"])
     model.diffusion_abar_top = float(diffusion.alphas_cumprod[diffusion.n_train_steps - 1])
     pos_mode = checkpoint_modal == MODEL_ANYSOLEV1_POS
+    regress_mode = checkpoint_modal == MODEL_ANYSOLEV2
     continuation = bool(config.get("continuation", False))
     warm_start = bool(config.get("warm_start", False))
 
@@ -504,27 +532,36 @@ def _evaluate_one(
                     batch["config_id"] = config_id
                     assert_batch_shapes(batch, batch_size, tw=tw)
                     v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
-                    cond = {
-                        "V_feat": v_feat,
-                        "T_raw": t_raw,
-                        "T_phys": t_phys,
-                        "T_s2m": t_s2m,
-                        "config_id": config_id,
-                        "session_id": batch.get("session_id"),
-                    }
-                    prior = model.pose_head.pose_mean.view(1, 1, -1).expand(batch_size, tw, -1) if warm_start else None
-                    pred_pose = diffusion.ddim_sample_loop(
-                        model,
-                        tau_related_kwargs=cond,
-                        shape=(batch_size, tw, POSE_DIM),
-                        steps=sample_steps,
-                        eta=0.0,
-                        device=device,
-                        prior=prior,
-                    )
-                    tau_zero = torch.zeros(batch_size, device=device, dtype=torch.long)
-                    out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id,
-                                batch.get("session_id"), T_s2m=t_s2m)
+                    if regress_mode:
+                        # F0b: single regression forward — no DDIM chain.
+                        # E6.4 continuation is diffusion-era and never applies
+                        # here (F3 replaces it with Hann blending); the FADE=4
+                        # crossfade below stays.
+                        out = model(v_feat, t_raw, t_phys, config_id,
+                                    batch.get("session_id"), T_s2m=t_s2m)
+                        pred_pose = out["x0_hat"]
+                    else:
+                        cond = {
+                            "V_feat": v_feat,
+                            "T_raw": t_raw,
+                            "T_phys": t_phys,
+                            "T_s2m": t_s2m,
+                            "config_id": config_id,
+                            "session_id": batch.get("session_id"),
+                        }
+                        prior = model.pose_head.pose_mean.view(1, 1, -1).expand(batch_size, tw, -1) if warm_start else None
+                        pred_pose = diffusion.ddim_sample_loop(
+                            model,
+                            tau_related_kwargs=cond,
+                            shape=(batch_size, tw, POSE_DIM),
+                            steps=sample_steps,
+                            eta=0.0,
+                            device=device,
+                            prior=prior,
+                        )
+                        tau_zero = torch.zeros(batch_size, device=device, dtype=torch.long)
+                        out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id,
+                                    batch.get("session_id"), T_s2m=t_s2m)
                     pred_trans = out["trans_hat"]
                     anchor = batch["trans_anchor"][:, None, :]
                     pred_trans_world = pred_trans + anchor
@@ -636,6 +673,32 @@ def _evaluate_one(
         payload["v2t"] = {name: all_values["V2M"][name] for name in ("T_mae", "T_rmse", "T_corr")}
     metrics_out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print("wrote %s" % metrics_out)
+    # F0a: extended protocol (per-part aggregation, W-MPJPE/RTE/yaw,
+    # jitter/accel/seam, contact F1 + foot slide, V2M pressure quality, T2M
+    # upper-body plausibility, robustness rows) -> metrics/<split>_fseries.json.
+    # Runs after the frozen per-window metrics so the classic JSON stays the
+    # single source for the pre-F0 numbers.
+    if not args.no_protocol:
+        from anysole.eval_protocol import run_protocol
+        run_protocol(
+            checkpoint=checkpoint,
+            config=config,
+            model=model,
+            dataset=dataset,
+            device=device,
+            checkpoint_path=str(ckpt),
+            split=args.split,
+            config_values=config_values,
+            regress_mode=regress_mode,
+            diffusion=diffusion,
+            sample_steps=sample_steps,
+            warm_start=warm_start,
+            seed=args.protocol_seed,
+            robustness=not args.no_robustness,
+            contact_method=contact_method,
+            tw=tw,
+            out_path=model_root / "metrics" / ("%s_fseries.json" % args.split),
+        )
     return 0
 
 

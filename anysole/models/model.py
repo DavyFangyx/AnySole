@@ -19,6 +19,7 @@ from anysole.models.aux_heads import AuxHeads
 from anysole.models.embeddings import SharedEmbeddings
 from anysole.models.encoders import ModalEncoders
 from anysole.models.fusion import FusionTransformer
+from anysole.models.model_v2 import MODEL_ANYSOLEV2
 from anysole.models.pose_head import PoseHead
 from anysole.models.traj_head import TrajHead
 from anysole.types import D_MODEL, TW
@@ -31,7 +32,9 @@ MODEL_ANYSOLEV1_INSOLE_DRIFT = "anysolev1_insole_drift"
 # E6.1: position-space variant (same encoders/fusion/decoder, pose head
 # diffuses root-local positions instead of 6D rotations).
 MODEL_ANYSOLEV1_POS = "anysolev1_pos"
-MODEL_NAMES = (MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS)
+# F0b: V2 regression model lives in model_v2.py (AnySoleModelV2); the modal
+# name is registered here so train/eval/infer MODAL choice lists share it.
+MODEL_NAMES = (MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2)
 
 
 class AnySoleModel(nn.Module):
@@ -44,6 +47,11 @@ class AnySoleModel(nn.Module):
         self.tw = tw
         if modal not in MODEL_NAMES:
             raise ValueError("Unknown modal %r; expected one of %s" % (modal, MODEL_NAMES))
+        if modal == MODEL_ANYSOLEV2:
+            raise ValueError(
+                "anysolev2 must be constructed as AnySoleModelV2 "
+                "(anysole/models/model_v2.py); AnySoleModel is the V1 diffusion model"
+            )
         self.modal = modal
         self.use_insole_drift = bool(use_insole_drift or modal == MODEL_ANYSOLEV1_INSOLE_DRIFT)
         if self.use_insole_drift:

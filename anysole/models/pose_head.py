@@ -21,6 +21,12 @@ E6.1: ``repr="pos"`` switches the diffused target from 6D rotations (138) to
 root-local 3D positions (66, 22 non-root joints) without touching the decoder
 structure - only the per-joint I/O width changes (6 -> 3). Default "6d" keeps
 the pre-E6 behavior exactly.
+
+F0b: ``head_mode="regress"`` turns the head into a direct F -> pose regression
+(fix_plan_v2.md): the x_tau input projections are replaced by a learned query
+``(1, tw, n_tokens, dim)`` and ``forward`` takes only the fused memory F —
+no x_tau/tau, no timestep token.  ``head_mode="diffusion"`` (default) keeps
+the pre-F0b layout byte-for-byte so old checkpoints load strictly.
 """
 
 from __future__ import annotations
@@ -45,8 +51,10 @@ from anysole.types import (
 
 
 class PoseHead(nn.Module):
-    def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8, dim_feedforward=1024, dropout=0.1, n_layers=6, repr="6d"):
+    def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8, dim_feedforward=1024, dropout=0.1, n_layers=6, repr="6d", head_mode="diffusion"):
         super().__init__()
+        if head_mode not in ("diffusion", "regress"):
+            raise ValueError("Unknown head_mode %r; expected 'diffusion' or 'regress'" % head_mode)
         if embeddings is None:
             embeddings = SharedEmbeddings(dim=dim, tw=tw)
         self.embeddings = embeddings
@@ -54,6 +62,7 @@ class PoseHead(nn.Module):
         self.tw = tw
         self.n_layers = n_layers
         self.repr = repr
+        self.head_mode = head_mode
         if repr == "pos":
             # 22 non-root joints as root-local positions (root excluded).
             self.n_body = len(BODY_JOINTS) - 1
@@ -83,16 +92,25 @@ class PoseHead(nn.Module):
         else:
             raise ValueError("Unknown pose repr %r; expected '6d' or 'pos'" % repr)
 
-        self.proj_body = nn.Linear(self.per_joint, dim)
-        self.proj_left = nn.Linear(self.per_joint, dim)
-        self.proj_right = nn.Linear(self.per_joint, dim)
         self.group_emb = nn.Embedding(3, dim)
         nn.init.normal_(self.group_emb.weight, std=0.02)
         self.register_buffer("group_ids", group_ids, persistent=True)
+        n_tokens = self.n_body + self.n_left + self.n_right
+        self.n_tokens = n_tokens
 
-        # Learned "position" for the prepended diffusion-step token.
-        self.timestep_token = nn.Parameter(torch.zeros(1, 1, dim))
-        nn.init.normal_(self.timestep_token, std=0.02)
+        if head_mode == "regress":
+            # F0b: replace the x_tau input projections with a fixed learned
+            # query — one free token position per (group joint, frame), no
+            # diffused input and no timestep token.
+            self.query = nn.Parameter(torch.zeros(1, tw, n_tokens, dim))
+            nn.init.normal_(self.query, std=0.02)
+        else:
+            self.proj_body = nn.Linear(self.per_joint, dim)
+            self.proj_left = nn.Linear(self.per_joint, dim)
+            self.proj_right = nn.Linear(self.per_joint, dim)
+            # Learned "position" for the prepended diffusion-step token.
+            self.timestep_token = nn.Parameter(torch.zeros(1, 1, dim))
+            nn.init.normal_(self.timestep_token, std=0.02)
 
         # MDM decoder block per layer: pre-LN self-attn -> pre-LN cross-attn(F)
         # -> pre-LN FFN, GELU. Full attention on [t_emb; x_tokens].
@@ -152,7 +170,29 @@ class PoseHead(nn.Module):
         right = self.out_right(tokens[:, :, self.n_body + self.n_left :, :])
         return torch.cat([body, left, right], dim=2).reshape(batch, self.tw, self.pose_dim)
 
-    def forward(self, x_tau, tau, F):
+    def forward(self, x_tau=None, tau=None, F=None):
+        """Dispatch by head_mode.
+
+        Diffusion keeps the ``(x_tau, tau, F)`` positional signature so every
+        pre-F0b caller/checkpoint works unchanged.  Regress takes only the
+        fused memory — call it with ``F=...`` (positional args are rejected so
+        a diffusion-style call cannot silently feed x_tau in as the memory).
+        """
+        if self.head_mode == "regress":
+            if x_tau is not None or tau is not None:
+                raise ValueError(
+                    "regress head takes the fused memory F only; call it as "
+                    "pose_head(F=memory), not with diffusion-style (x_tau, tau, F)"
+                )
+            if F is None:
+                raise ValueError("regress head requires F")
+            return self._forward_regress(F)
+        if x_tau is None or tau is None or F is None:
+            raise ValueError("diffusion head requires (x_tau, tau, F)")
+        return self._forward_diffusion(x_tau, tau, F)
+
+    def _forward_diffusion(self, x_tau, tau, F):
+        """Pre-F0b denoising forward, unchanged."""
         x_tau = (x_tau - self.pose_mean) / self.pose_std
         h = self._embed(x_tau)
         # Prepended timestep token: every decoder layer's self-attention can see
@@ -164,5 +204,21 @@ class PoseHead(nn.Module):
         h = torch.cat([t_tok, h], dim=1)
         h = self.decoder(h, F)
         h = h[:, 1:]  # drop the timestep token before unembedding
+        x0 = self._unembed(h)
+        return x0 * self.pose_std + self.pose_mean
+
+    def _forward_regress(self, F):
+        """F0b: token = query + time PE + group embedding, straight through the
+        6-layer decoder (self-attention, cross-attention to F, FFN), then
+        unembed and denormalize with the same fitted stats as the diffusion
+        head."""
+        batch = F.shape[0]
+        tokens = self.query.expand(batch, -1, -1, -1)  # (B, tw, n_tokens, dim)
+        tokens = tokens + self.embeddings.time_pe.to(dtype=tokens.dtype).view(1, self.tw, 1, self.dim)
+        tokens = tokens + self.group_emb(self.group_ids).to(dtype=tokens.dtype).view(
+            1, 1, self.n_tokens, self.dim
+        )
+        h = tokens.reshape(batch, self.tw * self.n_tokens, self.dim)
+        h = self.decoder(h, F)
         x0 = self._unembed(h)
         return x0 * self.pose_std + self.pose_mean

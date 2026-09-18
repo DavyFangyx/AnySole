@@ -19,8 +19,8 @@ from anysole.data.dataset import (
 )
 from anysole.diffusion import GaussianDiffusion
 from anysole.losses import compute_losses
-from anysole.models import AnySoleModel, MODEL_NAMES, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_POS
-from anysole.types import ANYSOLE_ROOT, CONFIG_PROBS, CONFIG_T, CONFIG_V, POSE_DIM, T_S2M_DIM, anysole_model_dir, assert_batch_shapes
+from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_NAMES, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2
+from anysole.types import CONFIG_PROBS, CONFIG_T, CONFIG_V, GAIT_ROOT, POSE_DIM, T_S2M_DIM, anysole_model_dir, assert_batch_shapes
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.geometry import fk_pose6d
 from anysole.losses import soft_contact_from_keypoints
@@ -155,9 +155,37 @@ def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt
     return mean.float(), var.sqrt().float()
 
 
+def init_from_checkpoint(model, path: Path, drop_prefixes=()) -> None:
+    """Warm-start: copy matching parameters from another checkpoint's model.
+
+    A key is copied only when it exists in the target state dict with the
+    same shape; everything else (missing keys, shape changes, explicit
+    ``drop_prefixes``) keeps the target's fresh initialization.  This makes
+    anysolev1 -> anysolev2 warm-start work with no key mapping: the V2 pose
+    head's ``query`` replaces the V1 ``proj_*``/``timestep_token`` (skipped
+    by the shape/name rule), while encoders/fusion/traj/aux transfer as-is.
+    """
+    src = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(src, dict) or "model" not in src:
+        raise ValueError("--init-from checkpoint has no 'model' state dict: %s" % path)
+    src = src["model"]
+    dst = model.state_dict()
+    loaded, skipped = [], []
+    for key, value in src.items():
+        if any(key.startswith(p) for p in drop_prefixes) or key not in dst or dst[key].shape != value.shape:
+            skipped.append(key)
+            continue
+        dst[key] = value.to(dst[key].dtype)
+        loaded.append(key)
+    model.load_state_dict(dst)
+    print("init-from %s: %d/%d keys copied%s" % (
+        path, len(loaded), len(dst),
+        " (skipped: %s)" % ", ".join(skipped) if skipped else ""))
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train AnySole V1.")
-    parser.add_argument("--config", type=Path, default=ANYSOLE_ROOT / "configs" / "v1.yaml")
+    parser.add_argument("--config", type=Path, default=GAIT_ROOT / "configs" / "v1.yaml")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument(
@@ -262,6 +290,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "Default: config contact_method, falling back to tactile_abs (原 contact.npy).",
     )
     parser.add_argument("--out-dir", type=Path, default=None, help="Override checkpoint output directory.")
+    parser.add_argument("--init-from", type=Path, default=None,
+                        help="F0b fast track: warm-start from an existing checkpoint. "
+                             "Only state-dict keys whose names AND shapes match the current "
+                             "model are copied (everything else keeps its fresh init), so "
+                             "e.g. an E3 anysolev1 ckpt can seed anysolev2 — the V1 pose-head "
+                             "diffusion projections (proj_*/timestep_token) have no V2 "
+                             "counterpart and are skipped automatically. --init-drop adds "
+                             "explicit prefixes to skip.")
+    parser.add_argument("--init-drop", type=str, default="",
+                        help="Comma-separated state-dict key prefixes to skip in addition "
+                             "to the automatic name/shape matching (e.g. 'pose_head.' to "
+                             "re-init the whole pose head while reusing the encoders).")
     parser.add_argument("--wandb_mode", choices=("disabled", "offline", "online"), default=None)
     parser.add_argument("--wandb_project", default=None)
     parser.add_argument("--wandb_entity", default=None)
@@ -283,6 +323,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def _evaluate(model, diffusion, loader, config, device):
     """Return the epoch-level VT/V/T metrics used by the training dashboard."""
     pos_mode = getattr(model.pose_head, "repr", "6d") == "pos"
+    regress_mode = str(config.get("modal")) == MODEL_ANYSOLEV2
     result = {}
     with torch.inference_mode():
         for config_value, config_name in zip((0, 1, 2), CONFIG_NAMES):
@@ -294,20 +335,25 @@ def _evaluate(model, diffusion, loader, config, device):
                 bsz = batch["pose_gt"].shape[0]
                 cid = torch.full((bsz,), config_value, device=device, dtype=torch.long)
                 v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, cid)
-                warm_prior = None
-                if bool(config.get("warm_start", False)):
-                    # E6.5: initialize the chain on the training marginal
-                    # (mean pose), not pure noise.
-                    warm_prior = model.pose_head.pose_mean.view(1, 1, -1).expand(
-                        bsz, int(config["tw"]), -1)
-                pred_pose = diffusion.ddim_sample_loop(
-                    model, tau_related_kwargs={"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
-                    "T_s2m": t_s2m, "config_id": cid, "session_id": batch.get("session_id")},
-                    shape=(bsz, int(config["tw"]), model.pose_head.pose_dim),
-                    steps=int(config["diffusion_sample_steps"]), eta=0.0, device=device,
-                    prior=warm_prior)
-                zero = torch.zeros(bsz, device=device, dtype=torch.long)
-                out = model(v_feat, t_raw, t_phys, pred_pose, zero, cid, batch.get("session_id"), T_s2m=t_s2m)
+                if regress_mode:
+                    # F0b: single forward, no DDIM sampling.
+                    out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m)
+                    pred_pose = out["x0_hat"]
+                else:
+                    warm_prior = None
+                    if bool(config.get("warm_start", False)):
+                        # E6.5: initialize the chain on the training marginal
+                        # (mean pose), not pure noise.
+                        warm_prior = model.pose_head.pose_mean.view(1, 1, -1).expand(
+                            bsz, int(config["tw"]), -1)
+                    pred_pose = diffusion.ddim_sample_loop(
+                        model, tau_related_kwargs={"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
+                        "T_s2m": t_s2m, "config_id": cid, "session_id": batch.get("session_id")},
+                        shape=(bsz, int(config["tw"]), model.pose_head.pose_dim),
+                        steps=int(config["diffusion_sample_steps"]), eta=0.0, device=device,
+                        prior=warm_prior)
+                    zero = torch.zeros(bsz, device=device, dtype=torch.long)
+                    out = model(v_feat, t_raw, t_phys, pred_pose, zero, cid, batch.get("session_id"), T_s2m=t_s2m)
                 anchor = batch["trans_anchor"][:, None, :]
                 pred_trans = out["trans_hat"] + anchor
                 gt_trans = batch["trans_gt"] + anchor
@@ -324,12 +370,15 @@ def _evaluate(model, diffusion, loader, config, device):
                 else:
                     pred_kp = fk_pose6d(pred_pose, pred_trans, batch["offsets"], batch["parents"])
                     totals["mpjpe"] += float(torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1).mean().item()) * n * 1000.0
-                if first_batch:
+                if first_batch and not regress_mode:
                     # tau=0 clean-input reconstruction MPJPE on one batch (no
                     # diffusion sampling): tells apart "cannot fit the training
                     # data" from "cannot denoise", on the same joint scope as
-                    # eval.py (all 23 joints).
+                    # eval.py (all 23 joints).  F0b regress has no clean-input
+                    # reconstruction — its direct output IS the prediction, so
+                    # tau0 is set to the full MPJPE below.
                     pose_in = batch["pose_gt_pos"] if pos_mode else batch["pose_gt"]
+                    zero = torch.zeros(bsz, device=device, dtype=torch.long)
                     out0 = model(v_feat, t_raw, t_phys, pose_in, zero, cid, batch.get("session_id"), T_s2m=t_s2m)
                     if pos_mode:
                         err0 = torch.linalg.vector_norm(
@@ -364,6 +413,10 @@ def _evaluate(model, diffusion, loader, config, device):
             count = max(totals["n"], 1)
             p = totals.get("tp", 0) / max(totals.get("tp", 0) + totals.get("fp", 0), 1)
             r = totals.get("tp", 0) / max(totals.get("tp", 0) + totals.get("fn", 0), 1)
+            if regress_mode:
+                # F0b: no denoising chain — the direct regression output is
+                # both the final prediction and the "clean-input" value.
+                tau0_mpjpe = totals["mpjpe"] / count
             result.update({f"val/mpjpe/{config_name}": totals["mpjpe"] / count,
                            f"val/root_ate/{config_name}": totals["root_ate"] / count,
                            f"val/contact_f1/{config_name}": 2 * p * r / max(p + r, 1e-8),
@@ -410,6 +463,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             config[key] = value
     if config.get("modal", MODEL_ANYSOLEV1) not in MODEL_NAMES:
         raise ValueError("Unknown modal %r; expected one of %s" % (config.get("modal"), MODEL_NAMES))
+    if config.get("modal") == MODEL_ANYSOLEV2 and (
+        args.tau_max is not None
+        or args.tau_fixed is not None
+        or bool(config.get("warm_start", False))
+        or bool(config.get("continuation", False))
+    ):
+        # F0b: the regression model has no diffusion chain; these E-era knobs
+        # would silently do nothing, so say so instead.
+        print("WARNING: --tau-max/--tau-fixed/warm_start/continuation are diffusion-era "
+              "knobs and are ignored by modal anysolev2 (regression)")
 
     session_ids = None
     if args.limit_sessions is not None:
@@ -515,6 +578,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise RuntimeError("W&B monitoring requested but wandb is not installed") from exc
     model_kw = {}
     modal = str(config.get("modal", MODEL_ANYSOLEV1))
+    regress_mode = modal == MODEL_ANYSOLEV2
     # Keep model variants independent in the centralized results tree. An
     # explicit --out-dir remains authoritative for custom experiments.
     if args.out_dir is None:
@@ -523,25 +587,52 @@ def main(argv: Optional[List[str]] = None) -> int:
         # other's checkpoints/metrics.
         contact_method = str(config.get("contact_method", "tactile_abs"))
         config["out_dir"] = str(anysole_model_dir(modal, contact_method) / "checkpoints")
-    if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):
-        templates, subject_map = load_template_bank(config["template_path"])
-        model_kw.update(templates=templates, subject_to_index=subject_map)
-    model = AnySoleModel(
-        d=int(config["d_model"]),
-        tw=int(config["tw"]),
-        dropout=float(config.get("dropout", 0.1)),
-        modal=modal,
-        use_insole_drift=bool(config.get("use_insole_drift", False)),
-        pose_layers=int(config.get("pose_layers", 6)),
-        tactile_input=str(config.get("tactile_input", "raw108")),
-        tactile_direct=bool(config.get("tactile_direct", False)),
-        no_imu=bool(config.get("no_imu", False)),
-        **model_kw,
-    ).to(device)
+    if modal == MODEL_ANYSOLEV2:
+        # F0b: regression model (model_v2.py) — V1 structure, regress pose
+        # head, no diffusion pair in forward.
+        if bool(config.get("use_insole_drift", False)):
+            raise ValueError("anysolev2 does not support insole drift compensation")
+        model = AnySoleModelV2(
+            d=int(config["d_model"]),
+            tw=int(config["tw"]),
+            dropout=float(config.get("dropout", 0.1)),
+            pose_layers=int(config.get("pose_layers", 6)),
+            tactile_input=str(config.get("tactile_input", "raw108")),
+            tactile_direct=bool(config.get("tactile_direct", False)),
+            no_imu=bool(config.get("no_imu", False)),
+        ).to(device)
+    else:
+        if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):
+            templates, subject_map = load_template_bank(config["template_path"])
+            model_kw.update(templates=templates, subject_to_index=subject_map)
+        model = AnySoleModel(
+            d=int(config["d_model"]),
+            tw=int(config["tw"]),
+            dropout=float(config.get("dropout", 0.1)),
+            modal=modal,
+            use_insole_drift=bool(config.get("use_insole_drift", False)),
+            pose_layers=int(config.get("pose_layers", 6)),
+            tactile_input=str(config.get("tactile_input", "raw108")),
+            tactile_direct=bool(config.get("tactile_direct", False)),
+            no_imu=bool(config.get("no_imu", False)),
+            **model_kw,
+        ).to(device)
+    if args.init_from is not None:
+        # F0b fast track: warm-start before fitting pose stats, so the
+        # normalization buffers are refit on the current dataset regardless
+        # of what the source checkpoint carried.
+        init_from_checkpoint(
+            model, args.init_from,
+            drop_prefixes=tuple(p for p in args.init_drop.split(",") if p),
+        )
     # Frozen pose-normalization stats (recorded so eval/infer rebuild the same depth).
     config["pose_layers"] = int(config.get("pose_layers", 6))
     # E6.1: pose_repr follows the modal so losses/eval agree with the head.
-    config["pose_repr"] = "pos" if modal == MODEL_ANYSOLEV1_POS else str(config.get("pose_repr", "6d"))
+    # F0b: anysolev2 has no position-space variant — the regression head is 6D only.
+    if modal == MODEL_ANYSOLEV2:
+        config["pose_repr"] = "6d"
+    else:
+        config["pose_repr"] = "pos" if modal == MODEL_ANYSOLEV1_POS else str(config.get("pose_repr", "6d"))
     pos_mode = config["pose_repr"] == "pos"
     if pos_mode and float(config.get("lambda_pose_vel", 0.0)) == 0.0 and float(config.get("lambda_bone", 0.0)) == 0.0:
         # Guard against repeating the 2026-09-16 misconfigured E6.2 launches:
@@ -593,36 +684,42 @@ def main(argv: Optional[List[str]] = None) -> int:
             assert_batch_shapes(batch, batch_size, tw=int(config["tw"]))
             v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
 
-            # Test11 τ training-regime knobs: --tau-fixed pins every step to one
-            # noise level (0 = identity-mapping training), --tau-max narrows the
-            # sampling band to U(0, tau_max) (low-noise region training).
-            if "tau_fixed" in config:
-                tau = torch.full(
-                    (batch_size,),
-                    int(config["tau_fixed"]),
-                    device=device,
-                    dtype=torch.long,
-                )
-            else:
-                tau = torch.randint(
-                    0,
-                    int(config.get("tau_max", config["diffusion_train_steps"])),
-                    (batch_size,),
-                    device=device,
-                    dtype=torch.long,
-                )
-            # E4: diffuse with per-dim noise scaled by the pose std (Step2Motion
-            # normalizes the data before diffusing; scaling the noise is the
-            # same thing here since the head normalizes its input internally).
-            # Without this, N(0,1) noise lands on a signal of std ~0.118 (8.5x
-            # SNR mismatch) and the DDIM chain injects per-frame jitter.
-            pose_target = batch["pose_gt_pos"] if pos_mode else batch["pose_gt"]
-            noise = torch.randn_like(pose_target)
-            if model.noise_scaled:
-                noise = noise * model.pose_head.pose_std.view(1, 1, -1)
-            x_tau = diffusion.q_sample(pose_target, tau, noise=noise)
             optimizer.zero_grad(set_to_none=True)
-            out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id, batch.get("session_id"), T_s2m=t_s2m)
+            if regress_mode:
+                # F0b: regression head — no tau sampling, no q_sample, no
+                # x_tau. L_pose applies directly to the regression output
+                # (losses.py unchanged).
+                out = model(v_feat, t_raw, t_phys, config_id, batch.get("session_id"), T_s2m=t_s2m)
+            else:
+                # Test11 τ training-regime knobs: --tau-fixed pins every step to one
+                # noise level (0 = identity-mapping training), --tau-max narrows the
+                # sampling band to U(0, tau_max) (low-noise region training).
+                if "tau_fixed" in config:
+                    tau = torch.full(
+                        (batch_size,),
+                        int(config["tau_fixed"]),
+                        device=device,
+                        dtype=torch.long,
+                    )
+                else:
+                    tau = torch.randint(
+                        0,
+                        int(config.get("tau_max", config["diffusion_train_steps"])),
+                        (batch_size,),
+                        device=device,
+                        dtype=torch.long,
+                    )
+                # E4: diffuse with per-dim noise scaled by the pose std (Step2Motion
+                # normalizes the data before diffusing; scaling the noise is the
+                # same thing here since the head normalizes its input internally).
+                # Without this, N(0,1) noise lands on a signal of std ~0.118 (8.5x
+                # SNR mismatch) and the DDIM chain injects per-frame jitter.
+                pose_target = batch["pose_gt_pos"] if pos_mode else batch["pose_gt"]
+                noise = torch.randn_like(pose_target)
+                if model.noise_scaled:
+                    noise = noise * model.pose_head.pose_std.view(1, 1, -1)
+                x_tau = diffusion.q_sample(pose_target, tau, noise=noise)
+                out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id, batch.get("session_id"), T_s2m=t_s2m)
             losses = compute_losses(out, batch, config_id, config)
 
             finite = torch.isfinite(losses["loss"]) and torch.isfinite(out["F"]).all()
@@ -721,11 +818,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         wandb_run.finish()
     try:
         from anysole.eval import main as eval_main
-        # Training-time auto-eval stays lean: metrics only, no BVH export
-        # (run eval again later to refresh predictions/eval_bvh).
+        # Training-time auto-eval stays lean: metrics only, no BVH export and
+        # no F0a protocol pass (run eval again later to refresh
+        # predictions/eval_bvh and the fseries protocol JSON).
         eval_main(["--config", str(args.config), "--ckpt", str(out_dir / "ckpt_last.pt"),
                    "--modal", modal, "--split", "test", "--device", str(device),
-                   "--contact-method", str(config["contact_method"]), "--no-write-bvh"])
+                   "--contact-method", str(config["contact_method"]), "--no-write-bvh",
+                   "--no-protocol"])
     except Exception as exc:
         print("automatic test evaluation failed: %s" % exc)
     return 0

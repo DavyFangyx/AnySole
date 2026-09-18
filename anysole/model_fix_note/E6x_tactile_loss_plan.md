@@ -224,7 +224,7 @@ CUDA_VISIBLE_DEVICES=4 python results_display/script/visualize_anysole.py --moda
   --device cuda:7
 
 # 可视化
-CUDA_VISIBLE_DEVICES=4 python results_display/script/visualize_anysole.py --modal E6.6a --contact-method tacch
+CUDA_VISIBLE_DEVICES=4 python results_display/script/visualize_anysole.py --modal E6.6a --contact-method tacch --force
 ```
 
 **验收**：T2M one-shot / echo slope 对比 E3_base。无收益 → 不回退，直接进步骤 2。
@@ -251,7 +251,7 @@ CUDA_VISIBLE_DEVICES=4 python results_display/script/visualize_anysole.py --moda
   --device cuda:7
 
 # 可视化
-CUDA_VISIBLE_DEVICES=6 python results_display/script/visualize_anysole.py --modal E6.6b --contact-method tacdir
+CUDA_VISIBLE_DEVICES=6 python results_display/script/visualize_anysole.py --modal E6.6b --contact-method tacdir --force
 ```
 
 **验收**：T2M/VT2M one-shot、echo slope 对比 E6.6a 与 E3_base。

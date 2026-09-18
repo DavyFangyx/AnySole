@@ -330,8 +330,8 @@ cd /data/fangyuxuan/projects/gait/Baselines/Step2Motion
 conda activate touch_gait
 
 python src/test_model.py \
-  results://Step2Motion/checkpoints/gait_model \
-  ../../AnysoleWorkspace/derived/Step2Motion/gait/gait_test.pt \
+  results://Step2Motion/checkpoints/gait_model_noimu \
+  ../../AnysoleWorkspace/derived/Step2Motion/gait_noimu/gait_test.pt \
   --only_test
 ```
 
