@@ -7,7 +7,7 @@ from typing import Mapping
 import torch
 import torch.nn.functional as F
 
-from anysole.geometry import fk_pose6d
+from anysole.geometry import f2_to_world, fk_pose6d
 from anysole.types import (
     CONFIG_T,
     FPS,
@@ -98,6 +98,52 @@ def _trajectory_losses(out, batch, weights):
     )
 
 
+def _f2_trajectory_losses(out, batch, weights):
+    """F2a trajectory losses on the 4-dim heading-frame target.
+
+    Velocity MSE over all 4 dims (normalized by the fitted per-dim stats so
+    psi_dot / v_h / h share one scale); multi-scale displacement on the
+    INTEGRATED heading-frame trajectory (first 3 dims), as per fix_plan_v2.md
+    §F2a item 6.
+    """
+    v_hat = out["v_hat"]
+    target = batch["traj_gt_f2"]
+    stats = weights.get("traj_f2_stats")
+    if isinstance(stats, dict):
+        mean = torch.as_tensor(stats["mean"], dtype=v_hat.dtype, device=v_hat.device).view(1, 1, 4)
+        std = torch.as_tensor(stats["std"], dtype=v_hat.dtype, device=v_hat.device).view(1, 1, 4)
+    else:
+        mean = v_hat.new_zeros(1, 1, 4)
+        std = v_hat.new_ones(1, 1, 4)
+    v_hat_n = (v_hat - mean) / std
+    target_n = (target - mean) / std
+    l_vel = F.mse_loss(v_hat_n, target_n)
+    x_hat = torch.cumsum(v_hat_n[..., :3], dim=1) / float(FPS)
+    x_gt = torch.cumsum(target_n[..., :3], dim=1) / float(FPS)
+    deltas = weights.get("traj_deltas", DEFAULT_TRAJ_DELTAS)
+    if isinstance(deltas, str):
+        deltas = tuple(int(value.strip()) for value in deltas.split(",") if value.strip())
+    else:
+        deltas = tuple(int(value) for value in deltas)
+    valid = tuple(delta for delta in deltas if 1 <= delta < x_hat.shape[1])
+    if not valid:
+        raise ValueError("traj_deltas must contain an integer in [1, Tw-1]")
+    power = float(weights.get("traj_delta_weight_power", 1.0))
+    delta_terms = []
+    for delta in valid:
+        pred_delta = x_hat[:, delta:] - x_hat[:, :-delta]
+        gt_delta = x_gt[:, delta:] - x_gt[:, :-delta]
+        scale_weight = 1.0 / (float(delta) ** power)
+        delta_terms.append(scale_weight * F.mse_loss(pred_delta, gt_delta))
+    l_delta = torch.stack(delta_terms).mean()
+    return (
+        _weight(weights, "traj_velocity_w", 1.0) * l_vel
+        + _weight(weights, "traj_delta_w", 1.0) * l_delta,
+        l_vel,
+        l_delta,
+    )
+
+
 def compute_losses(out, batch, config_id, weights) -> dict:
     """Return all frozen V1 loss terms as scalar tensors."""
     pose_gt = batch["pose_gt"]
@@ -105,6 +151,9 @@ def compute_losses(out, batch, config_id, weights) -> dict:
     # E6.1: pose_repr "pos" switches the pose target to root-local positions.
     # 6D is the default and keeps the original MSE loss.
     pos_mode = str(weights.get("pose_repr", "6d")) == "pos"
+    # F2a: heading/tilt representation — the pose target's root 6D is the
+    # tilt, and the trajectory loss + FK supervision use f2_to_world.
+    f2_mode = bool(weights.get("f2_repr", False)) and not pos_mode
 
     if pos_mode:
         l_pose = F.l1_loss(out["x0_hat"], batch["pose_gt_pos"])
@@ -112,8 +161,15 @@ def compute_losses(out, batch, config_id, weights) -> dict:
     else:
         l_pose = F.mse_loss(out["x0_hat"], pose_gt)
         target = pose_gt
-    l_traj, l_traj_vel, l_traj_delta = _trajectory_losses(out, batch, weights)
-    l_trec = F.mse_loss(out["pressure_hat"], batch["T_raw"])
+    if f2_mode:
+        l_traj, l_traj_vel, l_traj_delta = _f2_trajectory_losses(out, batch, weights)
+    else:
+        l_traj, l_traj_vel, l_traj_delta = _trajectory_losses(out, batch, weights)
+    l_trec = (
+        F.mse_loss(out["pressure_hat"], batch["T_raw"])
+        if out.get("pressure_hat") is not None
+        else l_pose.new_zeros(())
+    )
 
     # E6.2: frame-to-frame smoothness of the diffused target (works for both
     # representations; default weight 0 keeps the E5 behavior).
@@ -135,7 +191,11 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         len_gt = torch.linalg.vector_norm(batch["offsets"][:, 1:, :], dim=-1)
         l_bone = F.mse_loss(len_pred, len_gt.unsqueeze(1).expand_as(len_pred))
 
-    vrec_per_sample = (out["vfeat_hat"] - batch["V_feat"]).square().flatten(1).mean(dim=1)
+    vrec_per_sample = (
+        (out["vfeat_hat"] - batch["V_feat"]).square().flatten(1).mean(dim=1)
+        if out.get("vfeat_hat") is not None
+        else l_pose.new_zeros((batch["V_feat"].shape[0],))
+    )
     vrec_mask = config_id.to(device=vrec_per_sample.device).reshape(-1) == CONFIG_T
     if bool(vrec_mask.any()):
         l_vrec = vrec_per_sample[vrec_mask].mean()
@@ -160,7 +220,16 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         l_kp = F.mse_loss(pred_kp, batch["kp_gt"])
         l_con = l_pose.new_zeros(())
     else:
-        pred_kp = fk_pose6d(out["x0_hat"], trans_world, batch["offsets"], batch["parents"])
+        if f2_mode:
+            # World pose/trans recovered from the tilt pose + heading-frame
+            # trajectory (geometry.f2_to_world); FK supervision then compares
+            # the same world keypoints as the V1 path.
+            world_pose, world_trans = f2_to_world(
+                out["x0_hat"], out["v_hat"], batch["psi_anchor"], anchor
+            )
+            pred_kp = fk_pose6d(world_pose, world_trans, batch["offsets"], batch["parents"])
+        else:
+            pred_kp = fk_pose6d(out["x0_hat"], trans_world, batch["offsets"], batch["parents"])
         l_kp = F.mse_loss(pred_kp, batch["kp_gt"])
         soft_contact = soft_contact_from_keypoints(pred_kp)
         l_con = F.binary_cross_entropy(soft_contact, batch["contact_gt"])

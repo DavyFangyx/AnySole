@@ -25,17 +25,22 @@ def _transformer_encoder(dim, n_layers, nhead, dim_feedforward, dropout):
 
 
 class TrajHead(nn.Module):
-    def __init__(self, dim=D_MODEL, tw=TW, nhead=8, dim_feedforward=1024, dropout=0.1):
+    def __init__(self, dim=D_MODEL, tw=TW, nhead=8, dim_feedforward=1024, dropout=0.1,
+                 out_dim=3):
         super().__init__()
         self.tw = tw
+        self.out_dim = int(out_dim)
         self.encoder = _transformer_encoder(dim, 2, nhead, dim_feedforward, dropout)
-        self.proj = nn.Linear(dim, 3)
+        self.proj = nn.Linear(dim, self.out_dim)
 
     def forward(self, F):
         batch = F.shape[0]
         pooled = F.reshape(batch, 2, self.tw, -1).mean(dim=1)
         h = self.encoder(pooled)
         v_hat = self.proj(h)
-        # v_hat is m/s; integrate the 40 Hz samples back to meters.
-        trans_hat = torch.cumsum(v_hat, dim=1) / float(FPS)
+        # F2a (out_dim=4): dims [psi_dot, v_hx, v_hz, h] — only the first
+        # three integrate (heading + heading-frame position); h is the direct
+        # world height.  V1 (out_dim=3): v_hat is m/s; integrate the 40 Hz
+        # samples back to meters.
+        trans_hat = torch.cumsum(v_hat[..., :3], dim=1) / float(FPS)
         return v_hat, trans_hat

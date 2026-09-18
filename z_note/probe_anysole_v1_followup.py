@@ -69,7 +69,7 @@ def main():
             kp_mean = fk_pose6d(mean_pose, gt_trans, batch["offsets"], batch["parents"])
             t0 = torch.zeros(bsz, device=DEVICE, dtype=torch.long)
             c = torch.full((bsz,), CONFIG_VT, device=DEVICE, dtype=torch.long)
-            v, tr, tp = condition_inputs(batch, c)
+            v, tr, tp, _, _ = condition_inputs(batch, c)
             out = model(v, tr, tp, pose_gt, t0, c, batch.get("session_id"))
             kp_head = fk_pose6d(out["x0_hat"], gt_trans, batch["offsets"], batch["parents"])
             out2 = model(v, tr, tp, mean_pose, t0, c, batch.get("session_id"))
@@ -91,7 +91,7 @@ def main():
     bsz = batch["pose_gt"].shape[0]
     t0 = torch.zeros(bsz, device=DEVICE, dtype=torch.long)
     c = torch.full((bsz,), CONFIG_VT, device=DEVICE, dtype=torch.long)
-    v, tr, tp = condition_inputs(batch, c)
+    v, tr, tp, _, _ = condition_inputs(batch, c)
 
     class MHAWrap(nn.Module):
         def __init__(self, mha, idx, name):

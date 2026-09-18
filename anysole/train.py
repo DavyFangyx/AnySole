@@ -22,7 +22,7 @@ from anysole.losses import compute_losses
 from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_NAMES, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2
 from anysole.types import CONFIG_PROBS, CONFIG_T, CONFIG_V, GAIT_ROOT, POSE_DIM, T_S2M_DIM, anysole_model_dir, assert_batch_shapes
 from anysole.ablations.insole_drift.templates import load_template_bank
-from anysole.geometry import fk_pose6d
+from anysole.geometry import f2_to_world, fk_pose6d
 from anysole.losses import soft_contact_from_keypoints
 from anysole.types import CONFIG_NAMES
 
@@ -116,6 +116,10 @@ def condition_inputs(batch: dict, config_id: torch.Tensor, t_s2m_dim: int = T_S2
     drop_v = (config_id == CONFIG_T).view(-1, 1, 1)
     drop_t = (config_id == CONFIG_V).view(-1, 1, 1)
     v_feat = torch.where(drop_v, torch.zeros_like(batch["V_feat"]), batch["V_feat"])
+    # F1: zero the GVHMR channel for T-only rows (same rule as V_feat); the
+    # batch dict is mutated so model call sites can pick it up directly.
+    if batch.get("V_hmr") is not None:
+        batch["V_hmr"] = torch.where(drop_v, torch.zeros_like(batch["V_hmr"]), batch["V_hmr"])
     t_raw = torch.where(drop_t, torch.zeros_like(batch["T_raw"]), batch["T_raw"])
     t_phys = torch.where(drop_t, torch.zeros_like(batch["T_phys"]), batch["T_phys"])
     t_s2m = batch.get("T_s2m")
@@ -153,6 +157,32 @@ def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt
     mean = sums / count
     var = (sumsq / count - mean.square()).clamp(min=0.0)
     return mean.float(), var.sqrt().float()
+
+
+def fit_traj_stats(loader: DataLoader, device: torch.device) -> Dict[str, list]:
+    """One pass over the training loader: per-dim mean/std of traj_gt_f2 (4).
+
+    F2a: the trajectory loss compares psi_dot / v_h / h in one normalized
+    space, so the per-dim scales are balanced by construction.  Saved into
+    the checkpoint config (traj_f2_stats) and consumed by losses.py.
+    """
+    dim = 4  # TRAJ_F2_DIM
+    sums = torch.zeros(dim, dtype=torch.float64, device=device)
+    sumsq = torch.zeros(dim, dtype=torch.float64, device=device)
+    count = 0
+    with torch.no_grad():
+        for raw_batch in loader:
+            traj = raw_batch["traj_gt_f2"].to(device=device, dtype=torch.float64, non_blocking=True)
+            flat = traj.reshape(-1, traj.shape[-1])
+            sums += flat.sum(dim=0)
+            sumsq += flat.square().sum(dim=0)
+            count += flat.shape[0]
+    if count == 0:
+        raise RuntimeError("cannot fit traj stats: training loader is empty")
+    mean = sums / count
+    var = (sumsq / count - mean.square()).clamp(min=0.0)
+    std = var.sqrt().clamp(min=1e-2)
+    return {"mean": [float(v) for v in mean], "std": [float(v) for v in std]}
 
 
 def init_from_checkpoint(model, path: Path, drop_prefixes=()) -> None:
@@ -250,6 +280,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "IMU + force + CoP, anysole/data/tactile_s2m.py). Saved into the checkpoint.",
     )
     parser.add_argument(
+        "--t-encoder",
+        choices=("linear", "foot_conv"),
+        default=None,
+        help="F4a: tactile stream encoder (raw108 only). linear = flat "
+        "LinearTemporalEncoder (E3 口径, default); foot_conv = FootConvEncoder — "
+        "per-foot 4×12 grid conv (right foot mirrored), [left/right/global] "
+        "tokens + temporal transformer. The input DATA is unchanged (108-dim); "
+        "only the encoding changes (anysole/models/foot_encoder.py). "
+        "Saved into the checkpoint.",
+    )
+    parser.add_argument(
         "--tactile-direct",
         action="store_true",
         default=None,
@@ -264,6 +305,43 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "the s2m50 tactile input — the data is built as 38-dim (pressure16+force+CoP "
         "per foot, no IMU values computed or stored) and the encoder's IMU groups are "
         "removed. Requires --tactile-input s2m50. Saved into the checkpoint.",
+    )
+    parser.add_argument(
+        "--v-input",
+        choices=("hrnet", "hmr_gvhmr"),
+        default=None,
+        help="F1: visual encoder input. hrnet = V_feat (HRNet 2048 + CLIFF bbox, "
+        "E3 口径); hmr_gvhmr = V_hmr (1156-dim GVHMR channel: aa body_pose 63 + "
+        "global_orient 3 + betas 10 + COCO-17 kp2d 51 + HMR2 img features 1024 + "
+        "bbox/q 5). Requires the hmr cache (anysole/data/extract_hmr.py). "
+        "Saved into the checkpoint.",
+    )
+    parser.add_argument(
+        "--decoder",
+        choices=("v1", "part9"),
+        default=None,
+        help="F5: decoder structure. v1 = fusion + pose head + traj head (F0b "
+        "baseline); part9 = 9-part query decoder with per-part V/T/empty gating "
+        "(anysole/models/part_decoder.py; requires --t-encoder foot_conv; aux "
+        "reconstruction heads are dropped). Saved into the checkpoint.",
+    )
+    parser.add_argument(
+        "--gate-mode",
+        choices=("gated", "nogate"),
+        default=None,
+        help="F5: part9 gating variant. gated = softmax(V/T/empty) per part; "
+        "nogate = single cross-attention over the joined local window "
+        "(f5_nogate ablation). Saved into the checkpoint.",
+    )
+    parser.add_argument(
+        "--f2-repr",
+        action="store_true",
+        default=None,
+        help="F2a: heading/tilt representation. pose target root 6D = tilt "
+        "(yaw removed), trajectory target = 4-dim [psi_dot, v_hx, v_hz, h] "
+        "(geometry.py f2_to_world recovers the world pose/trans). The traj "
+        "head outputs 4-dim; traj stats are fitted on the training set and "
+        "saved into the checkpoint. Saved into the checkpoint.",
     )
     parser.add_argument("--lambda-pose", type=float, default=None, metavar="W",
                         help="E6.7: override yaml loss weight lambda_pose.")
@@ -317,6 +395,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                              "value, keeping their original names (no *_cap duplicates). Raw charts get "
                              "y-squashed by the first epochs' spike (loss_total 30 -> 0.1, loss_pose 1.5 -> "
                              "0.01), hiding convergence; e.g. --loss-cap 1.0 pins the y-axis to 0-1.")
+    parser.add_argument("--grad-clip", type=float, default=None,
+                        help="Max-norm gradient clipping (torch.nn.utils.clip_grad_norm_). "
+                             "None = off. F0 lesson: the original F0b_warm run exploded at "
+                             "ep~370 via a FINITE huge gradient (nonfinite guard never fired) "
+                             "and never recovered; healthy regression runs stay at "
+                             "grad_norm <= 1.3 after warm-up, so 5.0 only bites on explosions.")
     return parser.parse_args(argv)
 
 
@@ -324,10 +408,12 @@ def _evaluate(model, diffusion, loader, config, device):
     """Return the epoch-level VT/V/T metrics used by the training dashboard."""
     pos_mode = getattr(model.pose_head, "repr", "6d") == "pos"
     regress_mode = str(config.get("modal")) == MODEL_ANYSOLEV2
+    f2_mode = bool(config.get("f2_repr", False))
     result = {}
     with torch.inference_mode():
         for config_value, config_name in zip((0, 1, 2), CONFIG_NAMES):
             totals = {"mpjpe": 0.0, "root_ate": 0.0, "contact_f1": 0.0, "foot_slide": 0.0, "n": 0}
+            gates_sum = torch.zeros(9, 3, device=device)
             tau0_mpjpe = 0.0
             first_batch = True
             for raw_batch in loader:
@@ -335,10 +421,13 @@ def _evaluate(model, diffusion, loader, config, device):
                 bsz = batch["pose_gt"].shape[0]
                 cid = torch.full((bsz,), config_value, device=device, dtype=torch.long)
                 v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, cid)
+                v_kw = {"V_hmr": batch.get("V_hmr")} if str(config.get("v_input", "hrnet")) == "hmr_gvhmr" else {}
                 if regress_mode:
                     # F0b: single forward, no DDIM sampling.
-                    out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m)
+                    out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m, **v_kw)
                     pred_pose = out["x0_hat"]
+                    if out.get("gates") is not None:
+                        gates_sum += out["gates"].detach().float().mean(dim=(0, 1)) * bsz
                 else:
                     warm_prior = None
                     if bool(config.get("warm_start", False)):
@@ -353,7 +442,7 @@ def _evaluate(model, diffusion, loader, config, device):
                         steps=int(config["diffusion_sample_steps"]), eta=0.0, device=device,
                         prior=warm_prior)
                     zero = torch.zeros(bsz, device=device, dtype=torch.long)
-                    out = model(v_feat, t_raw, t_phys, pred_pose, zero, cid, batch.get("session_id"), T_s2m=t_s2m)
+                    out = model(v_feat, t_raw, t_phys, pred_pose, zero, cid, batch.get("session_id"), T_s2m=t_s2m, **v_kw)
                 anchor = batch["trans_anchor"][:, None, :]
                 pred_trans = out["trans_hat"] + anchor
                 gt_trans = batch["trans_gt"] + anchor
@@ -368,7 +457,18 @@ def _evaluate(model, diffusion, loader, config, device):
                     )
                     totals["mpjpe"] += float(err.mean().item()) * n * 1000.0
                 else:
-                    pred_kp = fk_pose6d(pred_pose, pred_trans, batch["offsets"], batch["parents"])
+                    if f2_mode:
+                        # F2a: recover the world pose/trans from the tilt pose
+                        # + heading-frame trajectory, then the same FK scope.
+                        world_pose, world_trans = f2_to_world(
+                            pred_pose, out["v_hat"], batch["psi_anchor"],
+                            batch["trans_anchor"],
+                        )
+                        pred_kp = fk_pose6d(world_pose, world_trans,
+                                            batch["offsets"], batch["parents"])
+                        pred_trans = world_trans
+                    else:
+                        pred_kp = fk_pose6d(pred_pose, pred_trans, batch["offsets"], batch["parents"])
                     totals["mpjpe"] += float(torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1).mean().item()) * n * 1000.0
                 if first_batch and not regress_mode:
                     # tau=0 clean-input reconstruction MPJPE on one batch (no
@@ -379,7 +479,7 @@ def _evaluate(model, diffusion, loader, config, device):
                     # tau0 is set to the full MPJPE below.
                     pose_in = batch["pose_gt_pos"] if pos_mode else batch["pose_gt"]
                     zero = torch.zeros(bsz, device=device, dtype=torch.long)
-                    out0 = model(v_feat, t_raw, t_phys, pose_in, zero, cid, batch.get("session_id"), T_s2m=t_s2m)
+                    out0 = model(v_feat, t_raw, t_phys, pose_in, zero, cid, batch.get("session_id"), T_s2m=t_s2m, **v_kw)
                     if pos_mode:
                         err0 = torch.linalg.vector_norm(
                             out0["x0_hat"].reshape(bsz, -1, 22, 3)
@@ -422,6 +522,11 @@ def _evaluate(model, diffusion, loader, config, device):
                            f"val/contact_f1/{config_name}": 2 * p * r / max(p + r, 1e-8),
                            f"val/foot_slide/{config_name}": totals["foot_slide"] / count,
                            f"val/tau0_mpjpe/{config_name}": tau0_mpjpe})
+            if float(gates_sum.abs().sum().item()) > 0:
+                for part in range(9):
+                    for gate_idx, gate_name in ((0, "V"), (1, "T"), (2, "E")):
+                        result[f"val/gate_{gate_name}_part{part}/{config_name}"] = float(
+                            gates_sum[part, gate_idx] / count)
     result["val/gap_mpjpe_dropT"] = result["val/mpjpe/V"] - result["val/mpjpe/VT"]
     result["val/gap_mpjpe_dropV"] = result["val/mpjpe/T"] - result["val/mpjpe/VT"]
     return result
@@ -492,12 +597,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not args.loss_cap > 0.0:
             raise ValueError("--loss-cap must be positive")
         config["loss_cap"] = float(args.loss_cap)
+    if args.grad_clip is not None:
+        if not args.grad_clip > 0.0:
+            raise ValueError("--grad-clip must be positive")
+        config["grad_clip"] = float(args.grad_clip)
     if args.stride is not None:
         if not 1 <= args.stride <= int(config["tw"]):
             raise ValueError("--stride must be in [1, tw]")
         config["stride"] = int(args.stride)
     if args.tactile_input is not None:
         config["tactile_input"] = args.tactile_input
+    if args.t_encoder is not None:
+        config["t_encoder"] = args.t_encoder
+    if args.v_input is not None:
+        config["v_input"] = args.v_input
+    if args.decoder is not None:
+        config["decoder"] = args.decoder
+    if args.gate_mode is not None:
+        config["gate_mode"] = args.gate_mode
+    if args.f2_repr:
+        config["f2_repr"] = True
     if args.tactile_direct:
         config["tactile_direct"] = True
     if args.no_imu:
@@ -521,6 +640,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             contact_method=str(config["contact_method"]),
             stride=config.get("stride"),
             no_imu=bool(config.get("no_imu", False)),
+            v_input=str(config.get("v_input", "hrnet")),
+            f2_repr=bool(config.get("f2_repr", False)),
         )
     except FileNotFoundError as exc:
         if "HRNet cache" in str(exc):
@@ -544,7 +665,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), no_imu=bool(config.get("no_imu", False)))
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:
@@ -600,6 +721,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             tactile_input=str(config.get("tactile_input", "raw108")),
             tactile_direct=bool(config.get("tactile_direct", False)),
             no_imu=bool(config.get("no_imu", False)),
+            v_input=str(config.get("v_input", "hrnet")),
+            t_encoder=str(config.get("t_encoder", "linear")),
+            f2_repr=bool(config.get("f2_repr", False)),
+            decoder=str(config.get("decoder", "v1")),
+            gate_mode=str(config.get("gate_mode", "gated")),
         ).to(device)
     else:
         if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):
@@ -649,13 +775,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     # every checkpoint so eval/infer match the sampling init scale.
     config["noise_scaled"] = bool(config.get("noise_scaled", True))
     model.noise_scaled = config["noise_scaled"]
-    pose_mean, pose_std = fit_pose_stats(
-        loader, device, key="pose_gt_pos" if pos_mode else "pose_gt"
-    )
-    model.pose_head.set_stats(pose_mean, pose_std)
-    print("pose stats: mean %.4f +/- %.4f, std %.4f +/- %.4f (dims floored at 1e-2: %d/%d)"
-          % (pose_mean.mean().item(), pose_mean.std().item(), pose_std.mean().item(),
-             pose_std.std().item(), int((pose_std <= 1e-2).sum().item()), pose_mean.shape[0]))
+    # F5 part9: the part decoder outputs the raw pose without per-dim
+    # normalization stats, and model.pose_head is None — skip both.
+    if model.pose_head is not None:
+        pose_mean, pose_std = fit_pose_stats(
+            loader, device, key="pose_gt_pos" if pos_mode else "pose_gt"
+        )
+        model.pose_head.set_stats(pose_mean, pose_std)
+        print("pose stats: mean %.4f +/- %.4f, std %.4f +/- %.4f (dims floored at 1e-2: %d/%d)"
+              % (pose_mean.mean().item(), pose_mean.std().item(), pose_std.mean().item(),
+                 pose_std.std().item(), int((pose_std <= 1e-2).sum().item()), pose_mean.shape[0]))
+    if bool(config.get("f2_repr", False)):
+        # F2a: per-dim traj stats balance psi_dot / v_h / h inside the
+        # trajectory loss; saved with the checkpoint for eval reference.
+        config["traj_f2_stats"] = fit_traj_stats(loader, device)
+        print("traj f2 stats: mean %s std %s"
+              % (config["traj_f2_stats"]["mean"], config["traj_f2_stats"]["std"]))
     diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))
     out_dir = Path(config["out_dir"])
@@ -683,13 +818,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             batch["config_id"] = config_id
             assert_batch_shapes(batch, batch_size, tw=int(config["tw"]))
             v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+            # F1: hmr_gvhmr checkpoints consume the GVHMR channel; V1 models
+            # have no V_hmr parameter.
+            v_kw = {"V_hmr": batch.get("V_hmr")} if str(config.get("v_input", "hrnet")) == "hmr_gvhmr" else {}
 
             optimizer.zero_grad(set_to_none=True)
             if regress_mode:
                 # F0b: regression head — no tau sampling, no q_sample, no
                 # x_tau. L_pose applies directly to the regression output
                 # (losses.py unchanged).
-                out = model(v_feat, t_raw, t_phys, config_id, batch.get("session_id"), T_s2m=t_s2m)
+                out = model(v_feat, t_raw, t_phys, config_id, batch.get("session_id"), T_s2m=t_s2m, **v_kw)
             else:
                 # Test11 τ training-regime knobs: --tau-fixed pins every step to one
                 # noise level (0 = identity-mapping training), --tau-max narrows the
@@ -733,6 +871,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 continue
 
             losses["loss"].backward()
+            grad_clip = config.get("grad_clip")
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
             grad_sq = torch.zeros((), device=device)
             for parameter in model.parameters():
                 if parameter.grad is not None:

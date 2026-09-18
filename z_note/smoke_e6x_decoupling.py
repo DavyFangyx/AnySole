@@ -37,7 +37,7 @@ def build_batch(ds, idxs):
 def one_step(model, batch, diffusion, config, repr_key="pose_gt"):
     bsz = batch["pose_gt"].shape[0]
     cid = batch["config_id"]
-    v, tr, tp = condition_inputs(batch, cid)
+    v, tr, tp, _, _ = condition_inputs(batch, cid)
     tau = torch.randint(0, 1000, (bsz,), device=DEVICE)
     target = batch[repr_key]
     noise = torch.randn_like(target)
@@ -123,7 +123,7 @@ def main():
     b6 = build_batch(ds6, list(range(16)))
     bsz = b6["pose_gt"].shape[0]
     cid = b6["config_id"]
-    v, tr, tp = condition_inputs(b6, cid)
+    v, tr, tp, _, _ = condition_inputs(b6, cid)
     cond = {"V_feat": v, "T_raw": tr, "T_phys": tp, "config_id": cid, "session_id": b6.get("session_id")}
     with torch.inference_mode():
         p0 = diff6.ddim_sample_loop(m6, tau_related_kwargs=cond, shape=(bsz, 20, POSE_DIM),

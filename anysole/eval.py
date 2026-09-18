@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 from anysole.data.bvh_io import pose_trans_to_motion, write_bvh
 from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.diffusion import GaussianDiffusion
-from anysole.geometry import fk_pose6d, positions_to_6d_np, rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np
+from anysole.geometry import f2_to_world, fk_pose6d, positions_to_6d_np, rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np
 from anysole.losses import soft_contact_from_keypoints
 from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device
@@ -239,12 +239,19 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
     tactile_input = str(saved_config.get("tactile_input", "raw108"))
     tactile_direct = bool(saved_config.get("tactile_direct", False))
     no_imu = bool(saved_config.get("no_imu", False))
+    v_input = str(saved_config.get("v_input", "hrnet"))
+    t_encoder = str(saved_config.get("t_encoder", "linear"))
+    f2_repr = bool(saved_config.get("f2_repr", False))
+    decoder = str(saved_config.get("decoder", "v1"))
+    gate_mode = str(saved_config.get("gate_mode", "gated"))
     if modal == MODEL_ANYSOLEV2:
         # F0b: regression model (model_v2.py); the regress pose head is
         # implied by the modal, and forward takes no diffusion pair.
         model = AnySoleModelV2(
             d=d_model, tw=tw, dropout=dropout, pose_layers=pose_layers,
             tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
+            v_input=v_input, t_encoder=t_encoder, f2_repr=f2_repr,
+            decoder=decoder, gate_mode=gate_mode,
         ).to(device)
     else:
         model = AnySoleModel(
@@ -382,6 +389,11 @@ def _evaluate_one(
     model.diffusion_abar_top = float(diffusion.alphas_cumprod[diffusion.n_train_steps - 1])
     pos_mode = checkpoint_modal == MODEL_ANYSOLEV1_POS
     regress_mode = checkpoint_modal == MODEL_ANYSOLEV2
+    # F2a: heading/tilt representation — world pose/trans recovered via
+    # geometry.f2_to_world before FK metrics and BVH export.
+    f2_repr = bool(checkpoint.get("config", {}).get("f2_repr", False))
+    # F1: hmr_gvhmr checkpoints consume the GVHMR channel (V_hmr).
+    v_hmr_mode = str(checkpoint.get("config", {}).get("v_input", "hrnet")) == "hmr_gvhmr"
     continuation = bool(config.get("continuation", False))
     warm_start = bool(config.get("warm_start", False))
 
@@ -399,6 +411,8 @@ def _evaluate_one(
         session_ids=session_ids,
         contact_method=contact_method,
         no_imu=no_imu,
+        v_input=str(checkpoint.get("config", {}).get("v_input", "hrnet")),
+        f2_repr=bool(checkpoint.get("config", {}).get("f2_repr", False)),
         # E6.4: continuation eval uses overlapping windows (stride = tw/2);
         # without it the stride stays non-overlapping (E3 behavior).
         stride=(tw // 2) if (pos_mode and continuation) else None,
@@ -433,6 +447,7 @@ def _evaluate_one(
                         batch["config_id"] = config_id
                         assert_batch_shapes(batch, bsz, tw=tw)
                         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+                        v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
                         cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
                                 "T_s2m": t_s2m, "config_id": config_id,
                                 "session_id": batch.get("session_id")}
@@ -443,7 +458,7 @@ def _evaluate_one(
                             steps=sample_steps, half=half)[0]
                         tau_zero = torch.zeros(bsz, device=device, dtype=torch.long)
                         out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id,
-                                    batch.get("session_id"), T_s2m=t_s2m)
+                                    batch.get("session_id"), T_s2m=t_s2m, **v_kw)
                         anchor = batch["trans_anchor"][:, None, :]
                         pred_trans = out["trans_hat"] + anchor
                         gt_trans = batch["trans_gt"] + anchor
@@ -485,6 +500,7 @@ def _evaluate_one(
                         batch["config_id"] = config_id
                         assert_batch_shapes(batch, batch_size, tw=tw)
                         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+                        v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
                         cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
                                 "T_s2m": t_s2m, "config_id": config_id,
                                 "session_id": batch.get("session_id")}
@@ -495,7 +511,7 @@ def _evaluate_one(
                             steps=sample_steps, eta=0.0, device=device)
                         tau_zero = torch.zeros(batch_size, device=device, dtype=torch.long)
                         out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id,
-                                    batch.get("session_id"), T_s2m=t_s2m)
+                                    batch.get("session_id"), T_s2m=t_s2m, **v_kw)
                         anchor = batch["trans_anchor"][:, None, :]
                         pred_trans = out["trans_hat"] + anchor
                         gt_trans = batch["trans_gt"] + anchor
@@ -532,13 +548,14 @@ def _evaluate_one(
                     batch["config_id"] = config_id
                     assert_batch_shapes(batch, batch_size, tw=tw)
                     v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+                    v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
                     if regress_mode:
                         # F0b: single regression forward — no DDIM chain.
                         # E6.4 continuation is diffusion-era and never applies
                         # here (F3 replaces it with Hann blending); the FADE=4
                         # crossfade below stays.
                         out = model(v_feat, t_raw, t_phys, config_id,
-                                    batch.get("session_id"), T_s2m=t_s2m)
+                                    batch.get("session_id"), T_s2m=t_s2m, **v_kw)
                         pred_pose = out["x0_hat"]
                     else:
                         cond = {
@@ -561,16 +578,30 @@ def _evaluate_one(
                         )
                         tau_zero = torch.zeros(batch_size, device=device, dtype=torch.long)
                         out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id,
-                                    batch.get("session_id"), T_s2m=t_s2m)
+                                    batch.get("session_id"), T_s2m=t_s2m, **v_kw)
                     pred_trans = out["trans_hat"]
                     anchor = batch["trans_anchor"][:, None, :]
-                    pred_trans_world = pred_trans + anchor
+                    if f2_repr:
+                        # F2a: world pose/trans from the tilt pose + heading
+                        # trajectory; the GT world pose is recovered the same
+                        # way for the rotation metric.
+                        pred_pose_w, pred_trans_world = f2_to_world(
+                            pred_pose, out["v_hat"], batch["psi_anchor"], batch["trans_anchor"]
+                        )
+                        gt_pose_w, _ = f2_to_world(
+                            batch["pose_gt"], batch["traj_gt_f2"], batch["psi_anchor"],
+                            batch["trans_anchor"],
+                        )
+                    else:
+                        pred_trans_world = pred_trans + anchor
+                        pred_pose_w = pred_pose
+                        gt_pose_w = batch["pose_gt"]
                     gt_trans_world = batch["trans_gt"] + anchor
-                    pred_kp = fk_pose6d(pred_pose, pred_trans_world, batch["offsets"], batch["parents"])
+                    pred_kp = fk_pose6d(pred_pose_w, pred_trans_world, batch["offsets"], batch["parents"])
 
                     metrics.add("MPJPE", torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1), 1000.0)
                     metrics.add("PA-MPJPE", _pa_error(pred_kp, batch["kp_gt"]), 1000.0)
-                    metrics.add("MPJRE", _rotation_error_deg(pred_pose, batch["pose_gt"]))
+                    metrics.add("MPJRE", _rotation_error_deg(pred_pose_w, gt_pose_w))
                     metrics.add("traj_ATE", torch.linalg.vector_norm(pred_trans_world - gt_trans_world, dim=-1), 1000.0)
                     pred_contact = soft_contact_from_keypoints(pred_kp) > 0.5
                     metrics.add("contact_acc", (pred_contact == (batch["contact_gt"] > 0.5)).float())
@@ -578,19 +609,21 @@ def _evaluate_one(
                     # Tactile aux-head metrics (normalized 0-1 units).  Under
                     # V-only conditioning the T input is zeroed, so these numbers
                     # measure V2T generation quality (the V2M row in the report).
-                    t_ae = (out["pressure_hat"] - batch["T_raw"]).abs()
-                    metrics.add("T_mae", t_ae)
-                    metrics.add("T_mse", t_ae.square())
-                    corr, corr_valid = _tactile_corr(out["pressure_hat"], batch["T_raw"])
-                    if bool(corr_valid.any()):
-                        metrics.add("T_corr", corr[corr_valid])
+                    # F5 part9 drops the aux heads — those rows are skipped.
+                    if out.get("pressure_hat") is not None:
+                        t_ae = (out["pressure_hat"] - batch["T_raw"]).abs()
+                        metrics.add("T_mae", t_ae)
+                        metrics.add("T_mse", t_ae.square())
+                        corr, corr_valid = _tactile_corr(out["pressure_hat"], batch["T_raw"])
+                        if bool(corr_valid.any()):
+                            metrics.add("T_corr", corr[corr_valid])
 
                     if bvh_out is not None:
                         for idx, session_id in enumerate(raw_batch["session_id"]):
                             exports.setdefault(session_id, []).append(
                                 (
                                     int(raw_batch["frame_start"][idx]),
-                                    pred_pose[idx].cpu().numpy(),
+                                    pred_pose_w[idx].cpu().numpy(),
                                     pred_trans_world[idx].cpu().numpy(),
                                     gt_trans_world[idx].cpu().numpy(),
                                     raw_batch["hierarchy"][idx],

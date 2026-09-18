@@ -59,7 +59,7 @@ def main():
                 batch = move_batch(raw, DEVICE)
                 bsz = batch["pose_gt"].shape[0]
                 cid = torch.full((bsz,), config_value, device=DEVICE, dtype=torch.long)
-                v, tr, tp = condition_inputs(batch, cid)
+                v, tr, tp, _, _ = condition_inputs(batch, cid)
                 tau = torch.full((bsz,), 999, device=DEVICE, dtype=torch.long)
                 noise = torch.randn(bsz, 20, POSE_DIM, device=DEVICE)
                 out = model(v, tr, tp, noise, tau, cid, batch.get("session_id"))

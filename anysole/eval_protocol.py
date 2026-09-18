@@ -51,7 +51,7 @@ import torch.nn.functional as F
 
 from anysole.data.dataset import collate_windows
 from anysole.eval import _sample_x_t_init, _session_window_groups, _tactile_corr
-from anysole.geometry import fk_pose6d, rot6d_to_rotmat
+from anysole.geometry import f2_to_world, fk_pose6d, rot6d_to_rotmat
 from anysole.losses import soft_contact_from_keypoints
 from anysole.train import condition_inputs, move_batch
 from anysole.types import (
@@ -287,8 +287,9 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     accum.add("joint_limit_viol_knee", viol_knee)
 
     # ---- pressure output quality (V2M only: T input is zeroed, so these
-    # measure vision-to-tactile generation) ----
-    if config_value == CONFIG_V:
+    # measure vision-to-tactile generation).  F5 part9 drops the aux heads
+    # and skips these rows. ----
+    if config_value == CONFIG_V and seq.get("pressure_pred") is not None:
         f_pred = seq["pressure_pred"].sum(dim=-1)
         f_gt = seq["pressure_gt"].sum(dim=-1)
         ss_res = float(((f_pred - f_gt) ** 2).sum().item())
@@ -322,7 +323,6 @@ def _degrade_inputs(v_feat, t_raw, t_phys, t_s2m, tw: int, kind: str, rng: np.ra
         ts[mask] = 0.0
     return v, tr, tp, ts
 
-
 def _evaluate_config(
     dataset, model, device, config_value: int, regress_mode: bool, diffusion,
     sample_steps: int, warm_start: bool, tw: int, forward_axis: int,
@@ -330,6 +330,10 @@ def _evaluate_config(
 ) -> Dict[str, float]:
     """Full-session inference for one conditioning config, then all protocol
     metrics.  ``degrade`` in ("v", "t") adds the robustness span dropout."""
+    # F1: hmr_gvhmr checkpoints consume the GVHMR channel.
+    v_hmr_mode = str(getattr(model, "v_input", "hrnet")) == "hmr_gvhmr"
+    # F2a: heading/tilt representation.
+    f2_repr = bool(getattr(model, "f2_repr", False))
     accum = _Accum()
     contact = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
     groups = _session_window_groups(dataset)
@@ -345,9 +349,10 @@ def _evaluate_config(
                 v_feat, t_raw, t_phys, t_s2m = _degrade_inputs(
                     v_feat, t_raw, t_phys, t_s2m, tw, degrade, rng
                 )
+            v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
             if regress_mode:
                 out = model(v_feat, t_raw, t_phys, config_id,
-                            batch.get("session_id"), T_s2m=t_s2m)
+                            batch.get("session_id"), T_s2m=t_s2m, **v_kw)
                 pred_pose = out["x0_hat"]
             else:
                 cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
@@ -360,20 +365,45 @@ def _evaluate_config(
                     steps=sample_steps, eta=0.0, device=device)
                 tau_zero = torch.zeros(bsz, device=device, dtype=torch.long)
                 out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id,
-                            batch.get("session_id"), T_s2m=t_s2m)
+                            batch.get("session_id"), T_s2m=t_s2m, **v_kw)
             anchor = batch["trans_anchor"][:, None, :]
-            seq = {
-                "pred_pose": pred_pose.reshape(-1, pred_pose.shape[-1]),
-                "pred_trans": (out["trans_hat"] + anchor).reshape(-1, 3),
-                "gt_pose": batch["pose_gt"].reshape(-1, batch["pose_gt"].shape[-1]),
-                "gt_trans": (batch["trans_gt"] + anchor).reshape(-1, 3),
-                "kp_gt": batch["kp_gt"].reshape(-1, N_JOINTS, 3),
-                "contact_gt": batch["contact_gt"].reshape(-1, 2),
-                "pressure_gt": batch["T_raw"].reshape(-1, batch["T_raw"].shape[-1]),
-                "pressure_pred": out["pressure_hat"].reshape(-1, out["pressure_hat"].shape[-1]),
-                "offsets": batch["offsets"][0],
-                "parents": batch["parents"][0],
-            }
+            if f2_repr:
+                # F2a: world pose/trans recovered from the tilt pose + heading
+                # trajectory before the protocol metrics (same FK scope).
+                pred_pose_w, pred_trans_w = f2_to_world(
+                    pred_pose, out["v_hat"], batch["psi_anchor"], batch["trans_anchor"]
+                )
+                gt_pose_w, _ = f2_to_world(
+                    batch["pose_gt"], batch["traj_gt_f2"], batch["psi_anchor"],
+                    batch["trans_anchor"],
+                )
+                seq = {
+                    "pred_pose": pred_pose_w.reshape(-1, pred_pose_w.shape[-1]),
+                    "pred_trans": pred_trans_w.reshape(-1, 3),
+                    "gt_pose": gt_pose_w.reshape(-1, gt_pose_w.shape[-1]),
+                    "gt_trans": (batch["trans_gt"] + anchor).reshape(-1, 3),
+                    "kp_gt": batch["kp_gt"].reshape(-1, N_JOINTS, 3),
+                    "contact_gt": batch["contact_gt"].reshape(-1, 2),
+                    "pressure_gt": batch["T_raw"].reshape(-1, batch["T_raw"].shape[-1]),
+                    "pressure_pred": (out["pressure_hat"].reshape(-1, out["pressure_hat"].shape[-1])
+                                      if out.get("pressure_hat") is not None else None),
+                    "offsets": batch["offsets"][0],
+                    "parents": batch["parents"][0],
+                }
+            else:
+                seq = {
+                    "pred_pose": pred_pose.reshape(-1, pred_pose.shape[-1]),
+                    "pred_trans": (out["trans_hat"] + anchor).reshape(-1, 3),
+                    "gt_pose": batch["pose_gt"].reshape(-1, batch["pose_gt"].shape[-1]),
+                    "gt_trans": (batch["trans_gt"] + anchor).reshape(-1, 3),
+                    "kp_gt": batch["kp_gt"].reshape(-1, N_JOINTS, 3),
+                    "contact_gt": batch["contact_gt"].reshape(-1, 2),
+                    "pressure_gt": batch["T_raw"].reshape(-1, batch["T_raw"].shape[-1]),
+                    "pressure_pred": (out["pressure_hat"].reshape(-1, out["pressure_hat"].shape[-1])
+                                      if out.get("pressure_hat") is not None else None),
+                    "offsets": batch["offsets"][0],
+                    "parents": batch["parents"][0],
+                }
             _session_metrics(seq, tw, forward_axis, config_value, accum, contact)
     result = accum.means()
     p = contact["tp"] / max(contact["tp"] + contact["fp"], 1)

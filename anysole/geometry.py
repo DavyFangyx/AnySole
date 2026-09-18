@@ -8,7 +8,12 @@ import torch.nn.functional as F
 from scipy.spatial.transform import Rotation as SciRotation
 from scipy.spatial.transform import Slerp
 
-from anysole.types import N_JOINTS
+from anysole.types import FPS, N_JOINTS
+
+# F2a: the BVH Hips local forward axis (verified 2026-09-18 by
+# z_note/smoke_f2_roundtrip.py: heading-frame lateral/forward velocity ratio
+# and speed correlation favor +Z on every informative session).
+FORWARD_AXIS = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
 
 def _as_rotmat_np(eulers_deg: np.ndarray) -> np.ndarray:
@@ -234,3 +239,115 @@ def positions_to_6d_np(
             rotmats[:, j] = (rot * roll).as_matrix()
     out = rotmat_to_6d_np(rotmats)
     return out.reshape(*lead, N_JOINTS * 6)
+
+
+# ---------------------------------------------------------------------------
+# F2a: heading/tilt representation (fix_plan_v2.md §F2a).
+#
+# pose_f2 (..., 138): joints 1-22 keep the parent-local 6D rotations; the root
+#   6D is the TILT = R_yaw(psi)^T @ R_root_world — the world root rotation
+#   with the ground heading removed.
+# traj_f2 (..., 4): [psi_dot (rad/s), v_hx, v_hz (heading-frame horizontal
+#   velocity, m/s), h (world root height, m)].
+# Anchors: psi_anchor (heading at the frame before the window) and
+#   trans_anchor (world root position at that frame).
+# ---------------------------------------------------------------------------
+
+
+def yaw_rotmat_np(psi: np.ndarray) -> np.ndarray:
+    """(...,) heading angles -> (..., 3, 3) rotation about the world Y axis.
+
+    World (x, y, z), y up; a yaw of psi rotates the heading frame's +x axis
+    to world direction (cos psi, 0, sin psi).
+    """
+    psi = np.asarray(psi, dtype=np.float64)
+    c, s = np.cos(psi), np.sin(psi)
+    out = np.zeros(psi.shape + (3, 3), dtype=np.float64)
+    out[..., 0, 0] = c
+    out[..., 0, 2] = s
+    out[..., 1, 1] = 1.0
+    out[..., 2, 0] = -s
+    out[..., 2, 2] = c
+    return out
+
+
+def yaw_rotmat(psi: torch.Tensor) -> torch.Tensor:
+    """Torch twin of yaw_rotmat_np."""
+    c, s = torch.cos(psi), torch.sin(psi)
+    out = torch.zeros(psi.shape + (3, 3), device=psi.device, dtype=psi.dtype)
+    out[..., 0, 0] = c
+    out[..., 0, 2] = s
+    out[..., 1, 1] = 1.0
+    out[..., 2, 0] = -s
+    out[..., 2, 2] = c
+    return out
+
+
+def heading_from_root_np(root_rotmats: np.ndarray) -> np.ndarray:
+    """(T, 3, 3) world root rotations -> ground heading psi (T,), unwrapped.
+
+    psi = atan2(fz, fx) of the world FORWARD_AXIS; np.unwrap removes the
+    +/-pi jumps so frame differences are physical.
+    """
+    forward = np.einsum("tij,j->ti", root_rotmats, FORWARD_AXIS)
+    psi = np.arctan2(forward[:, 2], forward[:, 0])
+    return np.unwrap(psi)
+
+
+def f2_to_world_np(pose_f2, traj_f2, psi_anchor, trans_anchor):
+    """(T, 138) tilt pose + (T, 4) traj -> (world_pose_6d (T, 138), world_trans (T, 3)).
+
+    Integrates psi_dot/v_h from the window anchors (heading frame at
+    psi_anchor, position at trans_anchor); world height is traj_f2[:, 3]
+    directly.  Joints 1-22 are untouched (yaw-invariant parent-local 6D).
+    """
+    pose_f2 = np.asarray(pose_f2, dtype=np.float64).reshape(-1, N_JOINTS, 6)
+    traj_f2 = np.asarray(traj_f2, dtype=np.float64).reshape(-1, 4)
+    psi_anchor = float(psi_anchor)
+    trans_anchor = np.asarray(trans_anchor, dtype=np.float64).reshape(3)
+    psi_rel = np.cumsum(traj_f2[:, 0], axis=0) / float(FPS)
+    psi = psi_anchor + psi_rel
+    r_yaw = yaw_rotmat_np(psi)
+    r_tilt = rot6d_to_rotmat_np(pose_f2[:, 0])
+    r_root_world = np.einsum("tij,tjk->tik", r_yaw, r_tilt)
+    v_h = traj_f2[:, 1:3]
+    v_h3 = np.stack([v_h[:, 0], np.zeros_like(v_h[:, 0]), v_h[:, 1]], axis=1)
+    v_world_xy = np.einsum("tij,tj->ti", r_yaw, v_h3)[:, [0, 2]]
+    pos_rel = np.cumsum(v_world_xy, axis=0) / float(FPS)
+    world_trans = trans_anchor[None, :] + np.stack(
+        [pos_rel[:, 0], traj_f2[:, 3] - trans_anchor[1], pos_rel[:, 1]], axis=1
+    )
+    world_pose = pose_f2.copy()
+    world_pose[:, 0] = rotmat_to_6d_np(r_root_world)
+    return world_pose.reshape(-1, N_JOINTS * 6).astype(np.float32), world_trans.astype(np.float32)
+
+
+def f2_to_world(pose_f2: torch.Tensor, traj_f2: torch.Tensor,
+                psi_anchor: torch.Tensor, trans_anchor: torch.Tensor):
+    """Torch twin of f2_to_world_np; batch-aware.
+
+    pose_f2 (B, T, 138), traj_f2 (B, T, 4), psi_anchor (B,), trans_anchor (B, 3).
+    Returns (world_pose (B, T, 138), world_trans (B, T, 3)).
+    """
+    batch, time = pose_f2.shape[0], pose_f2.shape[1]
+    pose = pose_f2.reshape(batch, time, N_JOINTS, 6)
+    psi_rel = torch.cumsum(traj_f2[:, :, 0], dim=1) / float(FPS)
+    psi = psi_anchor.view(batch, 1) + psi_rel
+    r_yaw = yaw_rotmat(psi)  # (B, T, 3, 3)
+    r_tilt = rot6d_to_rotmat(pose[:, :, 0])
+    r_root_world = torch.matmul(r_yaw, r_tilt)
+    v_h = traj_f2[:, :, 1:3]
+    v_h3 = torch.stack(
+        [v_h[..., 0], torch.zeros_like(v_h[..., 0]), v_h[..., 1]], dim=-1
+    )
+    v_world_xy = torch.einsum("btij,btj->bti", r_yaw, v_h3)[..., [0, 2]]
+    pos_rel = torch.cumsum(v_world_xy, dim=1) / float(FPS)
+    world_trans = torch.stack(
+        [trans_anchor[:, 0:1] + pos_rel[:, :, 0],
+         traj_f2[:, :, 3],
+         trans_anchor[:, 2:3] + pos_rel[:, :, 1]],
+        dim=-1,
+    )
+    world_pose = pose.clone()
+    world_pose[:, :, 0] = rotmat_to_6d(r_root_world)
+    return world_pose.reshape(batch, time, N_JOINTS * 6), world_trans

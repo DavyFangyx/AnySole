@@ -19,6 +19,9 @@ FAKE_MARKED_ROOT = (
     / "reconstruction_20260817_161459_fake_marked"
 )
 HRNET_CACHE_ROOT = WORKSPACE_ROOT / "derived" / "AnySole" / "hrnet_cache" / "cam3"
+# F1: GVHMR per-session caches (<model>/cam3/<session>.pt), written by
+# anysole/data/extract_hmr.py.
+HMR_CACHE_ROOT = WORKSPACE_ROOT / "derived" / "AnySole" / "hmr_cache"
 CLIFF_CKPT = (
     WORKSPACE_ROOT
     / "dependencies"
@@ -57,6 +60,9 @@ POSE_DIM = N_JOINTS * 6  # 138
 # amplification of the 6D space (verified per-joint profile: hip 60mm ->
 # hand 398mm in 6D vs no amplification in positions).
 POSE_POS_DIM = 22 * 3  # 66
+# F2a: heading-frame trajectory target: [psi_dot (rad/s), v_hx, v_hz
+# (heading-frame horizontal velocity, m/s), h (world root height, m)].
+TRAJ_F2_DIM = 4
 T_RAW_DIM = 96
 T_PHYS_DIM = 12
 # E6.6a: Step2Motion-口径触觉通道（每脚 25 维 = 16 压力池化[heel8 toes8] +
@@ -67,6 +73,15 @@ T_S2M_DIM = 50
 # 数据侧不合成、模型侧不编码 IMU；编码器按 38 维分组（无 IMU 组）。
 T_S2M_NOIMU_DIM = 38
 V_FEAT_DIM = 2051  # HRNet 2048 + normalized CLIFF bbox_info [cx, cy, b]
+# F1: GVHMR visual channel (v_input="hmr_gvhmr").  Per frame:
+#   body_pose aa 63 (SMPL-X 21 body joints) + global_orient 3 + betas 10
+#   + kp2d COCO-17 51 (full-img px + conf) + HMR2 f_imgseq 1024
+#   + bbox_info 3 (normalized cx, cy, size) + q_V 2 (kp mean conf, trunc ratio)
+V_HMR_DIM = 1156
+V_HMR_ROT_DIM = 76   # body_pose 63 + global_orient 3 + betas 10
+V_HMR_KP_DIM = 51    # COCO-17 (x, y, conf)
+V_HMR_IMG_DIM = 1024 # HMR2 ViT backbone features
+V_HMR_MISC_DIM = 5   # bbox_info 3 + q_V 2
 FUSE_LEN = 40  # V(20) + combined T(20)
 N_CONTACT = 2
 
@@ -159,13 +174,16 @@ CROP_SIZE = 256
 # Batch field names and shapes. Values are (B, ...) with B omitted.
 BATCH_SHAPES = {
     "V_feat": (TW, V_FEAT_DIM),
+    "V_hmr": (TW, V_HMR_DIM),  # F1 optional: only v_input="hmr_*" batches carry it
     "T_raw": (TW, T_RAW_DIM),
     "T_phys": (TW, T_PHYS_DIM),
     "pose_gt": (TW, POSE_DIM),
     "pose_gt_pos": (TW, POSE_POS_DIM),
     "trans_gt": (TW, 3),
     "vel_gt": (TW, 3),
+    "traj_gt_f2": (TW, TRAJ_F2_DIM),  # F2a optional: only f2_repr batches carry it
     "trans_anchor": (3,),
+    "psi_anchor": (),  # F2a optional scalar
     "root_rot_init": (3, 3),
     "kp_gt": (TW, N_JOINTS, 3),
     "contact_gt": (TW, N_CONTACT),
@@ -181,11 +199,15 @@ def assert_batch_shapes(batch, batch_size=None, tw=TW):
     import torch
 
     for name, expected in BATCH_SHAPES.items():
+        if name in ("session_id",):
+            continue
+        if name in ("V_hmr", "traj_gt_f2", "psi_anchor") and name not in batch:
+            # F1/F2a: these channels only exist for their respective modes;
+            # every other batch legitimately omits them.
+            continue
         if name not in batch:
             raise KeyError("batch missing field %s" % name)
         value = batch[name]
-        if name in ("session_id",):
-            continue
         if not torch.is_tensor(value):
             raise TypeError("%s must be a tensor, got %s" % (name, type(value)))
         if batch_size is None:

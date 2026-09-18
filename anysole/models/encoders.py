@@ -5,6 +5,12 @@ channel (T_s2m) instead of ``cat([T_raw, T_phys])`` (108-dim); with
 ``tactile_direct=True`` the tactile encoder is the per-group TactileEncoder
 (E6.6b, Step2Motion-style), otherwise a flat LinearTemporalEncoder (E6.6a).
 
+F4a: ``t_encoder="foot_conv"`` (with tactile_input="raw108") replaces the flat
+LinearTemporalEncoder with the FootConvEncoder — per-foot spatial-grid conv on
+the SAME 108-dim channel (right foot mirrored, [left/right/global] token
+stream, temporal transformer).  The input data is untouched; only the
+encoding changes (foot_encoder.py).
+
 --no-imu (E6.8): the input becomes the 38-dim T_s2m (IMU channels deleted at
 data build time) and the encoder receives 38-dim — for TactileEncoder the two
 IMU groups are structurally absent.
@@ -16,6 +22,7 @@ import torch
 import torch.nn as nn
 
 from anysole.models.embeddings import SharedEmbeddings
+from anysole.models.foot_encoder import FootConvEncoder
 from anysole.models.tactile_encoder import TactileEncoder
 from anysole.types import (
     CONFIG_T,
@@ -27,6 +34,11 @@ from anysole.types import (
     T_S2M_NOIMU_DIM,
     TW,
     V_FEAT_DIM,
+    V_HMR_DIM,
+    V_HMR_IMG_DIM,
+    V_HMR_KP_DIM,
+    V_HMR_MISC_DIM,
+    V_HMR_ROT_DIM,
 )
 
 
@@ -51,14 +63,57 @@ class LinearTemporalEncoder(nn.Module):
         return h + modality.to(dtype=h.dtype)
 
 
+class VEncHMR(nn.Module):
+    """F1: grouped Linear over the GVHMR visual channel, same contract as
+    LinearTemporalEncoder.
+
+    V_hmr layout per frame (V_HMR_DIM = 1156):
+      rot 76 (body_pose aa 63 + global_orient 3 + betas 10)
+      | kp2d 51 (COCO-17 x/y/conf) | img 1024 (HMR2 ViT features)
+      | misc 5 (bbox_info 3 + q_V 2)
+    One projection per group, summed, then time PE + modality embedding.
+    """
+
+    def __init__(self, embeddings, dim=D_MODEL):
+        super().__init__()
+        self.rot_proj = nn.Linear(V_HMR_ROT_DIM, dim)
+        self.kp_proj = nn.Linear(V_HMR_KP_DIM, dim)
+        self.img_proj = nn.Linear(V_HMR_IMG_DIM, dim)
+        self.misc_proj = nn.Linear(V_HMR_MISC_DIM, dim)
+        self.norm = nn.LayerNorm(dim)
+        self.embeddings = embeddings
+
+    def forward(self, x):
+        if x.shape[-1] != V_HMR_DIM:
+            raise ValueError("VEncHMR expects %d-dim input, got %d" % (V_HMR_DIM, x.shape[-1]))
+        rot = x[..., :V_HMR_ROT_DIM]
+        kp = x[..., V_HMR_ROT_DIM:V_HMR_ROT_DIM + V_HMR_KP_DIM]
+        img = x[..., V_HMR_ROT_DIM + V_HMR_KP_DIM:V_HMR_ROT_DIM + V_HMR_KP_DIM + V_HMR_IMG_DIM]
+        misc = x[..., -V_HMR_MISC_DIM:]
+        h = self.rot_proj(rot) + self.kp_proj(kp) + self.img_proj(img) + self.misc_proj(misc)
+        h = self.norm(h)
+        h = h + self.embeddings.time_pe.to(dtype=h.dtype)
+        modality = self.embeddings.modality(
+            torch.tensor(0, device=x.device, dtype=torch.long)
+        )
+        return h + modality.to(dtype=h.dtype)
+
+
 class ModalEncoders(nn.Module):
     def __init__(self, embeddings, dim=D_MODEL, tw=TW, tactile_input="raw108",
-                 tactile_direct=False, no_imu=False):
+                 tactile_direct=False, no_imu=False, v_input="hrnet",
+                 t_encoder="linear"):
         super().__init__()
         if embeddings is None:
             embeddings = SharedEmbeddings(dim=dim, tw=tw)
+        if v_input not in ("hrnet", "hmr_gvhmr"):
+            raise ValueError("v_input must be 'hrnet' or 'hmr_gvhmr', got %r" % v_input)
         if tactile_input not in ("raw108", "s2m50"):
             raise ValueError("tactile_input must be 'raw108' or 's2m50', got %r" % tactile_input)
+        if t_encoder not in ("linear", "foot_conv"):
+            raise ValueError("t_encoder must be 'linear' or 'foot_conv', got %r" % t_encoder)
+        if t_encoder == "foot_conv" and tactile_input != "raw108":
+            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108' (F4a)")
         if tactile_direct and tactile_input != "s2m50":
             raise ValueError("tactile_direct requires tactile_input='s2m50'")
         if no_imu and tactile_input != "s2m50":
@@ -66,9 +121,18 @@ class ModalEncoders(nn.Module):
         self.embeddings = embeddings
         self.tw = tw
         self.tactile_input = tactile_input
+        self.t_encoder = t_encoder
+        self.v_input = v_input
         self.no_imu = bool(no_imu)
-        self.v_enc = LinearTemporalEncoder(V_FEAT_DIM, embeddings, 0)
-        if tactile_direct:
+        # F1: hmr_gvhmr replaces the HRNet feature encoder with the grouped
+        # GVHMR channel (V_hmr); hrnet keeps the V1 encoder unchanged.
+        self.v_enc = VEncHMR(embeddings, dim=dim) if v_input == "hmr_gvhmr" \
+            else LinearTemporalEncoder(V_FEAT_DIM, embeddings, 0)
+        if t_encoder == "foot_conv":
+            # F4a: per-foot grid conv + [left/right/global] temporal tokens
+            # on the unchanged 108-dim channel.
+            self.t_enc = FootConvEncoder(embeddings, dim=dim, tw=tw)
+        elif tactile_direct:
             # E6.6b: per-group encoding (Step2Motion-style), streams merged.
             # --no-imu: 38-dim input, the two IMU groups are deleted.
             self.t_enc = TactileEncoder(embeddings, dim=dim, tw=tw, no_imu=no_imu)
@@ -79,8 +143,13 @@ class ModalEncoders(nn.Module):
                 in_dim = T_RAW_DIM + T_PHYS_DIM
             self.t_enc = LinearTemporalEncoder(in_dim, embeddings, 1)
 
-    def forward(self, V_feat, T_tac, config_id):
-        v_tok = self.v_enc(V_feat)
+    def forward(self, V_feat, T_tac, config_id, V_hmr=None):
+        if self.v_input == "hmr_gvhmr":
+            if V_hmr is None:
+                raise ValueError("V_hmr is required when v_input='hmr_gvhmr'")
+            v_tok = self.v_enc(V_hmr)
+        else:
+            v_tok = self.v_enc(V_feat)
         t_tok = self.t_enc(T_tac)
 
         config_id = config_id.to(device=v_tok.device, dtype=torch.long).reshape(-1)

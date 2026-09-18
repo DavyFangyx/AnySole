@@ -14,10 +14,17 @@ from torch.utils.data import Dataset
 from anysole.data.bvh_io import resample_session_bvh
 from anysole.data.pressure import load_session_pressure, normalize_raw
 from anysole.data.tactile_s2m import build_t_s2m
-from anysole.geometry import fk_pose6d_np, rot6d_to_rotmat_np
+from anysole.geometry import (
+    fk_pose6d_np,
+    heading_from_root_np,
+    rot6d_to_rotmat_np,
+    rotmat_to_6d_np,
+    yaw_rotmat_np,
+)
 from anysole.types import (
     CONFIG_PROBS,
     FPS,
+    HMR_CACHE_ROOT,
     HRNET_CACHE_ROOT,
     JOINT_PARENTS,
     N_JOINTS,
@@ -25,6 +32,11 @@ from anysole.types import (
     SPLIT_CSV,
     TW,
     V_FEAT_DIM,
+    V_HMR_DIM,
+    V_HMR_IMG_DIM,
+    V_HMR_KP_DIM,
+    V_HMR_MISC_DIM,
+    V_HMR_ROT_DIM,
     WORKSPACE_ROOT,
 )
 
@@ -75,6 +87,40 @@ def session_time_grid(meta: dict) -> np.ndarray:
 
 def hrnet_cache_path(session_id: str, cache_root: Path = HRNET_CACHE_ROOT) -> Path:
     return Path(cache_root) / ("%s.pt" % session_id)
+
+
+def hmr_cache_path(model: str, session_id: str) -> Path:
+    """F1: per-session GVHMR cache written by anysole/data/extract_hmr.py."""
+    return HMR_CACHE_ROOT / model / "cam3" / ("%s.pt" % session_id)
+
+
+def assemble_v_hmr(hmr: dict, n_frames: int) -> np.ndarray:
+    """(N, V_HMR_DIM) per-frame GVHMR channel from an hmr cache file.
+
+    Layout: rot 76 (body_pose aa 63 + global_orient 3 + betas 10)
+    | kp2d 51 | f_imgseq 1024 | misc 5 (bbox cx/w, cy/h, size/hypot + q_V 2).
+    """
+    rot = np.concatenate(
+        [hmr["body_pose"], hmr["global_orient"], hmr["betas"]], axis=1
+    ).astype(np.float32)
+    kp = hmr["kp2d"].reshape(n_frames, -1).astype(np.float32)
+    img = hmr["f_imgseq"].astype(np.float32)
+    bbx = hmr["bbx_xys"].astype(np.float32)
+    img_w = float(hmr.get("img_w", 1.0))
+    img_h = float(hmr.get("img_h", 1.0))
+    diag = float(np.hypot(img_w, img_h))
+    misc = np.stack(
+        [bbx[:, 0] / img_w, bbx[:, 1] / img_h, bbx[:, 2] / diag,
+         hmr["q_v"][:, 0], hmr["q_v"][:, 1]],
+        axis=1,
+    ).astype(np.float32)
+    out = np.concatenate([rot, kp, img, misc], axis=1).astype(np.float32)
+    if out.shape != (n_frames, V_HMR_DIM):
+        raise ValueError(
+            "V_hmr shape %s != (%d, %d); rot/kp/img/misc = %d/%d/%d/%d"
+            % (out.shape, n_frames, V_HMR_DIM, rot.shape[1], kp.shape[1], img.shape[1], misc.shape[1])
+        )
+    return out
 
 
 def contact_label_path(seq_dir: Path, method: str) -> Path:
@@ -137,12 +183,24 @@ class AnySoleDataset(Dataset):
         contact_method: str = "tactile_abs",
         stride: Optional[int] = None,
         no_imu: bool = False,
+        v_input: str = "hrnet",
+        v_hmr_model: str = "gvhmr",
+        f2_repr: bool = False,
     ):
         self.mode = mode
         self.window_length = int(window_length)
         # --no-imu: T_s2m is built without the synthesized IMU channels
         # (38-dim instead of 50-dim; see tactile_s2m.py).
         self.no_imu = bool(no_imu)
+        # F1: hmr_gvhmr reads the GVHMR cache as the visual input (V_hmr);
+        # the HRNet cache is still loaded (L_Vrec target / V-only fallback).
+        self.v_input = str(v_input)
+        if self.v_input not in ("hrnet", "hmr_gvhmr"):
+            raise ValueError("v_input must be 'hrnet' or 'hmr_gvhmr', got %r" % self.v_input)
+        self.v_hmr_model = str(v_hmr_model)
+        # F2a: pose_gt root 6D becomes the tilt (heading removed), and the
+        # trajectory target becomes the 4-dim heading-frame quantity.
+        self.f2_repr = bool(f2_repr)
         # E6.3: window stride. None = non-overlapping (stride == window_length,
         # the pre-E6 behavior). Training may use stride=1 (every frame
         # alignment, Step2Motion-style); continuation eval uses tw//2.
@@ -212,6 +270,19 @@ class AnySoleDataset(Dataset):
                     "%s V_feat shape %s != (%d, %d)" % (session_id, v_feat.shape, n_frames, V_FEAT_DIM)
                 )
 
+            # F1: GVHMR visual channel (only when the run consumes it).
+            if self.v_input == "hmr_gvhmr":
+                hmr_path = hmr_cache_path(self.v_hmr_model, session_id)
+                if not hmr_path.is_file():
+                    raise FileNotFoundError(
+                        "Missing GVHMR cache %s. Run `python -m anysole.data.extract_hmr` "
+                        "(downloads required, see extract_hmr.py header)." % hmr_path
+                    )
+                hmr = torch.load(hmr_path, map_location="cpu")
+                v_hmr = assemble_v_hmr(hmr, n_frames)
+            else:
+                v_hmr = None
+
             kp = fk_pose6d_np(bvh["pose_6d"], bvh["trans_m"], bvh["offsets_m"], bvh["parents"])
             t_raw_norm = normalize_raw(pressure["T_raw"])
             # E6.6a: Step2Motion-口径触觉通道（50 维/帧：16 压力池化 + 合成 IMU
@@ -241,6 +312,36 @@ class AnySoleDataset(Dataset):
             if n_frames > 1:
                 vel[1:] = (trans[1:] - trans[:-1]) * float(FPS)
 
+            # F2a: heading/tilt representation (per session, before windows).
+            if self.f2_repr:
+                root_rot = rot6d_to_rotmat_np(
+                    bvh["pose_6d"].reshape(n_frames, N_JOINTS, 6)[:, 0]
+                )
+                psi = heading_from_root_np(root_rot)  # (T,), unwrapped
+                r_yaw = yaw_rotmat_np(psi)
+                tilt = np.einsum("tji,tjk->tik", r_yaw, root_rot)  # R_yaw^T @ R_root
+                pose_f2 = bvh["pose_6d"].copy()
+                pose_f2[:, :6] = rotmat_to_6d_np(tilt)
+                # psi_dot / v_h use the true forward differences; the first
+                # frame of the sequence has no predecessor and gets ZERO
+                # motion (not the plan's copy-next-frame: zero keeps the
+                # f2->world roundtrip exact at frame 0, since the window
+                # anchor is that same frame's world state).
+                psi_dot = np.zeros_like(psi)
+                vel_xy = np.zeros((n_frames, 2), dtype=np.float64)
+                if n_frames > 1:
+                    psi_dot[1:] = (psi[1:] - psi[:-1]) * float(FPS)
+                    vel_xy[1:] = (trans[1:, [0, 2]] - trans[:-1, [0, 2]]) * float(FPS)
+                v_h = np.einsum("tji,tj->ti", r_yaw, np.stack(
+                    [vel_xy[:, 0], np.zeros_like(vel_xy[:, 0]), vel_xy[:, 1]], axis=1
+                ))[:, [0, 2]]  # R_yaw^T @ v_xy, y padded
+                traj_f2 = np.concatenate(
+                    [psi_dot[:, None], v_h, trans[:, 1:2]], axis=1
+                ).astype(np.float32)
+            else:
+                psi = None
+                traj_f2 = None
+
             session = {
                 "session_id": session_id,
                 "hierarchy": bvh["hierarchy"],
@@ -248,8 +349,10 @@ class AnySoleDataset(Dataset):
                 "T_raw": t_raw_norm,
                 "T_phys": pressure["T_phys"],
                 "T_s2m": t_s2m,
-                "pose_gt": bvh["pose_6d"],
+                "pose_gt": pose_f2 if self.f2_repr else bvh["pose_6d"],
                 "pose_gt_pos": pose_pos,
+                "traj_gt_f2": traj_f2,
+                "psi": psi,
                 "root_rot_init": root_rot_init,
                 "trans_global": trans.astype(np.float32),
                 "vel_gt": vel.astype(np.float32),
@@ -259,6 +362,8 @@ class AnySoleDataset(Dataset):
                 "parents": np.asarray(JOINT_PARENTS, dtype=np.int64),
                 "fake_mask": fake_mask,
             }
+            if self.v_input == "hmr_gvhmr":
+                session["V_hmr"] = v_hmr.astype(np.float32)
             file_index = len(self.sessions)
             if n_frames >= self.window_length:
                 n_windows = (n_frames - self.window_length) // self.stride + 1
@@ -306,6 +411,13 @@ class AnySoleDataset(Dataset):
             "hierarchy": session["hierarchy"],
             "frame_start": torch.tensor(left, dtype=torch.long),
         }
+        if self.v_input == "hmr_gvhmr":
+            item["V_hmr"] = crop("V_hmr")
+        if self.f2_repr:
+            item["traj_gt_f2"] = crop("traj_gt_f2")
+            item["psi_anchor"] = torch.tensor(
+                session["psi"][max(left - 1, 0)], dtype=torch.float32
+            )
         # Trajectory targets are relative to the frame immediately before the
         # window.  Dividing by FPS integrates m/s back to meters.
         item["trans_gt"] = torch.cumsum(item["vel_gt"], dim=0) / float(FPS)

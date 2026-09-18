@@ -58,7 +58,7 @@ def main():
     batch = move_batch(collate_windows(windows), DEVICE)
     bsz = batch["pose_gt"].shape[0]
     c = torch.full((bsz,), CONFIG_VT, device=DEVICE, dtype=torch.long)
-    v, tr, tp = condition_inputs(batch, c)
+    v, tr, tp, _, _ = condition_inputs(batch, c)
     anchor = batch["trans_anchor"][:, None, :]
     gt_trans = batch["trans_gt"] + anchor
     kp_gt = batch["kp_gt"]

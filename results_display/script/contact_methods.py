@@ -20,6 +20,13 @@ Methods (``METHODS`` registry):
                 的患者退化为绝对阈值
     joint_or    bvh_h ∨ tactile_gmm (任一判离地即离地)
     joint_and   bvh_h ∧ tactile_gmm (两者都判离地才离地)
+    motion_f6   F6 运动学状态机: 接触->离地 v>0.6m/s 连续2帧(压力永不触发离地);
+                离地->接触 (v<0.3 且 |az|<3 连续2帧) 或 (压力承重 且 v<0.6);
+                h>=20cm 且无压力时拒绝接触(台阶承重走压力分支不受影响)
+    pressure_f6 F6 承重: 逐格基线=离地帧值90分位(自举自 motion_f6), corrected和
+                + 迟滞阈值(80 或 0.2*stance中位, 1.5x 滞回)
+    f6_soft     F6 软标签: 硬值=motion_f6, 按 pressure_f6 一致度取
+                {0.95 触地承重 / 0.70 触地未承重 / 0.05 离地 / 0.30 离地残余压}
 
 The ``--report`` step scores every method against ``bvh_h`` as reference
 (视觉判据: 脚离地) and writes ``comparison.csv`` / ``comparison.png``
@@ -42,6 +49,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from scipy.ndimage import median_filter
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -97,6 +105,8 @@ def load_aligned(seq_dir: Path) -> dict:
         "floor": floor,
         "sums_l": out["left48"].sum(axis=1).astype(np.float64),
         "sums_r": out["right48"].sum(axis=1).astype(np.float64),
+        "left48": out["left48"],
+        "right48": out["right48"],
     }
 
 
@@ -227,6 +237,139 @@ def m_pat_offset(ctx: dict, patient_offsets: dict | None) -> np.ndarray:
     return out
 
 
+# --- F6: 运动学状态机 + 标定压力 + 软标签（2026-09-18） ------------------------
+# 设计见 fix_plan_v2.md F6a。全局常数，不逐 session 拟合；
+# 预验证：S10113 台阶承重段判接触、S11032/53/73 摆动相判离地、全 144 session
+# 各 seq 接触率与生物力学先验一致（走 0.62 / 跑 0.47 / 跳 0.60 / 楼梯 0.69）。
+
+F6_V_LO, F6_V_HI, F6_A_THR, F6_H_HIGH = 0.3, 0.6, 3.0, 0.20  # m/s, m/s, m/s^2, m
+F6_MIN_AIR = 10  # 离地帧少于此数 -> 基线退化为 0（绝对阈值），拖步患者全接触
+F6_SOFT = {"contact_loaded": 0.95, "contact_unloaded": 0.70, "air_loaded": 0.30, "air_unloaded": 0.05}
+
+_F6_CACHE: dict[int, dict] = {}
+
+
+def _f6_signals(ctx: dict, side: str) -> dict:
+    """脚速 v、竖直加速度 a_z（位置 3 帧中值滤波后中央差分）与高度 h。"""
+    names, pts = ctx["names"], ctx["pts"]
+    idx = [
+        i for i, nm in enumerate(names)
+        if nm.lower().startswith(f"{side}foot") or nm.lower().startswith(f"{side}toe")
+    ]
+    fp = median_filter(pts[:, idx, :], size=(3, 1, 1))
+    p = fp.mean(axis=1)
+    v3 = np.zeros_like(p)
+    v3[1:] = (p[1:] - p[:-1]) * FPS
+    v = np.linalg.norm(v3, axis=1)
+    z = p[:, 2]
+    az = np.zeros_like(z)
+    az[2:] = (z[2:] - z[:-2]) / 2.0 * FPS * FPS
+    h, _ = foot_signal(ctx, side)
+    return {"v": v.astype(np.float64), "az": az.astype(np.float64), "h": h}
+
+
+def _f6_schmitt(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """迟滞二值化: 当前真 -> 掉到 lo 以下才翻假; 当前假 -> 超过 hi 才翻真。"""
+    s = np.zeros(x.shape[0], dtype=bool)
+    s[0] = x[0] > hi
+    for t in range(1, x.shape[0]):
+        s[t] = x[t] >= lo if s[t - 1] else x[t] > hi
+    return s
+
+
+def _f6_pressure(ctx: dict, side: str, air: np.ndarray) -> dict:
+    """逐格基线（离地帧 90 分位）减除后的 corrected 和 + 迟滞阈值 -> loaded。"""
+    cells = ctx["left48"] if side == "left" else ctx["right48"]
+    calibrated = air.sum() >= F6_MIN_AIR
+    base = np.percentile(cells[air], 90, axis=0) if calibrated else np.zeros(cells.shape[1], dtype=np.float64)
+    corr = np.clip(cells - base, 0.0, None).sum(axis=1).astype(np.float64)
+    stance = ~air
+    stance_ref = float(np.median(corr[stance])) if stance.any() else float(np.median(corr))
+    thr_lo = max(80.0, 0.2 * stance_ref)
+    thr_hi = 1.5 * thr_lo
+    return {
+        "corrected": corr,
+        "loaded": _f6_schmitt(corr, thr_lo, thr_hi),
+        "thr_lo": float(thr_lo),
+        "thr_hi": float(thr_hi),
+        "calibrated": bool(calibrated),
+        "n_air": int(air.sum()),
+    }
+
+
+def _f6_machine(ctx: dict, side: str, loaded: np.ndarray) -> np.ndarray:
+    """运动学接触状态机（初值=接触，每脚独立）。
+
+    接触->离地: v > V_HI 连续 2 帧（压力永不触发离地——推离期压力先掉是语义差）。
+    离地->接触: (v < V_LO 且 |a_z| < A_THR 连续 2 帧) 或 (承重 且 v < V_HI)。
+    h >= H_HIGH 且无压力 -> 拒绝接触（空中悬停/跳顶；台阶承重不受影响）。"""
+    sig = _f6_signals(ctx, side)
+    v, az, h = sig["v"], sig["az"], sig["h"]
+    n = v.shape[0]
+    state = np.ones(n, dtype=np.int8)
+    for t in range(2, n):
+        prev = state[t - 1]
+        to_air = v[t] > F6_V_HI and v[t - 1] > F6_V_HI
+        vel_cont = (
+            v[t] < F6_V_LO and v[t - 1] < F6_V_LO
+            and abs(az[t]) < F6_A_THR and abs(az[t - 1]) < F6_A_THR
+        )
+        pres_cont = bool(loaded[t]) and v[t] < F6_V_HI
+        to_cont = vel_cont or pres_cont
+        if to_cont and h[t] >= F6_H_HIGH and not loaded[t]:
+            to_cont = False
+        if prev == 1 and to_air:
+            state[t] = 0
+        elif prev == 0 and to_cont:
+            state[t] = 1
+        else:
+            state[t] = prev
+    return state
+
+
+def _f6_pipeline(ctx: dict) -> dict:
+    """motion_f6 / pressure_f6 / f6_soft 联合计算。
+
+    自举标定：v>V_HI 帧作种子离地 -> 标基线 -> 跑状态机 -> 用最终离地帧重标定 -> 重跑。
+    缓存按 ctx 身份挂引用（防 id 复用串台）。"""
+    key = id(ctx)
+    if key in _F6_CACHE and _F6_CACHE[key]["_ctx"] is ctx:
+        return _F6_CACHE[key]
+    out: dict = {"_ctx": ctx}
+    for side in ("left", "right"):
+        sig = _f6_signals(ctx, side)
+        seed_air = sig["v"] > F6_V_HI
+        p0 = _f6_pressure(ctx, side, seed_air)
+        state1 = _f6_machine(ctx, side, p0["loaded"])
+        p1 = _f6_pressure(ctx, side, state1 == 0)
+        out[side] = {"state": _f6_machine(ctx, side, p1["loaded"]), **p1}
+    _F6_CACHE[key] = out
+    return out
+
+
+def m_motion_f6(ctx: dict) -> np.ndarray:
+    pipe = _f6_pipeline(ctx)
+    return np.stack([pipe["left"]["state"], pipe["right"]["state"]], axis=1).astype(np.float32)
+
+
+def m_pressure_f6(ctx: dict) -> np.ndarray:
+    pipe = _f6_pipeline(ctx)
+    return np.stack([pipe["left"]["loaded"], pipe["right"]["loaded"]], axis=1).astype(np.float32)
+
+
+def m_f6_soft(ctx: dict) -> np.ndarray:
+    pipe = _f6_pipeline(ctx)
+    out = np.zeros((ctx["n"], 2), dtype=np.float32)
+    for k, side in enumerate(("left", "right")):
+        cont = pipe[side]["state"] == 1
+        loaded = pipe[side]["loaded"]
+        out[cont & loaded, k] = F6_SOFT["contact_loaded"]
+        out[cont & ~loaded, k] = F6_SOFT["contact_unloaded"]
+        out[~cont & ~loaded, k] = F6_SOFT["air_unloaded"]
+        out[~cont & loaded, k] = F6_SOFT["air_loaded"]
+    return out
+
+
 METHODS: dict[str, dict] = {
     "tactile_abs": {"desc": "触觉绝对阈值: 48格压力和 > 100 (原 contact.npy 口径)", "fn": lambda ctx, po: m_tactile_abs(ctx)},
     "bvh_soft": {"desc": "BVH 运动学 (模型同构 sigmoid 乘积 > 0.5)", "fn": lambda ctx, po: m_bvh_soft(ctx)},
@@ -236,6 +379,9 @@ METHODS: dict[str, dict] = {
     "pat_offset": {"desc": "患者级偏移补偿: 摆动相压力和的中位数 + 100", "fn": m_pat_offset},
     "joint_or": {"desc": "bvh_h ∨ tactile_gmm (任一判离地)", "fn": lambda ctx, po: m_joint_or(ctx)},
     "joint_and": {"desc": "bvh_h ∧ tactile_gmm (都判离地才离地)", "fn": lambda ctx, po: m_joint_and(ctx)},
+    "motion_f6": {"desc": "F6 运动学状态机: v>0.6离地 / v<0.3&|az|<3 或承重落地 / h>=20cm无压力否决", "fn": lambda ctx, po: m_motion_f6(ctx)},
+    "pressure_f6": {"desc": "F6 承重: 逐格离地基线90分位 + corrected和 + 迟滞阈值", "fn": lambda ctx, po: m_pressure_f6(ctx)},
+    "f6_soft": {"desc": "F6 软标签: motion_f6 硬值 × pressure_f6 一致度 {0.05,0.3,0.7,0.95}", "fn": lambda ctx, po: m_f6_soft(ctx)},
 }
 METHOD_NAMES = list(METHODS)
 
@@ -290,6 +436,9 @@ def apply_method(ctx: dict, method: str, po: dict | None) -> tuple[np.ndarray, t
             thr_r = (off["right"] + CONTACT_SUM_THRESH) if off["right"] is not None else CONTACT_SUM_THRESH
         else:
             thr_l = thr_r = CONTACT_SUM_THRESH
+    elif method == "pressure_f6":
+        pipe = _f6_pipeline(ctx)
+        thr_l, thr_r = pipe["left"]["thr_lo"], pipe["right"]["thr_lo"]
     return contact, (thr_l, thr_r)
 
 

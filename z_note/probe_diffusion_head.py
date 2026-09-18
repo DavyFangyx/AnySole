@@ -44,7 +44,7 @@ def main() -> None:
     loader = torch.utils.data.DataLoader(dataset, batch_size=8, shuffle=False, collate_fn=collate_windows)
     batch = move_batch(next(iter(loader)), device)
     cid = torch.full((8,), CONFIG_VT, device=device, dtype=torch.long)
-    v_feat, t_raw, t_phys = condition_inputs(batch, cid)
+    v_feat, t_raw, t_phys, _, _ = condition_inputs(batch, cid)
     pose_gt = batch["pose_gt"]
 
     # mean pose per frame (over this batch)

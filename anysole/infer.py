@@ -11,10 +11,25 @@ import numpy as np
 import torch
 
 from anysole.data.bvh_io import load_bvh, pose_trans_to_motion, resample_session_bvh, write_bvh
-from anysole.data.dataset import find_session_dir, hrnet_cache_path, resolve_bvh_path, session_time_grid
+from anysole.data.dataset import (
+    assemble_v_hmr,
+    find_session_dir,
+    hmr_cache_path,
+    hrnet_cache_path,
+    resolve_bvh_path,
+    session_time_grid,
+)
 from anysole.data.pressure import load_session_pressure, normalize_raw
 from anysole.data.tactile_s2m import build_t_s2m
 from anysole.diffusion import GaussianDiffusion
+from anysole.geometry import (
+    euler_yxz_to_rotmat,
+    f2_to_world_np,
+    heading_from_root_np,
+    positions_to_6d_np,
+    rot6d_to_rotmat_np,
+    rotmat_to_6d_np,
+)
 from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.train import load_config, resolve_device
@@ -33,6 +48,7 @@ from anysole.types import (
     T_S2M_DIM,
     T_S2M_NOIMU_DIM,
     V_FEAT_DIM,
+    V_HMR_DIM,
     anysole_model_dir,
 )
 
@@ -178,12 +194,26 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
         # --no-imu checkpoint: the tactile channel is 38-dim. Rebuild the zero
         # placeholder (used for V-only rows) at the deleted-channel width.
         t_s2m = np.zeros((n_frames, T_S2M_NOIMU_DIM), dtype=np.float32)
+    # F1: hmr_gvhmr checkpoints consume the GVHMR channel.
+    v_hmr = np.zeros((n_frames, V_HMR_DIM), dtype=np.float32)
+    if str(saved_config.get("v_input", "hrnet")) == "hmr_gvhmr" and config_value in (CONFIG_VT, CONFIG_V):
+        hmr_path = hmr_cache_path("gvhmr", args.session)
+        if not hmr_path.is_file():
+            raise FileNotFoundError(
+                "Missing GVHMR cache %s. Run `python -m anysole.data.extract_hmr`." % hmr_path
+            )
+        v_hmr = assemble_v_hmr(torch.load(hmr_path, map_location="cpu"), n_frames)
     if modal == MODEL_ANYSOLEV2:
         # F0b: regression model — the regress pose head is implied by the
         # modal; forward takes no diffusion pair.
         model = AnySoleModelV2(
             d=d_model, tw=tw, dropout=dropout, pose_layers=pose_layers,
             tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
+            v_input=str(saved_config.get("v_input", "hrnet")),
+            t_encoder=str(saved_config.get("t_encoder", "linear")),
+            f2_repr=bool(saved_config.get("f2_repr", False)),
+            decoder=str(saved_config.get("decoder", "v1")),
+            gate_mode=str(saved_config.get("gate_mode", "gated")),
         ).to(device)
     else:
         model = AnySoleModel(
@@ -211,7 +241,15 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
             bvh_s["pose_6d"], bvh_s["trans_m"], bvh_s["offsets_m"], bvh_s["parents"], t_raw,
             no_imu=no_imu,
         )
-    bvh = load_bvh(resolve_bvh_path(meta)) if pos_mode else None
+    f2_repr = bool(saved_config.get("f2_repr", False))
+    bvh = load_bvh(resolve_bvh_path(meta)) if (pos_mode or f2_repr) else None
+    psi_array = None
+    trans_world_array = None
+    if f2_repr:
+        # F2a: per-frame heading + world root position for the window anchors.
+        root_rot = euler_yxz_to_rotmat(bvh.motion[:, 3:6])  # (T,3,3)
+        psi_array = heading_from_root_np(root_rot)
+        trans_world_array = bvh.motion[:, 0:3]
 
     if continuation:
         # E6.4: overlapping windows (stride = tw/2) with chain continuation;
@@ -221,12 +259,14 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
         traw_windows, _ = _stride_windows(t_raw, tw, half)
         tphys_windows, _ = _stride_windows(t_phys, tw, half)
         ts2m_windows, _ = _stride_windows(t_s2m, tw, half)
+        vhmr_windows, _ = _stride_windows(v_hmr, tw, half)
         root_init = euler_yxz_to_rotmat(bvh.motion[0, 3:6][None, :])[0]
     else:
         v_windows = _right_pad_windows(v_feat, tw)
         traw_windows = _right_pad_windows(t_raw, tw)
         tphys_windows = _right_pad_windows(t_phys, tw)
         ts2m_windows = _right_pad_windows(t_s2m, tw)
+        vhmr_windows = _right_pad_windows(v_hmr, tw)
     pose_parts, trans_parts = [], []
     # Each window is relative to the preceding frame.  Stitch windows in
     # order by carrying forward the last predicted world-space position
@@ -240,7 +280,9 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
             traw_batch = traw_windows[left:right].to(device)
             tphys_batch = tphys_windows[left:right].to(device)
             ts2m_batch = ts2m_windows[left:right].to(device)
+            vhmr_batch = vhmr_windows[left:right].to(device)
             config_id = torch.full((right - left,), config_value, device=device, dtype=torch.long)
+            v_kw = {"V_hmr": vhmr_batch} if str(saved_config.get("v_input", "hrnet")) == "hmr_gvhmr" else {}
             cond = {
                 "V_feat": v_batch,
                 "T_raw": traw_batch,
@@ -252,7 +294,7 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
             if modal == MODEL_ANYSOLEV2:
                 # F0b: one regression forward per window, no sampling chain.
                 out = model(v_batch, traw_batch, tphys_batch, config_id,
-                            [args.session] * (right - left), T_s2m=ts2m_batch)
+                            [args.session] * (right - left), T_s2m=ts2m_batch, **v_kw)
                 pred_pose = out["x0_hat"]
             else:
                 prior = model.pose_head.pose_mean.view(1, 1, -1).expand(right - left, tw, -1) if warm_start else None
@@ -295,14 +337,29 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
                     else:
                         stitch_anchor = window_world[-1].clone()
             else:
-                pose_parts.append(pred_pose.cpu())
-                world_windows = []
-                for window_rel in trans_rel:
-                    window_world = window_rel + stitch_anchor.view(1, 3)
-                    world_windows.append(window_world)
-                    stitch_anchor = window_world[-1].clone()
-                trans_world = torch.stack(world_windows, dim=0)
-                trans_parts.append(trans_world)
+                if f2_repr:
+                    # F2a: recover the world pose/trans per window from the
+                    # tilt pose + heading trajectory and its GT anchors.
+                    for w in range(right - left):
+                        window_idx = left + w
+                        anchor_idx = min(max(window_idx - 1, 0), n_frames - 1)
+                        world_pose, world_trans = f2_to_world_np(
+                            pred_pose[w].cpu().numpy(),
+                            out["v_hat"][w].cpu().numpy(),
+                            float(psi_array[anchor_idx]),
+                            trans_world_array[anchor_idx],
+                        )
+                        pose_parts.append(torch.from_numpy(world_pose))
+                        trans_parts.append(torch.from_numpy(world_trans))
+                else:
+                    pose_parts.append(pred_pose.cpu())
+                    world_windows = []
+                    for window_rel in trans_rel:
+                        window_world = window_rel + stitch_anchor.view(1, 3)
+                        world_windows.append(window_world)
+                        stitch_anchor = window_world[-1].clone()
+                    trans_world = torch.stack(world_windows, dim=0)
+                    trans_parts.append(trans_world)
 
     pred_pose_np = torch.cat(pose_parts, dim=0).reshape(-1, POSE_DIM)[:n_frames].numpy()
     pred_trans_np = torch.cat(trans_parts, dim=0).reshape(-1, 3)[:n_frames].numpy()

@@ -83,13 +83,29 @@ def collect_f(model, dataset, device: torch.device, batch_size: int) -> tuple:
             batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in raw_batch.items()}
             B = batch["pose_gt"].shape[0]
             config_id = torch.zeros(B, dtype=torch.long, device=device)
-            if model.tactile_input == "s2m50":
-                t_tac = batch["T_s2m"]
+            if getattr(model, "decoder", "v1") == "part9":
+                # F5: the part decoder replaces fusion — probe its part-mean
+                # memory through the full forward.
+                out = model(batch["V_feat"], batch["T_raw"], batch["T_phys"], config_id,
+                            T_s2m=batch.get("T_s2m"), V_hmr=batch.get("V_hmr"))
+                F = out["F"]  # (B, tw, d)
             else:
-                t_tac = torch.cat([batch["T_raw"], batch["T_phys"]], dim=-1)
-            v_tok, t_tok = model.encoders(batch["V_feat"], t_tac, config_id)
-            F = model.fusion(v_tok, t_tok)  # (B, 40, d)
-            f_list.append(F.view(-1, 2, F.shape[-1]).reshape(-1, 2 * F.shape[-1]))
+                if model.tactile_input == "s2m50":
+                    t_tac = batch["T_s2m"]
+                else:
+                    t_tac = torch.cat([batch["T_raw"], batch["T_phys"]], dim=-1)
+                v_tok, t_tok = model.encoders(batch["V_feat"], t_tac, config_id,
+                                              V_hmr=batch.get("V_hmr"))
+                F = model.fusion(v_tok, t_tok)  # (B, 40, d)
+            tw_runtime = batch["pose_gt"].shape[1]
+            if F.shape[1] == 2 * tw_runtime:
+                # v1 fusion: two tokens per frame -> 512-dim per frame.
+                f_list.append(F.reshape(-1, 2, F.shape[-1]).reshape(-1, 2 * F.shape[-1]))
+            elif F.shape[1] == tw_runtime:
+                # F5 part decoder: one part-mean token per frame.
+                f_list.append(F.reshape(-1, F.shape[-1]))
+            else:
+                raise ValueError("unexpected F tokens %d for tw %d" % (F.shape[1], tw_runtime))
             pose_list.append(batch["pose_gt"].reshape(-1, batch["pose_gt"].shape[-1]))
     return torch.cat(f_list), torch.cat(pose_list)
 
@@ -135,6 +151,8 @@ def main(argv=None) -> int:
                                         {"val": "val", "test": "test"}[args.split])
                          if mode in ("eval", "test") else None),
             contact_method=contact_method, no_imu=no_imu,
+            v_input=str(saved.get("v_input", "hrnet")),
+            f2_repr=bool(saved.get("f2_repr", False)),
         )
 
     train_ds = build_dataset("train")
