@@ -100,6 +100,7 @@ results_display/
 | `visualize_step2motion.py` | Step2Motion 足底压力/生成 BVH/GT 对比动画 | `Test1_visualization/Step2Motion/gait_model/` |
 | `visualize_anysole.py` | AnySole 主模型与消融（足底压力/预测 BVH/GT） | `Test1_visualization/AnySole/<modal>/<config>/` |
 | `visualize_gt_bvh.py` | 原始 GT 动捕 BVH 的骨架渲染（参考动画） | `Test1_visualization/gt/` |
+| `visualize_gt_smpl.py` | 原始 GT SMPL-NPZ 的骨架渲染（与 AnySole SMPL GT 对齐） | `Test1_visualization/gt_smpl/` |
 
 ```bash
 conda activate touch_gait

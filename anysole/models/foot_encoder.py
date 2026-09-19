@@ -89,6 +89,13 @@ class FootConvEncoder(nn.Module):
         # Match LinearTemporalEncoder's contract: normalized stream + time PE
         # + modality embedding (the fusion input shape stays (B, tw, dim)).
         self.norm = nn.LayerNorm(dim)
+        # encode_stream output norm (fix_plan_v3 §3.1 hygiene fix): the F5
+        # root cause was this stream lacking LayerNorm (|t_tok| ~1400x the
+        # V tokens -> one-hot cross attention).  V3 does not call
+        # encode_stream; the norm is so future misuse fails loudly, not
+        # silently.  NOTE: adding these keys is tolerated by the quasi-strict
+        # loaders (eval.py / infer.py _MISSING_OK) for pre-V3 checkpoints.
+        self.stream_norm = nn.LayerNorm(dim)
 
     def _per_foot_inputs(self, x: torch.Tensor):
         """(B, tw, 108) -> grids (B, tw, 2, 4, 12), feats (B, tw, 2, FEAT_PER_FOOT)."""
@@ -133,9 +140,10 @@ class FootConvEncoder(nn.Module):
         tokens = tokens + self.foot_emb.weight.to(dtype=tokens.dtype).view(1, 1, 2, self.dim)
         return tokens
 
-    def encode_stream(self, x: torch.Tensor) -> torch.Tensor:
-        """(B, tw, 108) -> (B, tw, 3, dim) token stream after the temporal
-        transformer (F5: the part decoder's T stream — left/right/global)."""
+    def _stream_raw(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, tw, 108) -> (B, tw, 3, dim) RAW token stream after the temporal
+        transformer (no output LayerNorm).  ``forward()`` consumes this so the
+        F4a/F2p4 forward path is byte-identical to the pre-fix computation."""
         batch, tw = x.shape[0], x.shape[1]
         tokens = self._per_foot_tokens(x)  # (B, tw, 2, dim)
         global_tok = self.global_merge(tokens.reshape(batch, tw, 2 * self.dim))
@@ -149,6 +157,15 @@ class FootConvEncoder(nn.Module):
         seq = self.temporal(seq + pe + type_emb)
         return seq.reshape(batch, tw, 3, self.dim)
 
+    def encode_stream(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, tw, 108) -> (B, tw, 3, dim) token stream after the temporal
+        transformer (left/right/global).  ARCHIVED alongside part_decoder
+        (v2 §F5 作废, fix_plan_v3); the LayerNorm here is the hygiene fix —
+        the un-normalized stream was the F5 failure root cause.  ``forward()``
+        does NOT route through this normalization (it uses _stream_raw), so
+        the F4a/F2p4 forward values are unchanged by the fix."""
+        return self.stream_norm(self._stream_raw(x))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 3 or x.shape[-1] != T_RAW_DIM + T_PHYS_DIM:
             raise ValueError(
@@ -156,7 +173,7 @@ class FootConvEncoder(nn.Module):
                 % (T_RAW_DIM + T_PHYS_DIM, tuple(x.shape))
             )
         batch, tw = x.shape[0], x.shape[1]
-        seq = self.encode_stream(x)
+        seq = self._stream_raw(x)
         h = self.out_merge(seq.reshape(batch, tw, 3 * self.dim))
         h = self.norm(h)
         h = h + self.embeddings.time_pe.to(dtype=h.dtype)

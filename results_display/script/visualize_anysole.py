@@ -41,6 +41,7 @@ from visualize_motionpro import (  # noqa: E402
     parents_to_edges,
     session_dir,
 )
+from smpl_visual import load_smpl_gt  # noqa: E402
 
 PRED_ROOT = cli_common.RESULTS_ROOT / "AnySole"
 
@@ -55,8 +56,10 @@ def load_pressure(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     return pressure, fake
 
 
-def load_gt(seq_dir: Path, n_frames: int, fps: float = 40.0):
+def load_gt(seq_dir: Path, n_frames: int, fps: float = 40.0, mocap_format: str = "smpl"):
     meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
+    if mocap_format == "smpl":
+        return load_smpl_gt(seq_dir, n_frames, fps)
     bvh_path = Path(cli_common.resolve_path(meta["bvh_path"]))
     # AnySole BVHs are already aligned to visual_start_s; the default 0.4s
     # trim would shift the skeleton panel past the pressure timeline.
@@ -83,7 +86,7 @@ def render_session(seq_dir: Path, pred_bvh: Path, session_id: str, config_id: st
     n = min(pressure.shape[0], pred.shape[0], fake.shape[0])
     if n < pred.shape[0]:
         log.warning(f"{session_id}_{config_id}: pred has {pred.shape[0]} frames, rendering first {n}")
-    gt, gt_parents = load_gt(seq_dir, n, args.fps)
+    gt, gt_parents = load_gt(seq_dir, n, args.fps, args.mocap_format)
     gt_edges = parents_to_edges(gt_parents)
 
     frame_ids = list(range(0, n, max(args.stride, 1)))
@@ -132,6 +135,7 @@ def parse_args() -> argparse.Namespace:
         "Model dir is <modal>_<contact-method> (e.g. anysolev1_bvh_soft).",
     )
     parser.add_argument("--contact-method", type=str, default="tactile_abs", help="Contact-label scheme(s), comma-separated; ignored when --modal is 'auto'.")
+    parser.add_argument("--mocap-format", choices=("smpl", "bvh"), default="smpl", help="Ground-truth source format; predictions remain exported BVH.")
     return parser.parse_args()
 
 

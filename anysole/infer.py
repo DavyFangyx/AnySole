@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from anysole.data.bvh_io import load_bvh, pose_trans_to_motion, resample_session_bvh, write_bvh
+from anysole.data.smpl_io import load_smpl, resolve_smpl_path
 from anysole.data.dataset import (
     assemble_v_hmr,
     find_session_dir,
@@ -47,10 +48,18 @@ from anysole.types import (
     T_RAW_DIM,
     T_S2M_DIM,
     T_S2M_NOIMU_DIM,
+    SMPL_ROOTS,
     V_FEAT_DIM,
     V_HMR_DIM,
     anysole_model_dir,
 )
+
+# Quasi-strict load allowance (fix_plan_v3 §3.1) — keep in sync with the
+# identical _MISSING_OK in eval.py.
+_MISSING_OK = frozenset({
+    "encoders.t_enc.stream_norm.weight",
+    "encoders.t_enc.stream_norm.bias",
+})
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -206,14 +215,18 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     if modal == MODEL_ANYSOLEV2:
         # F0b: regression model — the regress pose head is implied by the
         # modal; forward takes no diffusion pair.
+        if str(saved_config.get("decoder", "v1")) == "part9":
+            raise ValueError(
+                "F5 part9 checkpoint is archived (v2 §F5 作废，fix_plan_v3 取代)；"
+                "V3 代码不回载。基线用 F4a_footconv / F2p4_combo。"
+            )
         model = AnySoleModelV2(
             d=d_model, tw=tw, dropout=dropout, pose_layers=pose_layers,
             tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
             v_input=str(saved_config.get("v_input", "hrnet")),
             t_encoder=str(saved_config.get("t_encoder", "linear")),
             f2_repr=bool(saved_config.get("f2_repr", False)),
-            decoder=str(saved_config.get("decoder", "v1")),
-            gate_mode=str(saved_config.get("gate_mode", "gated")),
+            pose_parts=int(saved_config.get("pose_parts", 3)),
         ).to(device)
     else:
         model = AnySoleModel(
@@ -221,7 +234,13 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
             tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
             **model_kw,
         ).to(device)
-    model.load_state_dict(checkpoint["model"], strict=True)
+    # Quasi-strict load — same allowance as eval.py _load_model
+    # (fix_plan_v3 §3.1); keep both _MISSING_OK sets in sync.
+    missing, unexpected = model.load_state_dict(checkpoint["model"], strict=False)
+    if unexpected or not set(missing) <= _MISSING_OK:
+        raise RuntimeError(
+            "state_dict mismatch: missing=%s unexpected=%s" % (missing, unexpected)
+        )
     # E4: match the checkpoint's training noise scale (see train.py noise_scaled).
     model.noise_scaled = bool(saved_config.get("noise_scaled", False))
     model.eval()
@@ -236,7 +255,16 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
         # identically; see anysole/data/tactile_s2m.py for the leakage note).
         # --no-imu: no_imu=True builds the 38-dim channel without any IMU.
         t_mocap = session_time_grid(meta) - float(meta["offset_s"])
-        bvh_s = resample_session_bvh(resolve_bvh_path(meta), t_mocap, hierarchy_cache={})
+        mocap_format = str(saved_config.get("mocap_format", config.get("mocap_format", "smpl")))
+        if mocap_format == "smpl":
+            try:
+                smpl_path = resolve_smpl_path(meta, tuple(Path(p) for p in saved_config.get("smpl_roots", config.get("smpl_roots", SMPL_ROOTS))))
+                smpl_bvh = smpl_path.parent / "motion_smpl24_blender_world_m.bvh"
+                bvh_s = load_smpl(smpl_path, query_t=t_mocap, paired_bvh=smpl_bvh if smpl_bvh.is_file() else resolve_bvh_path(meta))
+            except FileNotFoundError:
+                bvh_s = resample_session_bvh(resolve_bvh_path(meta), t_mocap, hierarchy_cache={})
+        else:
+            bvh_s = resample_session_bvh(resolve_bvh_path(meta), t_mocap, hierarchy_cache={})
         t_s2m = build_t_s2m(
             bvh_s["pose_6d"], bvh_s["trans_m"], bvh_s["offsets_m"], bvh_s["parents"], t_raw,
             no_imu=no_imu,

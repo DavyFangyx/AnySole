@@ -53,4 +53,12 @@ cache_root: /data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/AnySole/hrne
 use_insole_drift: false
 modal: anysolev1
 contact_method: joint_and
+# Main AnySole GT source.  Set to "bvh" only for legacy BVH ablations;
+# MotionPRO/other baselines continue to read their BVHs independently.
+mocap_format: smpl
+smpl_roots:
+  - /data/lizhe/projects/Tactile/Mocap/0804
+  - /data/lizhe/projects/Tactile/Mocap/0807
+  - /data/lizhe/projects/Tactile/Mocap/0808
+  - /data/lizhe/projects/Tactile/Mocap/0810
 template_path: /data/fangyuxuan/projects/gait/AnysoleWorkspace/calibration/insole_templates.json

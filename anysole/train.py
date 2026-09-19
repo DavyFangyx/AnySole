@@ -66,6 +66,8 @@ DEFAULT_CONFIG = {
     "out_dir": "/data/fangyuxuan/projects/gait/AnySole/outputs/v1",
     "use_insole_drift": False,
     "contact_method": "tactile_abs",
+    "mocap_format": "smpl",
+    "smpl_roots": ["/data/lizhe/projects/Tactile/Mocap/0804", "/data/lizhe/projects/Tactile/Mocap/0807", "/data/lizhe/projects/Tactile/Mocap/0808", "/data/lizhe/projects/Tactile/Mocap/0810"],
     "modal": MODEL_ANYSOLEV1,
     "template_path": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/calibration/insole_templates.json",
     "wandb_mode": "disabled",
@@ -317,21 +319,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "Saved into the checkpoint.",
     )
     parser.add_argument(
-        "--decoder",
-        choices=("v1", "part9"),
-        default=None,
-        help="F5: decoder structure. v1 = fusion + pose head + traj head (F0b "
-        "baseline); part9 = 9-part query decoder with per-part V/T/empty gating "
-        "(anysole/models/part_decoder.py; requires --t-encoder foot_conv; aux "
-        "reconstruction heads are dropped). Saved into the checkpoint.",
-    )
-    parser.add_argument(
-        "--gate-mode",
-        choices=("gated", "nogate"),
-        default=None,
-        help="F5: part9 gating variant. gated = softmax(V/T/empty) per part; "
-        "nogate = single cross-attention over the joined local window "
-        "(f5_nogate ablation). Saved into the checkpoint.",
+        "--mocap-format", choices=("smpl", "bvh"), default=None,
+        help="Ground-truth motion source. smpl (default) reads motion_neutral_smpl.npz; "
+        "bvh preserves the legacy Skeleton3 baseline path. Saved into the checkpoint.",
     )
     parser.add_argument(
         "--f2-repr",
@@ -342,6 +332,23 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "(geometry.py f2_to_world recovers the world pose/trans). The traj "
         "head outputs 4-dim; traj stats are fitted on the training set and "
         "saved into the checkpoint. Saved into the checkpoint.",
+    )
+    parser.add_argument(
+        "--pose-parts",
+        choices=(3, 9),
+        type=int,
+        default=None,
+        help="V3-2: pose-head query granularity. 3 = 23 joint queries in body/"
+        "left/right groups (F0b baseline); 9 = one query + one unembed head "
+        "per part (PART_JOINTS, fix_plan_v3.md §V3-2). Saved into the checkpoint.",
+    )
+    parser.add_argument(
+        "--lr-warmup-frac",
+        type=float,
+        default=None,
+        help="V3 structural steps (fix_plan_v3 §2.2): linear LR warmup over the "
+        "first this-fraction of total steps (e.g. 0.05), multiplying the "
+        "epoch cosine LR. 0/absent = no warmup (F0b/F4a behavior).",
     )
     parser.add_argument("--lambda-pose", type=float, default=None, metavar="W",
                         help="E6.7: override yaml loss weight lambda_pose.")
@@ -413,7 +420,6 @@ def _evaluate(model, diffusion, loader, config, device):
     with torch.inference_mode():
         for config_value, config_name in zip((0, 1, 2), CONFIG_NAMES):
             totals = {"mpjpe": 0.0, "root_ate": 0.0, "contact_f1": 0.0, "foot_slide": 0.0, "n": 0}
-            gates_sum = torch.zeros(9, 3, device=device)
             tau0_mpjpe = 0.0
             first_batch = True
             for raw_batch in loader:
@@ -426,8 +432,6 @@ def _evaluate(model, diffusion, loader, config, device):
                     # F0b: single forward, no DDIM sampling.
                     out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m, **v_kw)
                     pred_pose = out["x0_hat"]
-                    if out.get("gates") is not None:
-                        gates_sum += out["gates"].detach().float().mean(dim=(0, 1)) * bsz
                 else:
                     warm_prior = None
                     if bool(config.get("warm_start", False)):
@@ -522,11 +526,6 @@ def _evaluate(model, diffusion, loader, config, device):
                            f"val/contact_f1/{config_name}": 2 * p * r / max(p + r, 1e-8),
                            f"val/foot_slide/{config_name}": totals["foot_slide"] / count,
                            f"val/tau0_mpjpe/{config_name}": tau0_mpjpe})
-            if float(gates_sum.abs().sum().item()) > 0:
-                for part in range(9):
-                    for gate_idx, gate_name in ((0, "V"), (1, "T"), (2, "E")):
-                        result[f"val/gate_{gate_name}_part{part}/{config_name}"] = float(
-                            gates_sum[part, gate_idx] / count)
     result["val/gap_mpjpe_dropT"] = result["val/mpjpe/V"] - result["val/mpjpe/VT"]
     result["val/gap_mpjpe_dropV"] = result["val/mpjpe/T"] - result["val/mpjpe/VT"]
     return result
@@ -611,12 +610,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["t_encoder"] = args.t_encoder
     if args.v_input is not None:
         config["v_input"] = args.v_input
-    if args.decoder is not None:
-        config["decoder"] = args.decoder
-    if args.gate_mode is not None:
-        config["gate_mode"] = args.gate_mode
+    if args.mocap_format is not None:
+        config["mocap_format"] = args.mocap_format
     if args.f2_repr:
         config["f2_repr"] = True
+    if args.pose_parts is not None:
+        config["pose_parts"] = int(args.pose_parts)
+    if args.lr_warmup_frac is not None:
+        config["lr_warmup_frac"] = float(args.lr_warmup_frac)
     if args.tactile_direct:
         config["tactile_direct"] = True
     if args.no_imu:
@@ -642,6 +643,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             no_imu=bool(config.get("no_imu", False)),
             v_input=str(config.get("v_input", "hrnet")),
             f2_repr=bool(config.get("f2_repr", False)),
+            mocap_format=str(config.get("mocap_format", "smpl")),
+            smpl_roots=config.get("smpl_roots"),
         )
     except FileNotFoundError as exc:
         if "HRNet cache" in str(exc):
@@ -665,7 +668,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)))
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), mocap_format=str(config.get("mocap_format", "smpl")), smpl_roots=config.get("smpl_roots"))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:
@@ -724,8 +727,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             v_input=str(config.get("v_input", "hrnet")),
             t_encoder=str(config.get("t_encoder", "linear")),
             f2_repr=bool(config.get("f2_repr", False)),
-            decoder=str(config.get("decoder", "v1")),
-            gate_mode=str(config.get("gate_mode", "gated")),
+            pose_parts=int(config.get("pose_parts", 3)),
         ).to(device)
     else:
         if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):
@@ -775,8 +777,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # every checkpoint so eval/infer match the sampling init scale.
     config["noise_scaled"] = bool(config.get("noise_scaled", True))
     model.noise_scaled = config["noise_scaled"]
-    # F5 part9: the part decoder outputs the raw pose without per-dim
-    # normalization stats, and model.pose_head is None — skip both.
+    # Pose stats live on the pose head; guard kept defensively (the V3
+    # structure always has one, but a missing head must fail loudly elsewhere,
+    # not here).
     if model.pose_head is not None:
         pose_mean, pose_std = fit_pose_stats(
             loader, device, key="pose_gt_pos" if pos_mode else "pose_gt"
@@ -796,7 +799,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_dir = Path(config["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # V3 structural steps (fix_plan_v3 §2.2): linear LR warmup over the first
+    # lr_warmup_frac of the total planned steps, multiplying the epoch cosine
+    # LR. 0/absent = no warmup (F0b/F4a behavior).
+    lr_warmup_frac = float(config.get("lr_warmup_frac", 0.0))
+    warmup_steps = 0
+    if lr_warmup_frac > 0:
+        warmup_steps = int(lr_warmup_frac * int(config["epochs"]) * len(loader))
+        print("lr warmup: %.4f x %d epochs x %d steps/epoch = %d steps"
+              % (lr_warmup_frac, int(config["epochs"]), len(loader), warmup_steps))
+
     global_step = 0
+    # Best-ckpt tracking (loss-explosion protection): the val eval cadence is
+    # the only visibility into val quality, so the best-so-far model by
+    # val/tau0_mpjpe/VT is snapshotted to ckpt_best.pt — a finite-gradient
+    # explosion (F0b_warm ep370 / V3_2_part9 ep271, no nonfinite guard fires)
+    # can destroy ckpt_last.pt in ~10 epochs; the snapshot survives.
+    best_vt = None
     for epoch in range(int(config["epochs"])):
         model.train()
         # E4 cosine LR decay over the whole run; E3 base uses lr_schedule
@@ -871,6 +890,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                 continue
 
             losses["loss"].backward()
+            # NaN-grad guard (fix_plan_v3 §2.2): check every parameter BEFORE
+            # the clip, because clip_grad_norm_ mixes one non-finite gradient
+            # into every parameter (F5B_gated failure mode).  Same treatment
+            # as the loss-level guard above: skip the step, drop the lr.
+            grads_ok = all(
+                p.grad is None or bool(torch.isfinite(p.grad).all())
+                for p in model.parameters()
+            )
+            if not grads_ok:
+                for group in optimizer.param_groups:
+                    group["lr"] = 1.0e-4
+                optimizer.zero_grad(set_to_none=True)
+                print("non-finite gradient at step %d; lr set to 1e-4, batch skipped" % global_step)
+                nonfinite_skips += 1
+                global_step += 1
+                continue
             grad_clip = config.get("grad_clip")
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
@@ -879,6 +914,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if parameter.grad is not None:
                     grad_sq = grad_sq + parameter.grad.detach().square().sum()
             epoch_sums["grad_norm"] += float(torch.sqrt(grad_sq).item()) * batch_size
+            if warmup_steps > 0:
+                # Per-step linear ramp over the cosine epoch LR (the epoch
+                # value is set on the groups at the top of the loop).
+                ramp = min(1.0, global_step / float(warmup_steps))
+                for group in optimizer.param_groups:
+                    group["lr"] = epoch_lr * ramp
             optimizer.step()
             n = batch_size
             epoch_sums["n"] += n
@@ -925,6 +966,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             eval_results = _evaluate(model, diffusion, val_loader, config, device)
             print("epoch %d eval: %s" % (epoch + 1,
                   "  ".join("%s=%.4f" % (key, value) for key, value in sorted(eval_results.items()))))
+            vt_now = eval_results.get("val/tau0_mpjpe/VT")
+            if vt_now is not None and (best_vt is None or vt_now < best_vt):
+                best_vt = vt_now
+                best_ckpt = {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "epoch": epoch + 1,
+                    "config": dict(config),
+                    "best_vt": best_vt,
+                }
+                best_path = out_dir / "ckpt_best.pt"
+                best_tmp = out_dir / ("ckpt_best.pt.tmp%d" % os.getpid())
+                torch.save(best_ckpt, best_tmp)
+                os.replace(best_tmp, best_path)
+                print("saved best %s (epoch %d, val/tau0 VT %.4f)" % (best_path, epoch + 1, best_vt))
         if wandb_run is not None:
             denom = max(epoch_sums["n"], 1)
             log = {"epoch": epoch + 1}

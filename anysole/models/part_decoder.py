@@ -1,5 +1,10 @@
 """F5: part-query decoder with per-part V/T/empty gating (fix_plan_v2.md §F5).
 
+**ARCHIVED (2026-09-19): v2 §F5 作废，fix_plan_v3.md 取代。本模块无任何调用方，
+仅留档。** 四 run 失败根因见 memory/f5-root-cause-tstream-scale-bug.md
+（encode_stream 缺 LayerNorm → T token 量级 1400×V → 交叉注意力 one-hot 退化）。
+V3 的门控方案（§V3-3 σ 软门控）作用在 fused F 的模态掩码视图上，不复用本模块。
+
 Replaces the fusion transformer + pose head + traj head of AnySole V2 with a
 9-part query decoder.  Each frame, each part:
 
@@ -30,16 +35,8 @@ import torch
 import torch.nn as nn
 
 from anysole.models.embeddings import SharedEmbeddings
-from anysole.types import D_MODEL, FPS, JOINT_PARENTS, TW
+from anysole.types import D_MODEL, FPS, JOINT_PARENTS, N_PARTS, PART_JOINTS, PART_NAMES, TW
 
-PART_NAMES = ("root", "torso", "headneck", "l_arm", "r_arm",
-              "l_leg", "r_leg", "l_foot", "r_foot")
-# BVH-23 joint indices per part (fix_plan_v2.md §0.2 table).
-PART_JOINTS = (
-    (0,), (1, 2, 3, 4), (5, 6), (7, 8, 9, 10), (11, 12, 13, 14),
-    (15, 16), (19, 20), (17, 18), (21, 22),
-)
-N_PARTS = len(PART_NAMES)
 LOCAL_WINDOW = 4  # t-4..t+4 cross-attention window
 REL_POSITIONS = 2 * LOCAL_WINDOW + 1
 
@@ -118,11 +115,13 @@ class _Layer(nn.Module):
         h, _ = self.temporal_attn(z_time, z_time, z_time, need_weights=False)
         z = z + self.dropout(h.reshape(batch, n_parts, tw, dim).permute(0, 2, 1, 3))
         z = self.norm2(z)
-        # 3) local cross-attention to the V/T window tokens (one query per
-        # part-frame; every part sees the same local window).
-        z_q = z.reshape(batch * tw * n_parts, 1, dim)
-        e_v_flat = e_v.reshape(batch * tw, e_v.shape[2], dim).repeat_interleave(n_parts, dim=0)
-        e_t_flat = e_t.reshape(batch * tw, e_t.shape[2], dim).repeat_interleave(n_parts, dim=0)
+        # 3) local cross-attention to the V/T window tokens.  The window
+        # tokens are SHARED across the 9 part queries: batch = B*tw frames,
+        # 9 queries each — repeating the k/v per part would blow the
+        # key/value tensors up 9x (the first F5 OOM at batch 256).
+        z_q = z.reshape(batch * tw, n_parts, dim)
+        e_v_flat = e_v.reshape(batch * tw, e_v.shape[2], dim)
+        e_t_flat = e_t.reshape(batch * tw, e_t.shape[2], dim)
         attn_v, _ = self.cross_v(z_q, e_v_flat, e_v_flat, need_weights=False)
         attn_t, _ = self.cross_t(z_q, e_t_flat, e_t_flat, need_weights=False)
         attn_v = attn_v.reshape(batch, tw, n_parts, dim)

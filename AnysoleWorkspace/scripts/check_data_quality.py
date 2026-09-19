@@ -31,7 +31,9 @@ def main() -> int:
                 if not np.isfinite(pressure).all(): issues.append("pressure_nonfinite")
             except Exception as exc:
                 issues.append("pressure_unreadable")
-        for key in ("pressure_path", "bvh_path"):
+        for key in ("pressure_path", "bvh_path", "smpl_path"):
+            if key not in r:
+                continue  # manifests generated before the SMPL migration
             if not Path(ROOT / r[key]).is_file(): issues.append(f"missing_{key}")
         if r["joint_checksum"]: checksums.add(r["joint_checksum"])
         if r["quality"] != "ok": issues.extend(x for x in r["quality"].split(";") if x)

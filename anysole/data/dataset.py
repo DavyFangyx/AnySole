@@ -1,4 +1,8 @@
-"""40 Hz BVH windows with cached HRNet features and raw insole tokens."""
+"""40 Hz motion windows with cached HRNet features and raw insole tokens.
+
+Motion is read from SMPL-NPZ by default and converted to the frozen AnySole
+23-joint protocol; ``mocap_format='bvh'`` preserves the legacy baseline path.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ import torch
 from torch.utils.data import Dataset
 
 from anysole.data.bvh_io import resample_session_bvh
+from anysole.data.smpl_io import load_smpl, resolve_smpl_path
 from anysole.data.pressure import load_session_pressure, normalize_raw
 from anysole.data.tactile_s2m import build_t_s2m
 from anysole.geometry import (
@@ -38,6 +43,7 @@ from anysole.types import (
     V_HMR_MISC_DIM,
     V_HMR_ROT_DIM,
     WORKSPACE_ROOT,
+    SMPL_ROOTS,
 )
 
 
@@ -186,6 +192,8 @@ class AnySoleDataset(Dataset):
         v_input: str = "hrnet",
         v_hmr_model: str = "gvhmr",
         f2_repr: bool = False,
+        mocap_format: str = "smpl",
+        smpl_roots: Optional[Sequence[Path]] = None,
     ):
         self.mode = mode
         self.window_length = int(window_length)
@@ -201,6 +209,10 @@ class AnySoleDataset(Dataset):
         # F2a: pose_gt root 6D becomes the tilt (heading removed), and the
         # trajectory target becomes the 4-dim heading-frame quantity.
         self.f2_repr = bool(f2_repr)
+        self.mocap_format = str(mocap_format).lower()
+        if self.mocap_format not in ("smpl", "bvh"):
+            raise ValueError("mocap_format must be 'smpl' or 'bvh'")
+        self.smpl_roots = tuple(Path(p) for p in (smpl_roots or SMPL_ROOTS))
         # E6.3: window stride. None = non-overlapping (stride == window_length,
         # the pre-E6 behavior). Training may use stride=1 (every frame
         # alignment, Step2Motion-style); continuation eval uses tw//2.
@@ -220,6 +232,7 @@ class AnySoleDataset(Dataset):
         self.sessions: List[dict] = []
         self.valid_windows: List[tuple] = []
         bvh_cache: Dict[str, object] = {}
+        smpl_cache: Dict[str, Path] = {}
 
         for session_id in self.session_ids:
             seq_dir = find_session_dir(self.seq_root, session_id)
@@ -228,7 +241,24 @@ class AnySoleDataset(Dataset):
             t_grid = session_time_grid(meta)
             t_mocap = t_grid - float(meta["offset_s"])
 
-            bvh = resample_session_bvh(resolve_bvh_path(meta), t_mocap, hierarchy_cache=bvh_cache)
+            bvh_path = resolve_bvh_path(meta)
+            if self.mocap_format == "smpl":
+                try:
+                    smpl_path = resolve_smpl_path(meta, self.smpl_roots, cache=smpl_cache)
+                    smpl_bvh = smpl_path.parent / "motion_smpl24_blender_world_m.bvh"
+                    bvh = load_smpl(smpl_path, query_t=t_mocap, paired_bvh=smpl_bvh if smpl_bvh.is_file() else bvh_path)
+                except FileNotFoundError:
+                    # A few legacy recordings have an explicit conversion
+                    # failure marker and no NPZ.  Keep them usable for the
+                    # historical baselines by falling back to their BVH.
+                    bvh = resample_session_bvh(bvh_path, t_mocap, hierarchy_cache=bvh_cache)
+                # The exporter and legacy visualizers still need a canonical
+                # Skeleton3 hierarchy; only the motion values come from SMPL.
+                bvh_header = resample_session_bvh(bvh_path, np.asarray([t_mocap[0]]), hierarchy_cache=bvh_cache)
+                bvh["hierarchy"] = bvh_header["hierarchy"]
+                bvh["names"] = bvh_header["names"]
+            else:
+                bvh = resample_session_bvh(bvh_path, t_mocap, hierarchy_cache=bvh_cache)
             if bvh["pose_6d"].shape[0] != n_frames:
                 raise ValueError(
                     "%s BVH resample length %d != n_frames %d"

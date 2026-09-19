@@ -499,6 +499,7 @@ warm-start 自 `F4a_footconv`（foot_conv 在 v1 表示下训了 400ep，全复�
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
   --modal anysolev2 --contact-method joint_and \
   --t-encoder foot_conv --decoder part9 --gate-mode nogate \
+  --batch-size 64 \
   --epochs 400 --grad-clip 5.0 \
   --init-from results/AnySole/F4a_footconv/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F5A_f4a_nogate/checkpoints \
@@ -509,6 +510,7 @@ warm-start 自 `F4a_footconv`（foot_conv 在 v1 表示下训了 400ep，全复�
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
   --modal anysolev2 --contact-method joint_and \
   --t-encoder foot_conv --decoder part9 --gate-mode gated \
+  --batch-size 64 \
   --epochs 400 --grad-clip 5.0 \
   --init-from results/AnySole/F4a_footconv/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F5A_f4a_gated/checkpoints \
@@ -526,6 +528,7 @@ decoder 新建）。对照 = F2p4_combo。
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
   --modal anysolev2 --contact-method joint_and \
   --f2-repr --t-encoder foot_conv --decoder part9 --gate-mode nogate \
+  --batch-size 64 \
   --epochs 400 --grad-clip 5.0 \
   --init-from results/AnySole/F2p4_combo/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F5B_f2p4_nogate/checkpoints \
@@ -536,6 +539,7 @@ decoder 新建）。对照 = F2p4_combo。
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
   --modal anysolev2 --contact-method joint_and \
   --f2-repr --t-encoder foot_conv --decoder part9 --gate-mode gated \
+  --batch-size 64 \
   --epochs 400 --grad-clip 5.0 \
   --init-from results/AnySole/F2p4_combo/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F5B_f2p4_gated/checkpoints \
@@ -546,6 +550,18 @@ decoder 新建）。对照 = F2p4_combo。
 **跑序**：B nogate 先跑（主线），A nogate 可并行；各自通过后再跑 gated。
 每条训练后验收同口径：eval + ridge + 可视化（路径换对应 out-dir；可视化
 `--modal F5B --contact-method f2p4_nogate` → `results/AnySole/F5B_f2p4_nogate`）。
+
+> **内存口径（F5 必须）**：part9 比 v1 解码器重——交叉注意力共享修复后实测
+> batch 64 峰值 4.2GiB / 128 8.3GiB；**训练用 --batch-size 64**（共享卡更紧时
+> 降 32）。**验收 eval 命令同样要加 `--batch-size 64`**（eval 默认读 ckpt 的
+> 256 会再次 OOM；协议按 session 组批不受该 flag 影响、体量相近安全）。
+> 首次 F5 的 OOM 根因 = 交叉注意力曾把窗口 token 为每个部位查询重复 9 倍
+> （part_decoder.py 已修，2026-09-18）。
+> 第二次 F5 报错（BCE 范围断言）= λ_con=0 时 BCE 仍被计算且 part9 冷启动
+> 极端姿态产生 NaN 接触——losses.py 已修：λ_con=0 完全跳过 BCE + nan_to_num/
+> clamp 保险（2026-09-18）。冷启动提醒：part decoder 全新建，epoch1 MPJPE
+> ~859mm（v1 warm-start 起点 ~150mm），前几十 epoch 快速下降属正常；400ep
+> 可能偏紧，ep200 观察走势，仍下行则续 800ep。
 
 **验收（F5，先看门控探针再看主指标；计划 §F5 判据）**：
 - 门控探针：T-only 时手臂 g_∅ 明显高于腿/脚；VT 时脚部 g_T 支撑相高于摆动相
@@ -583,6 +599,7 @@ decoder 新建）。对照 = F2p4_combo。
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
   --modal anysolev2 --contact-method joint_and \
   --f2-repr --t-encoder foot_conv --decoder part9 --gate-mode nogate \
+  --batch-size 64 \
   --epochs 400 --grad-clip 5.0 \
   --init-from results/AnySole/F2p4_combo/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F5_nogate/checkpoints \

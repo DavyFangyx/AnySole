@@ -231,8 +231,16 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         else:
             pred_kp = fk_pose6d(out["x0_hat"], trans_world, batch["offsets"], batch["parents"])
         l_kp = F.mse_loss(pred_kp, batch["kp_gt"])
-        soft_contact = soft_contact_from_keypoints(pred_kp)
-        l_con = F.binary_cross_entropy(soft_contact, batch["contact_gt"])
+        # Contact: computed only when its weight is nonzero — a zero-weighted
+        # BCE is pure cost AND a NaN risk (cold-start outputs produce extreme
+        # poses; inf-inf NaN in the soft-contact speed can then feed the BCE).
+        # The clamp is belt-and-suspenders for the enabled case.
+        if _weight(weights, "lambda_con", 0.1) > 0.0:
+            soft_contact = soft_contact_from_keypoints(pred_kp)
+            soft_contact = soft_contact.nan_to_num(0.0).clamp(1e-7, 1.0 - 1e-7)
+            l_con = F.binary_cross_entropy(soft_contact, batch["contact_gt"])
+        else:
+            l_con = l_pose.new_zeros(())
 
     total = (
         _weight(weights, "lambda_pose", 1.0) * l_pose

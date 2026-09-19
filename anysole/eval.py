@@ -41,6 +41,14 @@ from anysole.types import (
     assert_batch_shapes,
 )
 
+# Quasi-strict load allowance (fix_plan_v3 §3.1): state-dict keys added as
+# code hygiene AFTER the baseline checkpoints were trained.  Only these may
+# be missing when loading F4a/F2p4-era checkpoints.
+_MISSING_OK = frozenset({
+    "encoders.t_enc.stream_norm.weight",
+    "encoders.t_enc.stream_norm.bias",
+})
+
 
 def _pa_error(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Per-joint errors after per-frame similarity Procrustes alignment."""
@@ -129,6 +137,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--limit-sessions", type=int, default=None)
     parser.add_argument("--sample-steps", type=int, default=None)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--mocap-format", choices=("smpl", "bvh"), default=None,
+                        help="Override GT source format for this evaluation (default: checkpoint/config, then smpl).")
     parser.add_argument(
         "--config-id",
         default=None,
@@ -242,8 +252,14 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
     v_input = str(saved_config.get("v_input", "hrnet"))
     t_encoder = str(saved_config.get("t_encoder", "linear"))
     f2_repr = bool(saved_config.get("f2_repr", False))
-    decoder = str(saved_config.get("decoder", "v1"))
-    gate_mode = str(saved_config.get("gate_mode", "gated"))
+    pose_parts = int(saved_config.get("pose_parts", 3))
+    # F5 part9 is archived (fix_plan_v3.md supersedes v2 §F5): its checkpoints
+    # are kept on disk but the V3 codebase does not load them.
+    if str(saved_config.get("decoder", "v1")) == "part9":
+        raise ValueError(
+            "F5 part9 checkpoint is archived (v2 §F5 作废，fix_plan_v3 取代)；"
+            "V3 代码不回载。基线用 F4a_footconv / F2p4_combo。"
+        )
     if modal == MODEL_ANYSOLEV2:
         # F0b: regression model (model_v2.py); the regress pose head is
         # implied by the modal, and forward takes no diffusion pair.
@@ -251,7 +267,7 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
             d=d_model, tw=tw, dropout=dropout, pose_layers=pose_layers,
             tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
             v_input=v_input, t_encoder=t_encoder, f2_repr=f2_repr,
-            decoder=decoder, gate_mode=gate_mode,
+            pose_parts=pose_parts,
         ).to(device)
     else:
         model = AnySoleModel(
@@ -260,7 +276,14 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
             no_imu=no_imu,
             **model_kw,
         ).to(device)
-    model.load_state_dict(checkpoint["model"], strict=True)
+    # Quasi-strict load: the only tolerated missing keys are the hygiene-only
+    # additions (foot_encoder stream_norm, fix_plan_v3 §3.1) that pre-date the
+    # checkpoint.  Anything else — missing OR unexpected — is a real mismatch.
+    missing, unexpected = model.load_state_dict(checkpoint["model"], strict=False)
+    if unexpected or not set(missing) <= _MISSING_OK:
+        raise RuntimeError(
+            "state_dict mismatch: missing=%s unexpected=%s" % (missing, unexpected)
+        )
     # E4: sampling init scale must match the checkpoint's training noise scale
     # (train.py saves noise_scaled=True when it scales q_sample noise by
     # pose_std; older checkpoints lack the flag and sample unscaled).
@@ -273,6 +296,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     config_values = _parse_config_values(args.config_id)
     config = load_config(args.config)
+    if args.mocap_format is not None:
+        config["mocap_format"] = args.mocap_format
     if args.modal is not None:
         config["modal"] = args.modal
     if args.ckpt is not None:
@@ -413,6 +438,8 @@ def _evaluate_one(
         no_imu=no_imu,
         v_input=str(checkpoint.get("config", {}).get("v_input", "hrnet")),
         f2_repr=bool(checkpoint.get("config", {}).get("f2_repr", False)),
+        mocap_format=str(checkpoint.get("config", {}).get("mocap_format", config.get("mocap_format", "smpl"))),
+        smpl_roots=checkpoint.get("config", {}).get("smpl_roots", config.get("smpl_roots")),
         # E6.4: continuation eval uses overlapping windows (stride = tw/2);
         # without it the stride stays non-overlapping (E3 behavior).
         stride=(tw // 2) if (pos_mode and continuation) else None,

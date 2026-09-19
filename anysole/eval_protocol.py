@@ -61,19 +61,12 @@ from anysole.types import (
     FPS,
     FOOT_JOINTS,
     N_JOINTS,
+    PART_JOINTS,
+    PART_NAMES,
 )
 
-# 9-part grouping of the BVH-23 joints (fix_plan_v2.md §0.2).  Joints 1-22
-# are parent-local rotations, so these groups are exactly the F5 part decoder's
-# output groups.
-PART_NAMES = (
-    "root", "torso", "headneck", "l_arm", "r_arm",
-    "l_leg", "r_leg", "l_foot", "r_foot",
-)
-PART_JOINTS: Tuple[Tuple[int, ...], ...] = (
-    (0,), (1, 2, 3, 4), (5, 6), (7, 8, 9, 10), (11, 12, 13, 14),
-    (15, 16), (19, 20), (17, 18), (21, 22),
-)
+# Re-exported for probe scripts that import the 9-part grouping from here
+# (single source of truth = anysole.types, fix_plan_v3 §V3-2).
 UPPER_JOINTS = tuple(range(1, 15))  # 1-14
 LOWER_JOINTS = tuple(range(15, 23))  # 15-22
 ANKLE_FOOT_JOINTS = (17, 18, 21, 22)

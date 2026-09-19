@@ -1,5 +1,9 @@
-"""F5 smoke test: part-query decoder structure, gating, and model/loss
-integration (no data files needed).
+"""F5 smoke test: part-query decoder structure and gating (ARCHIVED).
+
+**ARCHIVED (2026-09-19)**: v2 §F5 作废（fix_plan_v3.md 取代），PartDecoder 无调用
+方、仅留档。本脚本只保留 PartDecoder 独立构造的检查 1-3；原检查 4/5
+（AnySoleModelV2(decoder=part9) 端到端集成）随回退删除——模型构造已不再接受
+decoder 参数。此脚本不在常规回归清单内，仅供 PartDecoder 留档参考。
 
 Run (touch_gait env):
   python z_note/smoke_f5_part.py [--device cpu]
@@ -11,10 +15,6 @@ Checks:
  3. PartDecoder forward: x0_hat (B,tw,138), v_hat (B,tw,3/4), gates
     (B,tw,9,3) rows sum to 1; with V fully masked the V gates are ~0 and
     the T/empty gates take over; nogate variant runs with the same shapes.
- 4. AnySoleModelV2(decoder=part9, t_encoder=foot_conv) end-to-end:
-    forward shapes, compute_losses finite (aux losses zeroed), gradients
-    reach the part heads and the foot conv.
- 5. part9 with f2_repr: v_hat (B,tw,4), root head 6+4.
 """
 
 from __future__ import annotations
@@ -28,8 +28,6 @@ import torch
 GAIT = Path("/data/fangyuxuan/projects/gait")
 sys.path.insert(0, str(GAIT))
 
-from anysole.losses import compute_losses
-from anysole.models import AnySoleModelV2
 from anysole.models.part_decoder import (
     N_PARTS,
     PART_NAMES,
@@ -88,61 +86,12 @@ def check_decoder(device: torch.device) -> None:
     print("2. PartDecoder: shapes, gate softmax, bias init, V-mask collapse, nogate OK")
 
 
-def check_model(device: torch.device) -> None:
-    batch = 2
-    model = AnySoleModelV2(decoder="part9", t_encoder="foot_conv").to(device)
-    v = torch.randn(batch, TW, 2051, device=device)
-    tr = torch.randn(batch, TW, 96, device=device)
-    tp = torch.randn(batch, TW, 12, device=device)
-    cid = torch.zeros(batch, dtype=torch.long, device=device)
-    out = model(v, tr, tp, cid)
-    assert out["x0_hat"].shape == (batch, TW, 138)
-    assert out["pressure_hat"] is None and out["vfeat_hat"] is None
-    full = {
-        "V_feat": v, "T_raw": tr, "T_phys": tp,
-        "T_s2m": torch.zeros(batch, TW, 50, device=device),
-        "pose_gt": torch.randn(batch, TW, 138, device=device),
-        "vel_gt": torch.randn(batch, TW, 3, device=device),
-        "trans_gt": torch.randn(batch, TW, 3, device=device),
-        "trans_anchor": torch.zeros(batch, 3, device=device),
-        "kp_gt": torch.randn(batch, TW, 23, 3, device=device),
-        "contact_gt": torch.rand(batch, TW, 2, device=device),
-        "offsets": torch.rand(batch, 23, 3, device=device),
-        "parents": torch.tensor([[-1] + list(range(22))], device=device).expand(batch, -1),
-        "config_id": cid,
-    }
-    losses = compute_losses(out, full, cid, {"lambda_con": 0.0})
-    assert torch.isfinite(losses["loss"]), losses["loss"]
-    assert losses["L_Trec"].item() == 0.0 and losses["L_Vrec"].item() == 0.0
-    losses["loss"].backward()
-    assert model.part_decoder.root_head.weight.grad is not None
-    assert model.part_decoder.root_head.weight.grad.abs().sum() > 0
-    assert model.encoders.t_enc.conv[0].weight.grad is not None
-    print("3. AnySoleModelV2(part9+foot_conv): forward, zeroed aux losses, grads flow")
-
-
-def check_f2_integration(device: torch.device) -> None:
-    model = AnySoleModelV2(decoder="part9", t_encoder="foot_conv", f2_repr=True).to(device)
-    batch = 1
-    out = model(
-        torch.randn(batch, TW, 2051, device=device),
-        torch.randn(batch, TW, 96, device=device),
-        torch.randn(batch, TW, 12, device=device),
-        torch.zeros(batch, dtype=torch.long, device=device),
-    )
-    assert out["v_hat"].shape == (batch, TW, 4), out["v_hat"].shape
-    assert out["trans_hat"].shape == (batch, TW, 3)
-    print("4. part9 + f2_repr: v_hat (B,tw,4) heading trajectory")
-
-
 def main(argv=None) -> int:
     args = parse_args(argv)
     device = torch.device(args.device)
     check_hop_matrix()
     check_decoder(device)
-    check_model(device)
-    check_f2_integration(device)
-    print("smoke_f5_part: ALL CHECKS PASSED")
+    print("smoke_f5_part: ARCHIVED PartDecoder checks PASSED (checks 1-3 only)")
     return 0
 
 

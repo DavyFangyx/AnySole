@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "AnysoleWorkspace"
 FIELDS = ("session_id", "subject_id", "action", "trial", "camera", "video_path",
-          "pressure_path", "bvh_path", "target_fps", "n_frames", "visual_start_s",
+          "pressure_path", "bvh_path", "smpl_path", "target_fps", "n_frames", "visual_start_s",
           "mocap_start_s", "offset_s", "fake_frame_indices", "valid_frame_indices",
           "quality", "split_iid", "split_ood", "joint_checksum")
 
@@ -42,6 +42,25 @@ def bvh_for(session_id: str, meta: dict) -> Path:
     raw = Path(str(meta.get("rec_dir", ""))).parent / "mocap_ori_bvh" / session_id
     candidates = sorted(raw.glob("*.bvh")) if raw.is_dir() else []
     return candidates[0] if candidates else recorded
+
+
+SMPL_ROOTS = tuple(Path(p) for p in (
+    "/data/lizhe/projects/Tactile/Mocap/0804",
+    "/data/lizhe/projects/Tactile/Mocap/0807",
+    "/data/lizhe/projects/Tactile/Mocap/0808",
+    "/data/lizhe/projects/Tactile/Mocap/0810",
+))
+
+
+def smpl_for(session_id: str, meta: dict) -> Path:
+    recorded = Path(str(meta.get("smpl_path", "")))
+    if recorded.is_file():
+        return recorded
+    for root in SMPL_ROOTS:
+        matches = sorted(root.glob(f"**/{session_id}/motion_neutral_smpl.npz"))
+        if matches:
+            return matches[0]
+    return recorded
 
 
 def parse_bvh_header(path: Path) -> tuple[list[str], list[int]]:
@@ -99,6 +118,7 @@ def build(fps: float, camera: str, output: Path) -> tuple[list[dict], list[str]]
         pressure = meta_path.parent / "pressure.npz"
         fake_path = meta_path.parent / "fake_mask.npy"
         bvh = bvh_for(sid, meta)
+        smpl = smpl_for(sid, meta)
         names, parents = parse_bvh_header(bvh)
         fake = []
         if fake_path.is_file():
@@ -107,7 +127,7 @@ def build(fps: float, camera: str, output: Path) -> tuple[list[dict], list[str]]
         n = int(meta.get("n_frames", 0))
         valid = [i for i in range(n) if i not in set(fake)]
         quality = []
-        for label, path in (("pressure", pressure), ("bvh", bvh), ("video", meta.get("cam_dir", ""))):
+        for label, path in (("pressure", pressure), ("bvh", bvh), ("smpl", smpl), ("video", meta.get("cam_dir", ""))):
             if not Path(path).is_file() and label != "video": quality.append(f"missing_{label}")
             if label == "video" and not Path(path).exists(): quality.append("missing_video_source")
         if len(names) != 23: quality.append(f"joint_count_{len(names)}")
@@ -115,7 +135,7 @@ def build(fps: float, camera: str, output: Path) -> tuple[list[dict], list[str]]
         rows.append({"session_id": sid, "subject_id": subject, "action": sid[len(subject):-1] if sid.startswith(subject) else "",
                      "trial": sid[-1:] if sid.startswith(subject) else "", "camera": camera,
                      "video_path": rel(meta.get("cam_dir", "")), "pressure_path": rel(pressure),
-                     "bvh_path": rel(bvh), "target_fps": float(meta.get("target_fps", fps)),
+                     "bvh_path": rel(bvh), "smpl_path": rel(smpl), "target_fps": float(meta.get("target_fps", fps)),
                      "n_frames": n, "visual_start_s": meta.get("visual_start_s", ""),
                      "mocap_start_s": meta.get("mocap_start_s", ""), "offset_s": meta.get("offset_s", ""),
                      "fake_frame_indices": json.dumps(fake), "valid_frame_indices": json.dumps(valid),

@@ -9,6 +9,7 @@
 ```text
 AnysoleWorkspace/
 ├── sources/raw/                         # 原始触觉 + 视频 + 采集文件
+├── sources/smpl/                        # SMPL-NPZ 外部归档索引（不复制原文件）
 ├── sources/PressureWasher/              # PressureWasher 数据
 │   └── outputs/                         # stats/reconstructed/fake_marked/encoded
 ├── sources/published/                   # 发布数据
@@ -36,6 +37,10 @@ sources/raw/
         └── rec.../      # 触觉 CSV、相机 JPG、视频
 ```
 `sources/raw` 当前指向 `/data/lizhe/projects/Tactile/1_Data`，不复制原始数据。
+
+AnySole 主模型默认读取 `/data/lizhe/projects/Tactile/Mocap/0804`、`0807`、`0808`、
+`0810` 下的 `motion_neutral_smpl.npz`。BVH 原始姿态仍保留，供 MotionPRO 等基线及
+预测 BVH 导出使用；可用环境变量 `ANYSOLE_SMPL_ROOTS`（按系统路径分隔）覆盖 SMPL 根目录。
 
 ## 触觉数据
 

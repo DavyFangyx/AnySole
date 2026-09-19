@@ -22,6 +22,15 @@ HRNET_CACHE_ROOT = WORKSPACE_ROOT / "derived" / "AnySole" / "hrnet_cache" / "cam
 # F1: GVHMR per-session caches (<model>/cam3/<session>.pt), written by
 # anysole/data/extract_hmr.py.
 HMR_CACHE_ROOT = WORKSPACE_ROOT / "derived" / "AnySole" / "hmr_cache"
+# SMPL archives are kept outside the repository.  Override with
+# ``ANYSOLE_SMPL_ROOTS`` (path-separator separated) when relocating them.
+_smpl_env = os.environ.get("ANYSOLE_SMPL_ROOTS", "")
+SMPL_ROOTS = tuple(Path(p).expanduser() for p in _smpl_env.split(os.pathsep) if p) or (
+    Path("/data/lizhe/projects/Tactile/Mocap/0804"),
+    Path("/data/lizhe/projects/Tactile/Mocap/0807"),
+    Path("/data/lizhe/projects/Tactile/Mocap/0808"),
+    Path("/data/lizhe/projects/Tactile/Mocap/0810"),
+)
 CLIFF_CKPT = (
     WORKSPACE_ROOT
     / "dependencies"
@@ -141,6 +150,22 @@ JOINT_PARENTS = (
 LEFT_LEG_JOINTS = (15, 16, 17, 18)
 RIGHT_LEG_JOINTS = (19, 20, 21, 22)
 BODY_JOINTS = tuple(i for i in range(N_JOINTS) if i not in LEFT_LEG_JOINTS + RIGHT_LEG_JOINTS)
+
+# V3-2: frozen 9-part grouping of the BVH-23 joints (fix_plan_v2.md §0.2,
+# fix_plan_v3.md §V3-2).  Each part is a contiguous joint run; the PART order
+# is the decoder query order, NOT joint order (r_leg/r_foot are swapped).
+# Joints 1-22 are parent-local rotations, so part grouping is representation-
+# safe.  Single source of truth — eval_protocol.py and the archived
+# part_decoder.py import from here.
+PART_NAMES = (
+    "root", "torso", "headneck", "l_arm", "r_arm",
+    "l_leg", "r_leg", "l_foot", "r_foot",
+)
+PART_JOINTS = (
+    (0,), (1, 2, 3, 4), (5, 6), (7, 8, 9, 10), (11, 12, 13, 14),
+    (15, 16), (19, 20), (17, 18), (21, 22),
+)
+N_PARTS = len(PART_NAMES)
 
 LEFT_LEG_SLICE = slice(LEFT_LEG_JOINTS[0] * 6, (LEFT_LEG_JOINTS[-1] + 1) * 6)  # 90:114
 RIGHT_LEG_SLICE = slice(RIGHT_LEG_JOINTS[0] * 6, (RIGHT_LEG_JOINTS[-1] + 1) * 6)  # 114:138

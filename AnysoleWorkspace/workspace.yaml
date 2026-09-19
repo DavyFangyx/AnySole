@@ -5,6 +5,7 @@ roots:
   results_display: results_display
 sources:
   raw: /data/lizhe/projects/Tactile/1_Data
+  smpl: /data/lizhe/projects/Tactile/Mocap
   published: /data/lizhe/projects/Tactile/4_Dataset
   calibration_artifacts: /data/lizhe/projects/Tactile/0_Calibration
   pressure_washer: tools/PressureWasher

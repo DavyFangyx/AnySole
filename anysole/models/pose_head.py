@@ -27,6 +27,11 @@ F0b: ``head_mode="regress"`` turns the head into a direct F -> pose regression
 ``(1, tw, n_tokens, dim)`` and ``forward`` takes only the fused memory F —
 no x_tau/tau, no timestep token.  ``head_mode="diffusion"`` (default) keeps
 the pre-F0b layout byte-for-byte so old checkpoints load strictly.
+
+V3-2: ``n_parts=9`` (regress only) swaps the 23 joint queries (3 groups) for
+9 part queries with one unembed head per part (fix_plan_v3.md §V3-2).
+Everything else — decoder layers, pose stats, time PE, normalization — is
+shared; ``n_parts=3`` (default) keeps the pre-V3-2 path byte-for-byte.
 """
 
 from __future__ import annotations
@@ -42,6 +47,8 @@ from anysole.types import (
     LEFT_LEG_JOINTS,
     LEFT_LEG_SLICE,
     N_JOINTS,
+    N_PARTS,
+    PART_JOINTS,
     POSE_DIM,
     POSE_POS_DIM,
     RIGHT_LEG_JOINTS,
@@ -50,11 +57,28 @@ from anysole.types import (
 )
 
 
+def _part_place_idx() -> torch.Tensor:
+    """(POSE_DIM,) long tensor mapping joint-space position -> flat index in
+    the part-order concatenation (V3-2: 9 unembed heads emit in PART_JOINTS
+    order, which is NOT joint order — r_leg/r_foot are swapped)."""
+    flat = []  # (joint-space pos, part-flat index)
+    for joints in PART_JOINTS:
+        for j in joints:
+            for d in range(6):
+                flat.append((6 * j + d, len(flat)))
+    flat.sort()
+    return torch.tensor([idx for _, idx in flat], dtype=torch.long)
+
+
 class PoseHead(nn.Module):
-    def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8, dim_feedforward=1024, dropout=0.1, n_layers=6, repr="6d", head_mode="diffusion"):
+    def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8, dim_feedforward=1024, dropout=0.1, n_layers=6, repr="6d", head_mode="diffusion", n_parts=3):
         super().__init__()
         if head_mode not in ("diffusion", "regress"):
             raise ValueError("Unknown head_mode %r; expected 'diffusion' or 'regress'" % head_mode)
+        if n_parts not in (3, 9):
+            raise ValueError("n_parts must be 3 or 9, got %r" % n_parts)
+        if n_parts != 3 and (head_mode != "regress" or repr != "6d"):
+            raise ValueError("n_parts=9 requires head_mode='regress' and repr='6d' (V3-2)")
         if embeddings is None:
             embeddings = SharedEmbeddings(dim=dim, tw=tw)
         self.embeddings = embeddings
@@ -63,6 +87,7 @@ class PoseHead(nn.Module):
         self.n_layers = n_layers
         self.repr = repr
         self.head_mode = head_mode
+        self.n_parts = n_parts
         if repr == "pos":
             # 22 non-root joints as root-local positions (root excluded).
             self.n_body = len(BODY_JOINTS) - 1
@@ -86,16 +111,23 @@ class PoseHead(nn.Module):
             self.body_slice = BODY_SLICE
             self.left_slice = LEFT_LEG_SLICE
             self.right_slice = RIGHT_LEG_SLICE
-            group_ids = torch.zeros(N_JOINTS, dtype=torch.long)
-            group_ids[list(LEFT_LEG_JOINTS)] = 1
-            group_ids[list(RIGHT_LEG_JOINTS)] = 2
+            if n_parts == 9:
+                # V3-2: one query token per part (9) instead of one per joint
+                # (23 in 3 groups); the part embedding IS the part identity.
+                group_ids = torch.arange(N_PARTS, dtype=torch.long)
+            else:
+                group_ids = torch.zeros(N_JOINTS, dtype=torch.long)
+                group_ids[list(LEFT_LEG_JOINTS)] = 1
+                group_ids[list(RIGHT_LEG_JOINTS)] = 2
         else:
             raise ValueError("Unknown pose repr %r; expected '6d' or 'pos'" % repr)
 
-        self.group_emb = nn.Embedding(3, dim)
+        self.group_emb = nn.Embedding(self.n_parts, dim)
         nn.init.normal_(self.group_emb.weight, std=0.02)
         self.register_buffer("group_ids", group_ids, persistent=True)
         n_tokens = self.n_body + self.n_left + self.n_right
+        if n_parts == 9:
+            n_tokens = N_PARTS
         self.n_tokens = n_tokens
 
         if head_mode == "regress":
@@ -125,9 +157,18 @@ class PoseHead(nn.Module):
         )
         self.decoder = nn.TransformerDecoder(layer, num_layers=n_layers)
 
-        self.out_body = nn.Linear(dim, self.per_joint)
-        self.out_left = nn.Linear(dim, self.per_joint)
-        self.out_right = nn.Linear(dim, self.per_joint)
+        if n_parts == 9:
+            # V3-2: one unembed head per part; outputs concatenated in PART
+            # order then scattered back to joint order via part_place_idx.
+            self.out_parts = nn.ModuleList(
+                [nn.Linear(dim, len(joints) * 6) for joints in PART_JOINTS]
+            )
+            self.register_buffer("part_place_idx", _part_place_idx(), persistent=True)
+            self.out_body = self.out_left = self.out_right = None
+        else:
+            self.out_body = nn.Linear(dim, self.per_joint)
+            self.out_left = nn.Linear(dim, self.per_joint)
+            self.out_right = nn.Linear(dim, self.per_joint)
 
         # Per-dim mean/std of the pose representation over the training set.
         # Defaults are identity so a fresh/unfitted head still runs; train.py
@@ -163,6 +204,14 @@ class PoseHead(nn.Module):
 
     def _unembed(self, h):
         batch = h.shape[0]
+        if self.n_parts == 9:
+            # V3-2: 9 part queries -> 9 part heads -> scatter to joint order.
+            tokens = h.view(batch, self.tw, self.n_tokens, self.dim)
+            parts = torch.cat(
+                [head(tokens[:, :, p]) for p, head in enumerate(self.out_parts)],
+                dim=-1,
+            )  # (B, tw, 138) in PART_JOINTS order
+            return parts.gather(-1, self.part_place_idx.expand(batch, self.tw, -1))
         n_tokens = self.n_body + self.n_left + self.n_right
         tokens = h.view(batch, self.tw, n_tokens, self.dim)
         body = self.out_body(tokens[:, :, : self.n_body, :])
