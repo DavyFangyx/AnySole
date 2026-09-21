@@ -248,7 +248,7 @@ python results_display/script/r_test1_visualize_step2motion.py
 --self-test
 
 # 默认 主模型 + 消融，全部 config，全部concat
-CUDA_VISIBLE_DEVICES=4 python results_display/script/r_test1_visualize_anysole.py --modal anysolev1 --gen gif --contact-method joint_and
+CUDA_VISIBLE_DEVICES=4 python results_display/script/r_test1_visualize_anysole.py --modal F0b --contact-method joint_and --gen gif --mesh --session S12042
 --modal anysolev1,anysolev1_insole_drift
 --contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
 --config-id VT2M

@@ -7,11 +7,17 @@ legacy BVH files are detected automatically for Step2Motion results. Panel rende
 Outputs are written below ``results_display/r_test1_visualize/AnySole/<modal>/<config>``
 (or the ``ANYSOLE_RESULTSDISPLAY`` override).
 
+``--mesh`` replaces the Predicted/GT skeleton panels with full SMPL surface
+renders (mesh + skeleton overlay via ``utils.smpl_mesh``); panels whose
+motion file has no SMPL params (legacy BVH) keep the classic skeleton panel.
+The default (and ``--only-bone``) renders skeleton panels only.
+
 Usage (run from the repository root):
     python results_display/script/r_test1_visualize_anysole.py
     python results_display/script/r_test1_visualize_anysole.py --modal anysolev1 --config-id VT2M
     python results_display/script/r_test1_visualize_anysole.py --session S7013
     python results_display/script/r_test1_visualize_anysole.py --modal anysolev1 --contact-method bvh_soft,joint_and
+    python results_display/script/r_test1_visualize_anysole.py --session S7013 --mesh --max-frames 40
 """
 from __future__ import annotations
 
@@ -29,17 +35,19 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from utils import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
-from utils.motion_io import load_motion, load_session_gt  # noqa: E402
+from utils.motion_io import load_motion, load_session_gt, smpl_yup_to_display  # noqa: E402
 from utils.render_common import (  # noqa: E402
+    CANVAS_H,
     LEFT_FOOT_BOX,
+    PANEL_W,
     RIGHT_FOOT_BOX,
-    compose_frame,
     crop_foot,
-    interp_joints,
-    joints_to_meters,
     parents_to_edges,
+    render_foot_panel,
+    render_skeleton_panel,
     session_dir,
 )
+from utils.smpl_mesh import mesh_from_archive, render_mesh_frame, smpl_faces  # noqa: E402
 
 PRED_ROOT = cli_common.RESULTS_ROOT / "AnySole"
 
@@ -54,29 +62,60 @@ def load_pressure(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     return pressure, fake
 
 
-def load_gt(seq_dir: Path, n_frames: int, fps: float = 40.0):
-    loaded = load_session_gt(seq_dir, n_frames, fps)
-    return loaded["joints"], loaded["parents"]
+def load_gt(seq_dir: Path, n_frames: int, fps: float = 40.0) -> dict:
+    return load_session_gt(seq_dir, n_frames, fps)
 
 
-def load_pred(pred_path: Path) -> tuple[np.ndarray, list[tuple[int, int]]]:
-    loaded = load_motion(pred_path)
-    return loaded["joints"], parents_to_edges(loaded["parents"])
+def load_pred(pred_path: Path) -> dict:
+    return load_motion(pred_path)
+
+
+def render_mesh_panel(verts: np.ndarray, faces: np.ndarray, joints: np.ndarray,
+                      edges: list, title: str, color: tuple, frame_idx: int,
+                      n_frames: int) -> np.ndarray:
+    """Full-SMPL panel at the classic PANEL_W x CANVAS_H size (mesh + skeleton)."""
+    return render_mesh_frame(
+        verts, faces, joints=joints, edges=edges, title=title,
+        frame_index=frame_idx, total=n_frames,
+        mesh_color=tuple(c / 255.0 for c in color),
+        bone_color="#C46A4A", joint_color="#{:02x}{:02x}{:02x}".format(*color),
+        title_color="#{:02x}{:02x}{:02x}".format(*color),
+        bg_color="#0A0C10",
+        size=(PANEL_W, CANVAS_H),
+    )
 
 
 def render_session(seq_dir: Path, pred_path: Path, session_id: str, config_id: str, args: argparse.Namespace, session_out: Path):
-    gen_path = cli_common.media_path(session_out, f"{session_id}_{config_id}_compare", args.gen)
+    stem = f"{session_id}_{config_id}_compare" + ("_mesh" if args.mesh else "")
+    gen_path = cli_common.media_path(session_out, stem, args.gen)
     if cli_common.outputs_ready([gen_path]) and not args.force:
         log.info(f"Skip {session_id}_{config_id}: already exists under {session_out}")
         return "skip"
 
     pressure, fake = load_pressure(seq_dir)
-    pred, pred_edges = load_pred(pred_path)
+    pred_loaded = load_pred(pred_path)
+    pred, pred_edges = pred_loaded["joints"], parents_to_edges(pred_loaded["parents"])
     n = min(pressure.shape[0], pred.shape[0], fake.shape[0])
     if n < pred.shape[0]:
         log.warning(f"{session_id}_{config_id}: pred has {pred.shape[0]} frames, rendering first {n}")
-    gt, gt_parents = load_gt(seq_dir, n, args.fps)
-    gt_edges = parents_to_edges(gt_parents)
+    gt_loaded = load_gt(seq_dir, n, args.fps)
+    gt, gt_edges = gt_loaded["joints"], parents_to_edges(gt_loaded["parents"])
+
+    # Full-surface panels where SMPL params exist; legacy BVH keeps skeletons.
+    pred_verts = gt_verts = None
+    faces = smpl_faces() if args.mesh else None
+    if args.mesh:
+        if pred_loaded["format"] == "smpl":
+            pred_verts = smpl_yup_to_display(mesh_from_archive(pred_path)["verts"])
+        else:
+            log.warning(f"{session_id}_{config_id}: pred is {pred_loaded['format']}; mesh unavailable, keeping skeleton panel")
+        if gt_loaded["format"] == "smpl":
+            gt_verts = smpl_yup_to_display(
+                mesh_from_archive(Path(gt_loaded["source_path"]), query_t=gt_loaded["t_mocap"])["verts"]
+            )
+        else:
+            log.warning(f"{session_id}_{config_id}: GT is {gt_loaded['format']}; mesh unavailable, keeping skeleton panel")
+        log.info(f"mesh mode: up to 2 surface panels per frame; use --stride/--max-frames to trim render time")
 
     frame_ids = list(range(0, n, max(args.stride, 1)))
     if args.max_frames > 0:
@@ -84,21 +123,20 @@ def render_session(seq_dir: Path, pred_path: Path, session_id: str, config_id: s
     frames = []
     for t in frame_ids:
         valid = not bool(fake[t])
-        frames.append(
-            compose_frame(
-                crop_foot(pressure[t], LEFT_FOOT_BOX),
-                crop_foot(pressure[t], RIGHT_FOOT_BOX),
-                pred[t],
-                gt[t],
-                gt_edges,
-                session_id,
-                t,
-                n,
-                args.fps,
-                valid,
-                pred_edges=pred_edges,
-            )
+        left = render_foot_panel(
+            crop_foot(pressure[t], LEFT_FOOT_BOX),
+            crop_foot(pressure[t], RIGHT_FOOT_BOX),
+            session_id, t, n, args.fps, valid,
         )
+        if pred_verts is not None:
+            pred_panel = render_mesh_panel(pred_verts[t], faces, pred[t], pred_edges, "Predicted", (80, 200, 255), t, n)
+        else:
+            pred_panel = render_skeleton_panel(pred[t], "Predicted", (80, 200, 255), t, n, edges=pred_edges)
+        if gt_verts is not None:
+            gt_panel = render_mesh_panel(gt_verts[t], faces, gt[t], gt_edges, "GT Motion", (255, 170, 80), t, n)
+        else:
+            gt_panel = render_skeleton_panel(gt[t], "GT Motion", (255, 170, 80), t, n, edges=gt_edges)
+        frames.append(np.concatenate([left, pred_panel, gt_panel], axis=1))
     if not frames:
         raise RuntimeError(f"No frames rendered for {session_id}_{config_id}")
 
@@ -124,7 +162,21 @@ def parse_args() -> argparse.Namespace:
         "Model dir is <modal>_<contact-method> (e.g. anysolev1_bvh_soft).",
     )
     parser.add_argument("--contact-method", type=str, default="tactile_abs", help="Contact-label scheme(s), comma-separated; ignored when --modal is 'auto'.")
-    return parser.parse_args()
+    parser.add_argument(
+        "--mesh",
+        action="store_true",
+        help="Render full SMPL surface panels (mesh + skeleton overlay) for Predicted/GT instead of skeleton-only. "
+        "Motion files without SMPL params (legacy BVH) keep the classic skeleton panel.",
+    )
+    parser.add_argument(
+        "--only-bone",
+        action="store_true",
+        help="Explicit skeleton-only panels (the default); conflicts with --mesh.",
+    )
+    args = parser.parse_args()
+    if args.mesh and args.only_bone:
+        parser.error("--mesh and --only-bone are mutually exclusive")
+    return args
 
 
 def main() -> int:

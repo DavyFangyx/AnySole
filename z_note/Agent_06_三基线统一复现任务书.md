@@ -101,11 +101,28 @@ pressure_tookit 与 VP-MoCap **同属 MMVP 工作**（arXiv 2403.17610）的两�
    `image_pressure.py`（split_csv/fake_mask/contact_method/96×96 压力缩放/valid
    掩码）、`FRAPPE.py`（MHA permute、footloss 除零、smpl 路径）、
    `app/test_frappe.py`（`evaluate_checkpoint` 表 3/4 指标）、`data_prep/` 均在。
-2. **GT 口径（D1，已定：方案 b）**：按 SMPL-24 协议从 manifest `smpl_path`
-   重导出 `smpl.npy / keypoints.npy`（复用 `anysole.data.smpl_io.load_smpl` +
-   40Hz 重采样），contact 标签用 `AnysoleWorkspace/tool/contact_labels.py`
-   的 bvh_h/bvh_soft（Test5 结论优于触觉系）。理由：GT 属于协议层
-   （§3.3 红线），复现基线只改接口/配置，不引入与 AnySole 不同的 GT 基础。
+2. **GT 口径（D1，已定：方案 b）——清除 BVH 分支历史遗留通路**：
+   **实测盘面（S7011）**：当前 derived `smpl.npy` 的 `betas` 恒为 0（BVH→SMPL
+   转换的特征，`56f5187` 的 `motion_to_smpl()` 写死 `betas=zeros(10)`），
+   `align_meta.json` 带 `bvh_path`，且文件是 numpy2 pickle（touch_gait 的
+   numpy1.23 读报 `numpy._core`）——即当前 derived GT 仍是 BVH_Motion 分支时代
+   的产物（后被重组工作用 numpy2 重存，内容未变）。`prepare_sequences.py`
+   已在 `a8ff4d7 整理文件` 随 Baselines 出 index。
+   **分支政策**：SMPL_Motion 下「用 BVH 的用 BVH、用 SMPL 的用 SMPL」——
+   MotionPRO 的 GT 表示是 SMPL 参数（FRAPPE 回归 85 维、smplx FK），属于 SMPL
+   派，必须从 manifest `smpl_path`（`motion_neutral_smpl.npz`：真实 `betas`、
+   `poses (T_src,72)`、120Hz）重导出 `smpl.npy / keypoints.npy`（复用
+   `anysole.data.smpl_io.load_smpl` + 40Hz 统一网格重采样；实测 derived T=389
+   与统一 n_frames=389 一致，**换源不换时间轴**）；Step2Motion 继续走
+   `bvh_path`（baseline-only 字段）；MMVP 两条线的评估 GT 同样用原生 SMPL。
+   重导脚本放 `AnysoleWorkspace/tool/`（旧 `Baselines/MotionPRO/data_prep/`
+   已无跟踪位置）；contact 标签用 `AnysoleWorkspace/tool/contact_labels.py`
+   的 bvh_h/bvh_soft（Test5 结论优于触觉系）。
+   **实现坑**：① 新写的 `smpl.npy` 若由 numpy2 环境产出，touch_gait 训练端
+   必须走集成版 `load_smpl_npy()`（已兼容）或改用 numpy1 写入；② `motion_
+   neutral_smpl.npz` 的 `pose_body` 是 63 维（21 关节×3），重导时按
+   `anysole` 的 SMPL-24 协议补齐/映射到 69 维 body_pose，不得沿用
+   `BVH_TO_SMPL_BODY`。
 3. **数据侧补齐**：`bbox.npy / feature_hrnet.pth / pressure.npz / fake_mask.npy`
    沿用现有；`keypoints.npy / smpl.npy / contact*.npy` 按步骤 2 重生成
    （`gen_bbox` 走 bbox_scan 环境，其余走 touch_gait）。
@@ -295,11 +312,11 @@ pressure_tookit 与 VP-MoCap 同属 MMVP 工作的两条方法线，观测协议
 
 | # | 用途 | 下载地址 | 放置位置 | 状态 |
 |---|---|---|---|---|
-| 1 | pressure_tookit essential（bodyModels/smpl、smplify_essential/gmm_08.pkl、pressure/RegionInsole2SMPL*、foot_related、hand_ids） | https://drive.google.com/file/d/15D2I9W4oYXZ2rbN94aFFevacua2JjOj9/view?usp=drive_link （readme.md 官方链接） | `AnysoleWorkspace/dependencies/pressure_tookit/essential/` | **缺，待用户下载** |
-| 2 | SMPL_MALE.pkl（PoseTransOpt） | https://smpl.is.tue.mpg.de/ （注册后下载；SMPL_NEUTRAL 已有，不用再下） | `AnysoleWorkspace/dependencies/VP-MoCap/smpl/`（或 PoseTransOpt/models/） | **缺，待用户下载** |
-| 3 | VPoser V02_05（PoseTransOpt 姿态先验） | https://smpl-x.is.tue.mpg.de/ （注册；VPoser 下载页） | `PoseTransOpt/models/V02_05/` | **缺，待用户下载** |
-| 4 | RTM-pose 2D 关键点模型（**已定：halpe26 rtmpose-m**，pressure_tookit + VP-MoCap 共用） | https://github.com/open-mmlab/mmpose/tree/main/projects/rtmpose （model zoo 的 halpe26 配置+ckpt；具体文件名按 zoo 表钉死后回填） | `AnysoleWorkspace/dependencies/rtmpose/`；mmpose 代码装进新 env | **缺，待用户下载** |
-| 5 | CLIFF 代码（pressure_tookit 姿态初始化 + VP-MoCap CLIFF_results.npz；ckpt hr48 已有） | https://github.com/huawei-noah/noah-research/tree/master/CLIFF | `AnysoleWorkspace/dependencies/CLIFF/` | **缺，待用户下载** |
+| 1 | pressure_tookit essential（bodyModels/smpl、smplify_essential/gmm_08.pkl、pressure/RegionInsole2SMPL*、foot_related、hand_ids；**另含 SMPL_MALE/FEMALE 与 smpl_uv**） | https://drive.google.com/file/d/15D2I9W4oYXZ2rbN94aFFevacua2JjOj9/view?usp=drive_link （readme.md 官方链接） | `AnysoleWorkspace/dependencies/pressure_tookit/essential/` | **已就位**（2026-09-21 解包核验） |
+| 2 | SMPL_MALE.pkl（PoseTransOpt） | https://smpl.is.tue.mpg.de/ （注册后下载；SMPL_NEUTRAL 已有，不用再下） | `AnysoleWorkspace/dependencies/VP-MoCap/smpl/SMPL_MALE.pkl` | **已就位**（官方 SMPL v1.1.0 包；essential 内另有副本作双保险） |
+| 3 | VPoser V02_05（PoseTransOpt 姿态先验） | https://smpl-x.is.tue.mpg.de/ （注册；VPoser 下载页） | `Baselines/VP-MoCap/PoseTransOpt/models/V02_05/` | **已就位**（yaml + snapshots ×2） |
+| 4 | RTM-pose 2D 关键点模型（**已定：halpe26 rtmpose-m**，pressure_tookit + VP-MoCap 共用） | https://github.com/open-mmlab/mmpose/tree/main/projects/rtmpose （model zoo 的 halpe26 配置+ckpt） | `AnysoleWorkspace/dependencies/rtmpose/rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.pth`；mmpose 代码装进新 env | **已就位**（body7 变体；config 由 mmpose 包自带，装包时取 rtmpose-m_8xb256-700e_body7-halpe26-256x192.py） |
+| 5 | CLIFF 代码（pressure_tookit 姿态初始化 + VP-MoCap CLIFF_results.npz；ckpt hr48 已有） | https://github.com/huawei-noah/noah-research/tree/master/CLIFF | `AnysoleWorkspace/dependencies/CLIFF/` | **已就位**（从 noah-research-master 解出 CLIFF/；requirements torch≥1.11+torchgeometry+pyrender+smplx+yacs 全部由 mmvp 环境覆盖；ckpt 用现有 `dependencies/MotionPRO/cliff_ckpt/hr48-...3dpw.pt`） |
 | 6 | ZoeDepth（可选：PoseTransOpt README 的原始选择；默认改用已有 DepthPro，不下载） | https://github.com/isl-org/ZoeDepth | — | 可选 |
 | 7 | FPP-Net 官方 checkpoint | README 为占位符 `url_here`，**官方未发布** | — | 必须自训（§4.2.3） |
 

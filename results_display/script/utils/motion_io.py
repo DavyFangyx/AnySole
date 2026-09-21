@@ -116,7 +116,8 @@ def load_session_gt(seq_dir: Path, n_frames: int, fps: float = 40.0) -> dict:
     t_mocap = t_grid - float(meta["offset_s"])
     try:
         smpl = resolve_smpl_path(meta, tuple(SMPL_ROOTS))
-        return load_motion(smpl, query_t=t_mocap)
+        result = load_motion(smpl, query_t=t_mocap)
+        result["source_path"] = str(smpl)
     except FileNotFoundError:
         # Legacy/Step2Motion sessions may only have BVH.  This fallback is
         # confined to the display reader; AnySole training/inference never
@@ -124,4 +125,9 @@ def load_session_gt(seq_dir: Path, n_frames: int, fps: float = 40.0) -> dict:
         bvh = Path(str(meta.get("bvh_path", ""))).expanduser()
         if not bvh.is_file():
             raise
-        return load_motion(bvh, query_t=t_mocap)
+        result = load_motion(bvh, query_t=t_mocap)
+        result["source_path"] = str(bvh)
+    # Extra keys let mesh renderers reuse the exact same time grid/archive:
+    # ``format`` (smpl/bvh) already comes from load_motion.
+    result["t_mocap"] = t_mocap
+    return result

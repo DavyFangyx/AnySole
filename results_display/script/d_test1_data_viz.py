@@ -10,12 +10,19 @@ not touch either existing MotionPRO or Step2Motion renderer.
 Outputs are written below ``results_display/data/d_test1_data_viz/``:
     <session-or-stem>/<smp24|bvh23>/skeleton_zup.npz   data file (always written)
     <session-or-stem>/<smp24|bvh23>/{gif,mp4}/skeleton_zup.* animation (--gen)
+    <session-or-stem>/smp24/mesh_zup.npz + {gif,mp4}/mesh_zup.* (--mesh)
 
 ``ANYSOLE_RESULTSDISPLAY`` overrides the display root.
+
+``--mesh`` renders the full SMPL surface (6890 vertices, LBS from
+``utils.smpl_mesh``) with the skeleton overlaid, replacing the skeleton-only
+outputs for SMPL-24 sessions; BVH-23 sessions fall back to skeleton-only with
+a warning.  The default (and ``--only-bone``) keeps the skeleton-only output.
 
 Example:
     python results_display/script/d_test1_data_viz.py
     python results_display/script/d_test1_data_viz.py --session S7013 --gen gif
+    python results_display/script/d_test1_data_viz.py --session S7013 --mesh --gen mp4
     python results_display/script/d_test1_data_viz.py --protocol bvh23
     python results_display/script/d_test1_data_viz.py --bvh /path/to/single.bvh --gen mp4
 """
@@ -42,7 +49,8 @@ import numpy as np
 from anysole.data.smpl_io import resolve_smpl_path
 from anysole.types import SMPL_ROOTS
 from utils.bvh_aligner_pose import parse_bvh_aligner
-from utils.motion_io import load_session_gt
+from utils.motion_io import load_session_gt, smpl_yup_to_display
+from utils.smpl_mesh import mesh_from_archive, render_mesh_frame
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,7 +70,21 @@ def parse_args() -> argparse.Namespace:
         help="GT source per session: auto = SMPL-24 when available else BVH-23 (default); "
         "smp24 / bvh23 force one protocol and skip sessions that lack it.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--mesh",
+        action="store_true",
+        help="Render the full SMPL surface (mesh + skeleton overlay) instead of skeleton-only. "
+        "Needs SMPL-24 sessions; BVH-23 sessions fall back to skeleton-only.",
+    )
+    parser.add_argument(
+        "--only-bone",
+        action="store_true",
+        help="Explicit skeleton-only rendering (the default); conflicts with --mesh.",
+    )
+    args = parser.parse_args()
+    if args.mesh and args.only_bone:
+        parser.error("--mesh and --only-bone are mutually exclusive")
+    return args
 
 
 def discover_test_sessions(session_ids: list, seq_root: Path) -> list[tuple[str, Path]]:
@@ -157,6 +179,38 @@ def _write_outputs(output_dir: Path, positions: np.ndarray, edges: list, frame_i
     print(f"output: {output_dir}")
 
 
+def _write_mesh_outputs(output_dir: Path, verts: np.ndarray, faces: np.ndarray, positions: np.ndarray,
+                        edges: list, frame_ids: np.ndarray, args: argparse.Namespace,
+                        raw_fps: float, total_frames: int, title: str) -> None:
+    stride = max(1, int(args.stride))
+    npz_path = output_dir / "mesh_zup.npz"
+    gen_path = cli_common.media_path(output_dir, "mesh_zup", args.gen)
+    if cli_common.outputs_ready([npz_path, gen_path]) and not args.force:
+        print(f"[skip] outputs already exist under {output_dir}")
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        npz_path,
+        vertices=verts,
+        faces=np.asarray(faces, dtype=np.int64),
+        frame_ids=np.asarray(frame_ids, dtype=np.int64),
+        raw_fps=np.asarray([raw_fps], dtype=np.float64),
+        trimmed_frame_count=np.asarray([total_frames], dtype=np.int64),
+    )
+    images = [
+        render_mesh_frame(v, faces, joints=j, edges=edges, title=title, frame_index=i, total=total_frames)
+        for v, j, i in zip(verts, positions, frame_ids)
+    ]
+    frame_fps = cli_common.viz_fps(args.fps or raw_fps, stride)
+    gen_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.gen == "gif":
+        cli_common.write_gif(images, gen_path, frame_fps)
+    else:
+        cli_common.write_mp4(images, gen_path, frame_fps)
+    print(f"rendered={len(images)} raw_fps={raw_fps:.6f} trimmed_frames={total_frames}")
+    print(f"output: {output_dir}")
+
+
 def convert_session(seq_dir: Path, output_root: Path, sample_id: str, source: str, args: argparse.Namespace) -> None:
     """SMPL-24 (via load_session_gt) or BVH-23 (via aligner) session render."""
     stride = max(1, int(args.stride))
@@ -180,12 +234,24 @@ def convert_session(seq_dir: Path, output_root: Path, sample_id: str, source: st
         raise RuntimeError("motion contains no frames after trimming")
     positions = np.stack([positions_all[i] for i in frame_ids], axis=0)
     edges = [(int(parent), int(child)) for child, parent in enumerate(parents) if parent >= 0]
+    if source == "smp24" and args.mesh:
+        mesh = mesh_from_archive(Path(loaded["source_path"]), query_t=loaded["t_mocap"])
+        verts_display = smpl_yup_to_display(mesh["verts"])
+        _write_mesh_outputs(
+            output_root / sample_id / source, verts_display[np.asarray(frame_ids)], mesh["faces"],
+            positions, edges, np.asarray(frame_ids), args, fps, len(positions_all), f"{title} mesh",
+        )
+        return
+    if args.mesh:
+        print(f"[warn] {sample_id}: {source} has no SMPL params; --mesh falls back to skeleton-only")
     _write_outputs(output_root / sample_id / source, positions, edges,
                    np.asarray(frame_ids), args, fps, len(positions_all), title)
 
 
 def convert_one(bvh_path: Path, output_root: Path, sample_id: str, args: argparse.Namespace) -> None:
     """Single-file BVH render (--bvh mode), protocol forced to bvh23."""
+    if args.mesh:
+        print("[warn] single-BVH mode has no SMPL params; --mesh falls back to skeleton-only")
     stride = max(1, int(args.stride))
     parsed = parse_bvh_aligner(bvh_path)
     frame_ids = list(range(0, len(parsed["joints"]), stride))

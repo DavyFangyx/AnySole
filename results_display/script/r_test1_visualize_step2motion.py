@@ -5,6 +5,13 @@ Usage (run from the repository root):
     python results_display/script/r_test1_visualize_step2motion.py \
         results://Step2Motion/predictions/gait_model/S7063_gen.bvh
     python results_display/script/r_test1_visualize_step2motion.py --self-test
+    python results_display/script/r_test1_visualize_step2motion.py --mesh --max-frames 40
+
+``--mesh`` renders the GT panel as the full SMPL surface (mesh + skeleton
+overlay via ``utils.smpl_mesh``) when the session has an SMPL-24 archive and
+no ``--raw`` override; otherwise the GT panel keeps the BVH skeleton.  The
+generated panel stays a BVH skeleton (Step2Motion has no SMPL params).  The
+default (and ``--only-bone``) renders skeleton panels only.
 
 Outputs are written below ``results_display/r_test1_visualize/Step2Motion/gait_model`` (or the
 ``ANYSOLE_RESULTSDISPLAY`` override).
@@ -19,18 +26,30 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-STEP2MOTION_SRC = REPO_ROOT / "Baselines/Step2Motion/src"
-if str(STEP2MOTION_SRC) not in sys.path:
-    sys.path.insert(0, str(STEP2MOTION_SRC))
+# The BVH-era Step2Motion export helper now lives in the archived source
+# tree; Baselines/Step2Motion no longer ships bvh_export.py.
+STEP2MOTION_SRC = REPO_ROOT / "Baselines_backup" / "Step2Motion" / "src"
 
+# results_display ``utils`` must win over the Step2Motion tree's own
+# ``utils.py``: import everything from it before pushing STEP2MOTION_SRC to
+# sys.path[0] (its shadowing previously made ``from utils import cli_common``
+# load Step2Motion's utils, which drags in pymotion and breaks on py3.8).
 from utils import cli_common
 import cv2
 import numpy as np
 from matplotlib import cm
 from PIL import Image, ImageDraw, ImageFont
 from scipy.spatial.transform import Rotation as SciRotation
-from bvh_export import write_bvh
 from utils.bvh_aligner_pose import parse_bvh_aligner
+from utils.motion_io import load_motion, smpl_yup_to_display
+from utils.smpl_mesh import mesh_from_archive, render_mesh_frame, smpl_faces
+from anysole.data.smpl_io import resolve_smpl_path
+from anysole.types import SMPL_ROOTS
+
+if str(STEP2MOTION_SRC) not in sys.path:
+    sys.path.insert(0, str(STEP2MOTION_SRC))
+
+from bvh_export import write_bvh
 
 
 PANEL_W = 460
@@ -311,7 +330,8 @@ def find_seq_dir(session_id: str) -> Path:
     return matches[0]
 
 
-def load_original_gt(clip_id: str, n_frames: int, fps: float = TARGET_HZ) -> dict:
+def _gt_time_grid(clip_id: str, n_frames: int, fps: float) -> np.ndarray:
+    """Mocap-source query grid for a clip (visual_start/offset + fake-split clip start)."""
     session_id, clip_index = parse_clip_id(clip_id)
     seq_dir = find_seq_dir(session_id)
     meta = json.loads((seq_dir / "align_meta.json").read_text())
@@ -324,15 +344,45 @@ def load_original_gt(clip_id: str, n_frames: int, fps: float = TARGET_HZ) -> dic
         start, _end = clips[min(clip_index, len(clips) - 1)]
     else:
         start = 0
+    t_grid = float(meta["visual_start_s"]) + (start + 1 + np.arange(n_frames, dtype=np.float64)) / float(fps)
+    return t_grid - float(meta["offset_s"])
+
+
+def load_original_gt(clip_id: str, n_frames: int, fps: float = TARGET_HZ) -> dict:
+    session_id, _clip_index = parse_clip_id(clip_id)
+    seq_dir = find_seq_dir(session_id)
+    meta = json.loads((seq_dir / "align_meta.json").read_text())
     parsed = parse_bvh(meta["bvh_path"])
-    session_start = start + 1
-    t_grid = float(meta["visual_start_s"]) + (session_start + np.arange(n_frames, dtype=np.float64)) / float(fps)
-    t_mocap = t_grid - float(meta["offset_s"])
-    joints = interp_joints(parsed["joints"], parsed["frame_time"], t_mocap)
+    joints = interp_joints(parsed["joints"], parsed["frame_time"], _gt_time_grid(clip_id, n_frames, fps))
     return {
         "joints": joints_to_meters(joints),
         "parents": parsed["parents"],
         "names": parsed["names"],
+    }
+
+
+def load_original_gt_mesh(clip_id: str, n_frames: int, fps: float = TARGET_HZ) -> dict | None:
+    """SMPL-24 GT mesh (verts + joints) on the clip's query grid.
+
+    Returns None when the session has no SMPL archive; callers keep the BVH
+    skeleton GT panel instead.
+    """
+    session_id, _clip_index = parse_clip_id(clip_id)
+    seq_dir = find_seq_dir(session_id)
+    meta = json.loads((seq_dir / "align_meta.json").read_text())
+    try:
+        smpl = resolve_smpl_path(meta, tuple(SMPL_ROOTS))
+    except FileNotFoundError:
+        return None
+    t_mocap = _gt_time_grid(clip_id, n_frames, fps)
+    loaded = load_motion(smpl, query_t=t_mocap)
+    mesh = mesh_from_archive(smpl, query_t=t_mocap)
+    return {
+        "joints": loaded["joints"],
+        "parents": loaded["parents"],
+        "names": loaded["names"],
+        "verts": smpl_yup_to_display(mesh["verts"]),
+        "faces": mesh["faces"],
     }
 
 
@@ -399,6 +449,20 @@ def render_skeleton_panel(joints, parents, title, color, frame_idx, n_frames, mp
     return np.asarray(canvas)
 
 
+def render_mesh_panel(verts: np.ndarray, faces: np.ndarray, joints: np.ndarray,
+                      parents: np.ndarray, title: str, color: tuple,
+                      frame_idx: int, n_frames: int) -> np.ndarray:
+    """Full-SMPL panel at the classic PANEL_W x CANVAS_H size (mesh + skeleton)."""
+    return render_mesh_frame(
+        verts, faces, joints=joints, edges=parents_to_edges(parents), title=title,
+        frame_index=frame_idx, total=n_frames,
+        mesh_color=tuple(c / 255.0 for c in color),
+        bone_color="#C46A4A", joint_color="#{:02x}{:02x}{:02x}".format(*color),
+        title_color="#{:02x}{:02x}{:02x}".format(*color),
+        bg_color="#0A0C10", size=(PANEL_W, CANVAS_H),
+    )
+
+
 def compose_frame(left_block, right_block, pred_j, gt_j, pred_parents, gt_parents, clip_id, frame_idx, n_frames, fps, vmax):
     left = render_foot_panel(left_block, right_block, clip_id, frame_idx, n_frames, fps, vmax)
     mid = render_skeleton_panel(pred_j, pred_parents, "BVH GEN", PRED_COLOR, frame_idx, n_frames)
@@ -435,6 +499,7 @@ def visualize_from_exports(
     stride: int = 2,
     max_frames: int = 0,
     gen: str = "gif",
+    mesh: bool = False,
 ) -> dict:
     pred_bvh = Path(pred_bvh)
     cs_json = Path(cs_json)
@@ -450,47 +515,57 @@ def visualize_from_exports(
     left = left[:n]
     right = right[:n]
     fps = float(fps or pred["fps"] or TARGET_HZ)
-    try:
-        gt = load_raw_bvh(raw_bvh, clip_id, n, fps, raw_start_time)
-    except FileNotFoundError as exc:
-        # Older exports may contain an absolute BVH path from a machine where
-        # the original mocap archive was mounted.  Keep rendering predictions
-        # and tactile input when that optional reference is unavailable.
-        print("Warning: raw BVH unavailable (%s); rendering without a reference skeleton." % exc)
-        gt = {
-            "joints": pred["joints"].copy(),
-            "parents": pred["parents"].copy(),
-            "names": pred["names"],
-        }
-    gt_j = gt["joints"][:n]
+    # SMPL surface GT when requested and no --raw override (the raw override
+    # is an arbitrary BVH, which has no SMPL params).
+    gt_mesh = load_original_gt_mesh(clip_id, n, fps) if mesh and raw_bvh is None else None
+    if mesh and raw_bvh is None and gt_mesh is None:
+        print("Warning: no SMPL archive for %s; mesh mode keeps the BVH skeleton GT panel." % clip_id)
+    if gt_mesh is not None:
+        gt_j = gt_mesh["joints"][:n]
+        gt_parents = gt_mesh["parents"]
+    else:
+        try:
+            gt = load_raw_bvh(raw_bvh, clip_id, n, fps, raw_start_time)
+        except FileNotFoundError as exc:
+            # Older exports may contain an absolute BVH path from a machine where
+            # the original mocap archive was mounted.  Keep rendering predictions
+            # and tactile input when that optional reference is unavailable.
+            print("Warning: raw BVH unavailable (%s); rendering without a reference skeleton." % exc)
+            gt = {
+                "joints": pred["joints"].copy(),
+                "parents": pred["parents"].copy(),
+                "names": pred["names"],
+            }
+        gt_j = gt["joints"][:n]
+        gt_parents = gt["parents"]
     pred_parents = pred["parents"]
-    gt_parents = gt["parents"]
     vmax = float(np.percentile(np.concatenate([left, right], axis=1), 99))
     vmax = max(vmax, 1.0)
 
     frame_ids = list(range(0, n, max(int(stride), 1)))
     if max_frames and max_frames > 0:
         frame_ids = frame_ids[: max_frames]
-    frames = [
-        compose_frame(
+    frames = []
+    for t in frame_ids:
+        left_panel = render_foot_panel(
             moticon16_to_insole(left[t]),
             moticon16_to_insole(right[t]),
-            pred_j[t],
-            gt_j[t],
-            pred_parents,
-            gt_parents,
-            clip_id,
-            t,
-            n,
-            fps,
-            vmax,
+            clip_id, t, n, fps, vmax,
         )
-        for t in frame_ids
-    ]
+        mid = render_skeleton_panel(pred_j[t], pred_parents, "BVH GEN", PRED_COLOR, t, n)
+        if gt_mesh is not None:
+            right_panel = render_mesh_panel(
+                gt_mesh["verts"][t], gt_mesh["faces"], gt_j[t], gt_parents,
+                "SMPL GT", GT_COLOR, t, n,
+            )
+        else:
+            right_panel = render_skeleton_panel(gt_j[t], gt_parents, "BVH RAW", GT_COLOR, t, n)
+        frames.append(np.concatenate([left_panel, mid, right_panel], axis=1))
     if not frames:
         raise RuntimeError("No frames rendered for %s" % clip_id)
 
-    gen_path = cli_common.media_path(out_dir, "%s_compare" % clip_id, gen)
+    stem = "%s_compare%s" % (clip_id, "_mesh" if gt_mesh is not None else "")
+    gen_path = cli_common.media_path(out_dir, stem, gen)
     gen_path.parent.mkdir(parents=True, exist_ok=True)
     frame_fps = cli_common.viz_fps(fps, stride)
     if gen == "gif":
@@ -542,8 +617,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-start-time", type=float, default=None, help="First generated frame time in the raw BVH, in seconds.")
     parser.add_argument("--cs", type=str, default="", help="Insole JSON path. Default infers *_cs.json.")
     parser.add_argument("--clip-id", type=str, default="")
+    parser.add_argument(
+        "--mesh",
+        action="store_true",
+        help="Render the GT panel as the full SMPL surface (mesh + skeleton overlay) when the "
+        "session has an SMPL-24 archive and no --raw override; generated panel stays a BVH skeleton.",
+    )
+    parser.add_argument(
+        "--only-bone",
+        action="store_true",
+        help="Explicit skeleton-only panels (the default); conflicts with --mesh.",
+    )
     parser.add_argument("--self-test", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.mesh and args.only_bone:
+        parser.error("--mesh and --only-bone are mutually exclusive")
+    return args
 
 
 def _tiny_bvh(n_frames: int = 2) -> str:
@@ -628,14 +717,18 @@ def main() -> None:
         raw_bvh = args.raw or None
         raw_start_time = args.raw_start_time
         meta_path = infer_sidecar(pred_path, "_meta").with_suffix(".json")
-        if raw_bvh is None and meta_path.is_file():
+        # In mesh mode the GT surface comes from the session's SMPL archive,
+        # not the exported raw BVH; the meta raw_bvh_path is only the default
+        # skeleton-GT source (keep it unless mesh is requested).
+        if raw_bvh is None and meta_path.is_file() and not args.mesh:
             export_meta = json.loads(meta_path.read_text())
             raw_bvh = export_meta.get("raw_bvh_path") or None
             if raw_start_time is None:
                 raw_start_time = export_meta.get("raw_start_time")
         if raw_bvh:
             raw_bvh = cli_common.resolve_path(raw_bvh)
-        gen_path = cli_common.media_path(out_dir, "%s_compare" % clip_id, args.gen)
+        stem = "%s_compare%s" % (clip_id, "_mesh" if args.mesh else "")
+        gen_path = cli_common.media_path(out_dir, stem, args.gen)
         if cli_common.outputs_ready([gen_path]) and not args.force:
             print("Skip %s: already exists" % clip_id)
             n_skip += 1
@@ -651,6 +744,7 @@ def main() -> None:
             stride=args.stride,
             max_frames=args.max_frames,
             gen=args.gen,
+            mesh=args.mesh,
         )
         n_write += 1
     print("visualize_compare done: wrote=%d skipped=%d total=%d" % (n_write, n_skip, len(pred_files)))

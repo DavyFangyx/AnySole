@@ -1,8 +1,15 @@
 """Render MotionPRO tactile input, prediction, and GT as one animation.
 
+``--mesh`` replaces the Predicted/GT panels with full SMPL surface renders
+(mesh + skeleton overlay via ``utils.smpl_mesh``): predictions use the same
+smplx forward the script already runs, GT uses the session's SMPL-24 archive.
+Sessions without one keep the BVH skeleton GT panel.  The default (and
+``--only-bone``) renders skeleton panels only.
+
 Usage (run from the repository root):
     python results_display/script/r_test1_visualize_motionpro.py
     python results_display/script/r_test1_visualize_motionpro.py --session S14103
+    python results_display/script/r_test1_visualize_motionpro.py --session S12011 --mesh --max-frames 40
     python results_display/script/r_test1_visualize_motionpro.py \
         --checkpoint results://MotionPRO/checkpoints/imagepressure2smpl/init/5e-05/imagepressure2smpl_best.pth
 
@@ -21,7 +28,9 @@ from utils import cli_common
 
 
 REPO_ROOT = cli_common.REPO_ROOT
-MOTIONPRO_ROOT = REPO_ROOT / "Baselines/MotionPRO"
+# The BVH-era MotionPRO lib (FRAPPE / util.io) now lives in the archived
+# source tree; Baselines/MotionPRO keeps only data/checkpoints.
+MOTIONPRO_ROOT = REPO_ROOT / "Baselines_backup" / "MotionPRO"
 if str(MOTIONPRO_ROOT) not in sys.path:
     sys.path.insert(0, str(MOTIONPRO_ROOT))
 
@@ -37,6 +46,8 @@ from scipy.spatial.transform import Rotation as SciRotation
 from lib.model.FRAPPE import FRAPPE
 from lib.util.io import load_smpl_npy
 from utils.bvh_aligner_pose import parse_bvh_aligner
+from utils.motion_io import load_session_gt, smpl_yup_to_display
+from utils.smpl_mesh import mesh_from_archive, render_mesh_frame, smpl_faces
 
 
 SMPL_EDGES = [
@@ -413,10 +424,23 @@ def compose_frame(left_block, right_block, pred_j, gt_j, gt_edges, session_id, f
     return np.concatenate([left, mid, right], axis=1)
 
 
-def run_session(model, smpl, seq_dir, device, window_length):
+def render_mesh_panel(verts, faces, joints, edges, title, color, frame_idx, n_frames):
+    """Full-SMPL panel at the classic PANEL_W x CANVAS_H size (mesh + skeleton)."""
+    return render_mesh_frame(
+        verts, faces, joints=joints, edges=edges, title=title,
+        frame_index=frame_idx, total=n_frames,
+        mesh_color=tuple(c / 255.0 for c in color),
+        bone_color="#C46A4A", joint_color="#{:02x}{:02x}{:02x}".format(*color),
+        title_color="#{:02x}{:02x}{:02x}".format(*color),
+        bg_color="#0A0C10", size=(PANEL_W, CANVAS_H),
+    )
+
+
+def run_session(model, smpl, seq_dir, device, window_length, mesh=False):
     data = load_session(seq_dir)
     n = data["n"]
     pred = np.zeros((n, 22, 3), dtype=np.float32)
+    pred_verts = np.zeros((n, 6890, 3), dtype=np.float32) if mesh else None
     valid = np.zeros((n,), dtype=bool)
     smpl_gt = data["smpl"]
     beta_full = torch.from_numpy(np.asarray(smpl_gt["betas"][:10], dtype=np.float32))
@@ -439,8 +463,10 @@ def run_session(model, smpl, seq_dir, device, window_length):
             pred_smpl = smpl_output(smpl, beta, pred_theta, pred_trans)
             pred_joints = pred_smpl.joints[:, :22].detach().cpu().numpy()
             pred[left:right] = smpl_to_aligner_zup(pred_joints)
+            if mesh:
+                pred_verts[left:right] = smpl_to_aligner_zup(pred_smpl.vertices.detach().cpu().numpy())
             valid[left:right] = True
-    return data["pressure"], pred, valid, n
+    return data["pressure"], pred, pred_verts, valid, n
 
 
 def discover_checkpoints(checkpoint_arg, orig_cwd):
@@ -505,37 +531,67 @@ def parse_args():
     )
     parser.add_argument("--window-length", type=int, default=WINDOW_LENGTH)
     parser.add_argument("--gpu", type=int, default=None)
-    return parser.parse_args()
+    parser.add_argument(
+        "--mesh",
+        action="store_true",
+        help="Render Predicted/GT panels as the full SMPL surface (mesh + skeleton overlay); "
+        "GT needs the session's SMPL-24 archive, otherwise it keeps the BVH skeleton panel.",
+    )
+    parser.add_argument(
+        "--only-bone",
+        action="store_true",
+        help="Explicit skeleton-only panels (the default); conflicts with --mesh.",
+    )
+    args = parser.parse_args()
+    if args.mesh and args.only_bone:
+        parser.error("--mesh and --only-bone are mutually exclusive")
+    return args
 
 
 def render_session(model, smpl, seq_dir, device, args, session_id, session_out):
-    gen_path = cli_common.media_path(session_out, f"{session_id}_compare", args.gen)
+    stem = f"{session_id}_compare" + ("_mesh" if args.mesh else "")
+    gen_path = cli_common.media_path(session_out, stem, args.gen)
     if cli_common.outputs_ready([gen_path]) and not args.force:
         log.info(f"Skip {session_id}: already exists under {session_out}")
         return "skip"
-    pressure, pred, valid, n = run_session(model, smpl, seq_dir, device, args.window_length)
-    gt, gt_parents = load_original_gt(seq_dir, n, args.fps)
-    gt_edges = parents_to_edges(gt_parents)
+    pressure, pred, pred_verts, valid, n = run_session(model, smpl, seq_dir, device, args.window_length, mesh=args.mesh)
+    # SMPL surface GT when available; BVH GT skeleton otherwise.
+    gt_verts = faces = None
+    if args.mesh:
+        gt_loaded = load_session_gt(seq_dir, n, args.fps)
+        if gt_loaded["format"] == "smpl":
+            gt_verts = smpl_yup_to_display(
+                mesh_from_archive(Path(gt_loaded["source_path"]), query_t=gt_loaded["t_mocap"])["verts"]
+            )[:n]
+            faces = smpl_faces()
+            gt, gt_edges = gt_loaded["joints"][:n], parents_to_edges(gt_loaded["parents"])
+        else:
+            log.warning(f"{session_id}: GT is {gt_loaded['format']}; mesh unavailable, keeping skeleton GT panel")
+    if gt_verts is None:
+        gt, gt_parents = load_original_gt(seq_dir, n, args.fps)
+        gt_edges = parents_to_edges(gt_parents)
     frame_ids = list(range(0, n, max(args.stride, 1)))
     if args.max_frames and args.max_frames > 0:
         frame_ids = frame_ids[: args.max_frames]
     frames = []
     for t in frame_ids:
         keep = bool(valid[t])
-        frames.append(
-            compose_frame(
-                crop_foot(pressure[t], LEFT_FOOT_BOX),
-                crop_foot(pressure[t], RIGHT_FOOT_BOX),
-                pred[t],
-                gt[t],
-                gt_edges,
-                session_id,
-                t,
-                n,
-                args.fps,
-                keep,
-            )
+        left = render_foot_panel(
+            crop_foot(pressure[t], LEFT_FOOT_BOX),
+            crop_foot(pressure[t], RIGHT_FOOT_BOX),
+            session_id, t, n, args.fps, keep,
         )
+        if args.mesh:
+            mid = render_mesh_panel(pred_verts[t], faces, pred[t], SMPL_EDGES, "Predicted", (80, 200, 255), t, n)
+            right = (
+                render_mesh_panel(gt_verts[t], faces, gt[t], gt_edges, "GT Motion", (255, 170, 80), t, n)
+                if gt_verts is not None else
+                render_skeleton_panel(gt[t], "GT Motion", (255, 170, 80), t, n, edges=gt_edges)
+            )
+        else:
+            mid = render_skeleton_panel(pred[t], "Predicted", (80, 200, 255), t, n, edges=SMPL_EDGES)
+            right = render_skeleton_panel(gt[t], "GT Motion", (255, 170, 80), t, n, edges=gt_edges)
+        frames.append(np.concatenate([left, mid, right], axis=1))
     if not frames:
         raise RuntimeError(f"No frames rendered for {session_id}")
     gen_path.parent.mkdir(parents=True, exist_ok=True)

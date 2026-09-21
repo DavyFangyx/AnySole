@@ -8,9 +8,10 @@
 - **目录编号 = `{模型版本}_{contact-method}`**（现在全部 SMPL-24，不再有任何协议
   后缀）。当前所有基座都用 `joint_and` 标签：`F0b_joint_and` / `F4a_joint_and` /
   `F2_joint_and` / `F2p4_joint_and` / `V3_2_joint_and`。
-- **当前无有效 checkpoint**：group_ids 修复（2026-09-20）后，此前全部权重（含
-  BVH 时代与 SMPL-24 早期的 F4a_footconv / V3_2_part9）已归档
-  `results/backup/AnySole_BVH_backup/`，必须按下面的链条从零重训。
+- **checkpoint 状态**：group_ids 修复（2026-09-20）后，此前全部权重已归档
+  `results/backup/AnySole_BVH_backup/`。**2026-09-21 warm-start 链重训完成**：
+  F0b / F4a / F2 / F2+4 / V3-2 五个基座全部训出并过 val 协议验收
+  （各节已回填实测数字）。
 - 训练顺序（warm-start 链）：**F0b（from-scratch）→ F4a / F2（←F0b）→
   F2+4（←F2）→ V3-2（←F4a）**。
 - `anysole/configs/v1.yaml` 已是 SMPL-24 训练配置：raw108、tw=20、stride=20、lr=1e-4
@@ -44,6 +45,12 @@
 ---
 
 ## 基座 F0b · 回归本体（`--modal anysolev2`，from-scratch）
+
+**2026-09-21 实测**（400ep from-scratch，wandb fxemwdt8；val 协议 seed0）：
+VT2M MPJPE 78.1 / PA 44.8、V2M 81.4 / 46.2、T2M 154.9 / 72.4；
+VT yaw_drift 4.5、jitter 12.0、contact_f1 0.43、foot_slide 2.82mm/帧。
+from-scratch 400ep 是筛选预算，显著弱于 BVH 时代 warm-start 的 F0b_seed2
+（63.7/25.1）；若作为最终基线，续跑至 800ep（yaml 默认）预期继续收敛。
 
 ```bash
 # ① 训练
@@ -79,6 +86,10 @@
 模型：anysolev2 + `--t-encoder foot_conv`（数据不动，只换编码器）。
 历史 BVH 口径结果（仅参照）：VT 55.5/23.0、T2M 123.8/40.3；T-only 全身退化
 +7.6（V3 的动机）。新 t_enc 结构 warm-start 时按名字自动跳过、保持新初始化。
+**2026-09-21 实测**（400ep warm-start F0b；val 协议 seed0）：VT2M MPJPE 70.4 /
+PA 37.3（较 F0b 78.1/44.8，foot_conv 兑现 −7.7/−7.5）、V2M 71.6 / 36.4、
+T2M 175.2 / 69.6（**T-only 弱点依旧：yaw_drift 72.4**，即 V3 要修的对象）；
+VT contact_f1 0.62（F0b 0.43）。
 
 ```bash
 # ① 训练
@@ -115,6 +126,9 @@
 
 根 6D 拆 tilt/yaw + 4 维 heading-frame 轨迹；traj_head.proj 3→4 维自动跳过。
 历史 BVH 口径结果（仅参照）：T2M 89.7/35.8（T2M 最优）、VT 65.4/24.7。
+**2026-09-21 实测**（400ep warm-start F0b；val 协议 seed0）：VT2M MPJPE 79.8 /
+PA 49.3、V2M 72.5 / 42.4、T2M 139.3 / 79.1；**yaw_drift 全配置大幅改善**
+（T2M 30.4→3.1、VT 4.5→2.6、V 4.6→2.3，f2 表示核心收益复现）。
 
 ```bash
 # ① 训练
@@ -132,7 +146,7 @@
   --ckpt results/AnySole/F2_joint_and/checkpoints/ckpt_last.pt \
   --modal anysolev2 --contact-method joint_and \
   --split val --write-motion results/AnySole/F2_joint_and/predictions/eval_motion \
-  --protocol-seed 0 --no-robustness --device cuda:4
+  --protocol-seed 0 --no-robustness --device cuda:6
 
 # ③ 可视化 R_Test1（骨架动画）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test1_visualize_anysole.py \
@@ -151,6 +165,9 @@
 
 历史 BVH 口径结果（仅参照）：VT 63.4/23.1（PA 三配置最优）、T2M 99.7/40.7、
 yaw_drift 三配置全最优（foot_conv 为新结构自动跳过）。
+**2026-09-21 实测**（400ep warm-start F2；val 协议 seed0）：VT2M MPJPE 69.0 /
+PA 39.3、V2M 64.5 / 36.2、**T2M 134.9 / 77.7（链内最优）**、yaw_drift 2.5/2.3/2.8
+（三配置全优）。组合成立：f2 修 yaw、foot_conv 修 VT，T2M 较 F4a −40mm。
 
 ```bash
 # ① 训练
@@ -168,7 +185,7 @@ yaw_drift 三配置全最优（foot_conv 为新结构自动跳过）。
   --ckpt results/AnySole/F2p4_joint_and/checkpoints/ckpt_last.pt \
   --modal anysolev2 --contact-method joint_and \
   --split val --write-motion results/AnySole/F2p4_joint_and/predictions/eval_motion \
-  --protocol-seed 0 --no-robustness --device cuda:4
+  --protocol-seed 0 --no-robustness --device cuda:7
 
 # ③ 可视化 R_Test1（骨架动画）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test1_visualize_anysole.py \
@@ -190,6 +207,11 @@ yaw_drift 三配置全最优（foot_conv 为新结构自动跳过）。
 1s0yeuwn ep531：traj 先行发散、硬窗口触发、有限大梯度），但健康期（1s0yeuwn
 ep110-510 VT 52.9-58.1 / T 115）证明结构成立；ckpt_best 保护已上线（ep480 最优
 不再丢失）。重训命令一致，可选：v1.yaml 改 lr 3e-4 或 `--epochs 450` 缩短暴露。
+**2026-09-21 实测**（740ep warm-start F4a，**全程无爆炸**——grad-clip+warmup+NaN
+守卫生效）：ckpt_last@740 VT2M 72.8 / 42.2、V2M 65.7 / 35.3、T2M 183.1 / 69.9
+（T-only yaw 73.6 依旧弱）；**ckpt_best@310 VT2M 67.4 / 37.9（链内最优）、
+V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂移
+（310ep 后 68→76 波动），T-only 全局弱点留给 V3-3 σ 门控。
 
 ```bash
 # ① 训练
