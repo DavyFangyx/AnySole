@@ -38,23 +38,90 @@ AnysoleWorkspace/
 
 ## 数据准备 CLI 手册
 
-一条中间数据一条命令。**先 init/doctor 后按需执行**；常用参数见各脚本 `--help`。
+一条中间数据一条命令，直接复制执行。先 init/doctor，再按需执行；常用参数见各脚本 `--help`。
 
-| # | 中间数据 | 命令 | 产物 |
-| --- | --- | --- | --- |
-| 0 | workspace 初始化/体检 | `python AnysoleWorkspace/tool/workspace.py init` / `doctor` / `relink` | sources 软链、本地目录、calibration 软链 |
-| 1 | session manifest + splits | `python AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3` | `manifests/session_manifest.csv|jsonl`、`splits/default/splits.csv` |
-| 2 | 数据质检 | `python AnysoleWorkspace/tool/check_data_quality.py --manifest manifests/session_manifest.jsonl`；`check_splits.py` 同参 | `manifests/data_quality_report.md` |
-| 3 | 触觉清洗（4 stage） | `python AnysoleWorkspace/tool/pressure_washer/run.py {inspect,reconstruct,mark-fake,encode} [--skip-existing\|--force]` | `sources/PressureWasher/outputs/{stats,reconstructed,fake_marked,encoded}` |
-| 4 | HRNet 特征缓存 | `CUDA_VISIBLE_DEVICES=N python AnysoleWorkspace/tool/generate_hrnet_cache.py --cam-id 3 [--session S...]` | `derived/AnySole/hrnet_cache/cam3/*.pt` |
-| 5 | 接触 npz | `python AnysoleWorkspace/tool/contact_labels.py [--methods bvh_h,joint_and,...] [--session S...]` | 序列目录下 `contact_<method>.npy` |
-| 6 | 鞋垫模板 | `python -m anysole.ablations.insole_drift.build_templates --manifest manifests/session_manifest.csv --out calibration/insole_templates.json` | `calibration/insole_templates.json` |
-| 7 | MotionPRO 序列 | 历史数据，生产脚本随 Baselines 归档（`Baselines_backup/`） | `derived/MotionPRO/sequences/cam3/` |
-| 8 | Step2Motion gait 数据集 | 迁移自 Baselines（见 `tool/workspace.py` MIGRATIONS） | `derived/Step2Motion/gait/*.pt` |
-| 9 | pressure_tookit 深度适配 | 待写（Agent_06 未合入） | `derived/pressure_tookit/` |
+### 0. workspace 初始化/体检
 
-顺序依赖：0 → 1 → 2（质检读 manifest）；3/4/5/6 互不依赖，均以 0 的前置为准；
-训练侧（anysole）消费 1/4/5/6 的产物。
+```bash
+python AnysoleWorkspace/tool/workspace.py init
+python AnysoleWorkspace/tool/workspace.py doctor
+python AnysoleWorkspace/tool/workspace.py relink
+```
+
+产物：sources 软链、本地目录、calibration 软链。
+
+### 1. session manifest + splits
+
+```bash
+python AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3
+```
+
+产物：`manifests/session_manifest.csv|jsonl`、`splits/default/splits.csv`。
+
+### 2. 数据质检
+
+```bash
+python AnysoleWorkspace/tool/check_data_quality.py --manifest AnysoleWorkspace/manifests/session_manifest.jsonl
+python AnysoleWorkspace/tool/check_splits.py --manifest AnysoleWorkspace/manifests/session_manifest.jsonl
+```
+
+产物：`manifests/data_quality_report.md`。
+
+### 3. 触觉清洗（4 stage，顺序执行）
+
+```bash
+python AnysoleWorkspace/tool/pressure_washer/run.py inspect --skip-existing
+python AnysoleWorkspace/tool/pressure_washer/run.py reconstruct --skip-existing
+python AnysoleWorkspace/tool/pressure_washer/run.py mark-fake --skip-existing
+python AnysoleWorkspace/tool/pressure_washer/run.py encode --skip-existing
+```
+
+产物：`sources/PressureWasher/outputs/{stats,reconstructed,fake_marked,encoded}`。
+`--force` 覆盖输出；`--input PATH` 指定输入。
+
+### 4. HRNet 特征缓存
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python AnysoleWorkspace/tool/generate_hrnet_cache.py --cam-id 3
+# 单个 session：
+CUDA_VISIBLE_DEVICES=0 python AnysoleWorkspace/tool/generate_hrnet_cache.py --cam-id 3 --session S10103
+```
+
+产物：`derived/AnySole/hrnet_cache/cam3/*.pt`。
+
+### 5. 接触 npz
+
+```bash
+python AnysoleWorkspace/tool/contact_labels.py
+python AnysoleWorkspace/tool/contact_labels.py --methods bvh_h,joint_and
+python AnysoleWorkspace/tool/contact_labels.py --session S11023
+```
+
+产物：序列目录下 `contact_<method>.npy`。
+
+### 6. 鞋垫模板
+
+```bash
+python -m anysole.ablations.insole_drift.build_templates \
+  --manifest AnysoleWorkspace/manifests/session_manifest.csv \
+  --out AnysoleWorkspace/calibration/insole_templates.json
+```
+
+产物：`calibration/insole_templates.json`。
+
+### 7. MotionPRO 序列
+
+历史数据，生产脚本随 Baselines 归档（`Baselines_backup/`）。产物：`derived/MotionPRO/sequences/cam3/`。
+
+### 8. Step2Motion gait 数据集
+
+迁移自 Baselines（见 `tool/workspace.py` MIGRATIONS）。产物：`derived/Step2Motion/gait/*.pt`。
+
+### 9. pressure_tookit 深度适配
+
+待写（Agent_06 未合入）。产物：`derived/pressure_tookit/`。
+
+顺序依赖：0 → 1 → 2（质检读 manifest）；3/4/5/6 互不依赖，均以 0 的前置为准；训练侧（anysole）消费 1/4/5/6 的产物。
 
 ## 检查
 
