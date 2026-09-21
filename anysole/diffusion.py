@@ -87,7 +87,7 @@ class GaussianDiffusion:
         self.sqrt_one_minus_alphas_cumprod = np.sqrt(1.0 - alphas_cumprod)
 
     def q_sample(self, x0, tau, noise=None) -> Tensor:
-        """x0 (B,20,138), tau (B,) long in [0, n_train_steps-1] -> x_tau same shape."""
+        """x0 (B,T,POSE_DIM), tau -> x_tau with the same native SMPL shape."""
         if noise is None:
             noise = torch.randn_like(x0)
         if noise.shape != x0.shape:
@@ -118,6 +118,7 @@ class GaussianDiffusion:
             config_id,
             batch.get("session_id"),
             T_s2m=batch.get("T_s2m"),
+            V_hmr=batch.get("V_hmr"),
         )
         out = dict(out)
         out["tau"] = tau
@@ -136,6 +137,7 @@ class GaussianDiffusion:
                 cond["config_id"],
                 cond.get("session_id"),
                 T_s2m=cond.get("T_s2m"),
+                V_hmr=cond.get("V_hmr"),
             )
         if "F" in cond:
             return model(x_tau, tau, cond["F"])
@@ -277,7 +279,7 @@ class GaussianDiffusion:
         return x, carry_out
 
     def ddim_sample(self, model, F_or_inputs, shape, steps=DIFFUSION_SAMPLE_STEPS, eta=0.0) -> Tensor:
-        """Return x0 (B,20,138). eta defaults to 0."""
+        """Return native SMPL-24 x0 (B,T,POSE_DIM). eta defaults to 0."""
         if isinstance(F_or_inputs, dict):
             cond = dict(F_or_inputs)
         else:

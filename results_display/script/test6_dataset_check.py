@@ -6,12 +6,12 @@ A. GT self-consistency: FK(GT 6D pose, GT offsets) must reproduce the stored
    kp_gt up to float rounding, and the torch FK used by train/eval must agree
    with the numpy FK used to build the dataset.  Any systematic offset here
    (m vs mm units, hierarchy, resampling) would cap MPJPE far above zero no
-   matter how long the model trains.  This pipeline has no SMPL betas; the
-   "betas" analog is each BVH's own OFFSET template (offsets_m, cm -> m),
+   matter how long the model trains.  Native SMPL betas are converted through
+   SMPL_NEUTRAL's shapedirs/J_regressor into shape-dependent rest offsets,
    checked by A3 (units/geometry) and A5 (per-subject template consistency:
    same subject must be identical across actions/samples).
    A1 numpy FK(GT) vs stored kp_gt, A2 torch FK(GT) vs stored kp_gt,
-   A3 geometry/unit sanity, A4 pose<->BVH-motion roundtrip, A5 offsets.
+   A3 geometry/unit sanity, A4 native SMPL axis-angle roundtrip, A5 offsets.
 
 B. Mean-pose baseline: predict the train-split mean pose on the test split.
    B1 = mean pose + GT root trajectory (pose-only no-op), B2 = fully static
@@ -49,13 +49,16 @@ for path in (REPO_ROOT, SCRIPT_DIR):
 import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
 
-from anysole.data.bvh_io import motion_to_pose_trans, pose_trans_to_motion  # noqa: E402
+from anysole.data.smpl_io import smpl24_pose6d_to_poses  # noqa: E402
+from scipy.spatial.transform import Rotation as SciRotation  # noqa: E402
 from anysole.data.dataset import AnySoleDataset, collate_windows, find_session_dir  # noqa: E402
 from anysole.geometry import fk_pose6d, fk_pose6d_np, rot6d_to_rotmat, rotmat_to_6d  # noqa: E402
 from anysole.train import load_config  # noqa: E402
 from anysole.types import (  # noqa: E402
     FOOT_JOINTS,
     JOINT_NAMES,
+    JOINT_PROTOCOL_CHECKSUM,
+    MOTION_PROTOCOL,
     N_JOINTS,
     POSE_DIM,
     T_PHYS_DIM,
@@ -111,8 +114,11 @@ def fk_selfcheck(dataset: AnySoleDataset, max_windows: int) -> dict:
         # A1: numpy FK (the dataset build path) must reproduce kp_gt exactly.
         kp_re = fk_pose6d_np(pose_gt, trans_m, offsets, parents)
         a1_max = max(a1_max, float(np.abs(kp_re - kp_gt).max()))
-        # A4: pose <-> 72-channel BVH motion roundtrip (the export path).
-        pose2, trans2 = motion_to_pose_trans(pose_trans_to_motion(pose_gt, trans_m))
+        # A4: native SMPL-24 6D <-> axis-angle export roundtrip.
+        aa = smpl24_pose6d_to_poses(pose_gt)
+        mats = SciRotation.from_rotvec(aa.reshape(-1, N_JOINTS, 3).reshape(-1, 3)).as_matrix()
+        pose2 = np.concatenate([mats[..., :, 0], mats[..., :, 1]], axis=-1).reshape(pose_gt.shape).astype(np.float32)
+        trans2 = trans_m
         kp2 = fk_pose6d_np(pose2, trans2, offsets, parents)
         a4_max = max(a4_max, float(np.abs(kp2 - kp_gt).max()))
         # A3: geometry/unit sanity in meters.
@@ -163,7 +169,7 @@ def fk_selfcheck(dataset: AnySoleDataset, max_windows: int) -> dict:
                                         "note": "train/eval FK path (float32), %d windows checked" % n_checked},
         "A3_geometry_units": {"values": geometry, "warnings": warnings},
         "A4_pose_motion_roundtrip": {"max_m": a4_max, "threshold_m": 2e-3, "pass": a4_max < 2e-3,
-                                     "note": "BVH export units (cm<->m, euler<->6d)"},
+                                     "note": "native SMPL-24 axis-angle <-> 6D"},
         "A5_offsets": {
             "within_subject_max_abs_diff_m": within_max,
             "threshold_m": 1e-3,
@@ -234,6 +240,8 @@ def save_stats(out_dir: Path, stats: dict) -> None:
         pose_6d=stats["mean_pose_6d"],
         kp_rel=stats["mean_kp_rel"],
         kp_std=stats["kp_std"],
+        motion_protocol=np.asarray(MOTION_PROTOCOL),
+        joint_protocol_checksum=np.asarray(JOINT_PROTOCOL_CHECKSUM),
     )
     np.savez_compressed(
         out_dir / INPUT_MEANS_NPZ,
@@ -247,8 +255,15 @@ def ensure_mean_pose(npz_path, config: dict, contact_method: str):
     """Load the cached train mean pose, or compute and cache it (Test7)."""
     npz_path = Path(npz_path)
     if npz_path.is_file():
-        data = np.load(npz_path)
-        return data["pose_6d"], data["kp_rel"]
+        with np.load(npz_path) as data:
+            protocol = str(np.asarray(data.get("motion_protocol", "")))
+            checksum = str(np.asarray(data.get("joint_protocol_checksum", "")))
+            if protocol == MOTION_PROTOCOL and checksum == JOINT_PROTOCOL_CHECKSUM:
+                return data["pose_6d"], data["kp_rel"]
+        log.warning(
+            "stale mean-pose cache {} has a different motion/tree protocol; rebuilding",
+            npz_path,
+        )
     log.info("missing {}; computing train-split statistics now", npz_path)
     out_dir = npz_path.parent
     train_dataset = build_dataset("train", config, None, contact_method)

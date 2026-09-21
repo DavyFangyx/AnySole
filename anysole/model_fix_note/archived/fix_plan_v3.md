@@ -1,3 +1,6 @@
+> **已归档（2026-09-20）**：细节留档，不再维护。当前状态与结论见
+> ../model_fix_note.md，当前基座命令见 ../command_manual.md。
+
 # AnySole V3 设计方案（触觉兑现 · 功能导向修订版）
 
 > **本文档取代 fix_plan_v2.md 的 §F5**，主线目标从"部位解码器"重构为
@@ -36,7 +39,7 @@
 双脚 −10.0、双腿 −8.3），但 **T-only 全身退化 +7.6，且退化最重在上半身
 （手臂 +10~15、手 +14.6）**。T2M PA 40.3 也是四配置最差。
 
-通路分解探针（`z_note/probe_f4_tactile_path.py`，F4a ckpt，ridge 线性天花板，mm）：
+通路分解探针（`z_note/probes/probe_f4_tactile_path.py`，F4a ckpt，ridge 线性天花板，mm）：
 F=58.2 / v_tok=74.3 / t_tok1(forward)=110.6 / t_tok3(stream)=114.4 / 融合前拼接=73.0。
 结论：**融合没有毁掉触觉信息（F 比任何单流好 15mm），瓶颈不在融合容量**；触觉
 单流全身姿态天花板 ~110-130mm（增强器定位确认）；t_tok3 比 t_tok1 无读出优势；
@@ -282,5 +285,5 @@ V3-3 上线后：T-only 时 arm/spine g_∅ > 0.1？
 - 本计划 §V3-0/V3-6 继承 v2 §F6a/F6b；§V3-3 的 σ 监督继承 v2 §F7 的 β-NLL；
   §V3-5 继承 v2 §F8；**v2 §F5 作废**。
 - 已定位根因档案：`memory/f5-root-cause-tstream-scale-bug.md`；
-  探针脚本：`z_note/probe_f4_tactile_path.py`（通路分解，每步必跑）。
+  探针脚本：`z_note/probes/probe_f4_tactile_path.py`（通路分解，每步必跑）。
 - F0b/F2 两个线性 T 编码器的 run 保留为 T2M 参照 bar，不再重训。

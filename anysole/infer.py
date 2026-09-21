@@ -1,4 +1,4 @@
-"""Run AnySole on one aligned session and export a BVH file."""
+"""Run AnySole on one aligned session and export a standard SMPL NPZ."""
 
 from __future__ import annotations
 
@@ -10,21 +10,19 @@ from typing import List, Optional
 import numpy as np
 import torch
 
-from anysole.data.bvh_io import load_bvh, pose_trans_to_motion, resample_session_bvh, write_bvh
 from anysole.data.smpl_io import load_smpl, resolve_smpl_path
+from anysole.data.smpl_io import pelvis_to_smpl_trans, smpl24_pose6d_to_poses, smpl_archive_metadata
 from anysole.data.dataset import (
     assemble_v_hmr,
     find_session_dir,
     hmr_cache_path,
     hrnet_cache_path,
-    resolve_bvh_path,
     session_time_grid,
 )
 from anysole.data.pressure import load_session_pressure, normalize_raw
-from anysole.data.tactile_s2m import build_t_s2m
+from anysole.data.tactile_s2m import build_t_s2m, resolve_legacy_bvh_path
 from anysole.diffusion import GaussianDiffusion
 from anysole.geometry import (
-    euler_yxz_to_rotmat,
     f2_to_world_np,
     heading_from_root_np,
     positions_to_6d_np,
@@ -43,6 +41,9 @@ from anysole.types import (
     FAKE_MARKED_ROOT,
     FPS,
     GAIT_ROOT,
+    JOINT_PROTOCOL_CHECKSUM,
+    MOTION_PROTOCOL,
+    N_JOINTS,
     POSE_DIM,
     T_PHYS_DIM,
     T_RAW_DIM,
@@ -63,7 +64,7 @@ _MISSING_OK = frozenset({
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Infer a Skeleton3 BVH for one AnySole session.")
+    parser = argparse.ArgumentParser(description="Infer standard SMPL motion for one session.")
     parser.add_argument(
         "--ckpt",
         type=Path,
@@ -173,17 +174,36 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     else:
         t_raw = np.zeros((n_frames, T_RAW_DIM), dtype=np.float32)
         t_phys = np.zeros((n_frames, T_PHYS_DIM), dtype=np.float32)
-    # E6.6: unused for raw108 checkpoints (zeros are ignored); synthesized from
-    # the GT BVH below when the checkpoint was trained with tactile_input=s2m50.
+    # E6.6: unused for raw108 checkpoints (zeros are ignored). Historical
+    # s2m50 checkpoints obtain synthetic IMU only from the companion BVH.
     t_s2m = np.zeros((n_frames, T_S2M_DIM), dtype=np.float32)
 
     checkpoint = torch.load(args.ckpt, map_location="cpu")
     if not isinstance(checkpoint, dict) or "model" not in checkpoint:
         raise ValueError("Checkpoint must contain a 'model' state dict: %s" % args.ckpt)
-    checkpoint_modal = str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1))
+    saved_config = checkpoint.get("config", {})
+    if not isinstance(saved_config, dict):
+        raise RuntimeError("checkpoint config is missing or is not a mapping")
+    checkpoint_modal = str(saved_config.get("modal", MODEL_ANYSOLEV1))
     if args.modal is not None and args.modal != checkpoint_modal:
         raise ValueError("--modal %s does not match checkpoint modal %s" % (args.modal, checkpoint_modal))
-    saved_config = checkpoint.get("config", {})
+    state_pose_dim = getattr(checkpoint.get("model", {}).get("pose_head.pose_mean"), "shape", (POSE_DIM,))[0]
+    saved_joints = int(saved_config.get("motion_n_joints", state_pose_dim // 6 if state_pose_dim else N_JOINTS))
+    saved_protocol = str(saved_config.get("motion_protocol", ""))
+    saved_checksum = str(saved_config.get("joint_protocol_checksum", ""))
+    if (saved_joints != N_JOINTS or state_pose_dim != POSE_DIM
+            or saved_protocol != MOTION_PROTOCOL
+            or saved_checksum != JOINT_PROTOCOL_CHECKSUM):
+        raise RuntimeError(
+            "checkpoint motion protocol is incompatible with the current native SMPL-24 "
+            "joint tree (joints=%s, pose_dim=%s, protocol=%r, joint checksum=%s). "
+            "This includes BVH-23 checkpoints and early 24/144 SMPL checkpoints trained "
+            "with the incorrect collar-parent tree. Retrain under the current protocol; "
+            "an old checkpoint may only be used through --init-from, which resets its "
+            "pose/traj layers."
+            % (saved_joints, state_pose_dim, saved_protocol,
+               saved_checksum[:12] if saved_checksum else "missing")
+        )
     d_model = int(saved_config.get("d_model", config["d_model"]))
     tw = int(saved_config.get("tw", config["tw"]))
     modal = str(saved_config.get("modal", MODEL_ANYSOLEV1))
@@ -232,6 +252,9 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
         model = AnySoleModel(
             d=d_model, tw=tw, modal=modal, dropout=dropout, pose_layers=pose_layers,
             tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
+            v_input=str(saved_config.get("v_input", "hrnet")),
+            t_encoder=str(saved_config.get("t_encoder", "linear")),
+            f2_repr=bool(saved_config.get("f2_repr", False)),
             **model_kw,
         ).to(device)
     # Quasi-strict load — same allowance as eval.py _load_model
@@ -249,35 +272,48 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     pos_mode = modal == MODEL_ANYSOLEV1_POS
     continuation = bool(config.get("continuation", False)) and pos_mode
     warm_start = bool(config.get("warm_start", False))
-    if tactile_input == "s2m50" and config_value in (CONFIG_VT, CONFIG_T):
-        # E6.6a: synthesize the IMU channels from the session's GT BVH — the
-        # same convention as the training/eval dataset (Step2Motion evaluates
-        # identically; see anysole/data/tactile_s2m.py for the leakage note).
-        # --no-imu: no_imu=True builds the 38-dim channel without any IMU.
+    f2_repr = bool(saved_config.get("f2_repr", False))
+    uses_synthetic_imu = tactile_input == "s2m50" and config_value in (CONFIG_VT, CONFIG_T)
+    # Standard F4 (6D + raw108) must not read its SMPL target during inference
+    # merely to obtain betas for serialization. Position/F2 need explicit SMPL
+    # anchors; historical synthetic IMU is a separate BVH-derived input.
+    needs_gt_motion = bool(pos_mode or f2_repr)
+    motion = None
+    if needs_gt_motion:
         t_mocap = session_time_grid(meta) - float(meta["offset_s"])
-        mocap_format = str(saved_config.get("mocap_format", config.get("mocap_format", "smpl")))
-        if mocap_format == "smpl":
-            try:
-                smpl_path = resolve_smpl_path(meta, tuple(Path(p) for p in saved_config.get("smpl_roots", config.get("smpl_roots", SMPL_ROOTS))))
-                smpl_bvh = smpl_path.parent / "motion_smpl24_blender_world_m.bvh"
-                bvh_s = load_smpl(smpl_path, query_t=t_mocap, paired_bvh=smpl_bvh if smpl_bvh.is_file() else resolve_bvh_path(meta))
-            except FileNotFoundError:
-                bvh_s = resample_session_bvh(resolve_bvh_path(meta), t_mocap, hierarchy_cache={})
-        else:
-            bvh_s = resample_session_bvh(resolve_bvh_path(meta), t_mocap, hierarchy_cache={})
+        smpl_path = resolve_smpl_path(
+            meta,
+            tuple(Path(p) for p in saved_config.get(
+                "smpl_roots", config.get("smpl_roots", SMPL_ROOTS)
+            )),
+        )
+        motion = load_smpl(smpl_path, query_t=t_mocap)
+        print(
+            "WARNING: this checkpoint branch uses GT-SMPL-derived inference state "
+            "(pos/f2); it is an evaluation protocol, not mocap-free deployment."
+        )
+    if uses_synthetic_imu:
+        # E6.6a: preserve the original Step2Motion BVH-23/ToeBase IMU source.
+        # This GT-BVH-derived input is experimental and never used by raw108 F4.
+        t_mocap = session_time_grid(meta) - float(meta["offset_s"])
         t_s2m = build_t_s2m(
-            bvh_s["pose_6d"], bvh_s["trans_m"], bvh_s["offsets_m"], bvh_s["parents"], t_raw,
+            t_raw,
+            bvh_path=None if no_imu else resolve_legacy_bvh_path(meta),
+            query_t=None if no_imu else t_mocap,
             no_imu=no_imu,
         )
-    f2_repr = bool(saved_config.get("f2_repr", False))
-    bvh = load_bvh(resolve_bvh_path(meta)) if (pos_mode or f2_repr) else None
+        if not no_imu:
+            print(
+                "WARNING: s2m50 uses synthetic IMU derived from the directly exported GT BVH; "
+                "it is an evaluation protocol, not mocap-free deployment."
+            )
     psi_array = None
     trans_world_array = None
     if f2_repr:
         # F2a: per-frame heading + world root position for the window anchors.
-        root_rot = euler_yxz_to_rotmat(bvh.motion[:, 3:6])  # (T,3,3)
+        root_rot = rot6d_to_rotmat_np(motion["pose_6d"].reshape(-1, N_JOINTS, 6)[:, 0])
         psi_array = heading_from_root_np(root_rot)
-        trans_world_array = bvh.motion[:, 0:3]
+        trans_world_array = motion["trans_m"]
 
     if continuation:
         # E6.4: overlapping windows (stride = tw/2) with chain continuation;
@@ -288,7 +324,7 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
         tphys_windows, _ = _stride_windows(t_phys, tw, half)
         ts2m_windows, _ = _stride_windows(t_s2m, tw, half)
         vhmr_windows, _ = _stride_windows(v_hmr, tw, half)
-        root_init = euler_yxz_to_rotmat(bvh.motion[0, 3:6][None, :])[0]
+        root_init = rot6d_to_rotmat_np(motion["pose_6d"].reshape(-1, N_JOINTS, 6)[:1, 0])[0]
     else:
         v_windows = _right_pad_windows(v_feat, tw)
         traw_windows = _right_pad_windows(t_raw, tw)
@@ -316,6 +352,7 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
                 "T_raw": traw_batch,
                 "T_phys": tphys_batch,
                 "T_s2m": ts2m_batch,
+                "V_hmr": vhmr_batch if str(saved_config.get("v_input", "hrnet")) == "hmr_gvhmr" else None,
                 "config_id": config_id,
                 "session_id": [args.session] * (right - left),
             }
@@ -345,16 +382,16 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
                     )
                 tau_zero = torch.zeros(right - left, device=device, dtype=torch.long)
                 out = model(v_batch, traw_batch, tphys_batch, pred_pose, tau_zero, config_id,
-                            [args.session] * (right - left), T_s2m=ts2m_batch)
+                            [args.session] * (right - left), T_s2m=ts2m_batch, **v_kw)
             trans_rel = out["trans_hat"].cpu()
             if pos_mode:
                 for w in range(right - left):
                     first = (left == 0 and w == 0)
                     sl = slice(0, tw) if (first or not continuation) else slice(half, tw)
                     sixd = positions_to_6d_np(
-                        pred_pose[w, sl].cpu().numpy(), bvh.offsets_m, bvh.parents
+                        pred_pose[w, sl].cpu().numpy(), motion["offsets_m"], motion["parents"]
                     )
-                    root_local = rot6d_to_rotmat_np(sixd.reshape(-1, 23, 6)[:, 0:1, :])[:, 0]
+                    root_local = rot6d_to_rotmat_np(sixd.reshape(-1, N_JOINTS, 6)[:, 0:1, :])[:, 0]
                     world_root = np.einsum("ij,tjk->tik", root_init, root_local)
                     sixd[:, 0:6] = rotmat_to_6d_np(world_root)
                     pose_parts.append(torch.from_numpy(sixd))
@@ -370,7 +407,9 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
                     # tilt pose + heading trajectory and its GT anchors.
                     for w in range(right - left):
                         window_idx = left + w
-                        anchor_idx = min(max(window_idx - 1, 0), n_frames - 1)
+                        # Window k starts at frame k*tw; match Dataset's
+                        # anchor=max(left-1, 0), not the window ordinal k-1.
+                        anchor_idx = min(max(window_idx * tw - 1, 0), n_frames - 1)
                         world_pose, world_trans = f2_to_world_np(
                             pred_pose[w].cpu().numpy(),
                             out["v_hat"][w].cpu().numpy(),
@@ -391,7 +430,12 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
 
     pred_pose_np = torch.cat(pose_parts, dim=0).reshape(-1, POSE_DIM)[:n_frames].numpy()
     pred_trans_np = torch.cat(trans_parts, dim=0).reshape(-1, 3)[:n_frames].numpy()
-    hierarchy = bvh.hierarchy if pos_mode else load_bvh(resolve_bvh_path(meta)).hierarchy
+    export_betas = (
+        np.asarray(motion.get("betas"), dtype=np.float32)
+        if motion is not None
+        else np.zeros((10,), dtype=np.float32)
+    )
+    betas_source = "ground_truth_session" if motion is not None else "neutral_zero"
     if output_override is not None:
         output_path = output_override
     elif args.out is not None:
@@ -399,8 +443,21 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     else:
         # Standard results layout: checkpoints live beside predictions.
         model_root = args.ckpt.parent.parent if args.ckpt.parent.name == "checkpoints" else args.ckpt.parent
-        output_path = model_root / "predictions" / ("%s_%s.bvh" % (args.session, _CONFIG_TO_MODE[config_value]))
-    write_bvh(output_path, hierarchy, pose_trans_to_motion(pred_pose_np, pred_trans_np), 1.0 / FPS)
+        output_path = model_root / "predictions" / ("%s_%s.npz" % (args.session, _CONFIG_TO_MODE[config_value]))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    smpl_poses = smpl24_pose6d_to_poses(pred_pose_np)
+    np.savez_compressed(
+        output_path,
+        poses=smpl_poses,
+        trans=pelvis_to_smpl_trans(pred_pose_np, pred_trans_np, export_betas),
+        betas=export_betas,
+        betas_source=np.asarray(betas_source),
+        root_orient=smpl_poses[:, :3],
+        pose_body=smpl_poses[:, 3:],
+        mocap_frame_rate=np.asarray(FPS, dtype=np.float32),
+        source_frame_times_s=np.arange(len(smpl_poses), dtype=np.float32) / float(FPS),
+        **smpl_archive_metadata(),
+    )
     print("wrote %s (%d frames, config=%s)" % (output_path, n_frames, _CONFIG_TO_MODE[config_value]))
     return 0
 
@@ -436,7 +493,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     for mode in requested_modes:
         output_override = None
         if args.out is not None and len(requested_modes) > 1:
-            output_override = args.out / ("%s_%s.bvh" % (args.session, mode))
+            output_override = args.out / ("%s_%s.npz" % (args.session, mode))
         _run_one(args, _MODE_TO_CONFIG[mode], output_override)
     return 0
 

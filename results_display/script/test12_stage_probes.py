@@ -57,13 +57,15 @@ def collect(mode):
             batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in raw_batch.items()}
             B = batch["pose_gt"].shape[0]
             config_id = torch.zeros(B, dtype=torch.long, device=device)
-            v_tok, t_tok = model.encoders(batch["V_feat"], batch["T_raw"], batch["T_phys"], config_id)
+            t_tac = torch.cat([batch["T_raw"], batch["T_phys"]], dim=-1)
+            v_tok, t_tok = model.encoders(batch["V_feat"], t_tac, config_id,
+                                          V_hmr=batch.get("V_hmr"))
             F = model.fusion(v_tok, t_tok)
             vtok.append(v_tok)
             fus.append(F)
             pos.append(batch["pose_gt"])
     return (torch.cat(vtok).reshape(-1, 256), torch.cat(fus).view(-1, 20, 2, 256).reshape(-1, 512),
-            torch.cat(pos).reshape(-1, 138)), ds
+            torch.cat(pos).reshape(-1, POSE_DIM)), ds
 
 
 (train_vtok, train_F, train_p), train_ds = collect("train")
@@ -98,7 +100,7 @@ for name, Xtr, Ytr, Xva in (("v_tok (256/frame)", train_vtok, train_p, val_vtok)
 print("reference: raw V_feat=70.1 | B1=153.2 | trained head tau999 output=149.4 (L_pose=0.051)")
 
 # per-joint MPJPE: ridge-F prediction vs head tau999 output
-from anysole.types import JOINT_NAMES
+from anysole.types import JOINT_NAMES, POSE_DIM
 W_F = ridge_fit(train_F, train_p)
 pred_F = ridge_apply(W_F, val_F)
 sum_r, sum_h, n = {}, {}, 0

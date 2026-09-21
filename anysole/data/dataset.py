@@ -1,7 +1,8 @@
 """40 Hz motion windows with cached HRNet features and raw insole tokens.
 
-Motion is read from SMPL-NPZ by default and converted to the frozen AnySole
-23-joint protocol; ``mocap_format='bvh'`` preserves the legacy baseline path.
+AnySole motion targets are native SMPL-24.  The directly exported BVH remains
+the trusted source for precomputed contact labels and, only for the historical
+``s2m50`` input, Step2Motion-compatible synthetic IMU channels.
 """
 
 from __future__ import annotations
@@ -15,10 +16,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from anysole.data.bvh_io import resample_session_bvh
-from anysole.data.smpl_io import load_smpl, resolve_smpl_path
+from anysole.data.smpl_io import estimate_floor_y, load_smpl, resolve_smpl_path
 from anysole.data.pressure import load_session_pressure, normalize_raw
-from anysole.data.tactile_s2m import build_t_s2m
+from anysole.data.tactile_s2m import build_t_s2m, resolve_legacy_bvh_path
 from anysole.geometry import (
     fk_pose6d_np,
     heading_from_root_np,
@@ -31,7 +31,6 @@ from anysole.types import (
     FPS,
     HMR_CACHE_ROOT,
     HRNET_CACHE_ROOT,
-    JOINT_PARENTS,
     N_JOINTS,
     SEQ_ROOT,
     SPLIT_CSV,
@@ -42,7 +41,6 @@ from anysole.types import (
     V_HMR_KP_DIM,
     V_HMR_MISC_DIM,
     V_HMR_ROT_DIM,
-    WORKSPACE_ROOT,
     SMPL_ROOTS,
 )
 
@@ -66,23 +64,6 @@ def find_session_dir(seq_root: Path, session_id: str) -> Path:
     if not dirs:
         raise FileNotFoundError("No sequence dir for %s under %s" % (session_id, seq_root))
     return dirs[0]
-
-
-def resolve_bvh_path(meta: dict) -> Path:
-    """Resolve migrated BVH metadata without rewriting every align_meta.json."""
-    recorded = Path(meta["bvh_path"])
-    if recorded.is_file():
-        return recorded
-    session_id = str(meta["session_id"])
-    date = str(meta["date"])
-    root = WORKSPACE_ROOT / "sources" / "raw" / date / "mocap_ori_bvh" / session_id
-    candidates = sorted(root.glob("*.bvh"))
-    if not candidates:
-        raise FileNotFoundError(
-            "BVH not found for %s: recorded=%s, workspace raw=%s"
-            % (session_id, recorded, root)
-        )
-    return candidates[0]
 
 
 def session_time_grid(meta: dict) -> np.ndarray:
@@ -169,7 +150,7 @@ def collate_windows(samples: Sequence[dict]) -> dict:
     out: Dict[str, object] = {}
     keys = samples[0].keys()
     for key in keys:
-        if key in ("session_id", "hierarchy"):
+        if key in ("session_id",):
             out[key] = [sample[key] for sample in samples]
         else:
             out[key] = torch.stack([sample[key] for sample in samples], dim=0)
@@ -188,15 +169,20 @@ class AnySoleDataset(Dataset):
         allow_missing_video: bool = False,
         contact_method: str = "tactile_abs",
         stride: Optional[int] = None,
+        tactile_input: str = "raw108",
         no_imu: bool = False,
         v_input: str = "hrnet",
         v_hmr_model: str = "gvhmr",
         f2_repr: bool = False,
-        mocap_format: str = "smpl",
         smpl_roots: Optional[Sequence[Path]] = None,
     ):
         self.mode = mode
         self.window_length = int(window_length)
+        self.tactile_input = str(tactile_input)
+        if self.tactile_input not in ("raw108", "s2m50"):
+            raise ValueError("tactile_input must be 'raw108' or 's2m50'")
+        if no_imu and self.tactile_input != "s2m50":
+            raise ValueError("no_imu requires tactile_input='s2m50'")
         # --no-imu: T_s2m is built without the synthesized IMU channels
         # (38-dim instead of 50-dim; see tactile_s2m.py).
         self.no_imu = bool(no_imu)
@@ -209,9 +195,6 @@ class AnySoleDataset(Dataset):
         # F2a: pose_gt root 6D becomes the tilt (heading removed), and the
         # trajectory target becomes the 4-dim heading-frame quantity.
         self.f2_repr = bool(f2_repr)
-        self.mocap_format = str(mocap_format).lower()
-        if self.mocap_format not in ("smpl", "bvh"):
-            raise ValueError("mocap_format must be 'smpl' or 'bvh'")
         self.smpl_roots = tuple(Path(p) for p in (smpl_roots or SMPL_ROOTS))
         # E6.3: window stride. None = non-overlapping (stride == window_length,
         # the pre-E6 behavior). Training may use stride=1 (every frame
@@ -231,7 +214,6 @@ class AnySoleDataset(Dataset):
 
         self.sessions: List[dict] = []
         self.valid_windows: List[tuple] = []
-        bvh_cache: Dict[str, object] = {}
         smpl_cache: Dict[str, Path] = {}
 
         for session_id in self.session_ids:
@@ -241,28 +223,18 @@ class AnySoleDataset(Dataset):
             t_grid = session_time_grid(meta)
             t_mocap = t_grid - float(meta["offset_s"])
 
-            bvh_path = resolve_bvh_path(meta)
-            if self.mocap_format == "smpl":
-                try:
-                    smpl_path = resolve_smpl_path(meta, self.smpl_roots, cache=smpl_cache)
-                    smpl_bvh = smpl_path.parent / "motion_smpl24_blender_world_m.bvh"
-                    bvh = load_smpl(smpl_path, query_t=t_mocap, paired_bvh=smpl_bvh if smpl_bvh.is_file() else bvh_path)
-                except FileNotFoundError:
-                    # A few legacy recordings have an explicit conversion
-                    # failure marker and no NPZ.  Keep them usable for the
-                    # historical baselines by falling back to their BVH.
-                    bvh = resample_session_bvh(bvh_path, t_mocap, hierarchy_cache=bvh_cache)
-                # The exporter and legacy visualizers still need a canonical
-                # Skeleton3 hierarchy; only the motion values come from SMPL.
-                bvh_header = resample_session_bvh(bvh_path, np.asarray([t_mocap[0]]), hierarchy_cache=bvh_cache)
-                bvh["hierarchy"] = bvh_header["hierarchy"]
-                bvh["names"] = bvh_header["names"]
-            else:
-                bvh = resample_session_bvh(bvh_path, t_mocap, hierarchy_cache=bvh_cache)
-            if bvh["pose_6d"].shape[0] != n_frames:
+            try:
+                smpl_path = resolve_smpl_path(meta, self.smpl_roots, cache=smpl_cache)
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(
+                    f"AnySole requires SMPL motion for {session_id}; {exc}. "
+                    "BVH is supported only by Step2Motion."
+                ) from exc
+            motion = load_smpl(smpl_path, query_t=t_mocap)
+            if motion["pose_6d"].shape[0] != n_frames:
                 raise ValueError(
-                    "%s BVH resample length %d != n_frames %d"
-                    % (session_id, bvh["pose_6d"].shape[0], n_frames)
+                    "%s SMPL resample length %d != n_frames %d"
+                    % (session_id, motion["pose_6d"].shape[0], n_frames)
                 )
             pressure = load_session_pressure(meta, t_grid)
             contact_path = contact_label_path(seq_dir, self.contact_method)
@@ -313,29 +285,40 @@ class AnySoleDataset(Dataset):
             else:
                 v_hmr = None
 
-            kp = fk_pose6d_np(bvh["pose_6d"], bvh["trans_m"], bvh["offsets_m"], bvh["parents"])
+            kp = fk_pose6d_np(motion["pose_6d"], motion["trans_m"], motion["offsets_m"], motion["parents"])
+            # Native SMPL feet are joint centers, not sole vertices, and the
+            # archive world origin is not guaranteed to lie exactly on the
+            # floor.  This floor reference is only for the SMPL prediction-side
+            # contact metric/loss.  Ground-truth contact labels remain
+            # precomputed by the unchanged directly exported BVH pipeline.
+            floor_y = estimate_floor_y(kp)
             t_raw_norm = normalize_raw(pressure["T_raw"])
-            # E6.6a: Step2Motion-口径触觉通道（50 维/帧：16 压力池化 + 合成 IMU
-            # + 总力 + CoP）。IMU 由本会话 GT BVH 脚部运动学合成（与
-            # Step2Motion gait 导出同口径，含 GT 派生信息，见 tactile_s2m.py）。
-            # --no-imu：38 维/帧，IMU 通道真删（不合成、不存储）。
-            t_s2m = build_t_s2m(
-                bvh["pose_6d"], bvh["trans_m"], bvh["offsets_m"], bvh["parents"], t_raw_norm,
-                no_imu=self.no_imu,
-            )
-            # E6.1: root-local positions of the 22 non-root joints, in the
+            # E6.6a is an explicit historical auxiliary input.  Its IMU comes
+            # from the directly exported BVH-23/ToeBase chain, exactly as in
+            # Step2Motion; it must never be synthesized from the SMPL target.
+            # Default raw108 runs do not parse BVH or synthesize IMU at all.
+            if self.tactile_input == "s2m50":
+                t_s2m = build_t_s2m(
+                    t_raw_norm,
+                    bvh_path=None if self.no_imu else resolve_legacy_bvh_path(meta),
+                    query_t=None if self.no_imu else t_mocap,
+                    no_imu=self.no_imu,
+                )
+            else:
+                t_s2m = np.zeros((n_frames, 50), dtype=np.float32)
+            # E6.1: root-local positions of the 23 non-root joints, in the
             # session frame-0 root frame (Step2Motion initial_global_rot
             # convention).  World(t) = R_init @ local(t), so turns stay in the
             # local yaw and are learned from the condition.
             root_rot = rot6d_to_rotmat_np(
-                bvh["pose_6d"].reshape(n_frames, N_JOINTS, 6)[:, 0:1, :]
+                motion["pose_6d"].reshape(n_frames, N_JOINTS, 6)[:, 0:1, :]
             )[:, 0]  # (T,3,3) world root rotation
             root_rot_init = root_rot[0].astype(np.float32)
-            rel = kp[:, 1:, :] - kp[:, 0:1, :]  # (T,22,3) world-relative
+            rel = kp[:, 1:, :] - kp[:, 0:1, :]  # (T,23,3) world-relative
             pose_pos = np.einsum(
                 "ij,tpj->tpi", root_rot_init.T, rel
             ).reshape(n_frames, -1).astype(np.float32)
-            trans = bvh["trans_m"]
+            trans = motion["trans_m"]
             vel = np.zeros_like(trans)
             # Store true forward differences in m/s.  The first frame has no
             # predecessor and is therefore the zero increment.
@@ -345,12 +328,12 @@ class AnySoleDataset(Dataset):
             # F2a: heading/tilt representation (per session, before windows).
             if self.f2_repr:
                 root_rot = rot6d_to_rotmat_np(
-                    bvh["pose_6d"].reshape(n_frames, N_JOINTS, 6)[:, 0]
+                    motion["pose_6d"].reshape(n_frames, N_JOINTS, 6)[:, 0]
                 )
                 psi = heading_from_root_np(root_rot)  # (T,), unwrapped
                 r_yaw = yaw_rotmat_np(psi)
                 tilt = np.einsum("tji,tjk->tik", r_yaw, root_rot)  # R_yaw^T @ R_root
-                pose_f2 = bvh["pose_6d"].copy()
+                pose_f2 = motion["pose_6d"].copy()
                 pose_f2[:, :6] = rotmat_to_6d_np(tilt)
                 # psi_dot / v_h use the true forward differences; the first
                 # frame of the sequence has no predecessor and gets ZERO
@@ -374,12 +357,13 @@ class AnySoleDataset(Dataset):
 
             session = {
                 "session_id": session_id,
-                "hierarchy": bvh["hierarchy"],
+                "motion_format": "smpl",
+                "smpl_path": str(smpl_path),
                 "V_feat": v_feat.astype(np.float32),
                 "T_raw": t_raw_norm,
                 "T_phys": pressure["T_phys"],
                 "T_s2m": t_s2m,
-                "pose_gt": pose_f2 if self.f2_repr else bvh["pose_6d"],
+                "pose_gt": pose_f2 if self.f2_repr else motion["pose_6d"],
                 "pose_gt_pos": pose_pos,
                 "traj_gt_f2": traj_f2,
                 "psi": psi,
@@ -387,9 +371,11 @@ class AnySoleDataset(Dataset):
                 "trans_global": trans.astype(np.float32),
                 "vel_gt": vel.astype(np.float32),
                 "kp_gt": kp.astype(np.float32),
+                "floor_y": floor_y,
                 "contact_gt": contact[:, 6:8].astype(np.float32),
-                "offsets": bvh["offsets_m"].astype(np.float32),
-                "parents": np.asarray(JOINT_PARENTS, dtype=np.int64),
+                "offsets": motion["offsets_m"].astype(np.float32),
+                "parents": motion["parents"].astype(np.int64),
+                "betas": motion.get("betas", np.zeros(10, dtype=np.float32)).astype(np.float32),
                 "fake_mask": fake_mask,
             }
             if self.v_input == "hmr_gvhmr":
@@ -407,8 +393,9 @@ class AnySoleDataset(Dataset):
                 self.valid_windows.append((file_index, left, right))
             self.sessions.append(session)
 
-        print("%s sessions=%d windows=%d contact_method=%s no_imu=%s" % (
-            self.mode, len(self.sessions), len(self.valid_windows), self.contact_method, self.no_imu))
+        print("%s sessions=%d windows=%d contact_method=%s tactile_input=%s no_imu=%s" % (
+            self.mode, len(self.sessions), len(self.valid_windows), self.contact_method,
+            self.tactile_input, self.no_imu))
 
     def __len__(self) -> int:
         return len(self.valid_windows)
@@ -434,11 +421,11 @@ class AnySoleDataset(Dataset):
             "vel_gt": crop("vel_gt"),
             "kp_gt": crop("kp_gt"),
             "contact_gt": crop("contact_gt"),
+            "floor_y": torch.tensor(session["floor_y"], dtype=torch.float32),
             "offsets": torch.from_numpy(session["offsets"]).float(),
             "parents": torch.from_numpy(session["parents"]).long(),
             "root_rot_init": torch.from_numpy(session["root_rot_init"]).float(),
             "session_id": session["session_id"],
-            "hierarchy": session["hierarchy"],
             "frame_start": torch.tensor(left, dtype=torch.long),
         }
         if self.v_input == "hmr_gvhmr":

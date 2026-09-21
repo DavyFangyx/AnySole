@@ -1,4 +1,18 @@
+> **已归档（2026-09-20）**：细节留档，不再维护。当前状态与结论见
+> ../model_fix_note.md，当前基座命令见 ../command_manual.md。
+
 # AnySole V2 设计方案（F 系列 · v2 代码口径修订版）
+
+> **协议状态（2026-09-20）**：本文前半部分记录的是迁移前 BVH-23/Skeleton3
+> 历史方案，其中的 `N_JOINTS=23`、`POSE_DIM=138`、BVH-native 描述和旧指标均已
+> 归档，不是当前 AnySole 的输入输出协议。当前 AnySole 统一使用标准 SMPL-24：
+> `N_JOINTS=24`、`POSE_DIM=144`，位置表示为 23 个非根关节/69 维；当前实现和
+> 验收以 `anysole/types.py`、`anysole/data/smpl_io.py` 及
+> `archived/f2_f2p4_structure.md` 为准。BVH 仅供 Step2Motion/历史比较使用。
+>
+> **归档标注（2026-09-20）**：本文引用的旧 split 实验结果目录已归档至
+> `results/AnySole_BVH_backup/`（baseline 试跑见 `results/Baselines_BVH_backup/`），
+> 旧数值不再作为当前验收基线。
 
 > **本文档是给后续 AI 会话的实施手册**。每一步实现完成并验收后，在该步小节末尾回填
 > 结果（wandb tag、指标、判据通过/失败）；未回填 = 未完成。
@@ -8,6 +22,9 @@
 > 全链路无 SMPL**（`types.py:N_JOINTS=23`、`dataset.py:316` 有 SMPL 字段守卫）。
 > 本版全部关节编号、FK、数据管线按代码真实口径重写，并补齐文件级实施细节。
 > 原 fix_plan.md 仅作方法论参考（单变量纪律、σ_seed 判据、门控可解释性关卡保留）。
+
+> 下方第 0 节的逐项表格是当时的实施基线，保留用于解释历史实验；不要据此
+> 构造当前模型、数据集或 checkpoint。当前协议请看本文顶部的 SMPL-24 说明。
 
 ---
 
@@ -196,7 +213,7 @@ linear schedule 已被证伪（踢腿），E6.6 含 IMU 泄漏。
   6. `anysole/diffusion.py` 不删不改（旧 ckpt 评估兼容）。
 
 - 不动：输入、融合、轨迹头、辅助头、全部损失权重、数据管线。
-- 单测：新 `z_note/smoke_f0b_regress.py`——前向形状 (B,tw,138)、loss 回传、与 E3 同配置下
+- 单测：新 `z_note/probes/smoke_f0b_regress.py`——前向形状 (B,tw,138)、loss 回传、与 E3 同配置下
   `--modal anysolev1`（diffusion）行为逐参数一致（regress 关 = 旧行为）。
 - 判据：
   - 通过：VT2M PA-MPJPE 与 E3（81.2mm）差距 ≤2σ_seed，与 ridge-on-F（85mm）同量级；
@@ -221,7 +238,7 @@ linear schedule 已被证伪（踢腿），E6.6 含 IMU 泄漏。
      帧、同一 bbox、按所选模型预处理，保存：θ_hmr（SMPL 24 关节局部 6D + global_orient）、β_hmr、
      相机参数、2D 关键点+置信度、主干池化 token、bbox_info。缓存目录
      `AnysoleWorkspace/derived/AnySole/hmr_cache/<model>/cam3/<session>.pt`。
-  2. **零训练基线（先于训练）**：新 `z_note/probe_f1_zero_hmr.py`——θ_hmr+β_hmr 经 SMPL FK 出
+  2. **零训练基线（先于训练）**：新 `z_note/probes/probe_f1_zero_hmr.py`——θ_hmr+β_hmr 经 SMPL FK 出
      世界关节，与 `kp_gt`（BVH-23）按**语义名匹配关节子集**算逐帧 PA-MPJPE。匹配表（写死在
      探针里）：Hips↔pelvis、Left/RightUpLeg↔left/right_hip、Left/RightLeg↔left/right_knee、
      Left/RightFoot↔left/right_ankle、Left/RightShoulder↔left/right_shoulder、
@@ -260,7 +277,7 @@ linear schedule 已被证伪（踢腿），E6.6 含 IMU 泄漏。
 - 数据侧：`dataset.py` 新增 `pose_gt_f2`（根 6 换 tilt）与 `traj_gt_f2 (TW,4)` 字段；
   `geometry.py` 新增 `f2_to_world(pose_f2, traj_f2, offsets, parents) -> (world_pose_6d, world_trans)`
   （先积分 ψ/traj，再 R_yaw(ψ)@tilt 恢复世界根旋转），L_kp 与导出共用。
-- **单测（训练前必过）**：`z_note/smoke_f2_roundtrip.py`——GT → f2 表示 → f2_to_world →
+- **单测（训练前必过）**：`z_note/probes/smoke_f2_roundtrip.py`——GT → f2 表示 → f2_to_world →
   与 GT pose/trans 误差 ≈0（整窗累计漂移 <1mm；参照 positions_to_6d_np 的 0.00mm 口径）。
 - 判据：根 RTE、朝向漂移、W-MPJPE 显著改善，至少不劣化；MPJPE 不劣化。
 
@@ -301,7 +318,7 @@ linear schedule 已被证伪（踢腿），E6.6 含 IMU 泄漏。
      dF/dt；质量特征 q_T（饱和点比例、死点比例）。
   4. **空间编码**（新 `anysole/models/foot_encoder.py`）：左右共享权重、右脚沿内外侧镜像。
      Conv3×3(1→32) → Conv3×3(32→64, 沿长轴 stride 2) → Conv3×3(64→64) → 展平 → Linear→128，
-     与手工特征拼接 → Linear → d，加脚别嵌入。**先写单测确认网格方向**（`z_note/smoke_f4a_grid.py`）：
+     与手工特征拼接 → Linear → d，加脚别嵌入。**先写单测确认网格方向**（`z_note/probes/smoke_f4a_grid.py`）：
      脚跟着地时 CoP 应从脚跟移向脚尖（沿 `pressure.py:60` 的 heel_to_toe 定义）。
   5. **时间编码**：每脚 Conv1d(k=5, stride=r) 降到 40Hz；每帧组成 [左, 右, 全局=Linear(左‖右)]
      3 个 token，4 层时间 Transformer → E_T (B,T,3,d)。
@@ -511,7 +528,7 @@ fc≈0.73–0.78 且 fa≈0.20–0.33（GMM 谷值会切进安静站立段；pat
      4 层 9 部位时空编码器 → 脚 token；每脚 Linear → 4×6×32 → 长轴上采样 → Conv → softplus
      → 40Hz 4×12 压力 + 接触。损失：归一化压力 MSE + 总力 L1 + CoP L1 + 接触 BCE；
      训练时输入运动加小噪声（容忍预测误差）。
-  2. 质量检查（`z_note/probe_f9a_g.py`）：val GT 运动输入 → 总力 R²（≥0.8 才进 F9c）、
+  2. 质量检查（`z_note/probes/probe_f9a_g.py`）：val GT 运动输入 → 总力 R²（≥0.8 才进 F9c）、
      压力 Pearson、CoP 误差、接触 F1。
   3. V2M 压力输出改 G(M̂)，删除 F5 脚 token 压力头。
 - 判据：V2M 总力/CoP/接触 F1 不差于 F5 压力头；输出压力与预测动作接触时序一致。
@@ -581,7 +598,7 @@ fc≈0.73–0.78 且 fa≈0.20–0.33（GMM 谷值会切进安静站立段；pat
 
 **验收口径（每步同表）**：eval 全套 F 系列指标 + ridge-on-F 探针 + 训练面板
 （loss 各分量、grad_norm、T/V 编码器梯度比）+ BVH 运动学（逐关节误差、脚踝相对高度、
-帧间抖动——测量方式复用 `z_note/smoke_e6x_decoupling.py` 的 fk 读取）。
+帧间抖动——测量方式复用 `z_note/probes/smoke_e6x_decoupling.py` 的 fk 读取）。
 
 ## 7. 实施顺序清单（AI 逐项打勾）
 

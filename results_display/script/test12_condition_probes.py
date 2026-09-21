@@ -1,6 +1,6 @@
 """Information probes: how much pose info survives in the raw modality features?
 
-Ridge regression per-frame: V_feat (2051) -> pose_gt (138) and T (108) -> pose.
+Ridge regression per-frame: V_feat (2051) -> native SMPL-24 pose_gt (144) and T (108) -> pose.
 Fitted on the train split, MPJPE on the val split with GT trajectory.
 Compare with B1 (mean pose) = 153.2mm and the model's V2M/T2M (180.6 / 195.5).
 """
@@ -17,7 +17,7 @@ sys.path.insert(0, str(REPO))
 
 from anysole.data.dataset import AnySoleDataset, collate_windows
 from anysole.geometry import fk_pose6d
-from anysole.types import T_PHYS_DIM, T_RAW_DIM, V_FEAT_DIM
+from anysole.types import POSE_DIM, T_PHYS_DIM, T_RAW_DIM, V_FEAT_DIM
 
 device = torch.device("cuda")
 CFG = dict(seq_root=Path("AnysoleWorkspace/derived/MotionPRO/sequences/cam3"),
@@ -68,10 +68,10 @@ def mpjpe_from_pose(pose_pred, ds, split_loader):
 (val_v, val_t, val_p), val_ds = load_split("eval")
 train_v = train_v.reshape(-1, V_FEAT_DIM)
 train_t = train_t.reshape(-1, T_RAW_DIM + T_PHYS_DIM)
-train_p = train_p.reshape(-1, 138)
+train_p = train_p.reshape(-1, POSE_DIM)
 val_v = val_v.reshape(-1, V_FEAT_DIM)
 val_t = val_t.reshape(-1, T_RAW_DIM + T_PHYS_DIM)
-val_p = val_p.reshape(-1, 138)
+val_p = val_p.reshape(-1, POSE_DIM)
 val_loader = DataLoader(val_ds, batch_size=64, shuffle=False, num_workers=4, collate_fn=collate_windows)
 print("train samples %d, val %d" % (train_v.shape[0], val_v.shape[0]))
 

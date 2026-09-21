@@ -1,6 +1,6 @@
-"""Test5: GT BVH + tactile insoles + contact indicator animation (contact label check).
+"""Test5: GT motion + tactile insoles + contact indicator animation.
 
-Renders, per session and per contact *method*, the ground-truth mocap BVH
+Renders, per session and per contact *method*, the ground-truth motion
 skeleton aligned to the 40 Hz session grid next to the tactile insole
 heatmaps, with a per-foot contact indicator driven by the method's labels
 (red = contact, green = no contact), plus a full-session contact timeline
@@ -18,7 +18,7 @@ Outputs land under ``results_display/Test5_contact/<method>/``:
                                    behind the histograms (t = frame/40)
     threshold_analysis_hist.csv    (root) the same 64-bin distribution as
                                    plotted (bin_start/bin_end/count per side)
-    comparison.csv / comparison.png (root) method scorecard vs bvh_h reference,
+    comparison.csv / comparison.png (root) method scorecard across methods,
                                    produced by ``contact_methods.py --report``
 
 Usage (run from the repository root):
@@ -57,7 +57,7 @@ from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
 from anysole.data.pressure import load_session_pressure  # noqa: E402
 from anysole.types import CONTACT_SUM_THRESH  # noqa: E402
-from bvh_aligner_pose import parse_bvh_aligner  # noqa: E402
+from motion_io import load_session_gt  # noqa: E402
 
 # --- Rendering constants, same visual style as Test1's panels. ---
 LEFT_FOOT_BOX = (slice(40, 120), slice(6, 54))
@@ -109,23 +109,6 @@ def session_dir(seq_root, session_id):
     if not dirs:
         raise FileNotFoundError(f"No sequence dir for {session_id} under {seq_root}")
     return dirs[0]
-
-
-def joints_to_meters(joints):
-    pts = np.asarray(joints, dtype=np.float32)
-    if pts.size and float(np.ptp(pts[0], axis=0).max()) > 5.0:
-        return pts * 0.01
-    return pts
-
-
-def interp_joints(joints, frame_time, query_t):
-    src_t = np.arange(joints.shape[0], dtype=np.float64) * float(frame_time)
-    out = np.empty((query_t.size,) + joints.shape[1:], dtype=np.float64)
-    clipped = np.clip(query_t, src_t[0], src_t[-1]) if src_t.size else query_t
-    for joint_i in range(joints.shape[1]):
-        for axis_i in range(3):
-            out[:, joint_i, axis_i] = np.interp(clipped, src_t, joints[:, joint_i, axis_i])
-    return out.astype(np.float32)
 
 
 def parents_to_edges(parents):
@@ -196,18 +179,9 @@ def load_pressure(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 def load_gt(seq_dir: Path, n_frames: int, fps: float = 40.0):
-    """GT BVH aligned to the 40 Hz session grid, dataset-consistent.
-
-    ``trim_leading_seconds=0.0`` is required: the parser's 0.40 default
-    shifts the returned joints by 0.4 s (z_note/Agent_05_AnySole_缺陷修复任务书.md Task 1).
-    """
-    meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
-    bvh_path = Path(cli_common.resolve_path(meta["bvh_path"]))
-    parsed = parse_bvh_aligner(bvh_path, trim_leading_seconds=0.0)
-    t_grid = float(meta["visual_start_s"]) + np.arange(n_frames, dtype=np.float64) / float(fps)
-    t_mocap = t_grid - float(meta["offset_s"])
-    joints = interp_joints(parsed["joints"], parsed["frame_time"], t_mocap)
-    return joints_to_meters(joints), parsed["parents"], parsed["names"]
+    """GT motion aligned to the session grid; prefer SMPL, BVH fallback only."""
+    motion = load_session_gt(seq_dir, n_frames, fps=fps)
+    return motion["joints"], motion["parents"], motion["names"], motion["format"]
 
 
 def foot_joint_indices(names: list[str]) -> dict[str, list[int]]:
@@ -318,7 +292,7 @@ def render_skeleton_contact_panel(joints, edges, foot_idx, left_on, right_on, va
     canvas = Image.new("RGB", (PANEL_W, CANVAS_H), (10, 12, 16))
     draw = ImageDraw.Draw(canvas)
     draw.rectangle([0, 0, PANEL_W - 1, CANVAS_H - 1], outline=(48, 48, 56))
-    draw_text(draw, (PANEL_W // 2, 12), "GT BVH Contact", TITLE_FONT, fill=C_BONE, anchor="mt")
+    draw_text(draw, (PANEL_W // 2, 12), "GT Motion Contact", TITLE_FONT, fill=C_BONE, anchor="mt")
 
     uv = project_joints(joints, PANEL_W, CANVAS_H - 40, margin=78)
     ground_y = int(CANVAS_H * 0.88)
@@ -356,7 +330,7 @@ def render_skeleton_unavailable(message: str, frame_idx: int, n_frames: int):
     canvas = Image.new("RGB", (PANEL_W, CANVAS_H), (10, 12, 16))
     draw = ImageDraw.Draw(canvas)
     draw.rectangle([0, 0, PANEL_W - 1, CANVAS_H - 1], outline=(48, 48, 56))
-    draw_text(draw, (PANEL_W // 2, 12), "GT BVH Contact", TITLE_FONT, fill=C_BONE, anchor="mt")
+    draw_text(draw, (PANEL_W // 2, 12), "GT Motion Contact", TITLE_FONT, fill=C_BONE, anchor="mt")
     draw_text(draw, (PANEL_W // 2, CANVAS_H // 2), message, INFO_FONT, fill=C_GRAY, anchor="mm")
     footer = f"frame {frame_idx}/{n_frames - 1}"
     draw_text(draw, (PANEL_W // 2, CANVAS_H - 18), footer, INFO_FONT, fill=(180, 180, 190), anchor="mb")
@@ -565,7 +539,7 @@ def plot_threshold_analysis(out_dir: Path, rows: list[dict]):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Test5: GT BVH + tactile insoles + contact indicator animation and threshold analysis.")
+    parser = argparse.ArgumentParser(description="Test5: auto-detected GT motion + tactile insoles + contact indicator animation and threshold analysis.")
     cli_common.add_common_args(parser, seq_root=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test5_contact")
     parser.add_argument(
         "--methods",
@@ -577,7 +551,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def analysis_row(session_id: str, seq_dir: Path, fps: float, method: str) -> dict | None:
-    """Compute the summary row without loading pressure.npz / BVH.
+    """Compute the summary row without loading pressure.npz / motion.
 
     Used for sessions whose animation already exists, so re-runs without
     ``--force`` still regenerate ``contact_summary.csv``.
@@ -647,16 +621,17 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, met
         left48 = left48[:n]
         right48 = right48[:n]
 
-    gt_ok, gt_msg = False, "GT BVH unavailable"
+    gt_ok, gt_msg = False, "GT motion unavailable"
+    gt_format = "unknown"
     joints = edges = None
     foot_idx = {"left": [], "right": []}
     try:
-        joints, parents, names = load_gt(seq_dir, n, args.fps)
+        joints, parents, names, gt_format = load_gt(seq_dir, n, args.fps)
         edges = parents_to_edges(parents)
         foot_idx = foot_joint_indices(names)
         gt_ok, gt_msg = True, ""
     except (FileNotFoundError, ValueError) as exc:
-        log.warning(f"{session_id}: GT BVH load failed ({exc}); rendering placeholder skeleton")
+        log.warning(f"{session_id}: GT motion load failed ({exc}); rendering placeholder skeleton")
 
     row = analyze_session(session_id, contact, left48, right48, csv_available)
     if n < 2:
@@ -695,7 +670,7 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, met
     log.info(f"Wrote {gen_path}")
     log.info(
         f"{session_id}: rendered={len(frames)} frames, contact L={rate_l:.3f} R={rate_r:.3f}, "
-        f"gt={'ok' if gt_ok else 'missing'}, csv={'ok' if csv_available else 'missing'}"
+        f"gt={gt_format if gt_ok else 'missing'}, csv={'ok' if csv_available else 'missing'}"
     )
     return "write", row
 

@@ -41,7 +41,8 @@ class AnySoleModel(nn.Module):
     def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, modal=MODEL_ANYSOLEV1,
                  use_insole_drift=False, templates=None, subject_to_index=None,
                  drift_kwargs=None, pose_layers=6, tactile_input="raw108",
-                 tactile_direct=False, no_imu=False):
+                 tactile_direct=False, no_imu=False, v_input="hrnet",
+                 t_encoder="linear", f2_repr=False):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -61,6 +62,9 @@ class AnySoleModel(nn.Module):
         self.tactile_input = str(tactile_input)
         self.tactile_direct = bool(tactile_direct)
         self.no_imu = bool(no_imu)
+        self.v_input = str(v_input)
+        self.t_encoder = str(t_encoder)
+        self.f2_repr = bool(f2_repr)
         if self.tactile_input not in ("raw108", "s2m50"):
             raise ValueError("tactile_input must be 'raw108' or 's2m50', got %r" % self.tactile_input)
         if self.tactile_direct and self.tactile_input != "s2m50":
@@ -73,17 +77,18 @@ class AnySoleModel(nn.Module):
         self.encoders = ModalEncoders(
             self.embeddings, dim=d, tw=tw,
             tactile_input=self.tactile_input, tactile_direct=self.tactile_direct,
-            no_imu=self.no_imu,
+            no_imu=self.no_imu, v_input=self.v_input, t_encoder=self.t_encoder,
         )
         self.fusion = FusionTransformer(dim=d, tw=tw, nhead=nhead, dropout=dropout)
         self.pose_head = PoseHead(
             self.embeddings, dim=d, tw=tw, nhead=nhead, dropout=dropout, n_layers=pose_layers,
             repr="pos" if modal == MODEL_ANYSOLEV1_POS else "6d",
         )
-        self.traj_head = TrajHead(dim=d, tw=tw, nhead=nhead, dropout=dropout)
+        self.traj_head = TrajHead(dim=d, tw=tw, nhead=nhead, dropout=dropout,
+                                  out_dim=4 if self.f2_repr else 3)
         self.aux_heads = AuxHeads(dim=d, tw=tw)
 
-    def forward(self, V_feat, T_raw, T_phys, x_tau, tau, config_id, subject_ids=None, T_s2m=None):
+    def forward(self, V_feat, T_raw, T_phys, x_tau, tau, config_id, subject_ids=None, T_s2m=None, V_hmr=None):
         if self.use_insole_drift:
             # V-only rows contain zero tactile input, so compensation is harmless.
             T_raw, _, _ = self.drift_compensator(T_raw, subject_ids)
@@ -94,7 +99,7 @@ class AnySoleModel(nn.Module):
             T_tac = T_s2m
         else:
             T_tac = torch.cat([T_raw, T_phys], dim=-1)
-        v_tok, t_tok = self.encoders(V_feat, T_tac, config_id)
+        v_tok, t_tok = self.encoders(V_feat, T_tac, config_id, V_hmr=V_hmr)
         fused = self.fusion(v_tok, t_tok)
         memory = fused
         if self.tactile_direct:

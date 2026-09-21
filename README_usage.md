@@ -1,8 +1,8 @@
 # 统一使用说明
 
 本项目以 `AnysoleWorkspace/` 为统一数据工作区，固定使用 cam3、40 Hz、同一份
-session split 和 Skeleton3 23 关节协议。主模型为 AnySole，基线模型为
-MotionPRO、Step2Motion 和 pressure toolkit。
+session split。主模型 AnySole 使用标准 SMPL-24 关节协议（BVH-23 仅 Step2Motion
+基线使用）。基线模型为 MotionPRO、Step2Motion 和 pressure toolkit。
 
 ## 1. 环境与路径
 
@@ -192,20 +192,19 @@ python -m anysole.ablations.insole_drift.build_templates \
 cd /data/fangyuxuan/projects/gait
 conda activate touch_gait
 
-# 主模型
+# 主模型（anysolev2 回归主线；当前基座与各变体的完整命令见
+# anysole/model_fix_note/command_manual.md）
 CUDA_VISIBLE_DEVICES=4 python -m anysole.train \
-  --modal anysolev1 \
+  --modal anysolev2 \
   --contact-method joint_and \
-  --tau-max 100 --epoch 500 \
+  --grad-clip 5.0 \
   --wandb_mode online \
-  --wandb_project Anysole --wandb_experiment_tag e1_taumax100 --wandb_eval_interval 100
+  --wandb_project Anysole --wandb_experiment_tag <tag> --wandb_eval_interval 10
 
-# 漂移补偿消融模型
-  --modal anysolev1 \
-# 不同接触 npy
-  --contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
-# 调整评估间隔，减少时间开销
-  --wandb_eval_interval 100
+# 漂移补偿消融模型（anysolev1 系 legacy 变体）
+# python -m anysole.ablations.insole_drift.build_templates ...（见上文）
+# 接触标签方案由 --contact-method 指定：tactile_abs / bvh_h / bvh_soft /
+#   joint_or / joint_and / motion_f6 / pressure_f6 / f6_soft
 ```
 
 ### 3.2 三个基线

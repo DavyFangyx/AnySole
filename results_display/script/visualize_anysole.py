@@ -1,9 +1,8 @@
-"""Render AnySole tactile input, predicted BVH, and GT as one animation (Test1).
+"""Render AnySole tactile input, predicted motion, and GT as one animation.
 
-Predictions are read from the eval BVH files already written by
-``anysole.eval`` (``results/AnySole/<modal>/predictions/eval_bvh/<session>_<config>.bvh``);
-no model inference happens here.  Panel rendering reuses the MotionPRO
-renderer helpers so every Test1 output shares the same visual style.
+Predictions are read from standard SMPL NPZ files written by ``anysole.eval``;
+legacy BVH files are detected automatically for Step2Motion results. Panel rendering uses the shared
+``render_common`` helpers so every Test1 output keeps the same visual style.
 
 Outputs are written below ``results_display/Test1_visualization/AnySole/<modal>/<config>``
 (or the ``ANYSOLE_RESULTSDISPLAY`` override).
@@ -30,8 +29,8 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
-from bvh_aligner_pose import parse_bvh_aligner  # noqa: E402
-from visualize_motionpro import (  # noqa: E402
+from motion_io import load_motion, load_session_gt  # noqa: E402
+from render_common import (  # noqa: E402
     LEFT_FOOT_BOX,
     RIGHT_FOOT_BOX,
     compose_frame,
@@ -41,7 +40,6 @@ from visualize_motionpro import (  # noqa: E402
     parents_to_edges,
     session_dir,
 )
-from smpl_visual import load_smpl_gt  # noqa: E402
 
 PRED_ROOT = cli_common.RESULTS_ROOT / "AnySole"
 
@@ -56,37 +54,28 @@ def load_pressure(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     return pressure, fake
 
 
-def load_gt(seq_dir: Path, n_frames: int, fps: float = 40.0, mocap_format: str = "smpl"):
-    meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
-    if mocap_format == "smpl":
-        return load_smpl_gt(seq_dir, n_frames, fps)
-    bvh_path = Path(cli_common.resolve_path(meta["bvh_path"]))
-    # AnySole BVHs are already aligned to visual_start_s; the default 0.4s
-    # trim would shift the skeleton panel past the pressure timeline.
-    parsed = parse_bvh_aligner(bvh_path, trim_leading_seconds=0.0)
-    t_grid = float(meta["visual_start_s"]) + np.arange(n_frames, dtype=np.float64) / float(fps)
-    t_mocap = t_grid - float(meta["offset_s"])
-    joints = interp_joints(parsed["joints"], parsed["frame_time"], t_mocap)
-    return joints_to_meters(joints), parsed["parents"]
+def load_gt(seq_dir: Path, n_frames: int, fps: float = 40.0):
+    loaded = load_session_gt(seq_dir, n_frames, fps)
+    return loaded["joints"], loaded["parents"]
 
 
-def load_pred(pred_bvh: Path) -> tuple[np.ndarray, list[tuple[int, int]]]:
-    parsed = parse_bvh_aligner(pred_bvh, trim_leading_seconds=0.0)
-    return joints_to_meters(parsed["joints"]), parents_to_edges(parsed["parents"])
+def load_pred(pred_path: Path) -> tuple[np.ndarray, list[tuple[int, int]]]:
+    loaded = load_motion(pred_path)
+    return loaded["joints"], parents_to_edges(loaded["parents"])
 
 
-def render_session(seq_dir: Path, pred_bvh: Path, session_id: str, config_id: str, args: argparse.Namespace, session_out: Path):
+def render_session(seq_dir: Path, pred_path: Path, session_id: str, config_id: str, args: argparse.Namespace, session_out: Path):
     gen_path = cli_common.media_path(session_out, f"{session_id}_{config_id}_compare", args.gen)
     if cli_common.outputs_ready([gen_path]) and not args.force:
         log.info(f"Skip {session_id}_{config_id}: already exists under {session_out}")
         return "skip"
 
     pressure, fake = load_pressure(seq_dir)
-    pred, pred_edges = load_pred(pred_bvh)
+    pred, pred_edges = load_pred(pred_path)
     n = min(pressure.shape[0], pred.shape[0], fake.shape[0])
     if n < pred.shape[0]:
         log.warning(f"{session_id}_{config_id}: pred has {pred.shape[0]} frames, rendering first {n}")
-    gt, gt_parents = load_gt(seq_dir, n, args.fps, args.mocap_format)
+    gt, gt_parents = load_gt(seq_dir, n, args.fps)
     gt_edges = parents_to_edges(gt_parents)
 
     frame_ids = list(range(0, n, max(args.stride, 1)))
@@ -125,7 +114,7 @@ def render_session(seq_dir: Path, pred_bvh: Path, session_id: str, config_id: st
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Visualize AnySole eval BVH vs tactile input and GT BVH.")
+    parser = argparse.ArgumentParser(description="Visualize AnySole motion vs tactile input and SMPL GT.")
     cli_common.add_common_args(parser, seq_root=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test1_visualization" / "AnySole")
     parser.add_argument(
         "--modal",
@@ -135,7 +124,6 @@ def parse_args() -> argparse.Namespace:
         "Model dir is <modal>_<contact-method> (e.g. anysolev1_bvh_soft).",
     )
     parser.add_argument("--contact-method", type=str, default="tactile_abs", help="Contact-label scheme(s), comma-separated; ignored when --modal is 'auto'.")
-    parser.add_argument("--mocap-format", choices=("smpl", "bvh"), default="smpl", help="Ground-truth source format; predictions remain exported BVH.")
     return parser.parse_args()
 
 
@@ -154,7 +142,12 @@ def main() -> int:
         log.info(f"Sessions from {args.split} split ({len(session_ids)}): {session_ids}")
 
     if args.modal == "auto":
-        model_dirs = sorted(p.name for p in PRED_ROOT.iterdir() if p.is_dir()) if PRED_ROOT.is_dir() else []
+        # Archived BVH-era runs live under *_backup dirs; keep them out of
+        # the automatic sweep.
+        model_dirs = sorted(
+            p.name for p in PRED_ROOT.iterdir()
+            if p.is_dir() and "_backup" not in p.name
+        ) if PRED_ROOT.is_dir() else []
         if not model_dirs:
             raise SystemExit("No model dirs under %s" % PRED_ROOT)
         log.info(f"Models from {PRED_ROOT} ({len(model_dirs)}): {model_dirs}")
@@ -167,22 +160,28 @@ def main() -> int:
 
     for model_dir in model_dirs:
         for config_id in cli_common.split_csv_arg(args.config_id):
-            pred_root = PRED_ROOT / model_dir / "predictions" / "eval_bvh"
+            pred_root = PRED_ROOT / model_dir / "predictions"
             if not pred_root.is_dir():
                 log.warning(f"No prediction directory for {model_dir}: {pred_root}")
                 continue
             session_out = out_dir / model_dir / config_id
             for session_id in session_ids:
-                pred_bvh = pred_root / f"{session_id}_{config_id}.bvh"
-                if not pred_bvh.is_file():
-                    log.warning(f"Skip {model_dir}/{config_id}/{session_id}: no {pred_bvh.name}")
+                candidates = [
+                    pred_root / "eval_motion" / f"{session_id}_{config_id}.npz",
+                    # Legacy BVH output remains readable for old experiments;
+                    # new AnySole eval writes standard SMPL NPZ instead.
+                    pred_root / "eval_bvh" / f"{session_id}_{config_id}.bvh",
+                ]
+                pred_path = next((path for path in candidates if path.is_file()), None)
+                if pred_path is None:
+                    log.warning(f"Skip {model_dir}/{config_id}/{session_id}: no SMPL/BVH motion file")
                     continue
                 try:
                     seq_dir = session_dir(seq_root, session_id)
                 except FileNotFoundError as exc:
                     log.warning(str(exc))
                     continue
-                render_session(seq_dir, pred_bvh, session_id, config_id, args, session_out)
+                render_session(seq_dir, pred_path, session_id, config_id, args, session_out)
     return 0
 
 

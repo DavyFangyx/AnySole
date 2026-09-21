@@ -1,3 +1,6 @@
+> **已归档（2026-09-20）**：细节留档，不再维护。当前状态与结论见
+> ../model_fix_note.md，当前基座命令见 ../command_manual.md。
+
 # F2 / F2+4 分支模型结构说明（2026-09-18，供 AI 参考）
 
 > 本文只讲**模型结构**：F2（`--f2-repr`）与 F2+4（`--f2-repr --t-encoder foot_conv`）
@@ -5,6 +8,27 @@
 > `f0_command_manual.md`（§F2、§F2+4 组合实测），方案依据见 `fix_plan_v2.md` §F2/§F4a。
 > 两者共同的底座都是 **AnySoleModelV2**（F0b 回归线，`anysole/models/model_v2.py`），
 > 都不是独立模型，而是同一 V2 模型上的两个开关组合。
+>
+> **当前协议修订（SMPL-24，2026-09-20）**：AnySole 已不再使用 BVH-23 作为模型
+> 输入/输出。本文中的 pose 维度、查询数和关节树均按标准 SMPL-24 解释；BVH 只
+> 保留给 Step2Motion/历史对比脚本。旧的 23/138 数字均属于历史基线，不能用于
+> 当前 SMPL-24 checkpoint 的验收。
+
+> **验收状态**：本文后文记录的 `f2` / `fe2s0zsz` 数值来自迁移前 BVH-23 运行，只能作为
+> 历史线索，不能作为 SMPL-24 的 F2/F2+4 验收。SMPL-24 必须重新训练，并在训练前通过
+> `probe_smpl_protocol.py`、`probe_f4_smpl24_preflight.py` 和
+> `smoke_f2_roundtrip.py`；评估必须同时报告 mean-pose、always-contact、air recall 与
+> balanced contact accuracy。旧 23/138 checkpoint 只允许迁移协议无关层。
+
+> **关节树身份锁**：标准 SMPL-24 parents 为
+> `[-1,0,0,0,1,2,3,4,5,6,7,8,9,9,9,12,13,14,16,17,18,19,20,21]`，
+> 协议 checksum 为
+> `aa3ced6f1a84e876b9c3c579fa766fa530eda00449a2a98f3f8816ac8bbd0b36`。
+> 早期迁移代码把 `left_collar/right_collar` 错挂到 neck(12)，正确父节点是 spine3(9)。
+> 该错误在代表性会话造成全身 20.3–28.7mm、肩臂关节 44.3–62.7mm 的 FK 偏差；由于
+> loader 与 FK 曾共享同一错误常量，单纯 encode/decode round-trip 无法发现。现在本地
+> `SMPL_NEUTRAL.pkl` 的 kintree、checkpoint、预测 NPZ 与 Test6 cache 均校验 checksum；
+> 缺失 checksum 的早期 24/144 checkpoint 不再视为兼容。
 
 ---
 
@@ -22,13 +46,18 @@ stride=20、40Hz。
 | T 编码 | encoders.py:131-144 | `t_encoder="linear"`（F2 用）→ `LinearTemporalEncoder(108→d)` + time PE + modality 1 |
 | 配置屏蔽 | encoders.py:155-160 | config V→T 置 null token，T→V 置 null token（VT/V/T 三配置训练） |
 | 融合 | fusion.py | `FusionTransformer`：V/T token 交叉注意力 → fused F (B, tw, d) |
-| pose 头 | pose_head.py:210 | regress：可学习 query (1, tw, 23, d) + time PE + 部位 group emb → 6 层 decoder（自注意 + 交叉注意 F）→ 反标准化出 (B, tw, 138) 6D |
+| pose 头 | pose_head.py:210 | regress：SMPL-24 关节/部位 query（默认 24 个关节 query，或 9 个 part query）+ time PE + 部位 group emb → 6 层 decoder（自注意 + 交叉注意 F）→ 反标准化出 (B, tw, 144) 6D |
 | traj 头 | traj_head.py:36 | Transformer decoder，`out_dim` 3（V1）或 4（F2） |
 | aux 头 | aux_heads.py | T_rec→96 维 T_raw（L_Trec）、V_rec→HRNet 特征（L_Vrec） |
 
 损失（v1.yaml E3 口径，losses.py:245-254）：`λ_pose=3 / λ_traj=1 / λ_trec=0.1 /
 λ_vrec=0.1 / λ_kp=1 / λ_con=0`；L_kp = FK 到世界系 kp_gt（losses.py:230-233）。
 warm-start：`--init-from`，新结构按参数名自动跳过。
+
+当前 SMPL-24 预检表明 `lr=1e-3` 即使加 20-step warmup 仍会发散（full MPJPE
+516.75→628.33mm），`lr=1e-4` 可在相同固定 batch 上把 loss 0.725787→0.087316；
+默认配置已改为 `1e-4`，命令中也建议显式写出。旧 BVH-23 checkpoint 仅迁移编码器、
+fusion 与 aux 等协议无关层，pose/traj heads 必须重新初始化。
 
 ---
 
@@ -39,7 +68,7 @@ warm-start：`--init-from`，新结构按参数名自动跳过。
 
 ### 2.1 表示定义（geometry.py:244-353）
 
-- **pose_f2 (T,138)**：关节 1–22 保持 parent-local 6D **不动**；仅根 6D 替换为
+- **pose_f2 (T,144)**：SMPL-24 的非根关节 1–23 保持 parent-local 6D **不动**；仅根 6D 替换为
   **tilt** = R_yaw(ψ)ᵀ @ R_root_world（去掉地面朝向后的根旋转）。
 - **traj_f2 (T,4)** = `[ψ̇ (rad/s), v_hx, v_hz（heading 系水平速度 m/s）, h（世界根高 m）]`。
 - **锚点**（每窗口 2 个标量/向量，非模型输出）：`psi_anchor` = 窗口前一帧的 ψ；
@@ -47,19 +76,23 @@ warm-start：`--init-from`，新结构按参数名自动跳过。
 - 恢复：`f2_to_world`（torch/numpy 双版本）——cumsum(ψ̇)/FPS 积出 ψ，R_yaw @ R_tilt
   还原根世界旋转，v_h 经 R_yaw 转回世界 xy 后积出位移，h 直接用。**往返实测
   0.0001mm**（smoke_f2_roundtrip.py）。
-- 前向轴 `FORWARD_AXIS = +Z`（geometry.py:16，训练集验证固化）。
+- 前向轴 `FORWARD_AXIS = +Z`。对应标准 Y 轴旋转矩阵
+  `R_yaw(+Z)=(sin ψ,0,cos ψ)`，因此必须使用 `ψ=atan2(fx,fz)`；不能沿用旧的
+  `atan2(fz,fx)`。后者虽然 encode/decode 仍可自洽往返，却不会真正从 tilt 中去掉 yaw。
+  `smoke_f2_roundtrip.py` 同时检查全训练集 +Z/+X 运动统计和 tilt 的残余水平 heading。
 
 ### 2.2 数据侧（dataset.py:315-343, 416-425，离线预处理）
 
 逐 session：根世界旋转 → unwrap ψ → tilt 替换 pose_gt 根 6D；ψ̇/v_h 用**真前向差分**
 （首帧约定为 **0**，而非计划的"复制下一帧"——0 约定与"锚点=前一帧世界状态"精确
 自洽，往返无损）。每窗口取 `psi_anchor=psi[left-1]`、`trans_anchor=trans_global[left-1]`。
-`pose_gt` 形状不变 (T,138)，`trans_gt` 仍为窗内相对位移（L_traj 排除锚点）。
+`pose_gt` 形状为 (T,144)，`pose_gt_pos`（位置实验）为 23 个非根关节的 (T,69)；
+`trans_gt` 仍为窗内相对位移（L_traj 排除锚点）。
 
 ### 2.3 模型侧改动（唯一一处）
 
 model_v2.py:90-91：`TrajHead(out_dim=4 if f2_repr else 3)`。warm-start 时 proj 3→4
-自动跳过。pose 头 138 维不变（根 6 维现在输出 tilt）。`f2_repr` 存入 ckpt config。
+自动跳过。pose 头 144 维不变（根 6 维现在输出 tilt）。`f2_repr` 存入 ckpt config。
 
 ### 2.4 损失侧（losses.py）
 
@@ -71,8 +104,10 @@ model_v2.py:90-91：`TrajHead(out_dim=4 if f2_repr else 3)`。warm-start 时 pro
   恢复世界姿态 → FK → 与 V1 相同的世界 kp_gt 监督。**这是 F2 的世界系接地**：锚点不
   参与 L_traj，但把轨迹误差暴露给 FK 位置损失。
 - eval/protocol/infer 自动走 f2→world 恢复，无需额外参数（读 ckpt config）。
+- F2 的 `psi_anchor/trans_anchor` 来自 GT motion。它是训练/评估协议中的窗口世界系锚点，
+  不是无 mocap 部署时可获得的输入；F2 推理结果不能表述为完全 mocap-free deployment。
 
-### 2.5 实测（wandb f2 run，回填自手册）
+### 2.5 历史实测（BVH-23；不得作为当前 SMPL-24 验收）
 
 VT2M 65.4/PA 24.7；**T2M 89.7/35.8、T2M yaw 22.7（T-only 大幅改善）**；VT2M yaw 11.0。
 V2M PA 28.0 略劣于基线。
@@ -118,7 +153,7 @@ t_encoder 已核实于 ckpt config）；**warm-start 来源未留档**（train.p
 白名单不含 init-from，见 train.py:539-621），按 F2a/F4a 同协议推断为 F0b_seed2
 （foot_conv 与 traj proj 4 维按名字自动跳过，V 编码器/fusion 复用）。
 
-### 3.3 实测（组合结论，回填自手册 §F2+4 组合实测）
+### 3.3 历史实测（BVH-23；SMPL-24 必须重跑）
 
 **折中而非叠加**：VT2M 63.4/23.1（收回部分 F4a 增强），V2M PA 25.8、VT2M yaw 8.4
 （全配置最优），T2M 99.7/PA **40.7（四项最差，foot_conv 的 T-only 弱点在 F2 表示下
@@ -156,7 +191,7 @@ F5（门控正是修 T-only 的机制）。
 | `anysole/models/encoders.py:131-134` | `t_encoder="foot_conv"` 接线 |
 | `anysole/losses.py:101-144,164-165,223-230` | `_f2_trajectory_losses`；f2 分支；L_kp 经 f2_to_world |
 | `anysole/train.py / eval.py / eval_protocol.py / infer.py` | f2 自动处理（读 ckpt config 的 `f2_repr`/`traj_f2_stats`，warm-start 自动跳过形状变化参数） |
-| `z_note/smoke_f2_roundtrip.py` / `smoke_f4a_grid.py` | F2 往返/前向轴单测；F4a 网格单测 |
+| `z_note/probes/smoke_f2_roundtrip.py` / `smoke_f4a_grid.py` | F2 往返/前向轴单测；F4a 网格单测 |
 
 ## 6. 相邻分支关系（一图流）
 
@@ -169,3 +204,17 @@ F0b_seed2（V2 回归基线）
 
 F2b（λ_kp 扫描）= 非结构分支，已实测弃用，λ_kp 保持 1.0。
 ```
+
+## 7. 尚未闭环的 SMPL 特有风险
+
+- AnySole 预测 pose + pelvis trajectory，不预测 betas。训练/评估 FK 当前使用每个 session
+  的 GT betas/rest offsets；同一 subject 的逐 session offsets 最大分量漂移 18.02–38.29mm。
+  后续必须明确选择 per-session known shape、subject-canonical shape，或新增 shape 输入/输出，
+  不能在三种任务定义之间静默切换。
+- 普通 F4 infer 已不再读取 GT SMPL，导出使用 neutral-zero betas；F2/position 表示仍
+  使用 GT SMPL anchor。历史 `s2m50` synthetic-IMU 不读 SMPL，但仍从直接导出的
+  GT BVH-23/ToeBase 派生；这些都只能称为 evaluation protocol，不是无动捕部署。
+- 源 archive 记录的 SMPL model SHA256 与本地模型不同；标准 FK 已与本地 model 数值对齐，
+  但源模型文件不在当前机器上，因此两者的 shapedirs/J-regressor 数值等价性仍未证明。
+- SMPL-24 没有 BVH Skeleton3 的独立 ToeBase；当前 foot joint 是末端脚关节。源数据的两个
+  terminal hand rotations 全零，这些叶子旋转也不会改变 24-joint FK，主要由旋转损失约束。

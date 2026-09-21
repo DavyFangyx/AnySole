@@ -39,8 +39,9 @@ sources/raw/
 `sources/raw` 当前指向 `/data/lizhe/projects/Tactile/1_Data`，不复制原始数据。
 
 AnySole 主模型默认读取 `/data/lizhe/projects/Tactile/Mocap/0804`、`0807`、`0808`、
-`0810` 下的 `motion_neutral_smpl.npz`。BVH 原始姿态仍保留，供 MotionPRO 等基线及
-预测 BVH 导出使用；可用环境变量 `ANYSOLE_SMPL_ROOTS`（按系统路径分隔）覆盖 SMPL 根目录。
+`0810` 下的 `motion_neutral_smpl.npz`。AnySole 不读取或导出 BVH；原始 BVH 仅供
+Step2Motion 基线使用。可用环境变量 `ANYSOLE_SMPL_ROOTS`（按系统路径分隔）覆盖
+SMPL 根目录。
 
 ## 触觉数据
 
@@ -65,6 +66,10 @@ python AnysoleWorkspace/script/prepare_pressure_data.py encode
 输出依次位于 `sources/PressureWasher/outputs/stats`、`reconstructed`、`fake_marked`、`encoded`；可用 `--input PATH` 指定输入、`--overwrite` 覆盖输出。
 
 ## 检查
+
+`manifests/session_manifest.csv` 中的 `eligible_anysole=1` 只表示该 session 同时具备左右
+触觉 CSV、视频、SMPL 和 BVH；`splits/default/splits.csv` 只由这些 session 生成。BVH
+存在是为了 Step2Motion 基线，AnySole 训练/推理仍只读取 SMPL。
 
 ```bash
 python AnysoleWorkspace/script/build_workspace.py init

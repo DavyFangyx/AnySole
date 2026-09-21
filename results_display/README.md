@@ -12,16 +12,19 @@ results_display/
 │   ├── bvh_aligner_pose.py      # 共享 BVH 解析库
 │   ├── visualize_motionpro.py   # Test1：MotionPRO 动画
 │   ├── visualize_step2motion.py # Test1：Step2Motion 动画
-│   ├── visualize_anysole.py     # Test1：AnySole 动画（主模型 + 消融）
+│   ├── visualize_anysole.py     # Test1：AnySole 动画（自动识别 SMPL NPZ/BVH）
+│   ├── motion_io.py             # 统一动作读取器（格式自动检测）
 │   ├── visualize_gt_bvh.py      # Test1：GT 原始 BVH 渲染
 │   ├── visualize_anysole_traj.py# Test3：AnySole 轨迹对比动画 + 静态图
 │   ├── test4_insole_drift.py    # Test4：鞋垫漂移补偿器测试
 │   ├── test5_contact.py         # Test5：接触标签动画 + 阈值分析（按方案分目录）
 │   ├── contact_methods.py       # Test5：多方案接触标签生成 + 对比报告
 │   ├── test6_dataset_check.py   # Test6：数据集自检（GT FK 自洽 + 均值姿态基线）
-│   ├── test7_mean_pose_infer.py # Test7：均值/GT 姿态进入模型的推理 + BVH 导出
+│   ├── test7_mean_pose_infer.py # Test7：均值/GT 姿态进入模型的推理 + SMPL NPZ 导出
 │   ├── test8_input_ablation.py  # Test8：输入-输出相关性消融（条件置换 + 梯度检查）
-│   ├── test9_overfit.py         # Test9：单 batch 过拟合（关 dropout、VT-only）
+│   ├── test9_overfit.py         # Legacy diffusion Test9（不是当前 F4 验收）
+│   ├── probe_f4_smpl24_preflight.py # 当前 F4：真实 SMPL-24 batch/warm-start/loss/backward
+│   ├── probe_smpl_export_roundtrip.py # native SMPL 写出/读回与 model-origin/pelvis 契约
 │   ├── test9_1_sampler_checks.py # Test9.1：τ0 vs DDIM 差距定位（假模型/同批/τ网格/x0_hat逐元素/6D→SO3）
 │   ├── test10_tgen.py           # Test10：V2T 触觉生成（GT/生成热力图 + 误差分析）
 │   ├── test11_tau_regime.py     # Test11：τ 训练区间消融（τ≡0 恒等映射 / τ~U(0,100) 低噪声带 / U(0,1000) 对照）
@@ -40,9 +43,9 @@ results_display/
 │   └── AnySole/<modal>/<config>/{gif,mp4,png}/
 └── Test5_contact/               # 实验⑤输出：接触标签动画 + 阈值分析（按方案分目录）
     ├── <method>/                    # 每个接触判据方案一个子目录
-    │   ├── gif|mp4/<session>_contact.gif/.mp4  # 触觉热力图 + GT BVH + 该方案接触指示动画
+    │   ├── gif|mp4/<session>_contact.gif/.mp4  # 触觉热力图 + GT motion + 该方案接触指示动画
     │   ├── contact_summary.csv      # 该方案逐会话接触率/压力和统计
-    │   ├── diff_vs_bvh_h.csv        # 该方案 vs bvh_h 参考的差异区间清单
+    │   ├── diff_vs_bvh_h.csv        # 该方案 vs 直接导出 BVH 高度参考的差异区间清单
     │   │                            #   (会话/脚/起止时间s/方向/区间内高度·速度·压力和)
     │   ├── diff_by_subject.png      # 该方案差异 × 用户分布（fc/fa 堆叠占比，S5~S14）
     │   └── diff_by_sequence.png     # 该方案差异 × 动作序列分布（fc/fa 堆叠占比，01~13）
@@ -56,10 +59,10 @@ results_display/
 │   ├── mean_pose.npz            # 训练集均值姿态（有效 6D + 相对 Hips kp），Test7 复用
 │   └── input_means.npz          # 训练集 V/T 逐帧均值，Test8 复用
 ├── Test7_mean_pose/             # 实验⑦输出（均值姿态推理）
-│   ├── <session>/<session>_<arm>.bvh   # tau0_mean/tau0_gt/ddim_noise/ddim_mean500/ddim_gt500
+│   ├── <session>/<session>_<arm>.npz   # 原生 SMPL-24 motion
 │   └── test7_report.json        # 各 arm MPJPE + 输出两两距离
 ├── Test8_input_ablation/        # 实验⑧输出（输入-输出相关性）
-│   ├── <session>/<session>_<variant>_<arm>.bvh  # real/zero/mean/shuffle × ddim/tau0_gt
+│   ├── <session>/<session>_<variant>_<arm>.npz  # 原生 SMPL-24 motion
 │   └── test8_report.json        # 各条件 MPJPE + 输出两两距离 + 梯度范数比
 ├── Test9_overfit/               # 实验⑨输出（单 batch 过拟合）
     ├── overfit_log.csv          # 逐步 loss / tau0 MPJPE / DDIM MPJPE
@@ -89,8 +92,21 @@ results_display/
 视频、触觉与动捕之间存在时间偏差与漂移。偏差来自各设备独立起录：每个 session 的
 人工复核表 `AlignReviews_csv/<session>.csv` 记录常量偏移 `偏移量(s)`（= 视觉时间 − 动捕时间）；
 漂移则由触觉/视频时间轴按逐帧时钟重建（触觉 `t_us` 时间戳、视频文件名时钟）吸收。
-所有动捕与触觉同帧对比的脚本，GT BVH 都按 MotionPRO `prepare_sequences.py` 的补偿方式
+所有动捕与触觉同帧对比的脚本，GT motion 都按同一补偿方式
 重采样到 40 Hz 会话网格：`t_mocap = t_grid − offset_s`，其中 `t_grid = visual_start_s + n/40`
+
+## 模型协议约定（SMPL / BVH 双协议）
+
+展示与对照层（Test1/2/3）按文件格式自动检测协议，无协议 flag：
+
+| 协议 | 模型 | 产物约定 | 检测规则 |
+| --- | --- | --- | --- |
+| SMPL-24 | AnySole | `predictions/eval_motion/<session>_<config>.npz`（原生 SMPL-24，内嵌 `pred_pelvis_trans/gt_pelvis_trans`） | npz keys 含 `poses/root_orient/pose_body` → SMPL |
+| BVH-23 | Step2Motion 等 baseline | `predictions/<run>/<session>_gen.bvh`（Skeleton3） | `.bvh` 后缀 → bvh23 |
+
+- GT 读取统一走 `motion_io.load_session_gt`：优先会话 SMPL，缺失时回退 BVH（仅限展示层）。
+- Test2 的跨协议指标统一映射到 common19 语义关节（`evaluate_compare.py` 的 `protocol_gt`）。
+- 归档的 `*_backup*` 目录不参与任何自动扫描。
 
 ## Test1 结果可视化
 
@@ -98,9 +114,8 @@ results_display/
 | --- | --- | --- |
 | `visualize_motionpro.py` | MotionPRO 触觉输入/预测/GT 三栏对比动画 | `Test1_visualization/MotionPRO/<checkpoint tag>/` |
 | `visualize_step2motion.py` | Step2Motion 足底压力/生成 BVH/GT 对比动画 | `Test1_visualization/Step2Motion/gait_model/` |
-| `visualize_anysole.py` | AnySole 主模型与消融（足底压力/预测 BVH/GT） | `Test1_visualization/AnySole/<modal>/<config>/` |
+| `visualize_anysole.py` | AnySole 主模型与消融（足底压力/预测动作/SMPL GT；自动检测格式） | `Test1_visualization/AnySole/<modal>/<config>/` |
 | `visualize_gt_bvh.py` | 原始 GT 动捕 BVH 的骨架渲染（参考动画） | `Test1_visualization/gt/` |
-| `visualize_gt_smpl.py` | 原始 GT SMPL-NPZ 的骨架渲染（与 AnySole SMPL GT 对齐） | `Test1_visualization/gt_smpl/` |
 
 ```bash
 conda activate touch_gait
@@ -151,18 +166,25 @@ python results_display/script/evaluate_compare.py --auto-scan
 
 ## Test3 轨迹可视化
 
-`visualize_anysole_traj.py` 可视化 AnySole 生成的根轨迹（真实轨迹 vs 预测轨迹）：
+`visualize_anysole_traj.py` 可视化预测根轨迹 vs 真实轨迹（**SMPL/BVH 协议自动检测**）：
 单面板 3D 空间动画（gif/mp4）+ 每 session 一张静态图（png，3D 斜视图 / 俯视 / 高度曲线）。
 动画中 GT 整段显示（橙）、预测轨迹随帧生长（蓝），窗口边界用小点标记（每窗口在 GT 锚点处重新锚定），footer 实时显示当前帧 ATE 与整段 ATE。
 
-**数据来源**：`anysole.eval` 导出 BVH 时会在旁同时写出
-`<session>_<config>_traj.npz`（`pred_trans_world` / `gt_trans_world`，与 `traj_ATE` 指标严格同源）。
-Test3 只读这些 npz，不重新推理；请先重跑 eval 刷新产物：
+**数据来源（双协议）**：
+
+- SMPL 协议模型（AnySole）：`anysole.eval` 导出的原生 SMPL motion NPZ
+  （`predictions/eval_motion/<session>_<config>.npz`）内嵌轨迹字段
+  `pred_pelvis_trans` / `gt_pelvis_trans`（与 `traj_ATE` 指标严格同源）。
+- BVH 协议模型（Step2Motion 等）：`predictions/<run>/<session>_gen.bvh`，
+  预测轨迹取 BVH 根关节路径，GT 用 `motion_io.load_session_gt`
+  （SMPL 优先、BVH 回退）的根关节。
+
+Test3 只读这些文件，不重新推理；请先重跑 eval 刷新产物：
 
 ```bash
 conda activate touch_gait
 
-# 重新 eval（自动推导 ckpt/BVH/metrics 路径，同时刷新 BVH 与 traj npz）
+# 重新 eval（自动推导 ckpt/metrics 路径，同时刷新标准 SMPL motion NPZ）
 python -m anysole.eval \
   --modal anysolev1 \
   --contact-method tactile_abs
@@ -171,12 +193,15 @@ python -m anysole.eval \
 python results_display/script/visualize_anysole_traj.py --modal anysolev1 --gen gif --contact-method joint_and
 # 单 session / 单 config
 python results_display/script/visualize_anysole_traj.py --session S7013 --config-id VT2M
+# baseline 模型（扫描 results/ 下自包含模型目录，排除 *_backup*）
+python results_display/script/visualize_anysole_traj.py --auto
 ```
 
-输出：`Test3_trajectory/AnySole/<modal>/<config>/{gif,mp4,png}/<session>_<config>_traj.{gif,mp4,png}`。
+输出：`Test3_trajectory/AnySole/<modal>/<config>/{gif,mp4,png}/<session>_<config>_traj.{gif,mp4,png}`；
+baseline 模型输出在 `Test3_trajectory/<model>/gen/`。
 
-> 注意：eval 生成的 BVH 与 traj npz 必须与 checkpoint 配套。若重新训练了模型，
-> 旧的 `eval_bvh/` 产物会与新 metrics 不一致（轨迹头更新后曾出现整窗漂移的过期 BVH），
+> 注意：eval 生成的 motion NPZ 必须与 checkpoint 配套。若重新训练了模型，
+> 旧的 `eval_motion/` 产物会与新 metrics 不一致，
 > 需重跑上述 eval 命令再渲染 Test1/Test3。
 
 ## Test4 鞋垫偏移补偿模块
@@ -191,25 +216,26 @@ python results_display/script/test4_insole_drift.py --session S7013
 
 ## Test5 接触检测
 
-`test5_contact.py` 渲染 GT BVH 骨架 + 触觉鞋垫热力图，并叠加接触指示
+`test5_contact.py` 渲染自动识别的 GT motion 骨架 + 触觉鞋垫热力图，并叠加接触指示
 （**红色=接触、绿色=无接触**）：鞋垫描边与徽章、骨架足部关节着色、底部整段接触时间轴。
 每帧同步显示 48 格压力和值。
 
 背景：原 `contact.npy` 标签口径为「48 格鞋垫 CSV 逐帧压力和 > 100」
 （`prepare_sequences.py:contact_from_insoles`，阈值 `CONTACT_SUM_THRESH`），但大量鞋垫在脚
-离地后压力不归零（如 S11023 左脚摆动相压力和最低 653），导致 83.4% 的 BVH 离地帧被错标为接触。
+离地后压力不归零（如 S11023 左脚摆动相压力和最低 653），曾导致大量运动学离地帧被错标为接触。
 为对比候选修复方案，Test5 改为**按方案分子目录**：`contact_methods.py` 为每个方案生成
 `contact_<method>.npy`（与 `contact.npy` 同目录、同 10 列格式），`test5_contact.py --methods ...`
 
 | 方法 | 判据 |
 | --- | --- |
-| `bvh_soft` | BVH 运动学，与 `losses.soft_contact_from_keypoints` 同构（高<5cm ∧ 速<0.2m/s） |
-| `bvh_h` | BVH 高度 h<5cm 判接触，4/6cm 滞回 |
+| `bvh_soft` | 直接导出 BVH 运动学，与 `losses.soft_contact_from_keypoints` 同构（高<5cm ∧ 速<0.2m/s） |
+| `bvh_h` | 直接导出 BVH 脚部/ToeBase 相对地面高度 h<5cm 判接触，4/6cm 滞回 |
 | `tactile_abs` | 触觉绝对阈值：48 格压力和 > 100（原 contact.npy 口径） |
 | `tactile_rel` | 触觉相对阈值：min + 0.25·(max−min) |
 | `tactile_gmm` | 触觉自适应：log1p(压力和) 双峰 GMM 谷值阈值，单峰判全接触 |
 | `pat_offset` | 患者级偏移补偿：摆动相压力和的中位数（BVH 自动选模版）+ 100 |
-| `joint_or` / `joint_and` | BVH 高度 ∨ / ∧ 触觉 GMM |
+| `joint_or` | air union / contact intersection（任一来源判离地即离地） |
+| `joint_and` | air intersection / contact union（两来源都判离地才离地） |
 
 ```bash
 conda activate touch_gait
@@ -226,9 +252,16 @@ python results_display/script/test5_contact.py --methods bvh_h --session S11023
 `test6_dataset_check.py` 只读数据集、不加载任何模型，回答两个问题：
 
 - **A. GT 自洽**：FK(GT 6D, GT offsets) 必须能逐关节还原数据集内的 `kp_gt`。
-  A1 numpy FK（数据集构建路径）/ A2 torch FK（train/eval 路径）交叉验证、A3 单位与几何量程、A4 pose↔BVH 回环（cm↔m 换算）、
-  A5 骨骼模板一致性（按受试者分组：同人跨动作/采样必须一致——会话 ID 为 `S<人><动作><采样>`）。
-  本管线没有 SMPL betas——"GT betas" 的对应物是每个 BVH 自带的 OFFSET 模（`offsets_m`，cm→m）， A3/A5 即其单位与一致性检查。任何系统性偏移（m/mm 混用、层级错误）都会把 MPJPE 顶到一两百且训不下来。
+  A1 numpy FK（数据集构建路径）/ A2 torch FK（train/eval 路径）交叉验证、A3 单位与几何量程、A4 SMPL axis-angle↔6D 回环、
+  A5 骨骼模板一致性诊断（按受试者分组比较跨动作/采样的 rest offsets；会话 ID 为
+  `S<人><动作><采样>`）。源 MoSh 文件是逐 session 独立拟合，因而 A5 不是 loader
+  正确性的硬断言，而是检查“同一受试者能否视作同一 shape”的数据集设计前提。
+  本管线当前使用每个 SMPL 文件自己的 betas，通过 neutral SMPL
+  shapedirs/J-regressor 生成 shape-dependent rest joints 与 offsets。全量检查中 A5 实际
+  FAIL：同一受试者最大 offset 分量跨度为 18.02–38.29mm。这意味着现任务是“给定每段
+  GT shape 的 motion prediction”，不是同时生成 shape；不能把 A5 失败误报为 loader
+  错误，也不能在未重建所有目标与基线前擅自改用平均 betas。A1–A4 仍是 FK、单位和
+  旋转协议的硬验收项。
 - **B. 均值姿态基线**：拿训练集均值姿态当预测算 MPJPE。B1 = 均值姿态 + GT 根轨迹（只差姿态）；
   B2 = 完全静态均值姿态。若模型 MPJPE ≈ B1 → 条件被无视；若 B1 明显低于模型 MPJPE →
   模型比"啥也不干"还差，更像 bug（脚本会自动与 `anysolev1_joint_and/metrics/test.json` 对比）。
@@ -245,7 +278,7 @@ python results_display/script/test6_dataset_check.py --session S10103 --limit-se
 ## Test7 均值姿态推理（模型输出 vs 输入姿态）
 
 `test7_mean_pose_infer.py` 用 `results/AnySole/anysolev1_joint_and/checkpoints/ckpt_last.pt`（`--ckpt` 可换）
-把不同输入姿态送进模型（条件固定为真实 VT），导出 BVH：
+把不同输入姿态送进模型（条件固定为真实 VT），导出原生 SMPL-24 NPZ：
 
 | arm | 输入 | 说明 |
 | --- | --- | --- |
@@ -256,8 +289,8 @@ python results_display/script/test6_dataset_check.py --session S10103 --limit-se
 | `ddim_gt500` | GT 姿态加噪到 tau=500 再 DDIM | 推理初值上界 |
 
 看两件事：`tau0_mean` vs `tau0_gt` 输出距离（输出对输入姿态的敏感度）；`ddim_mean500` vs `ddim_gt500` 的
-MPJPE 差（初值对最终输出的影响）。BVH 写进 `Test7_mean_pose/<session>/`，可用
-`visualize_gt_bvh.py --bvh <路径>` 快速查看骨架动画。
+MPJPE 差（初值对最终输出的影响）。NPZ 写进 `Test7_mean_pose/<session>/`，可用
+`visualize_anysole.py`/统一 `motion_io.py` 自动识别并查看骨架动画。
 
 ```bash
 conda activate touch_gait
@@ -282,9 +315,25 @@ python results_display/script/test8_input_ablation.py
 python results_display/script/test8_input_ablation.py --session S10103 --export-sessions 1
 ```
 
-## Test9 单 batch 过拟合（目标/管线可用性）
+## 当前 F4 SMPL-24 单 batch 预检
 
-`test9_overfit.py` 取训练集固定一个 batch（默认 256 窗），关闭模态 dropout（固定 VT 配置，等价训练侧 `--dropoutVT 0,0`）与模型内部 dropout（`--dropout 0.0`），单 batch 反复训练。
+F4/AnySoleV2 请使用真实训练路径探针；它会检查 24×6D、SMPL parent tree、shape-dependent
+offset、`joint_and` sidecar、旧 23/138 warm-start 隔离、各 loss 分量、梯度裁剪以及固定 batch
+优化。默认 `lambda_con=0`，所以 contact 在当前命令中仅参与评估，不参与反向传播。
+
+```bash
+PYTHONPATH=. /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python \
+  results_display/script/probe_f4_smpl24_preflight.py \
+  --device cpu --steps 20 --grad-clip 5.0 --lr 1e-4
+
+PYTHONPATH=. /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python \
+  results_display/script/probe_smpl_export_roundtrip.py
+```
+
+## Legacy Test9（diffusion V1 历史诊断，不用于 F4 验收）
+
+`test9_overfit.py` 保留用于旧 diffusion V1 诊断。它不是 AnySoleV2/F4 的可执行验收入口；
+当前 F4 必须使用上面的 `probe_f4_smpl24_preflight.py`。
 训到 loss≈0 → 目标/管线正常，泛化差是欠训/条件弱；
 训不下去 → 目标/管线有问题。
 
@@ -378,7 +427,7 @@ pose-only 损失，lr 扫 {1e-3, 3e-4, 1e-4, 3e-5} × 3000 步），把训练时
 | `full` | τ ~ U(0, 1000) | 全区间对照（与 Test9 同设置），是「压下去」的参照 |
 
 判定：`tau0` PASS = L_pose < 1e-3 且 tau0 MPJPE < 5 mm（任一 lr 达到即可）；`lowband` PASS = tau0
-MPJPE < 10 mm。tau0 MPJPE = τ=0 干净 GT 姿态直通重建（GT 轨迹、23 关节 FK，mm），与训练侧看板
+MPJPE < 10 mm。tau0 MPJPE = τ=0 干净 GT 姿态直通重建（GT 轨迹、SMPL-24 FK，mm），与训练侧看板
 `val/tau0_mpjpe` 同口径。DDIM 仅在 `full` 臂采样——τ≡0 / 低噪声带训练的模型没见过高噪声区，
 DDIM 无意义。
 
@@ -427,3 +476,9 @@ python -m anysole.train --modal anysolev1 --contact-method joint_and \
 
 动画统一进入 `Test1_visualization/`，对照实验进入 `Test2_comparison/`，
 过时配置删除（默认自动扫描 results/）。
+
+> **2026-09-20 SMPL 转向归档**：BVH-23 时代的 AnySole 实验目录已归档至
+> `results/AnySole_BVH_backup/`，baseline 试跑归档至 `results/Baselines_BVH_backup/`；
+> 展示层工具不再消费这些目录（auto 扫描会跳过 `*_backup*`）。当前 AnySole
+> 只产出 SMPL-24 NPZ（`predictions/eval_motion/`）；BVH 格式支持仅服务于
+> MotionPRO / Step2Motion 等 baseline 的展示与对照。

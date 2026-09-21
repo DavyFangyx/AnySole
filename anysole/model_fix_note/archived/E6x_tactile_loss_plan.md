@@ -1,3 +1,6 @@
+> **已归档（2026-09-20）**：细节留档，不再维护。当前状态与结论见
+> ../model_fix_note.md，当前基座命令见 ../command_manual.md。
+
 # E6.6 / E6.7 计划：触觉路径重建 + 训练目标权重清单（E3 基线，CLI 单步叠加）
 
 > **目标**：把 echo slope（E5 实测 0.293 vs S2M 0.007）打下来，让条件（尤其触觉）驱动输出。
@@ -159,7 +162,7 @@ E6.7 的第一步只降 3/4/5（不动 1/2/6），第二步按需移除 4/5 并�
 ## Echo 监控（贯穿所有实验）
 
 训练期探针接入 train.py 的 eval hook（每 `wandb_eval_interval` 记 2 个数，逻辑照抄
-`z_note/probe_head_generation_floor.py`）：
+`z_note/probes/probe_head_generation_floor.py`）：
 
 1. **echo slope @ τ_max**：固定一个噪声种子，x_tau=纯噪声、τ=999 前向，
    x0_hat 对 x_tau 逐维线性回归斜率均值。参照线 = √ᾱ(999) ≈ 0（cosine-1000）。
@@ -393,7 +396,7 @@ CUDA_VISIBLE_DEVICES=4 python results_display/script/visualize_anysole.py --moda
 2. **运动学（关键）**：导出 BVH 的逐关节误差、**脚踝相对高度均值/最大值**
    （踢腿判据：E3 为 -0.606/0.286，E4 为 +0.013/0.627）、帧间抖动
    （GT 8.7mm/帧，E5 46-56mm/帧）；
-   测量脚本复用 `z_note/smoke_e6x_decoupling.py` 的 fk 读取方式。
+   测量脚本复用 `z_note/probes/smoke_e6x_decoupling.py` 的 fk 读取方式。
 
 ## 实现文件清单
 

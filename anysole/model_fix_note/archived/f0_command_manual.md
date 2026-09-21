@@ -1,20 +1,38 @@
+> **已归档（2026-09-20）**：细节留档，不再维护。当前状态与结论见
+> ../model_fix_note.md，当前基座命令见 ../command_manual.md。
+
 # F0 系列命令手册 · 快速通道版（A 单测 / B F0a′ 协议 / C F0b′ 回归 warm-start）
+
+> **SMPL-24 迁移警告（2026-09-20）**：本文保留的 E3/F0 历史数值与 23/138 checkpoint
+> 只能用于历史对照，不能作为当前 AnySole checkpoint 继续训练或直接评估。当前协议固定为
+> SMPL-24 / 144D；旧 checkpoint 只允许 shape-safe warm-start，共享编码器权重可复制，旧
+> pose head 必须重初始化。AnySole 导出为 SMPL NPZ（`--write-motion`）；BVH 仅属于
+> Step2Motion/历史可视化。`joint_and` 标签也必须由当前 SMPL-native 生成器重建。
 
 > **依据**：`fix_plan_fast.md`（2026-09-18 快速通道，取代本手册旧版步骤 0/1/2/3）。
 > 本文是 F0 的**照抄级命令手册**：每步 训练 / 评估 / 协议 / 探针 / 可视化 + 验收判据。
 > `fix_plan_v2.md` 仍为 F1–F9 方案内容、单变量纪律、协议指标表的正式源。
 >
-> **代码状态（2026-09-18）**：F0a/F0b 代码已落地；`--init-from/--init-drop` warm-start
-> 已实现并实测（E3 ckpt → AnySoleModelV2 复制 254/255 key，query 梯度正常）。
+> **代码状态（2026-09-20）**：F0a/F0b 已迁移到 SMPL-24；`--init-from/--init-drop`
+> 会识别旧 23/138 checkpoint，并丢弃全部 protocol-specific pose/traj 权重。实际 F0b→F4
+> 旧 checkpoint 只复制 98/323 个同形状 key（编码器/融合/aux 与共享 embedding 别名），
+> 不能再引用迁移前的“254/255 key”作为当前验收结论。
 > 训练前先跑步骤 A 单测。
+
+> **归档标注（2026-09-20，SMPL 转向后目录整理）**：本文历史步骤（E3/F0 系列等）的
+> 结果目录已整体归档至 `results/AnySole_BVH_backup/`，其数值为旧 split + BVH-23 协议
+> 口径，与当前 SMPL-24 / 新 split 结果不可直接对比，仅作历史参考。当前 F4a 目录已由
+> `F4a_footconv_smpl24` 改名为 `F4a_footconv`（下文命令中该路径相应替换）。viz 命令
+> 需显式指定 `--split`（eval 的 `--split` 透传 bug 已于同日修复；val 素材在
+> `eval_motion/`，test 素材需重跑 `anysole.eval --split test`）。
 >
 > **env = touch_gait，全部在 `/data/fangyuxuan/projects/gait` 下执行**；GPU 分配（2026-09-18
 > 实测 cuda:4 轻载、cuda:6/cuda:7 空闲）：
 > A 单测与 B 协议串行用 **cuda:6**，C 训练用 **cuda:4**（与 B 并行），D 验收用 **cuda:7**。
 > 执行前用 `nvidia-smi` 复核。
 >
-> **v1.yaml 全程不动**（其值即 E3 口径：raw108、tw=20、stride=20、λ_pose=3/λ_kp=1/λ_traj=1/
-> λ_trec=0.1/λ_vrec=0.1/λ_con=0、noise_scaled=false、lr 恒定、joint_and）。所有实验差异由
+> **当前 v1.yaml 是 SMPL-24 训练配置**（raw108、tw=20、stride=20、λ_pose=3/λ_kp=1/λ_traj=1/
+> λ_trec=0.1/λ_vrec=0.1/λ_con=0、noise_scaled=false、lr=1e-4 恒定、joint_and）。所有实验差异由
 > CLI 传入，CLI 覆盖值随 checkpoint 保存（现有机制），eval/infer 从 ckpt 读配置、无需重复传参。
 
 ---
@@ -62,23 +80,25 @@ continuation` 为 diffusion-era 开关，v2 下被忽略并打印 WARNING（正�
 ## 步骤 A：单测（GPU 6，约 5 分钟，训练前必跑）
 
 ```bash
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/smoke_f0b_regress.py --device cuda:6
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/smoke_f0b_regress.py --device cuda:6
 ```
 
-**验收（A）**：5 项检查全过——① AnySoleModelV2 前向形状（x0_hat (B,tw,138)、F (B,40,256) 等）；
+**验收（A）**：5 项检查全过——① AnySoleModelV2 前向形状（x0_hat (B,tw,144)、F (B,40,256) 等）；
 ② E3 权重下 compute_losses 有限且 query 收到梯度；③ regress 模式下 state dict 无
-proj_*/timestep_token；④ diffusion forward 仍出 (B,tw,138) 且 regress 拒绝位置参数误调；
-⑤ E3-era ckpt 对 anysolev1 strict 加载通过（V1 布局未被 F0b 改动破坏）。
+proj_*/timestep_token；④ diffusion forward 仍出 (B,tw,144) 且 regress 拒绝位置参数误调；
+⑤ E3-era 23/138 checkpoint 被 native SMPL-24 加载器明确拒绝；仅 warm-start 的同形状层可复用。
 
-warm-start 通路已另行实测（2026-09-18）：E3 ckpt → AnySoleModelV2 复制 254/255 个 key，
-仅 V1 diffusion 投影被跳过，前向/反向正常。
+warm-start 的当前口径：同为 SMPL-24 的相容 checkpoint 可按名字/形状迁移；旧 BVH-23
+checkpoint 会整块重置 pose head 与 trajectory head，只迁移协议无关层。共享 embedding 在
+state dict 中同时有顶层与 pose-head 别名，因此可能随顶层键迁移；这不等于旧 pose decoder
+被保留。
 
 ---
 
 ## 步骤 B：F0a′ — E3 ckpt 过协议一次（GPU 6，与步骤 C 并行）
 
 模型不改。产出：E3 val 全套 F 系列数字 + ridge 天花板（参照 ~85mm）。
-**这是唯一一次"E3 过协议"**：1 个协议种子、不写 BVH、不开鲁棒集（vdrop/tdrop 到 F5 起
+**历史步骤，不可直接用于当前 SMPL-24 checkpoint。** 这是唯一一次"E3 过协议"：1 个协议种子、不写 motion、不开鲁棒集（vdrop/tdrop 到 F5 起
 才作主判据）。
 
 ```bash
@@ -141,7 +161,7 @@ warm-start 通路已另行实测（2026-09-18）：E3 ckpt → AnySoleModelV2 �
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
   --ckpt results/AnySole/F0b_seed2/checkpoints/ckpt_last.pt \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-bvh results/AnySole/F0b_seed2/predictions/eval_bvh \
+  --split val --write-motion results/AnySole/F0b_seed2/predictions/eval_motion \
   --protocol-seed 2 --no-robustness \
   --device cuda:7
 
@@ -188,7 +208,7 @@ CUDA_VISIBLE_DEVICES=6 python results_display/script/visualize_anysole.py \
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
   --ckpt results/AnySole/F0c_ext400/checkpoints/ckpt_last.pt \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-bvh results/AnySole/F0c_ext400/predictions/eval_bvh \
+  --split val --write-motion results/AnySole/F0c_ext400/predictions/eval_motion \
   --protocol-seed 0 --no-robustness \
   --device cuda:7
 
@@ -217,7 +237,7 @@ F1 起保留替代目标（重建 θ_hmr 而非 HRNet 特征），留到 F5。
 
 ---
 
-## 单会话推理（任一步 checkpoint，导出可交互 BVH）
+## 单会话推理（native SMPL-24 checkpoint，导出 SMPL NPZ）
 
 ```bash
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.infer \
@@ -233,7 +253,7 @@ F1 起保留替代目标（重建 θ_hmr 而非 HRNet 特征），留到 F5。
 
 | 类别 | 指标 | 出处 |
 |---|---|---|
-| 局部姿态 | MPJPE / PA-MPJPE：9 部位（root/torso/headneck/l_arm/r_arm/l_leg/r_leg/l_foot/r_foot）+ upper(1–14)/lower(15–22)/踝脚(17,18,21,22)/手(10,14) | `metrics/<split>_fseries.json` |
+| 局部姿态 | MPJPE / PA-MPJPE：9 个 SMPL-24 语义部位（root/torso/headneck/l_arm/r_arm/l_leg/r_leg/l_foot/r_foot）+ upper/lower/ankle-foot/hands；索引只由 `anysole.types` 的关节名生成 | `metrics/<split>_fseries.json` |
 | 全局 | W-MPJPE（4s 段首帧对齐）、RTE_norm（按位移长度归一化）、yaw_abs_deg / yaw_drift_deg | 同上（forward_axis 由数据自选，写进 JSON） |
 | 时序 | jitter_mm（probe_jitter 口径 mm/帧）、accel_err_ms2、seam_jump_mm（附 GT 同缝参照） | 同上 |
 | 接触 | contact_f1、foot_slide_mm / foot_slide_gt_mm（mm/帧） | 同上 |
@@ -243,7 +263,7 @@ F1 起保留替代目标（重建 θ_hmr 而非 HRNet 特征），留到 F5。
 | 经典 | VT2M/V2M/T2M MPJPE、PA-MPJPE、MPJRE、traj_ATE、contact_acc、T_mae/T_rmse/T_corr | `metrics/<split>.json`（口径不变） |
 | 读出天花板 | ridge-on-F MPJPE / PA-MPJPE / 分部位 / L_pose | `metrics/ridge_probe_<split>.json`，**每步必跑** |
 | 训练面板 | tau0、loss 各分量量级、grad_norm、steps_per_epoch | wandb（`--loss-cap 1.0` 压 y 轴） |
-| BVH 运动学 | 逐关节误差、脚踝相对高度（踢腿判据）、帧间抖动（GT 参照 8.7mm/帧） | 导出 BVH；fk 读取复用 `z_note/smoke_e6x_decoupling.py` 的方式 |
+| SMPL-24 运动学 | 逐语义关节误差、相对 session floor 的脚高、帧间抖动；同时报告 mean-pose 与 always-contact 探针 | 导出 native SMPL NPZ；由 `motion_io.py` 自动识别并可视化 |
 
 **每步回填**：把上表数字回填到 `fix_plan_fast.md` 对应小节末尾（未回填 = 未完成）。
 
@@ -253,7 +273,7 @@ F1 起保留替代目标（重建 θ_hmr 而非 HRNet 特征），留到 F5。
 
 | 文件 | 改动 |
 |---|---|
-| `anysole/models/pose_head.py` | `head_mode="diffusion"\|"regress"`；diffusion 布局逐字节保留（旧 ckpt strict 加载）；regress = 可学习 query (1,tw,23,dim) + 同 6 层 decoder，forward 只收 F（位置参数守卫） |
+| `anysole/models/pose_head.py` | `head_mode="diffusion"\|"regress"`；regress = SMPL-24 可学习 query (1,tw,24,dim) + 6 层 decoder，forward 只收 F（位置参数守卫） |
 | `anysole/models/model_v2.py`（新） | `AnySoleModelV2`（modal `anysolev2`）：V1 结构原样，仅 pose_head 用 regress，forward 去 x_tau/tau |
 | `anysole/models/model.py` / `__init__.py` | `anysolev2` 注册进 MODEL_NAMES；AnySoleModel 构造 v2 时报错指向 V2 |
 | `anysole/train.py` | regress 分支跳过 τ/q_sample；_evaluate 同分支；v2 强制 pose_repr=6d；diffusion-era 开关打警告；自动 eval 加 `--no-protocol`；**2026-09-18 追加 `--init-from/--init-drop` + `init_from_checkpoint()`（warm-start，已实测）** |
@@ -261,7 +281,7 @@ F1 起保留替代目标（重建 θ_hmr 而非 HRNet 特征），留到 F5。
 | `anysole/eval_protocol.py`（新） | F0a 协议全部指标 + 鲁棒集；写 `metrics/<split>_fseries.json`；continuation 重叠窗自动跳过 |
 | `anysole/infer.py` | regress 分支；`--config` 默认路径修复 |
 | `results_display/script/ridge_probe.py`（新） | 正式化 ridge-on-F（512 维/帧口径，v1/v2 通用） |
-| `z_note/smoke_f0b_regress.py`（新） | F0b 单测（形状/loss 回传/regress 关=旧行为/E3 ckpt 守卫） |
+| `z_note/probes/smoke_f0b_regress.py`（新） | F0b 单测（形状/loss 回传/regress 关=旧行为/E3 ckpt 守卫） |
 | `anysole/diffusion.py` | 未动（旧 ckpt 评估兼容） |
 
 ## 风险与诚实声明
@@ -310,33 +330,38 @@ F1 起保留替代目标（重建 θ_hmr 而非 HRNet 特征），留到 F5。
 
 ## F4a：触觉流按脚编码（`--t-encoder foot_conv`，GPU 4，tag f4a_footconv）
 
+> **标注（2026-09-20）**：本节命令中的 `F4a_footconv_smpl24` 路径现为
+> `F4a_footconv`（目录已改名，旧目录同名者已归档）。viz 命令须加 `--split`：
+> val 素材已就绪（`--split val`），test 素材待重跑 eval。
+
 ```bash
 # 单测（训练前必跑）
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/smoke_f4a_grid.py --device cuda:6
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/smoke_f4a_grid.py --device cuda:6
 
 # 训练（warm-start 自 F0b_seed2；新 t_enc 结构按名字自动跳过、保持新初始化）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
   --modal anysolev2 --contact-method joint_and \
   --t-encoder foot_conv \
-  --epochs 400 --grad-clip 5.0 \
+  --epochs 400 --grad-clip 5.0 --lr 1e-4 \
   --init-from results/AnySole/F0b_seed2/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/F4a_footconv/checkpoints \
+  --out-dir results/AnySole/F4a_footconv_smpl24/checkpoints \
   --wandb_mode online --wandb_experiment_tag f4a_footconv \
   --wandb_eval_interval 10 --loss-cap 1.0 \
-  --device cuda:4
+  --device cuda:5
 
 # 验收（同 D 步骤口径）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/F4a_footconv/checkpoints/ckpt_last.pt \
+  --ckpt results/AnySole/F4a_footconv_smpl24/checkpoints/ckpt_last.pt \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-bvh results/AnySole/F4a_footconv/predictions/eval_bvh \
+  --split val --write-motion results/AnySole/F4a_footconv_smpl24/predictions/eval_motion \
   --protocol-seed 0 --no-robustness --device cuda:7
 
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/ridge_probe.py \
-  --ckpt results/AnySole/F4a_footconv/checkpoints/ckpt_last.pt --split val --device cuda:7
+  --ckpt results/AnySole/F4a_footconv_smpl24/checkpoints/ckpt_last.pt --split val --device cuda:7
 
-CUDA_VISIBLE_DEVICES=6 python results_display/script/visualize_anysole.py \
-  --modal F4a --contact-method footconv --force
+conda activate touch_gait
+CUDA_VISIBLE_DEVICES=7 python results_display/script/visualize_anysole.py \
+  --modal F4a --contact-method footconv_smpl24 --force
 ```
 
 **验收（F4a，对照 = F0b_seed2 基线，固定阈值）**：T2M 下肢 PA-MPJPE、根 RTE、
@@ -359,16 +384,16 @@ CUDA_VISIBLE_DEVICES=6 python results_display/script/visualize_anysole.py \
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.data.extract_hmr \
   --cam-id 3 --skip-existing
 # 2) 零训练基线探针（免费证据：逐帧 PA-MPJPE，15 对匹配关节）
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probe_f1_zero_hmr.py \
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/probe_f1_zero_hmr.py \
   --split val --device cuda:6
 # 3) 单测
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/smoke_f1_hmr.py --device cuda:6
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/smoke_f1_hmr.py --device cuda:6
 
 # 4) 训练（warm-start 自 F0b_seed2；新 v_enc 结构按名字自动跳过）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
   --modal anysolev2 --contact-method joint_and \
   --v-input hmr_gvhmr \
-  --epochs 400 --grad-clip 5.0 \
+  --epochs 400 --grad-clip 5.0 --lr 1e-4 \
   --init-from results/AnySole/F0b_seed2/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F1_hmr/checkpoints \
   --wandb_mode online --wandb_experiment_tag f1_hmr_gvhmr \
@@ -388,11 +413,12 @@ HMR 逐帧值（探针数字）→ 视觉读出升级成立；与基线持平（
 # F2：运动表示重构 + FK 位置损失（2026-09-18 实现）
 
 > 依据 fix_plan_v2.md §F2。F2a 表示重构（`--f2-repr`），F2b = λ_kp 扫描（CLI 已有，无新代码）。
-> 跑序：F4a 与 F2a 可并行（各自对照 F0b_seed2 基线，1 种子 400ep warm-start），两者完成后进 F5。
+> 跑序：F4a 与 F2a 可并行（各自对照 F0b_seed2 基线，1 种子 400ep warm-start），
+> 两者完成后跑 F2+4 组合（warm-start 自 F2_f2rep），组合验收后进 F5。
 
 ## 实现口径（与计划 §F2a 的偏差，如实记录）
 
-- 关节保持 23 不变；根拆分、tilt/yaw、4 维轨迹按计划实现（geometry.py：
+- 关节协议固定为标准 **SMPL-24 / 144D**；根拆分、tilt/yaw、4 维轨迹按计划实现（geometry.py：
   `heading_from_root_np` / `f2_to_world[_np]`，torch/numpy 双版本）。
 - **前向轴单测 = +Z**（有运动信息的训练集 session，速度相关性 +Z 胜 5:1；
   smoke_f2_roundtrip 检查 1 固化此结论）。
@@ -401,41 +427,79 @@ HMR 逐帧值（探针数字）→ 视觉读出升级成立；与基线持平（
   "窗口锚点 = 前一帧世界状态"精确自洽，**往返实测 0.0001mm**（计划标准 <1mm）。
 - **traj 4 维 per-dim 归一化**：训练集拟合 mean/std（`fit_traj_stats`）存入 ckpt
   config `traj_f2_stats`，损失在归一化空间算速度 MSE + 多尺度位移（ψ̇/v_h/h 尺度平衡）。
-- 轨迹头 3→4 维（warm-start 时 proj 按形状自动跳过）；pose head 138 维不变（根 6 = tilt）。
+- 轨迹头 3→4 维（跨协议 warm-start 时整个 traj head 重置）；pose head 为 144 维（根 6 = tilt）。
 
 ## F2a 命令（GPU 4，tag f2_f2rep）
 
 ```bash
 # 单测（训练前必跑：往返 + 前向轴 + 集成）
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/smoke_f2_roundtrip.py --device cuda:6
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/smoke_f2_roundtrip.py --device cuda:6
 
 # 训练（warm-start 自 F0b_seed2；traj_head.proj 3→4 维自动跳过）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
   --modal anysolev2 --contact-method joint_and \
   --f2-repr \
-  --epochs 400 --grad-clip 5.0 \
+  --epochs 400 --grad-clip 5.0 --lr 1e-4 \
   --init-from results/AnySole/F0b_seed2/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F2_f2rep/checkpoints \
   --wandb_mode online --wandb_experiment_tag f2_f2rep \
   --wandb_eval_interval 10 --loss-cap 1.0 \
-  --device cuda:5
+  --device cuda:6
 
 # 验收（eval/协议/导出自动处理 f2→world 恢复）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/F2p4_combo/checkpoints/ckpt_last.pt \
+  --ckpt results/AnySole/F2_f2rep/checkpoints/ckpt_last.pt \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-bvh results/AnySole/F2p4_combo/predictions/eval_bvh \
+  --split val --write-motion results/AnySole/F2_f2rep/predictions/eval_motion \
   --protocol-seed 0 --no-robustness --device cuda:7
 
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/ridge_probe.py \
   --ckpt results/AnySole/F2_f2rep/checkpoints/ckpt_last.pt --split val --device cuda:7
 
 CUDA_VISIBLE_DEVICES=6 python results_display/script/visualize_anysole.py \
-  --modal F2p4 --contact-method combo --force
+  --modal F2 --contact-method f2rep --force
 ```
 
 **验收（F2a，对照 = F0b_seed2，计划 §F2a 判据）**：根 RTE、yaw 漂移、W-MPJPE
 **显著改善且 MPJPE 不劣化**（≤+5mm）；塌缩门同 D。失败 → 弃开关回基线，不挡 F5。
+
+## F2+4 命令：F2 表示 + F4a 触觉编码组合（GPU 6，tag f2p4_combo）
+
+> 无新单测（两个组件各自已单测：smoke_f2_roundtrip / smoke_f4a_grid）。warm-start 自
+> **F2_f2rep**（实测取法，wandb fe2s0zsz 回填）：f2 表示的 encoders/traj/pose 全复用，
+> foot_conv 触觉编码器在该 ckpt 中为新结构、按名字自动跳过全新初始化（F4a_footconv
+> 的 foot_conv 权重未复用——两个来源二选一，取 F2 表示侧，触觉侧 400ep 从零）。
+
+```bash
+# 训练（warm-start 自 F2_f2rep；traj_head.proj 3→4 已在 F2a 时改好、同构复用）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
+  --modal anysolev2 --contact-method joint_and \
+  --f2-repr --t-encoder foot_conv \
+  --epochs 400 --grad-clip 5.0 --lr 1e-4 \
+  --init-from results/AnySole/F2_f2rep/checkpoints/ckpt_last.pt \
+  --out-dir results/AnySole/F2p4_combo/checkpoints \
+  --wandb_mode online --wandb_experiment_tag f2p4_combo \
+  --wandb_eval_interval 10 --loss-cap 1.0 \
+  --device cuda:6
+
+# 验收（f2→world 自动恢复；同 D 步骤口径）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
+  --ckpt results/AnySole/F2p4_combo/checkpoints/ckpt_last.pt \
+  --modal anysolev2 --contact-method joint_and \
+  --split val --write-motion results/AnySole/F2p4_combo/predictions/eval_motion \
+  --protocol-seed 0 --no-robustness --device cuda:7
+
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/ridge_probe.py \
+  --ckpt results/AnySole/F2p4_combo/checkpoints/ckpt_last.pt --split val --device cuda:7
+
+CUDA_VISIBLE_DEVICES=7 python results_display/script/visualize_anysole.py \
+  --modal F2p4 --contact-method combo --force
+```
+
+**验收（F2+4，对照 = F2 与 F4a 各自；组合判据 = 无负交互崩溃）**：VT/V 侧不劣于
+F4a、T2M MPJPE 不劣于 F4a（123.8）、yaw_drift 不差于 F2；任一指标显著差于两个
+单开的较差者 → 组合不成立，回退用单开最优进 F5。塌缩门同 D。**实测已回填**（wandb
+fe2s0zsz，见文末「F2+4 组合实测」）：折中而非叠加，判定直接进 F5。
 
 ## F2b：FK 位置损失权重（无新代码，λ_kp 扫描）
 
@@ -443,7 +507,7 @@ CUDA_VISIBLE_DEVICES=6 python results_display/script/visualize_anysole.py \
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
   --modal anysolev2 --contact-method joint_and \
   --f2-repr --lambda-kp 3 \
-  --epochs 200 --grad-clip 5.0 \
+  --epochs 200 --grad-clip 5.0 --lr 1e-4 \
   --init-from results/AnySole/F0b_seed2/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F2b_kp3/checkpoints \
   --wandb_mode online --wandb_experiment_tag f2b_kp3 \
@@ -458,7 +522,7 @@ MPJPE 反升 → 降 λ_kp 重跑（L_pose 必须保留：叶子关节只能靠�
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
   --ckpt results/AnySole/F2b_kp3/checkpoints/ckpt_last.pt \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-bvh results/AnySole/F2b_kp3/predictions/eval_bvh \
+  --split val --write-motion results/AnySole/F2b_kp3/predictions/eval_motion \
   --protocol-seed 0 --no-robustness --device cuda:7
 
 CUDA_VISIBLE_DEVICES=6 python results_display/script/visualize_anysole.py \
@@ -487,7 +551,7 @@ CUDA_VISIBLE_DEVICES=6 python results_display/script/visualize_anysole.py \
 
 ## F5 两条基线命令（各自独立，先 nogate 后 gated）
 
-> 单测（训练前必跑）：`python z_note/smoke_f5_part.py --device cuda:6`
+> 单测（训练前必跑）：`python z_note/probes/smoke_f5_part.py --device cuda:6`
 
 ### F5-A：基于 F4a（v1 表示 + foot_conv + part9）
 
@@ -500,8 +564,8 @@ warm-start 自 `F4a_footconv`（foot_conv 在 v1 表示下训了 400ep，全复�
   --modal anysolev2 --contact-method joint_and \
   --t-encoder foot_conv --decoder part9 --gate-mode nogate \
   --batch-size 64 \
-  --epochs 400 --grad-clip 5.0 \
-  --init-from results/AnySole/F4a_footconv/checkpoints/ckpt_last.pt \
+  --epochs 400 --grad-clip 5.0 --lr 1e-4 \
+  --init-from results/AnySole/F4a_footconv_smpl24/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F5A_f4a_nogate/checkpoints \
   --wandb_mode online --wandb_experiment_tag f5a_f4a_nogate \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:4
@@ -511,8 +575,8 @@ warm-start 自 `F4a_footconv`（foot_conv 在 v1 表示下训了 400ep，全复�
   --modal anysolev2 --contact-method joint_and \
   --t-encoder foot_conv --decoder part9 --gate-mode gated \
   --batch-size 64 \
-  --epochs 400 --grad-clip 5.0 \
-  --init-from results/AnySole/F4a_footconv/checkpoints/ckpt_last.pt \
+  --epochs 400 --grad-clip 5.0 --lr 1e-4 \
+  --init-from results/AnySole/F4a_footconv_smpl24/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F5A_f4a_gated/checkpoints \
   --wandb_mode online --wandb_experiment_tag f5a_f4a_gated \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:5
@@ -529,7 +593,7 @@ decoder 新建）。对照 = F2p4_combo。
   --modal anysolev2 --contact-method joint_and \
   --f2-repr --t-encoder foot_conv --decoder part9 --gate-mode nogate \
   --batch-size 64 \
-  --epochs 400 --grad-clip 5.0 \
+  --epochs 400 --grad-clip 5.0 --lr 1e-4 \
   --init-from results/AnySole/F2p4_combo/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F5B_f2p4_nogate/checkpoints \
   --wandb_mode online --wandb_experiment_tag f5b_f2p4_nogate \
@@ -540,7 +604,7 @@ decoder 新建）。对照 = F2p4_combo。
   --modal anysolev2 --contact-method joint_and \
   --f2-repr --t-encoder foot_conv --decoder part9 --gate-mode gated \
   --batch-size 64 \
-  --epochs 400 --grad-clip 5.0 \
+  --epochs 400 --grad-clip 5.0 --lr 1e-4 \
   --init-from results/AnySole/F2p4_combo/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F5B_f2p4_gated/checkpoints \
   --wandb_mode online --wandb_experiment_tag f5b_f2p4_gated \
@@ -565,7 +629,7 @@ decoder 新建）。对照 = F2p4_combo。
 
 **验收（F5，先看门控探针再看主指标；计划 §F5 判据）**：
 - 门控探针：T-only 时手臂 g_∅ 明显高于腿/脚；VT 时脚部 g_T 支撑相高于摆动相
-  （wandb gate 曲线 + 导出 BVH 核对相位）。
+  （wandb gate 曲线 + 导出 SMPL NPZ 核对相位）。
 - 主指标（A 对照 F4a_footconv；B 对照 F2p4_combo）：VT2M 手臂不劣化（≤+5mm）；
   **T2M MPJPE 不劣于各自对照**（A ≤123.8、B ≤99.7）**且 B 的 T2M PA ≤38**
   （门控修好 foot_conv 的 T-only = 核心判据）；nogate 与 gated 对照：gated 在
@@ -600,7 +664,7 @@ decoder 新建）。对照 = F2p4_combo。
   --modal anysolev2 --contact-method joint_and \
   --f2-repr --t-encoder foot_conv --decoder part9 --gate-mode nogate \
   --batch-size 64 \
-  --epochs 400 --grad-clip 5.0 \
+  --epochs 400 --grad-clip 5.0 --lr 1e-4 \
   --init-from results/AnySole/F2p4_combo/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/F5_nogate/checkpoints \
   --wandb_mode online --wandb_experiment_tag f5_nogate \

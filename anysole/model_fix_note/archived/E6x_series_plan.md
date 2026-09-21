@@ -1,3 +1,6 @@
+> **已归档（2026-09-20）**：细节留档，不再维护。当前状态与结论见
+> ../model_fix_note.md，当前基座命令见 ../command_manual.md。
+
 # E3 增强清单（E6.x 系列，2026-09-16）
 
 > **基础 = E3**。实测证据：E3 导出 BVH 脚踝误差 174mm、脚踝相对高度均值
@@ -8,7 +11,7 @@
 > sample 50 步、λ_pose=3.0 / λ_traj=1.0 / λ_kp=1.0 / λ_con=0.0、joint_and。
 >
 > 所有增强为独立开关（默认关闭 = 纯 E3 行为），解耦已验证：
-> `z_note/smoke_e6x_decoupling.py`。E6.4/E6.5 为零重训的评估侧机制，
+> `z_note/probes/smoke_e6x_decoupling.py`。E6.4/E6.5 为零重训的评估侧机制，
 > 可直接作用于 E3 模型（E6.5 实测对 E3 无收益，保留为可选工具）。
 
 '''
@@ -221,4 +224,4 @@ CUDA_VISIBLE_DEVICES=4 python results_display/script/visualize_anysole.py --moda
 1. **数字**：eval 的 VT2M MPJPE / PA-MPJPE / traj_ATE + 训练面板的 tau0（head 健康度）；
 2. **运动学（关键）**：导出 BVH 的逐关节误差、**脚踝相对高度均值/最大值**
    （踢腿判据：E3 为 -0.606/0.286，E4 为 +0.013/0.627）、帧间位移；
-   测量脚本可复用 `z_note/smoke_e6x_decoupling.py` 的 fk 读取方式。
+   测量脚本可复用 `z_note/probes/smoke_e6x_decoupling.py` 的 fk 读取方式。

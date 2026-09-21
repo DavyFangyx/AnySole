@@ -409,7 +409,7 @@ def render_skeleton_panel(joints, title, color, frame_idx, n_frames, edges=None,
 def compose_frame(left_block, right_block, pred_j, gt_j, gt_edges, session_id, frame_idx, n_frames, fps, valid, pred_edges=None):
     left = render_foot_panel(left_block, right_block, session_id, frame_idx, n_frames, fps, valid)
     mid = render_skeleton_panel(pred_j, "Predicted", (80, 200, 255), frame_idx, n_frames, edges=(pred_edges if pred_edges is not None else SMPL_EDGES))
-    right = render_skeleton_panel(gt_j, "GT BVH", (255, 170, 80), frame_idx, n_frames, edges=gt_edges)
+    right = render_skeleton_panel(gt_j, "GT Motion", (255, 170, 80), frame_idx, n_frames, edges=gt_edges)
     return np.concatenate([left, mid, right], axis=1)
 
 

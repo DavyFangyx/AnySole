@@ -6,10 +6,10 @@ in structure so the channels match the Step2Motion gait export:
 
     每脚 25 维 = pressure16（pool_48_to_16：heel[8] toes[8]）+ acc3 + gyro3 + force1 + cop2
 
-IMU 通道由 **GT BVH 脚部运动学合成**（脚部世界位置二阶差分 + 脚部全局旋转差分）——
-Step2Motion 的 gait 数据就是这么导出的（"Missing insole IMUs are synthesized from
-the raw 23-joint BVH skeleton"），eval 口径与其完全一致，含 GT 派生信息；真实部署
-时由鞋垫硬件 IMU 替代。
+IMU 通道只由 **直接导出的 GT BVH-23 脚部运动学**合成（脚部世界位置
+二阶差分 + 脚部全局旋转差分）。这里冻结 Step2Motion ``process_gait.py`` 的
+23 关节/ToeBase 语义，不使用也不接受 AnySole 的 SMPL-24 target。它含 GT BVH
+派生信息，只是历史实验输入；真实部署时应由鞋垫硬件 IMU 替代。
 
 两段式管线（与 Step2Motion 同构，此处用 rotmat 等价实现其 quat 往返）：
 1. 合成（synthesize_imu）：a_world = 位置二阶差分，+g 后转到局部系再 /G（模拟真实
@@ -28,18 +28,18 @@ force1 + cop2），acc/gyro 通道被真删：不调用 synthesize_imu、不产�
 
 from __future__ import annotations
 
-import numpy as np
+from pathlib import Path
 
-from anysole.geometry import fk_local_np, rot6d_to_rotmat_np
+import numpy as np
+from scipy.spatial.transform import Rotation as SciRotation
+from scipy.spatial.transform import Slerp
+
+from anysole.geometry import fk_local_np
 from anysole.types import (
     FPS,
-    LEFT_FOOT_JOINT,
-    LEFT_TOE_JOINT,
-    N_JOINTS,
-    RIGHT_FOOT_JOINT,
-    RIGHT_TOE_JOINT,
     T_S2M_DIM,
     T_S2M_NOIMU_DIM,
+    WORKSPACE_ROOT,
 )
 
 G = 9.81
@@ -47,6 +47,108 @@ G = 9.81
 # --no-imu：T_s2m 里被真删的 IMU 列（左脚 acc/gyro、右脚 acc/gyro），
 # 删除后每脚 19 维 = pressure16 + force1 + cop2，共 38 维。
 S2M_IMU_COLUMNS = tuple(range(16, 22)) + tuple(range(41, 47))
+
+# Frozen verbatim from Baselines/Step2Motion/src/process_gait.py.  These are
+# deliberately local: importing AnySole's SMPL-24 JOINT_* constants here would
+# silently change the meaning of the historical synthetic IMU channel.
+LEGACY_BVH_JOINT_NAMES = (
+    "Hips", "Spine", "Spine1", "Spine2", "Spine3", "Neck", "Head",
+    "LeftShoulder", "LeftArm", "LeftForeArm", "LeftHand",
+    "RightShoulder", "RightArm", "RightForeArm", "RightHand",
+    "LeftUpLeg", "LeftLeg", "LeftFoot", "LeftToeBase",
+    "RightUpLeg", "RightLeg", "RightFoot", "RightToeBase",
+)
+LEGACY_BVH_PARENTS = np.asarray(
+    [-1, 0, 1, 2, 3, 4, 5, 4, 7, 8, 9, 4, 11, 12, 13, 0, 15, 16, 17, 0, 19, 20, 21],
+    dtype=np.int64,
+)
+LEGACY_BVH_N_JOINTS = len(LEGACY_BVH_JOINT_NAMES)
+LEGACY_LEFT_FOOT = LEGACY_BVH_JOINT_NAMES.index("LeftFoot")
+LEGACY_LEFT_TOE = LEGACY_BVH_JOINT_NAMES.index("LeftToeBase")
+LEGACY_RIGHT_FOOT = LEGACY_BVH_JOINT_NAMES.index("RightFoot")
+LEGACY_RIGHT_TOE = LEGACY_BVH_JOINT_NAMES.index("RightToeBase")
+
+
+def resolve_legacy_bvh_path(meta: dict) -> Path:
+    """Resolve the directly exported BVH using Step2Motion's original rule."""
+    recorded = Path(meta["bvh_path"])
+    if recorded.is_file():
+        return recorded
+    session_id = str(meta["session_id"])
+    date = str(meta["date"])
+    root = WORKSPACE_ROOT / "sources" / "raw" / date / "mocap_ori_bvh" / session_id
+    candidates = sorted(root.glob("*.bvh"))
+    if not candidates:
+        raise FileNotFoundError(
+            "BVH not found for %s: recorded=%s, workspace raw=%s"
+            % (session_id, recorded, root)
+        )
+    return candidates[0]
+
+
+def _parse_legacy_bvh(path: Path) -> tuple[np.ndarray, float, np.ndarray]:
+    """The BVH parser used by Step2Motion's process_gait.py."""
+    text = Path(path).read_text(errors="replace").splitlines()
+    offsets = []
+    names = []
+    joint_i = -1
+    for line in text:
+        stripped = line.strip()
+        if stripped.startswith("ROOT ") or stripped.startswith("JOINT "):
+            names.append(stripped.split()[1])
+            joint_i += 1
+        elif stripped.startswith("OFFSET") and joint_i >= 0 and len(offsets) == joint_i:
+            offsets.append([float(v) for v in stripped.split()[1:4]])
+        if stripped.startswith("MOTION"):
+            break
+    motion_idx = next(i for i, line in enumerate(text) if line.startswith("MOTION"))
+    n_frames = int(text[motion_idx + 1].split(":")[1])
+    frame_time = float(text[motion_idx + 2].split(":")[1])
+    motion = np.asarray(
+        [list(map(float, line.split())) for line in text[motion_idx + 3 : motion_idx + 3 + n_frames]],
+        dtype=np.float64,
+    )
+    if motion.shape != (n_frames, 72):
+        raise ValueError("Unexpected BVH motion shape %s in %s" % (motion.shape, path))
+    if tuple(names) != LEGACY_BVH_JOINT_NAMES:
+        raise ValueError("Unexpected BVH joint names in %s: %s" % (path, names))
+    if len(offsets) != LEGACY_BVH_N_JOINTS:
+        raise ValueError("Unexpected BVH joint count %d in %s" % (len(offsets), path))
+    return motion, frame_time, np.asarray(offsets, dtype=np.float64)
+
+
+def _interp_legacy_bvh(motion: np.ndarray, frame_time: float, query_t: np.ndarray) -> np.ndarray:
+    """Step2Motion translation interpolation + per-joint YXZ rotation SLERP."""
+    query_t = np.asarray(query_t, dtype=np.float64)
+    src_t = np.arange(motion.shape[0], dtype=np.float64) * float(frame_time)
+    out = np.empty((query_t.size, motion.shape[1]), dtype=np.float64)
+    for col in range(3):
+        out[:, col] = np.interp(query_t, src_t, motion[:, col])
+    clipped = np.clip(query_t, src_t[0], src_t[-1])
+    eulers = motion[:, 3:].reshape(motion.shape[0], LEGACY_BVH_N_JOINTS, 3)
+    if motion.shape[0] == 1:
+        out[:, 3:] = motion[0, 3:]
+        return out
+    for joint_i in range(LEGACY_BVH_N_JOINTS):
+        key_rots = SciRotation.from_euler("YXZ", eulers[:, joint_i], degrees=True)
+        slerp = Slerp(src_t, key_rots)
+        out[:, 3 + 3 * joint_i : 6 + 3 * joint_i] = slerp(clipped).as_euler("YXZ", degrees=True)
+    return out
+
+
+def _legacy_bvh_kinematics(path: Path, query_t: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return BVH foot-ready world positions, global rotations and offsets."""
+    motion, frame_time, offsets_cm = _parse_legacy_bvh(path)
+    sampled = _interp_legacy_bvh(motion, frame_time, query_t)
+    root_pos = sampled[:, :3] * 0.01
+    local_rot = SciRotation.from_euler(
+        "YXZ",
+        sampled[:, 3:].reshape(-1, 3),
+        degrees=True,
+    ).as_matrix().reshape(-1, LEGACY_BVH_N_JOINTS, 3, 3)
+    offsets_m = offsets_cm * 0.01
+    pos, global_rot = fk_local_np(local_rot, offsets_m, LEGACY_BVH_PARENTS)
+    return pos + root_pos[:, None, :], global_rot, offsets_m
 
 
 def pool_48_to_16(values48: np.ndarray) -> np.ndarray:
@@ -76,10 +178,10 @@ def cop_from_grid(values48: np.ndarray) -> np.ndarray:
     return cop
 
 
-def rest_foot_imu_axes(offsets: np.ndarray, parents: np.ndarray) -> dict:
-    """Foot IMU basis at rest pose (verbatim S2M rest_foot_imu_axes)."""
-    identity = np.broadcast_to(np.eye(3), (1, N_JOINTS, 3, 3)).copy()
-    pos, _ = fk_local_np(identity, offsets, parents)
+def rest_foot_imu_axes(offsets: np.ndarray) -> dict:
+    """BVH-23 foot IMU basis (verbatim S2M rest_foot_imu_axes)."""
+    identity = np.broadcast_to(np.eye(3), (1, LEGACY_BVH_N_JOINTS, 3, 3)).copy()
+    pos, _ = fk_local_np(identity, offsets, LEGACY_BVH_PARENTS)
 
     def compute_axes(toes_index, foot_index, opposite_foot_index, invert_up):
         right = pos[0, toes_index] - pos[0, foot_index]
@@ -94,8 +196,8 @@ def rest_foot_imu_axes(offsets: np.ndarray, parents: np.ndarray) -> dict:
         up = up / np.linalg.norm(up)
         return np.stack([right, up, forward], axis=-1)
 
-    left = compute_axes(LEFT_TOE_JOINT, LEFT_FOOT_JOINT, RIGHT_FOOT_JOINT, invert_up=True)
-    right = compute_axes(RIGHT_TOE_JOINT, RIGHT_FOOT_JOINT, LEFT_FOOT_JOINT, invert_up=False)
+    left = compute_axes(LEGACY_LEFT_TOE, LEGACY_LEFT_FOOT, LEGACY_RIGHT_FOOT, invert_up=True)
+    right = compute_axes(LEGACY_RIGHT_TOE, LEGACY_RIGHT_FOOT, LEGACY_LEFT_FOOT, invert_up=False)
     return {"left": left, "right": right}
 
 
@@ -252,37 +354,50 @@ def drop_imu_columns(t_s2m50: np.ndarray) -> np.ndarray:
     return t_s2m50[..., keep].astype(np.float32)
 
 
-def build_t_s2m(pose_6d, trans_m, offsets_m, parents, t_raw_norm, fps=FPS, no_imu=False) -> np.ndarray:
+def build_t_s2m(
+    t_raw_norm: np.ndarray,
+    *,
+    bvh_path: Path | None = None,
+    query_t: np.ndarray | None = None,
+    fps: float = FPS,
+    no_imu: bool = False,
+) -> np.ndarray:
     """Build the Step2Motion-口径 tactile channel for one session.
 
     ``t_raw_norm`` is the anysole-normalized 96-dim pressure (clip/PRESSURE_CLIP
-    then divide). ``pose_6d``/``trans_m`` are the session BVH pose and root
-    translation; the foot IMU is synthesized from their GT kinematics (see the
-    module docstring for the leakage convention).
+    then divide).  With IMU enabled, ``bvh_path`` and ``query_t`` are required;
+    the foot IMU is synthesized exclusively from the directly exported BVH-23
+    motion using Step2Motion's Left/RightFoot + ToeBase semantics.
 
     ``no_imu=True`` (--no-imu): the IMU channels are structurally absent —
-    ``synthesize_imu`` is never called and the output is 38-dim per frame
-    (pressure16 + force1 + cop2 per foot, no acc/gyro anywhere).
+    neither BVH parsing nor ``synthesize_imu`` is called and the output is
+    38-dim per frame (pressure16 + force1 + cop2 per foot).
     """
+    t_raw_norm = np.asarray(t_raw_norm, dtype=np.float32)
+    if t_raw_norm.ndim != 2 or t_raw_norm.shape[1] != 96:
+        raise ValueError("t_raw_norm must have shape (T, 96), got %s" % (t_raw_norm.shape,))
     left48 = t_raw_norm[:, :48]
     right48 = t_raw_norm[:, 48:]
     if no_imu:
         left = _foot_features_noimu(left48)
         right = _foot_features_noimu(right48)
     else:
-        rotmats = rot6d_to_rotmat_np(pose_6d.reshape(-1, N_JOINTS, 6))
-        pos, global_rot = fk_local_np(rotmats, offsets_m, parents)
-        # Foot world positions = FK positions + root translation (anysole kp
-        # convention; constant offsets cancel in the second difference).
-        world_pos = pos + trans_m[:, None, :]
-        rest_axes = rest_foot_imu_axes(offsets_m, parents)
+        if bvh_path is None or query_t is None:
+            raise ValueError("BVH-derived s2m50 IMU requires both bvh_path and query_t")
+        query_t = np.asarray(query_t, dtype=np.float64)
+        if query_t.shape != (t_raw_norm.shape[0],):
+            raise ValueError(
+                "query_t shape %s != (%d,)" % (query_t.shape, t_raw_norm.shape[0])
+            )
+        world_pos, global_rot, offsets_m = _legacy_bvh_kinematics(Path(bvh_path), query_t)
+        rest_axes = rest_foot_imu_axes(offsets_m)
         dt = 1.0 / float(fps)
         left = _foot_features(
-            left48, world_pos[:, LEFT_FOOT_JOINT], global_rot[:, LEFT_FOOT_JOINT],
+            left48, world_pos[:, LEGACY_LEFT_FOOT], global_rot[:, LEGACY_LEFT_FOOT],
             rest_axes["left"], dt, flip_local_y=True,
         )
         right = _foot_features(
-            right48, world_pos[:, RIGHT_FOOT_JOINT], global_rot[:, RIGHT_FOOT_JOINT],
+            right48, world_pos[:, LEGACY_RIGHT_FOOT], global_rot[:, LEGACY_RIGHT_FOOT],
             rest_axes["right"], dt, flip_local_y=False,
         )
     out = np.concatenate([left, right], axis=1).astype(np.float32)

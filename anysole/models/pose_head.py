@@ -17,8 +17,8 @@ to learn the noise-level gating. The rewrite fixes that:
   normalize the motion representation before diffusing); train.py fits the
   stats on the training set and they are saved with the checkpoint.
 
-E6.1: ``repr="pos"`` switches the diffused target from 6D rotations (138) to
-root-local 3D positions (66, 22 non-root joints) without touching the decoder
+E6.1: ``repr="pos"`` switches the diffused target from 6D rotations to
+root-local 3D positions (23 non-root joints) without touching the decoder
 structure - only the per-joint I/O width changes (6 -> 3). Default "6d" keeps
 the pre-E6 behavior exactly.
 
@@ -28,7 +28,7 @@ F0b: ``head_mode="regress"`` turns the head into a direct F -> pose regression
 no x_tau/tau, no timestep token.  ``head_mode="diffusion"`` (default) keeps
 the pre-F0b layout byte-for-byte so old checkpoints load strictly.
 
-V3-2: ``n_parts=9`` (regress only) swaps the 23 joint queries (3 groups) for
+V3-2: ``n_parts=9`` (regress only) swaps the SMPL-24 joint queries (3 groups) for
 9 part queries with one unembed head per part (fix_plan_v3.md §V3-2).
 Everything else — decoder layers, pose stats, time PE, normalization — is
 shared; ``n_parts=3`` (default) keeps the pre-V3-2 path byte-for-byte.
@@ -42,17 +42,14 @@ import torch.nn as nn
 from anysole.models.embeddings import SharedEmbeddings
 from anysole.types import (
     BODY_JOINTS,
-    BODY_SLICE,
     D_MODEL,
     LEFT_LEG_JOINTS,
-    LEFT_LEG_SLICE,
     N_JOINTS,
     N_PARTS,
     PART_JOINTS,
     POSE_DIM,
     POSE_POS_DIM,
     RIGHT_LEG_JOINTS,
-    RIGHT_LEG_SLICE,
     TW,
 )
 
@@ -89,16 +86,13 @@ class PoseHead(nn.Module):
         self.head_mode = head_mode
         self.n_parts = n_parts
         if repr == "pos":
-            # 22 non-root joints as root-local positions (root excluded).
+            # All 23 non-root SMPL joints as root-local positions (root excluded).
             self.n_body = len(BODY_JOINTS) - 1
             self.n_left = len(LEFT_LEG_JOINTS)
             self.n_right = len(RIGHT_LEG_JOINTS)
             self.per_joint = 3
             self.pose_dim = POSE_POS_DIM
             n_tokens = self.n_body + self.n_left + self.n_right
-            self.body_slice = slice(0, self.n_body * 3)
-            self.left_slice = slice(self.body_slice.stop, (self.n_body + self.n_left) * 3)
-            self.right_slice = slice(self.left_slice.stop, n_tokens * 3)
             group_ids = torch.zeros(n_tokens, dtype=torch.long)
             group_ids[self.n_body : self.n_body + self.n_left] = 1
             group_ids[self.n_body + self.n_left :] = 2
@@ -108,17 +102,18 @@ class PoseHead(nn.Module):
             self.n_right = len(RIGHT_LEG_JOINTS)
             self.per_joint = 6
             self.pose_dim = POSE_DIM
-            self.body_slice = BODY_SLICE
-            self.left_slice = LEFT_LEG_SLICE
-            self.right_slice = RIGHT_LEG_SLICE
             if n_parts == 9:
                 # V3-2: one query token per part (9) instead of one per joint
-                # (23 in 3 groups); the part embedding IS the part identity.
+                # (24 in 3 groups); the part embedding IS the part identity.
                 group_ids = torch.arange(N_PARTS, dtype=torch.long)
             else:
+                # Tokens are concatenated [body, left, right] in _embed and
+                # _forward_regress; tag by TOKEN position, not joint index —
+                # SMPL-24 interleaves leg joints with the body, so joint-index
+                # tagging gives 16/24 tokens the wrong group embedding.
                 group_ids = torch.zeros(N_JOINTS, dtype=torch.long)
-                group_ids[list(LEFT_LEG_JOINTS)] = 1
-                group_ids[list(RIGHT_LEG_JOINTS)] = 2
+                group_ids[self.n_body : self.n_body + self.n_left] = 1
+                group_ids[self.n_body + self.n_left :] = 2
         else:
             raise ValueError("Unknown pose repr %r; expected '6d' or 'pos'" % repr)
 
@@ -189,9 +184,21 @@ class PoseHead(nn.Module):
 
     def _embed(self, x_tau):
         batch, tw, _ = x_tau.shape
-        body = x_tau[..., self.body_slice].reshape(batch, tw, self.n_body, self.per_joint)
-        left = x_tau[..., self.left_slice].reshape(batch, tw, self.n_left, self.per_joint)
-        right = x_tau[..., self.right_slice].reshape(batch, tw, self.n_right, self.per_joint)
+        def gather(joints):
+            idx = torch.tensor(
+                [j * self.per_joint + d for j in joints for d in range(self.per_joint)],
+                device=x_tau.device, dtype=torch.long,
+            )
+            return x_tau.index_select(-1, idx).reshape(batch, tw, len(joints), self.per_joint)
+        if self.repr == "pos":
+            body_joints = tuple(j - 1 for j in BODY_JOINTS if j != 0)
+        else:
+            body_joints = tuple(BODY_JOINTS)
+        body = gather(body_joints)
+        left_joints = tuple(j if self.repr == "6d" else j - 1 for j in LEFT_LEG_JOINTS)
+        right_joints = tuple(j if self.repr == "6d" else j - 1 for j in RIGHT_LEG_JOINTS)
+        left = gather(left_joints)
+        right = gather(right_joints)
         tokens = torch.cat(
             [self.proj_body(body), self.proj_left(left), self.proj_right(right)],
             dim=2,
@@ -210,14 +217,23 @@ class PoseHead(nn.Module):
             parts = torch.cat(
                 [head(tokens[:, :, p]) for p, head in enumerate(self.out_parts)],
                 dim=-1,
-            )  # (B, tw, 138) in PART_JOINTS order
+            )  # (B, tw, POSE_DIM) in PART_JOINTS order
             return parts.gather(-1, self.part_place_idx.expand(batch, self.tw, -1))
         n_tokens = self.n_body + self.n_left + self.n_right
         tokens = h.view(batch, self.tw, n_tokens, self.dim)
         body = self.out_body(tokens[:, :, : self.n_body, :])
         left = self.out_left(tokens[:, :, self.n_body : self.n_body + self.n_left, :])
         right = self.out_right(tokens[:, :, self.n_body + self.n_left :, :])
-        return torch.cat([body, left, right], dim=2).reshape(batch, self.tw, self.pose_dim)
+        part_values = torch.cat([body, left, right], dim=2)
+        if self.repr == "6d":
+            joint_order = tuple(BODY_JOINTS) + tuple(LEFT_LEG_JOINTS) + tuple(RIGHT_LEG_JOINTS)
+        else:
+            joint_order = tuple(j - 1 for j in BODY_JOINTS if j != 0) + tuple(j - 1 for j in LEFT_LEG_JOINTS) + tuple(j - 1 for j in RIGHT_LEG_JOINTS)
+        flat = part_values.reshape(batch, self.tw, -1)
+        out = flat.new_zeros(batch, self.tw, self.pose_dim)
+        for k, j in enumerate(joint_order):
+            out[..., j * self.per_joint:(j + 1) * self.per_joint] = flat[..., k * self.per_joint:(k + 1) * self.per_joint]
+        return out
 
     def forward(self, x_tau=None, tau=None, F=None):
         """Dispatch by head_mode.

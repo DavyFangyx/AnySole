@@ -1,8 +1,11 @@
-"""Unified cross-model comparison evaluator (Test2) for AnySole, MotionPRO and Step2Motion.
+"""Protocol-aware comparison evaluator (Test2) for AnySole and BVH baselines.
 
-Prediction files use the shared contract: ``joint_xyz_world`` with shape
-(T, 23, 3), optionally accompanied by ``valid_mask``.  BVH files are also
-accepted and converted through the repository Skeleton3 FK implementation.
+AnySole predicts native SMPL-24 while Step2Motion predicts Skeleton3/BVH-23.
+Those arrays must never be truncated or compared by numeric joint index.  This
+evaluator identifies each prediction protocol, selects an explicit 19-joint
+semantic intersection, and evaluates against GT expressed in the *same native
+protocol* as that prediction.  SMPL is converted to the display/common z-up
+coordinate convention by ``motion_io``; BVH remains z-up.
 
 Writes only metrics to ``results_display/Test2_comparison``:
 ``comparison_per_session.csv`` (full detail), ``comparison_summary.csv``
@@ -30,10 +33,36 @@ ROOT = cli_common.REPO_ROOT
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from anysole.data.bvh_io import load_bvh  # noqa: E402
-from anysole.geometry import euler_yxz_to_rotmat, fk_local_np, resample_bvh_motion  # noqa: E402
+from anysole.types import JOINT_NAMES  # noqa: E402
+from motion_io import LEGACY_BVH_NAMES, load_motion  # noqa: E402
 
 METRICS = ("MPJPE_mm", "PA_MPJPE_mm", "WMPJPE_mm", "WAMPJPE_mm", "RTE_mm", "Accel_mps2", "Jitter_1e-3_mps2")
+
+# Skeleton3 has one more intermediate spine joint and no SMPL terminal hand
+# joints.  The intersection below deliberately excludes ambiguous spine
+# levels and the unmatched SMPL hands.  Ordering starts with pelvis because
+# metrics() uses joint 0 as the root.
+COMMON_JOINTS = (
+    "pelvis", "left_hip", "right_hip", "left_knee", "right_knee",
+    "left_ankle", "right_ankle", "left_foot", "right_foot", "neck", "head",
+    "left_collar", "right_collar", "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow", "left_wrist", "right_wrist",
+)
+SMPL_COMMON_NAMES = {
+    name: name for name in COMMON_JOINTS
+}
+BVH_COMMON_NAMES = {
+    "pelvis": "Hips",
+    "left_hip": "LeftUpLeg", "right_hip": "RightUpLeg",
+    "left_knee": "LeftLeg", "right_knee": "RightLeg",
+    "left_ankle": "LeftFoot", "right_ankle": "RightFoot",
+    "left_foot": "LeftToeBase", "right_foot": "RightToeBase",
+    "neck": "Neck", "head": "Head",
+    "left_collar": "LeftShoulder", "right_collar": "RightShoulder",
+    "left_shoulder": "LeftArm", "right_shoulder": "RightArm",
+    "left_elbow": "LeftForeArm", "right_elbow": "RightForeArm",
+    "left_wrist": "LeftHand", "right_wrist": "RightHand",
+}
 
 
 def sha256(path: Path) -> str:
@@ -98,23 +127,54 @@ def bvh_joints(path: Path, row: dict[str, str] | None = None) -> np.ndarray:
     exported on the session grid, so comparing them frame-by-frame against the
     raw BVH would misalign GT by ``mocap_start_s`` (median ~0.08 s, max ~0.9 s).
     """
-    bvh = load_bvh(path)
-    motion = bvh.motion
+    query_t = None
     if row is not None and "visual_start_s" in row and "offset_s" in row:
-        n = int(float(row.get("n_frames") or len(motion)))
+        n = int(float(row.get("n_frames") or 0))
+        if n <= 0:
+            raise ValueError("manifest n_frames must be positive for aligned BVH loading")
         fps = float(row.get("target_fps") or 40.0)
         t_grid = float(row["visual_start_s"]) + np.arange(n, dtype=np.float64) / fps
-        motion = resample_bvh_motion(motion, bvh.frame_time, t_grid - float(row["offset_s"]))
-    euler = motion[:, 3:].reshape(-1, 23, 3)
-    local = euler_yxz_to_rotmat(euler)
-    positions, _ = fk_local_np(local, bvh.offsets_m, bvh.parents)
-    return positions + motion[:, None, :3] * 0.01
+        query_t = t_grid - float(row["offset_s"])
+    loaded = load_motion(path, query_t=query_t)
+    if loaded["format"] != "bvh":
+        raise ValueError(f"expected legacy BVH, got {loaded['format']}: {path}")
+    return np.asarray(loaded["joints"], dtype=np.float32)
 
 
-def array_from_file(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
+def _decode_names(values) -> tuple[str, ...]:
+    return tuple(v.decode("utf-8") if isinstance(v, bytes) else str(v)
+                 for v in np.asarray(values).reshape(-1).tolist())
+
+
+def _infer_protocol(arr: np.ndarray, names: tuple[str, ...] | None) -> tuple[str, tuple[str, ...]]:
+    if arr.ndim != 3 or arr.shape[-1] != 3:
+        raise ValueError(f"joint array must be (T,J,3), got {arr.shape}")
+    if names is not None:
+        if len(names) != arr.shape[1]:
+            raise ValueError(f"joint_names has {len(names)} entries for J={arr.shape[1]}")
+        if set(JOINT_NAMES).issubset(names):
+            return "smpl24", names
+        if set(LEGACY_BVH_NAMES).issubset(names):
+            return "bvh23", names
+        raise ValueError(f"unrecognized joint_names protocol: {names}")
+    if arr.shape[1] == len(JOINT_NAMES):
+        return "smpl24", tuple(JOINT_NAMES)
+    if arr.shape[1] == len(LEGACY_BVH_NAMES):
+        return "bvh23", tuple(LEGACY_BVH_NAMES)
+    raise ValueError(
+        f"cannot infer motion protocol from J={arr.shape[1]}; include joint_names"
+    )
+
+
+def array_from_file(path: Path) -> tuple[np.ndarray, np.ndarray | None, tuple[str, ...], str]:
     if path.suffix.lower() == ".bvh":
-        return bvh_joints(path), None
+        return bvh_joints(path), None, tuple(LEGACY_BVH_NAMES), "bvh23"
     if path.suffix.lower() == ".npz":
+        with np.load(path, allow_pickle=True) as probe:
+            if ({"poses", "trans"}.issubset(probe.files)
+                    or {"root_orient", "pose_body", "trans"}.issubset(probe.files)):
+                motion = load_motion(path)
+                return motion["joints"], None, tuple(motion["names"]), "smpl24"
         data = np.load(path, allow_pickle=False)
         keys = list(data.keys())
         candidates = ("joint_xyz_world", "joints_world", "pred_joints", "joints", "xyz", "pose")
@@ -123,21 +183,57 @@ def array_from_file(path: Path) -> tuple[np.ndarray, np.ndarray | None]:
             raise ValueError(f"no joint array in {path}; keys={keys}")
         arr = np.asarray(data[key])
         mask = np.asarray(data["valid_mask"]).reshape(-1) if "valid_mask" in data else None
-        return arr, mask
+        names = _decode_names(data["joint_names"]) if "joint_names" in data else None
+        protocol, names = _infer_protocol(arr, names)
+        return arr, mask, names, protocol
     obj = np.load(path, allow_pickle=True)
     if isinstance(obj, np.ndarray):
-        return obj, None
+        protocol, names = _infer_protocol(obj, None)
+        return obj, None, names, protocol
     if isinstance(obj, dict):
         for key in ("joint_xyz_world", "joints_world", "pred_joints", "joints", "xyz"):
             if key in obj:
-                return np.asarray(obj[key]), np.asarray(obj.get("valid_mask")).reshape(-1) if "valid_mask" in obj else None
+                arr = np.asarray(obj[key])
+                names_in = _decode_names(obj["joint_names"]) if "joint_names" in obj else None
+                protocol, names = _infer_protocol(arr, names_in)
+                mask = np.asarray(obj.get("valid_mask")).reshape(-1) if "valid_mask" in obj else None
+                return arr, mask, names, protocol
     raise ValueError(f"unsupported prediction object: {path}")
 
 
-def find_prediction(root: Path, session_id: str, pattern: str | None = None) -> Path | None:
+def select_common_joints(joints: np.ndarray, names: tuple[str, ...], protocol: str) -> np.ndarray:
+    """Select the fixed semantic intersection; never align protocols by index."""
+    mapping = SMPL_COMMON_NAMES if protocol == "smpl24" else BVH_COMMON_NAMES
+    index = {name: i for i, name in enumerate(names)}
+    missing = [mapping[key] for key in COMMON_JOINTS if mapping[key] not in index]
+    if missing:
+        raise ValueError(f"{protocol} missing common joints: {missing}")
+    return np.asarray(joints)[:, [index[mapping[key]] for key in COMMON_JOINTS], :]
+
+
+def protocol_gt(row: dict[str, str], protocol: str) -> tuple[np.ndarray, tuple[str, ...]]:
+    if protocol == "bvh23":
+        path = resolve_repo_path(row["bvh_path"], ROOT)
+        return bvh_joints(path, row), tuple(LEGACY_BVH_NAMES)
+    if protocol == "smpl24":
+        path = resolve_repo_path(row["smpl_path"], ROOT)
+        n = int(float(row["n_frames"]))
+        fps = float(row.get("target_fps") or 40.0)
+        query_t = (float(row["visual_start_s"])
+                   + np.arange(n, dtype=np.float64) / fps
+                   - float(row["offset_s"]))
+        motion = load_motion(path, query_t=query_t)
+        return motion["joints"], tuple(motion["names"])
+    raise ValueError(f"unsupported protocol {protocol!r}")
+
+
+def find_prediction(root: Path, session_id: str, pattern: str | None = None, config_id: str | None = None) -> Path | None:
     if pattern:
-        candidate = root / pattern.format(session_id=session_id)
-        if candidate.is_file():
+        try:
+            candidate = root / pattern.format(session_id=session_id, config_id=config_id)
+        except (KeyError, IndexError):
+            candidate = None
+        if candidate is not None and candidate.is_file():
             return candidate
     for ext in (".npz", ".npy", ".bvh"):
         exact = root / f"{session_id}{ext}"
@@ -161,8 +257,8 @@ def expand_requested_models(results_root: Path, modals: list[str], config_ids: l
                 models.append({
                     "name": f"AnySole/{model_dir}/{config_id}",
                     "variant": config_id,
-                    "prediction_root": str(root / "predictions" / "eval_bvh"),
-                    "pattern": f"{{session_id}}_{config_id}.bvh",
+                    "prediction_root": str(root / "predictions" / "eval_motion"),
+                    "pattern": f"{{session_id}}_{config_id}.npz",
                     "checkpoint": str(root / "checkpoints" / "ckpt_last.pt"),
                     "modal": modal,
                     "contact_method": contact_method,
@@ -187,14 +283,18 @@ def discover_models(results_root: Path) -> list[dict[str, str]]:
             continue
         rel = model_root.relative_to(results_root)
         name = "/".join(rel.parts)
+        # Archived BVH-era results live under *_backup dirs; leave them out of
+        # the automatic sweep (list them explicitly via --models-config).
+        if any("backup" in part.lower() for part in rel.parts):
+            continue
         prediction_root = model_root / "predictions"
         # MotionPRO/Step2Motion may keep predictions at the model family root.
         if not prediction_root.is_dir():
             prediction_root = model_root
         pattern = None
         if "AnySole" in rel.parts:
-            prediction_root = model_root / "predictions" / "eval_bvh"
-            pattern = "{session_id}*.bvh"
+            prediction_root = model_root / "predictions" / "eval_motion"
+            pattern = "{session_id}*.npz"
         found.append({"name": name, "variant": rel.parts[-1], "prediction_root": str(prediction_root), "pattern": pattern or "", "checkpoint": str(model_root / "checkpoints")})
     # Keep only the deepest model directories, avoiding AnySole parent duplicates.
     def is_relative_to(path: Path, parent: Path) -> bool:
@@ -378,19 +478,27 @@ def main() -> int:
         name, root = model["name"], resolve_repo_path(model["prediction_root"], ROOT)
         model_rows = []
         for row in manifest:
-            sid = row["session_id"]; pred_path = find_prediction(root, sid, model.get("pattern")); base = {"model": name, "variant": model.get("variant", ""), "run_name": model.get("run_name", root.name), "session_id": sid, "subject_id": row.get("subject_id", ""), "action": row.get("action", ""), "split": args.split, "status": "ok", "reason": ""}
+            sid = row["session_id"]
+            pred_path = find_prediction(root, sid, model.get("pattern"), config_id=model.get("config_id"))
+            base = {"model": name, "variant": model.get("variant", ""), "run_name": model.get("run_name", root.name), "session_id": sid, "subject_id": row.get("subject_id", ""), "action": row.get("action", ""), "split": args.split, "protocol": "", "joint_set": "common19", "status": "ok", "reason": ""}
             try:
                 if pred_path is None: raise FileNotFoundError(f"no prediction under {root}")
-                gt_path = resolve_repo_path(row["bvh_path"], ROOT); pred, pred_mask = array_from_file(pred_path); gt = bvh_joints(gt_path, row)
-                if pred.ndim != 3 or pred.shape[1:] != (23, 3): raise ValueError(f"expected (T,23,3), got {pred.shape}")
-                keep = valid_mask(row, min(len(pred), len(gt))); keep &= pred_mask[:len(keep)].astype(bool) if pred_mask is not None else True
+                pred, pred_mask, pred_names, protocol = array_from_file(pred_path)
+                gt, gt_names = protocol_gt(row, protocol)
+                pred = select_common_joints(pred, pred_names, protocol)
+                gt = select_common_joints(gt, gt_names, protocol)
+                base["protocol"] = protocol
+                n_eval = min(len(pred), len(gt), len(pred_mask) if pred_mask is not None else max(len(pred), len(gt)))
+                keep = valid_mask(row, n_eval)
+                if pred_mask is not None:
+                    keep &= pred_mask[:n_eval].astype(bool)
                 vals = metrics(pred, gt, keep, args.fps); base.update(vals); base["prediction"] = str(pred_path)
             except Exception as exc:
                 base.update({"status": "missing", "reason": str(exc), "n_valid_frames": 0}); base.update({k: float("nan") for k in METRICS})
             details.append(base); model_rows.append(base)
         s = aggregate(model_rows); s.update({"model": name, "variant": model.get("variant", ""), "run_name": model.get("run_name", root.name), "n_sessions": sum(r["status"] == "ok" for r in model_rows), "split_sha256": sha256(args.manifest), "manifest_sha256": sha256(args.manifest), "eval_fps": args.fps, "checkpoint": model.get("checkpoint", "")})
         summaries.append(s)
-    detail_fields = ["model", "variant", "run_name", "session_id", "subject_id", "action", "split", "n_valid_frames", *METRICS, "status", "reason", "prediction"]
+    detail_fields = ["model", "variant", "run_name", "session_id", "subject_id", "action", "split", "protocol", "joint_set", "n_valid_frames", *METRICS, "status", "reason", "prediction"]
     summary_fields = ["model", *METRICS]
     for filename, fields, rows in (("comparison_per_session.csv", detail_fields, details), ("comparison_summary.csv", summary_fields, summaries)):
         with (args.out_dir / filename).open("w", encoding="utf-8", newline="") as f:
@@ -398,6 +506,7 @@ def main() -> int:
     (args.out_dir / "evaluation.log").write_text(
         f"split={args.split}\nsessions={len(manifest)}\nmodels={len(configs.get('models', configs))}\n"
         f"modal={','.join(modals)}\ncontact_method={','.join(contact_methods)}\nconfig_id={','.join(config_ids)}\n"
+        f"joint_set=common19\nprotocol_rule=native-protocol GT; explicit semantic-name mapping\n"
         + "".join(f"checkpoint[{row['model']}]={row['checkpoint']}\n" for row in summaries),
         encoding="utf-8",
     )

@@ -4,7 +4,7 @@ this a per-step mandatory probe (E3 reference ≈ 85 mm MPJPE); when a step
 improves, the ridge ceiling should move with it.
 
 ridge F (512 per frame = the two fused tokens of each frame, the test12 口径)
--> pose_gt (138), fitted on the train split under VT conditioning, evaluated
+-> native SMPL-24 pose_gt (144), fitted on the train split under VT conditioning, evaluated
 on the requested split with each window's GT trajectory.  Reports MPJPE,
 PA-MPJPE (per-frame Procrustes, eval 口径), per-part MPJPE (9 parts +
 upper/lower/ankle-foot/hands) and the raw L_pose MSE.
@@ -70,7 +70,7 @@ def ridge_apply(W: torch.Tensor, X: torch.Tensor, device: torch.device) -> torch
 
 
 def collect_f(model, dataset, device: torch.device, batch_size: int) -> tuple:
-    """(F per frame (N, 512), pose_gt per frame (N, 138)) under VT conditioning.
+    """(F per frame, native SMPL-24 pose_gt) under VT conditioning.
 
     The 512 = 2 fused tokens x 256 dims, the test12_stage_probes 口径: F is
     [v_fused(20) | t_fused(20)], so per frame there are exactly two tokens.
@@ -104,8 +104,7 @@ def collect_f(model, dataset, device: torch.device, batch_size: int) -> tuple:
 
 
 def mpjpe_table(pose_pred: torch.Tensor, dataset, device: torch.device, batch_size: int) -> tuple:
-    """Per-frame MPJPE (mm, 23 joints) on the split with GT trajectories ->
-    (per-joint err (N, 23), pa_err (N, 23))."""
+    """Per-frame MPJPE (mm, 24 joints) on the split with GT trajectories."""
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
                         num_workers=4, collate_fn=collate_windows)
     err_list, pa_list = [], []
@@ -143,7 +142,9 @@ def main(argv=None) -> int:
             session_ids=(load_split_ids(Path(config["split_csv"]),
                                         {"val": "val", "test": "test"}[args.split])
                          if mode in ("eval", "test") else None),
-            contact_method=contact_method, no_imu=no_imu,
+            contact_method=contact_method,
+            tactile_input=str(saved.get("tactile_input", "raw108")),
+            no_imu=no_imu,
             v_input=str(saved.get("v_input", "hrnet")),
             f2_repr=bool(saved.get("f2_repr", False)),
         )

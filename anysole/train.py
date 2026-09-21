@@ -20,7 +20,20 @@ from anysole.data.dataset import (
 from anysole.diffusion import GaussianDiffusion
 from anysole.losses import compute_losses
 from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_NAMES, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2
-from anysole.types import CONFIG_PROBS, CONFIG_T, CONFIG_V, GAIT_ROOT, POSE_DIM, T_S2M_DIM, anysole_model_dir, assert_batch_shapes
+from anysole.types import (
+    CONFIG_PROBS,
+    CONFIG_T,
+    CONFIG_V,
+    FOOT_JOINTS,
+    GAIT_ROOT,
+    JOINT_PROTOCOL_CHECKSUM,
+    MOTION_PROTOCOL,
+    N_JOINTS,
+    POSE_DIM,
+    T_S2M_DIM,
+    anysole_model_dir,
+    assert_batch_shapes,
+)
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.geometry import f2_to_world, fk_pose6d
 from anysole.losses import soft_contact_from_keypoints
@@ -32,14 +45,18 @@ DEFAULT_CONFIG = {
     "dropout": 0.1,
     "tw": 20,
     "batch_size": 256,
-    "lr": 1.0e-3,
+    # Native SMPL-24 reinitializes the pose/traj heads when warm-starting a
+    # BVH-23 checkpoint.  A real-batch F4 fixed-batch probe showed 1e-3
+    # increases full MPJPE even with 20-step warmup; 1e-4 is the verified
+    # stable starting rate for this protocol.
+    "lr": 1.0e-4,
     "epochs": 200,
     "num_workers": 4,
     "diffusion_train_steps": 1000,
     "diffusion_sample_steps": 50,
     "pose_layers": 6,
     # ---- E6.x 系列开关（默认值保持既有行为；E3 基础用 noise_scaled=false +
-    # lr_schedule=constant，详见 model_fix_note/E6x_series_plan.md）----
+    # lr_schedule=constant，详见 model_fix_note/archived/E6x_series_plan.md）----
     "pose_repr": "6d",          # E6.1: "pos" = 根局部位置表示
     "stride": None,             # E6.3: 训练窗 stride（None = 非重叠）
     "lambda_pose_vel": 0.0,     # E6.2: 帧间平滑损失权重（0 = 关闭）
@@ -66,7 +83,6 @@ DEFAULT_CONFIG = {
     "out_dir": "/data/fangyuxuan/projects/gait/AnySole/outputs/v1",
     "use_insole_drift": False,
     "contact_method": "tactile_abs",
-    "mocap_format": "smpl",
     "smpl_roots": ["/data/lizhe/projects/Tactile/Mocap/0804", "/data/lizhe/projects/Tactile/Mocap/0807", "/data/lizhe/projects/Tactile/Mocap/0808", "/data/lizhe/projects/Tactile/Mocap/0810"],
     "modal": MODEL_ANYSOLEV1,
     "template_path": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/calibration/insole_templates.json",
@@ -197,22 +213,94 @@ def init_from_checkpoint(model, path: Path, drop_prefixes=()) -> None:
     head's ``query`` replaces the V1 ``proj_*``/``timestep_token`` (skipped
     by the shape/name rule), while encoders/fusion/traj/aux transfer as-is.
     """
-    src = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(src, dict) or "model" not in src:
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(checkpoint, dict) or "model" not in checkpoint:
         raise ValueError("--init-from checkpoint has no 'model' state dict: %s" % path)
-    src = src["model"]
+    src = checkpoint["model"]
+    src_pose_dim = int(getattr(src.get("pose_head.pose_mean"), "shape", (0,))[0])
+    src_config = checkpoint.get("config", {}) if isinstance(checkpoint.get("config", {}), dict) else {}
+    src_joints = int(src_config.get("motion_n_joints", src_pose_dim // 6 if src_pose_dim else 0))
+    src_protocol = str(src_config.get("motion_protocol", ""))
+    src_checksum = str(src_config.get("joint_protocol_checksum", ""))
+    protocol_mismatch = (
+        src_pose_dim != POSE_DIM
+        or src_joints != N_JOINTS
+        or src_protocol != MOTION_PROTOCOL
+        or src_checksum != JOINT_PROTOCOL_CHECKSUM
+    )
+    effective_drop = tuple(drop_prefixes)
+    if protocol_mismatch:
+        # A motion head from another/unknown protocol is not merely a tensor
+        # with a possibly different width: joint order, parent tree, body/leg
+        # grouping and trajectory target are semantic state.  In particular,
+        # early 24/144 SMPL migration checkpoints used a wrong collar parent
+        # tree and therefore must not pass this gate on shape alone.
+        # Shape-only loading would still copy most decoder and trajectory
+        # tensors and silently retain that language.  Transfer only the
+        # protocol-independent encoders/fusion/auxiliary heads.
+        effective_drop += ("pose_head.", "traj_head.")
+        print("=" * 79)
+        reason = []
+        if src_pose_dim != POSE_DIM or src_joints != N_JOINTS:
+            reason.append("shape=%d-joint/%dD" % (src_joints, src_pose_dim))
+        if src_protocol != MOTION_PROTOCOL:
+            reason.append("motion_protocol=%r" % src_protocol)
+        if src_checksum != JOINT_PROTOCOL_CHECKSUM:
+            reason.append("joint-tree checksum=%s" % (src_checksum or "missing"))
+        print("WARNING: --init-from uses a legacy or unknown motion protocol (%s)." %
+              ", ".join(reason))
+        print("         Protocol-specific pose query/decoder/output/stats and traj_head.* are reinitialized")
+        print("         for SMPL-24/144D; shared embeddings plus encoder/fusion/aux may transfer.")
+        print("=" * 79)
     dst = model.state_dict()
     loaded, skipped = [], []
     for key, value in src.items():
-        if any(key.startswith(p) for p in drop_prefixes) or key not in dst or dst[key].shape != value.shape:
+        if any(key.startswith(p) for p in effective_drop) or key not in dst or dst[key].shape != value.shape:
             skipped.append(key)
             continue
         dst[key] = value.to(dst[key].dtype)
         loaded.append(key)
     model.load_state_dict(dst)
+    pose_skipped = [key for key in skipped if key.startswith("pose_head.")]
+    if pose_skipped and not protocol_mismatch:
+        print("WARNING: %d pose-head tensors were reinitialized because their name/shape did not match."
+              % len(pose_skipped))
     print("init-from %s: %d/%d keys copied%s" % (
         path, len(loaded), len(dst),
         " (skipped: %s)" % ", ".join(skipped) if skipped else ""))
+
+
+def warn_legacy_output_checkpoint(out_dir: Path) -> None:
+    """Warn when a run directory contains a non-current motion checkpoint."""
+    candidates = [Path(out_dir) / "ckpt_last.pt", Path(out_dir) / "ckpt_best.pt"]
+    legacy = []
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            old = torch.load(candidate, map_location="cpu", weights_only=False)
+            state = old.get("model", {}) if isinstance(old, dict) else {}
+            dim = int(getattr(state.get("pose_head.pose_mean"), "shape", (0,))[0])
+            cfg = old.get("config", {}) if isinstance(old, dict) else {}
+            joints = int(cfg.get("motion_n_joints", dim // 6 if dim else 0))
+            protocol = str(cfg.get("motion_protocol", ""))
+            checksum = str(cfg.get("joint_protocol_checksum", ""))
+            if (dim != POSE_DIM or joints != N_JOINTS
+                    or protocol != MOTION_PROTOCOL
+                    or checksum != JOINT_PROTOCOL_CHECKSUM):
+                legacy.append(
+                    "%s (%d joints/%dD, protocol=%r, tree=%s)"
+                    % (candidate.name, joints, dim, protocol, checksum[:12] or "missing")
+                )
+        except Exception as exc:
+            print("WARNING: could not inspect existing output checkpoint %s: %s" % (candidate, exc))
+    if legacy:
+        print("=" * 79)
+        print("WARNING: output directory contains legacy checkpoints: %s" % ", ".join(legacy))
+        print("         They are not resumable/evaluable under the current SMPL-24 joint tree")
+        print("         and will be replaced by this run.")
+        print("         Until the first new checkpoint is saved, do not treat this directory as a new result.")
+        print("=" * 79)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -279,7 +367,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="E6.6a: tactile encoder input. raw108 = cat([T_raw, T_phys]) (E3); "
         "s2m50 = Step2Motion-口径 50-dim channel (16 pooled pressure + synthesized "
-        "IMU + force + CoP, anysole/data/tactile_s2m.py). Saved into the checkpoint.",
+        "IMU + force + CoP). The historical IMU is derived from the directly exported "
+        "BVH-23/ToeBase motion, never from the SMPL target. Saved into the checkpoint.",
     )
     parser.add_argument(
         "--t-encoder",
@@ -319,11 +408,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "Saved into the checkpoint.",
     )
     parser.add_argument(
-        "--mocap-format", choices=("smpl", "bvh"), default=None,
-        help="Ground-truth motion source. smpl (default) reads motion_neutral_smpl.npz; "
-        "bvh preserves the legacy Skeleton3 baseline path. Saved into the checkpoint.",
-    )
-    parser.add_argument(
         "--f2-repr",
         action="store_true",
         default=None,
@@ -338,7 +422,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         choices=(3, 9),
         type=int,
         default=None,
-        help="V3-2: pose-head query granularity. 3 = 23 joint queries in body/"
+        help="V3-2: pose-head query granularity. 3 = SMPL-24 joint queries in body/"
         "left/right groups (F0b baseline); 9 = one query + one unembed head "
         "per part (PART_JOINTS, fix_plan_v3.md §V3-2). Saved into the checkpoint.",
     )
@@ -452,11 +536,11 @@ def _evaluate(model, diffusion, loader, config, device):
                 gt_trans = batch["trans_gt"] + anchor
                 n = bsz
                 if pos_mode:
-                    # E6.1: compare in the metric space directly (22 joints,
+                    # E6.1: compare in the metric space directly (23 joints,
                     # root-local; root covered by root_ate below).
                     err = torch.linalg.vector_norm(
-                        pred_pose.reshape(bsz, -1, 22, 3)
-                        - batch["pose_gt_pos"].reshape(bsz, -1, 22, 3),
+                        pred_pose.reshape(bsz, -1, N_JOINTS - 1, 3)
+                        - batch["pose_gt_pos"].reshape(bsz, -1, N_JOINTS - 1, 3),
                         dim=-1,
                     )
                     totals["mpjpe"] += float(err.mean().item()) * n * 1000.0
@@ -486,8 +570,8 @@ def _evaluate(model, diffusion, loader, config, device):
                     out0 = model(v_feat, t_raw, t_phys, pose_in, zero, cid, batch.get("session_id"), T_s2m=t_s2m, **v_kw)
                     if pos_mode:
                         err0 = torch.linalg.vector_norm(
-                            out0["x0_hat"].reshape(bsz, -1, 22, 3)
-                            - batch["pose_gt_pos"].reshape(bsz, -1, 22, 3),
+                            out0["x0_hat"].reshape(bsz, -1, N_JOINTS - 1, 3)
+                            - batch["pose_gt_pos"].reshape(bsz, -1, N_JOINTS - 1, 3),
                             dim=-1,
                         )
                         tau0_mpjpe = float(err0.mean().item()) * 1000.0
@@ -499,24 +583,34 @@ def _evaluate(model, diffusion, loader, config, device):
                 gt_rel = gt_trans - gt_trans[:, :1]
                 totals["root_ate"] += float(torch.linalg.vector_norm(pred_rel - gt_rel, dim=-1).mean().item()) * n
                 if not pos_mode:
-                    pred_contact = soft_contact_from_keypoints(pred_kp) > 0.5
+                    pred_contact = soft_contact_from_keypoints(pred_kp, batch["floor_y"]) > 0.5
                     gt_contact = batch["contact_gt"] > 0.5
                     tp = (pred_contact & gt_contact).sum().item()
                     fp = (pred_contact & ~gt_contact).sum().item()
                     fn = (~pred_contact & gt_contact).sum().item()
-                    totals.setdefault("tp", 0); totals.setdefault("fp", 0); totals.setdefault("fn", 0)
-                    totals["tp"] += tp; totals["fp"] += fp; totals["fn"] += fn
-                    foot = pred_kp[:, :, (17, 18, 21, 22), :][:, :, :, [0, 2]]
-                    # Keypoints are meters; report horizontal contact speed in cm/s.
-                    speed = torch.linalg.vector_norm(foot[:, 1:] - foot[:, :-1], dim=-1).mean(dim=-1) * 40.0 * 100.0
-                    contact_frames = pred_contact[:, 1:].any(dim=-1)
-                    slide = speed[contact_frames]
+                    tn = (~pred_contact & ~gt_contact).sum().item()
+                    totals.setdefault("tp", 0); totals.setdefault("fp", 0); totals.setdefault("fn", 0); totals.setdefault("tn", 0)
+                    totals["tp"] += tp; totals["fp"] += fp; totals["fn"] += fn; totals["tn"] += tn
+                    foot = pred_kp[:, :, FOOT_JOINTS, :][:, :, :, [0, 2]]
+                    # Keypoints are meters; report horizontal contact displacement
+                    # in mm/frame, matching eval_protocol.py.  Each foot is masked
+                    # by its own contact state.
+                    # Each foot is masked by its own contact state. The old
+                    # any-foot mask averaged the fast swing foot into the
+                    # stationary stance foot and over-reported sliding.
+                    speed = torch.linalg.vector_norm(foot[:, 1:] - foot[:, :-1], dim=-1) * 1000.0
+                    slide = speed[pred_contact[:, 1:]]
                     if slide.numel():
-                        totals["foot_slide"] += float(slide.mean().item()) * n
+                        totals.setdefault("foot_slide_sum", 0.0)
+                        totals.setdefault("foot_slide_n", 0)
+                        totals["foot_slide_sum"] += float(slide.sum().item())
+                        totals["foot_slide_n"] += int(slide.numel())
                 totals["n"] += n
             count = max(totals["n"], 1)
             p = totals.get("tp", 0) / max(totals.get("tp", 0) + totals.get("fp", 0), 1)
             r = totals.get("tp", 0) / max(totals.get("tp", 0) + totals.get("fn", 0), 1)
+            air_recall = totals.get("tn", 0) / max(totals.get("tn", 0) + totals.get("fp", 0), 1)
+            balanced_acc = 0.5 * (r + air_recall)
             if regress_mode:
                 # F0b: no denoising chain — the direct regression output is
                 # both the final prediction and the "clean-input" value.
@@ -524,7 +618,10 @@ def _evaluate(model, diffusion, loader, config, device):
             result.update({f"val/mpjpe/{config_name}": totals["mpjpe"] / count,
                            f"val/root_ate/{config_name}": totals["root_ate"] / count,
                            f"val/contact_f1/{config_name}": 2 * p * r / max(p + r, 1e-8),
-                           f"val/foot_slide/{config_name}": totals["foot_slide"] / count,
+                           f"val/contact_recall/{config_name}": r,
+                           f"val/air_recall/{config_name}": air_recall,
+                           f"val/contact_balanced_acc/{config_name}": balanced_acc,
+                           f"val/foot_slide/{config_name}": totals.get("foot_slide_sum", 0.0) / max(totals.get("foot_slide_n", 0), 1),
                            f"val/tau0_mpjpe/{config_name}": tau0_mpjpe})
     result["val/gap_mpjpe_dropT"] = result["val/mpjpe/V"] - result["val/mpjpe/VT"]
     result["val/gap_mpjpe_dropV"] = result["val/mpjpe/T"] - result["val/mpjpe/VT"]
@@ -610,8 +707,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["t_encoder"] = args.t_encoder
     if args.v_input is not None:
         config["v_input"] = args.v_input
-    if args.mocap_format is not None:
-        config["mocap_format"] = args.mocap_format
     if args.f2_repr:
         config["f2_repr"] = True
     if args.pose_parts is not None:
@@ -629,6 +724,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         value = getattr(args, key)
         if value is not None:
             config[key] = float(value)
+    config["motion_protocol"] = MOTION_PROTOCOL
+    config["motion_n_joints"] = int(N_JOINTS)
+    config["motion_pose_dim"] = int(POSE_DIM)
+    config["joint_protocol_checksum"] = JOINT_PROTOCOL_CHECKSUM
 
     try:
         dataset = AnySoleDataset(
@@ -640,10 +739,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             session_ids=session_ids,
             contact_method=str(config["contact_method"]),
             stride=config.get("stride"),
+            tactile_input=str(config.get("tactile_input", "raw108")),
             no_imu=bool(config.get("no_imu", False)),
             v_input=str(config.get("v_input", "hrnet")),
             f2_repr=bool(config.get("f2_repr", False)),
-            mocap_format=str(config.get("mocap_format", "smpl")),
             smpl_roots=config.get("smpl_roots"),
         )
     except FileNotFoundError as exc:
@@ -668,7 +767,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), mocap_format=str(config.get("mocap_format", "smpl")), smpl_roots=config.get("smpl_roots"))
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:
@@ -743,6 +842,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             tactile_input=str(config.get("tactile_input", "raw108")),
             tactile_direct=bool(config.get("tactile_direct", False)),
             no_imu=bool(config.get("no_imu", False)),
+            v_input=str(config.get("v_input", "hrnet")),
+            t_encoder=str(config.get("t_encoder", "linear")),
+            f2_repr=bool(config.get("f2_repr", False)),
             **model_kw,
         ).to(device)
     if args.init_from is not None:
@@ -798,6 +900,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))
     out_dir = Path(config["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
+    warn_legacy_output_checkpoint(out_dir)
 
     # V3 structural steps (fix_plan_v3 §2.2): linear LR warmup over the first
     # lr_warmup_frac of the total planned steps, multiplying the epoch cosine
@@ -876,7 +979,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if model.noise_scaled:
                     noise = noise * model.pose_head.pose_std.view(1, 1, -1)
                 x_tau = diffusion.q_sample(pose_target, tau, noise=noise)
-                out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id, batch.get("session_id"), T_s2m=t_s2m)
+                out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id,
+                            batch.get("session_id"), T_s2m=t_s2m, **v_kw)
             losses = compute_losses(out, batch, config_id, config)
 
             finite = torch.isfinite(losses["loss"]) and torch.isfinite(out["F"]).all()
@@ -1015,12 +1119,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         wandb_run.finish()
     try:
         from anysole.eval import main as eval_main
-        # Training-time auto-eval stays lean: metrics only, no BVH export and
-        # no F0a protocol pass (run eval again later to refresh
-        # predictions/eval_bvh and the fseries protocol JSON).
+        # Training-time auto-eval stays lean: metrics only and no protocol pass.
         eval_main(["--config", str(args.config), "--ckpt", str(out_dir / "ckpt_last.pt"),
                    "--modal", modal, "--split", "test", "--device", str(device),
-                   "--contact-method", str(config["contact_method"]), "--no-write-bvh",
+                   "--contact-method", str(config["contact_method"]), "--no-write-motion",
                    "--no-protocol"])
     except Exception as exc:
         print("automatic test evaluation failed: %s" % exc)

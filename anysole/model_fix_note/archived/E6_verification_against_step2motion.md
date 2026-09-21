@@ -1,7 +1,10 @@
+> **已归档（2026-09-20）**：细节留档，不再维护。当前状态与结论见
+> ../model_fix_note.md，当前基座命令见 ../command_manual.md。
+
 # E6: 对照 Step2Motion 实测核验（2026-09-16）
 
 > 对 E5 checkpoint（epoch 887, E5_sched200）与 Step2Motion gait_model 的 head/采样器/续写
-> 做了代码级对照实验。探针：`z_note/probe_sampler_continuation.py`、
+> 做了代码级对照实验。探针：`z_note/probes/probe_sampler_continuation.py`、
 > `probe_continuation_fullval.py`、`probe_head_generation_floor.py`、`probe_warmstart.py`。
 > 结论：**采样器与 schedule 不是主因（修正 E5 笔记的归因）；head 的高 τ 行为 + 6D 表示 +
 > 窗口结构才是。** Step2Motion 的优势 = 位置空间扩散 + 100 帧 stride-1 训练 + 续写推理 +

@@ -1,4 +1,4 @@
-"""Test7: mean-pose inference — feed mean/GT poses into the model, export BVHs.
+"""Test7: mean-pose inference — feed mean/GT poses into the model, export SMPL.
 
 Goal: decide whether the model output moves with its pose input and where it
 lands relative to GT.  Uses the trained checkpoint (default
@@ -17,7 +17,7 @@ shows how much the output follows the input pose; ddim_mean500 vs ddim_gt500
 shows how much the sampled output depends on the init pose.
 
 Outputs under results_display/Test7_mean_pose/:
-    <session>/<session>_<arm>.bvh   per-arm BVH (first --export-sessions sessions)
+    <session>/<session>_<arm>.npz   per-arm SMPL archive (first --export-sessions sessions)
     test7_report.json               per-arm MPJPE + pairwise output distances
 
 Usage (run from the repository root):
@@ -45,7 +45,7 @@ for path in (REPO_ROOT, SCRIPT_DIR):
 import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
 
-from anysole.data.bvh_io import pose_trans_to_motion, write_bvh  # noqa: E402
+from anysole.data.smpl_io import pelvis_to_smpl_trans, smpl24_pose6d_to_poses, smpl_archive_metadata  # noqa: E402
 from anysole.data.dataset import AnySoleDataset, collate_windows  # noqa: E402
 from anysole.diffusion import GaussianDiffusion  # noqa: E402
 from anysole.eval import _load_model  # noqa: E402
@@ -72,7 +72,7 @@ def ddim_from(diffusion, model, cond: dict, x_init: torch.Tensor, tau_start: int
     batch_size = x.shape[0]
     for i, t in enumerate(ordered):
         tau = torch.full((batch_size,), int(t), device=device, dtype=torch.long)
-        out = model(cond["V_feat"], cond["T_raw"], cond["T_phys"], x, tau, cond["config_id"], cond.get("session_id"))
+        out = model(cond["V_feat"], cond["T_raw"], cond["T_phys"], x, tau, cond["config_id"], cond.get("session_id"), V_hmr=cond.get("V_hmr"))
         if int(t) == 0:
             return out["x0_hat"]
         tau_prev = torch.full((batch_size,), int(ordered[i + 1]), device=device, dtype=torch.long)
@@ -121,7 +121,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mean-pose", type=str, default=str(cli_common.DISPLAY_ROOT / "Test6_dataset_check" / "mean_pose.npz"),
                         help="Train mean pose cache (auto-computed when missing).")
     parser.add_argument("--limit-sessions", type=int, default=0, help="Cap the number of sessions (0 = all).")
-    parser.add_argument("--export-sessions", type=int, default=4, help="First N sessions get BVH exports (0 = all).")
+    parser.add_argument("--export-sessions", type=int, default=4, help="First N sessions get SMPL NPZ exports (0 = all).")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--sample-steps", type=int, default=None)
     parser.add_argument("--init-tau", type=int, default=500, help="Noise level for the mean/GT-init DDIM arms.")
@@ -158,6 +158,10 @@ def main() -> int:
         window_length=int(config["tw"]),
         session_ids=session_ids,
         contact_method=contact_method,
+        tactile_input=str(ckpt_config.get("tactile_input", "raw108")),
+        no_imu=bool(ckpt_config.get("no_imu", False)),
+        v_input=str(ckpt_config.get("v_input", config.get("v_input", "hrnet"))),
+        v_hmr_model=str(ckpt_config.get("v_hmr_model", config.get("v_hmr_model", "gvhmr"))),
     )
     loader = DataLoader(
         dataset,
@@ -167,9 +171,13 @@ def main() -> int:
         collate_fn=collate_windows,
         pin_memory=device.type == "cuda",
     )
+    beta_by_session = {
+        session["session_id"]: np.asarray(session.get("betas", np.zeros(10)), dtype=np.float32)
+        for session in dataset.sessions
+    }
 
     mean_pose_np, _ = ensure_mean_pose(args.mean_pose, config, contact_method)
-    mean_pose = torch.from_numpy(mean_pose_np).float().to(device)  # (23, 6)
+    mean_pose = torch.from_numpy(mean_pose_np).float().to(device)  # (24, 6)
 
     arm_sums = {arm: {"mpjpe": 0.0, "n": 0} for arm in ARMS}
     pair_sums = {"%s__%s" % (a, b): 0.0 for a, b in combinations(ARMS, 2)}
@@ -183,7 +191,9 @@ def main() -> int:
             cid = torch.full((bsz,), CONFIG_VT, device=device, dtype=torch.long)
             v_feat, t_raw, t_phys = condition_inputs(batch, cid)
             sid = raw_batch["session_id"]
-            cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys, "config_id": cid, "session_id": sid}
+            cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
+                    "config_id": cid, "session_id": sid, "V_hmr": batch.get("V_hmr")}
+            v_kw = {"V_hmr": batch.get("V_hmr")}
             zero = torch.zeros(bsz, device=device, dtype=torch.long)
             anchor = batch["trans_anchor"][:, None, :]
             mean_x = mean_pose.reshape(1, 1, POSE_DIM).expand(bsz, int(config["tw"]), POSE_DIM)
@@ -192,7 +202,7 @@ def main() -> int:
             trans_world = {}
             # tau=0 clean-input arms.
             for arm, x_in in (("tau0_mean", mean_x), ("tau0_gt", batch["pose_gt"])):
-                out = model(v_feat, t_raw, t_phys, x_in, zero, cid, sid)
+                out = model(v_feat, t_raw, t_phys, x_in, zero, cid, sid, **v_kw)
                 poses[arm] = out["x0_hat"]
                 trans_world[arm] = out["trans_hat"] + anchor
             # Standard DDIM from noise (same path as eval.py VT2M).
@@ -204,14 +214,14 @@ def main() -> int:
                 eta=0.0,
                 device=device,
             )
-            out = model(v_feat, t_raw, t_phys, pred, zero, cid, sid)
+            out = model(v_feat, t_raw, t_phys, pred, zero, cid, sid, **v_kw)
             poses["ddim_noise"] = pred
             trans_world["ddim_noise"] = out["trans_hat"] + anchor
             # DDIM initialized from a half-noised mean / GT pose.
             for arm, x0 in (("ddim_mean500", mean_x), ("ddim_gt500", batch["pose_gt"])):
                 tau_init = torch.full((bsz,), int(args.init_tau), device=device, dtype=torch.long)
                 pred = ddim_from(diffusion, model, cond, diffusion.q_sample(x0, tau_init), int(args.init_tau), sample_steps, device)
-                out = model(v_feat, t_raw, t_phys, pred, zero, cid, sid)
+                out = model(v_feat, t_raw, t_phys, pred, zero, cid, sid, **v_kw)
                 poses[arm] = pred
                 trans_world[arm] = out["trans_hat"] + anchor
 
@@ -231,7 +241,6 @@ def main() -> int:
                                 int(raw_batch["frame_start"][i]),
                                 poses[arm][i].cpu().numpy(),
                                 trans_world[arm][i].cpu().numpy(),
-                                raw_batch["hierarchy"][i],
                             )
                         )
             for a, b in combinations(ARMS, 2):
@@ -249,8 +258,16 @@ def main() -> int:
         windows.sort(key=lambda item: item[0])
         pose = np.concatenate([item[1] for item in windows], axis=0)
         trans = np.concatenate([item[2] for item in windows], axis=0)
-        output_path = out_dir / session_id / ("%s_%s.bvh" % (session_id, arm))
-        write_bvh(output_path, windows[0][3], pose_trans_to_motion(pose, trans), 1.0 / FPS)
+        output_path = out_dir / session_id / ("%s_%s.npz" % (session_id, arm))
+        smpl_poses = smpl24_pose6d_to_poses(pose)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        betas = beta_by_session.get(session_id, np.zeros((10,), dtype=np.float32))
+        np.savez_compressed(output_path, poses=smpl_poses, trans=pelvis_to_smpl_trans(pose, trans, betas),
+                            root_orient=smpl_poses[:, :3], pose_body=smpl_poses[:, 3:],
+                            betas=betas,
+                            mocap_frame_rate=np.asarray(FPS, dtype=np.float32),
+                            source_frame_times_s=np.arange(len(pose), dtype=np.float32) / FPS,
+                            **smpl_archive_metadata())
         log.info("wrote {}", output_path)
 
     report = {

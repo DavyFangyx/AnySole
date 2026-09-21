@@ -1,3 +1,6 @@
+> **已归档（2026-09-20）**：细节留档，不再维护。当前状态与结论见
+> ../model_fix_note.md，当前基座命令见 ../command_manual.md。
+
 # AnySole Fixv2 快速通道（F0 修订版）
 
 > **本版是对 `fix_plan_v2.md` 的修订**：只改 §2 实验规范（判据/预算/种子）、§3 的 F0 一节
@@ -52,7 +55,7 @@
 ### 步骤 A：单测（约 5 分钟，训练前必跑）
 
 ```bash
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/smoke_f0b_regress.py --device cuda:6
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/smoke_f0b_regress.py --device cuda:6
 ```
 
 warm-start 通路已另行验证（2026-09-18）：E3 ckpt → AnySoleModelV2 复制 254/255 个
@@ -137,7 +140,7 @@ CUDA_VISIBLE_DEVICES=6 python results_display/script/visualize_anysole.py \
 
 | 阶段 | 内容 | 说明 |
 |---|---|---|
-| 立即（无训练/后台） | F2a 表示往返单测（`z_note/smoke_f2_roundtrip.py`）、F1 GVHMR 离线提取 + 零训练基线探针、S2M-P 重训、步骤 B 协议 | 全部不占主线 GPU；先把"免费信息"拿到手 |
+| 立即（无训练/后台） | F2a 表示往返单测（`z_note/probes/smoke_f2_roundtrip.py`）、F1 GVHMR 离线提取 + 零训练基线探针、S2M-P 重训、步骤 B 协议 | 全部不占主线 GPU；先把"免费信息"拿到手 |
 | 主线串行 | F0b′（步骤 C/D）→ F1 与 F4a 并行筛选 → F2a/F2b → F3 → F5（先 nogate 后 part9）→ F6 → F7（起开鲁棒集）→ F8 → F9 | F1/F4a 都是输入侧独立改动，各自对照 F0b′ 基线即可并行；F5 依赖 F1+F4 的流结构，串行；F8a/F9a 仍按 v2 §4 提前并行 |
 | 收尾 | 最终链条 from-scratch 全预算 1 次 | 正式基准，替换 warm-start 口径 |
 

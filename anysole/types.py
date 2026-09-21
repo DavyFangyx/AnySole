@@ -1,5 +1,13 @@
-"""Frozen V1 tensor shapes, joint layout, and path defaults."""
+"""AnySole tensor shapes and the canonical SMPL-24 motion protocol.
 
+AnySole consumes and predicts the standard SMPL-24 kinematic tree.  BVH is a
+Step2Motion/legacy interchange format and is deliberately *not* represented by
+these constants.  Keeping the protocol here prevents an input adapter from
+silently changing the model's joint language again.
+"""
+
+import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -38,6 +46,7 @@ CLIFF_CKPT = (
     / "cliff_ckpt"
     / "hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt"
 )
+SMPL_MODEL_PATH = WORKSPACE_ROOT / "dependencies" / "smpl" / "SMPL_NEUTRAL.pkl"
 
 
 def anysole_model_dir(modal: str, contact_method: str) -> Path:
@@ -62,21 +71,21 @@ HRNET_YAML = (
 TW = 20
 FPS = 40.0
 D_MODEL = 256
-N_JOINTS = 23
-POSE_DIM = N_JOINTS * 6  # 138
-# E6.1: root-local 3D positions of the 22 non-root joints (meters, session
+N_JOINTS = 24
+POSE_DIM = N_JOINTS * 6
+# E6.1: root-local 3D positions of the 23 non-root joints (meters, session
 # frame-0 orientation). The position representation removes the FK error
 # amplification of the 6D space (verified per-joint profile: hip 60mm ->
 # hand 398mm in 6D vs no amplification in positions).
-POSE_POS_DIM = 22 * 3  # 66
+POSE_POS_DIM = (N_JOINTS - 1) * 3
 # F2a: heading-frame trajectory target: [psi_dot (rad/s), v_hx, v_hz
 # (heading-frame horizontal velocity, m/s), h (world root height, m)].
 TRAJ_F2_DIM = 4
 T_RAW_DIM = 96
 T_PHYS_DIM = 12
 # E6.6a: Step2Motion-口径触觉通道（每脚 25 维 = 16 压力池化[heel8 toes8] +
-# 合成 IMU acc3/gyro3 + 总力1 + CoP2）。IMU 由 GT BVH 脚部运动学合成
-# （anysole/data/tactile_s2m.py），与 Step2Motion 的 gait 导出同口径。
+# 合成 IMU acc3/gyro3 + 总力1 + CoP2）。IMU 沿用 Step2Motion 的原始
+# BVH-23/ToeBase 运动学链生成；它不是 AnySole 的 SMPL-24 motion target。
 T_S2M_DIM = 50
 # --no-imu：真删 IMU 通道后的布局（每脚 19 维 = 16 压力池化 + 总力1 + CoP2）。
 # 数据侧不合成、模型侧不编码 IMU；编码器按 38 维分组（无 IMU 组）。
@@ -95,66 +104,53 @@ FUSE_LEN = 40  # V(20) + combined T(20)
 N_CONTACT = 2
 
 JOINT_NAMES = (
-    "Hips",
-    "Spine",
-    "Spine1",
-    "Spine2",
-    "Spine3",
-    "Neck",
-    "Head",
-    "LeftShoulder",
-    "LeftArm",
-    "LeftForeArm",
-    "LeftHand",
-    "RightShoulder",
-    "RightArm",
-    "RightForeArm",
-    "RightHand",
-    "LeftUpLeg",
-    "LeftLeg",
-    "LeftFoot",
-    "LeftToeBase",
-    "RightUpLeg",
-    "RightLeg",
-    "RightFoot",
-    "RightToeBase",
+    "pelvis", "left_hip", "right_hip", "spine1", "left_knee", "right_knee",
+    "spine2", "left_ankle", "right_ankle", "spine3", "left_foot", "right_foot",
+    "neck", "left_collar", "right_collar", "head", "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow", "left_wrist", "right_wrist", "left_hand", "right_hand",
 )
 
-# BVH parent indices matching Skeleton3 hierarchy.
+# Standard SMPL-24 kinematic tree (the order used by poses/root_orient in the
+# mocap NPZ files).  This is the only parent tree used by AnySole geometry.
 JOINT_PARENTS = (
-    -1,
-    0,
-    1,
-    2,
-    3,
-    4,
-    5,
-    4,
-    7,
-    8,
-    9,
-    4,
-    11,
-    12,
-    13,
-    0,
-    15,
-    16,
-    17,
-    0,
-    19,
-    20,
-    21,
+    -1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+    9, 9, 9, 12, 13, 14, 16, 17, 18, 19, 20, 21,
 )
+MOTION_PROTOCOL = "smpl24"
+JOINT_PROTOCOL_CHECKSUM = hashlib.sha256(json.dumps(
+    {"names": list(JOINT_NAMES), "parents": list(JOINT_PARENTS)},
+    ensure_ascii=False,
+    separators=(",", ":"),
+).encode()).hexdigest()
 
-LEFT_LEG_JOINTS = (15, 16, 17, 18)
-RIGHT_LEG_JOINTS = (19, 20, 21, 22)
+LEFT_LEG_JOINTS = (1, 4, 7, 10)
+RIGHT_LEG_JOINTS = (2, 5, 8, 11)
 BODY_JOINTS = tuple(i for i in range(N_JOINTS) if i not in LEFT_LEG_JOINTS + RIGHT_LEG_JOINTS)
 
-# V3-2: frozen 9-part grouping of the BVH-23 joints (fix_plan_v2.md §0.2,
-# fix_plan_v3.md §V3-2).  Each part is a contiguous joint run; the PART order
-# is the decoder query order, NOT joint order (r_leg/r_foot are swapped).
-# Joints 1-22 are parent-local rotations, so part grouping is representation-
+# Semantic metric groups and angle triples.  Keep these next to the canonical
+# SMPL names/tree: evaluation code must not carry unexplained integer triples
+# copied from the legacy Skeleton3/BVH-23 ordering.
+LOWER_JOINTS = LEFT_LEG_JOINTS + RIGHT_LEG_JOINTS
+UPPER_JOINTS = tuple(i for i in range(N_JOINTS) if i not in LOWER_JOINTS)
+ANKLE_FOOT_JOINTS = (
+    JOINT_NAMES.index("left_ankle"), JOINT_NAMES.index("right_ankle"),
+    JOINT_NAMES.index("left_foot"), JOINT_NAMES.index("right_foot"),
+)
+HAND_JOINTS = (
+    JOINT_NAMES.index("left_hand"), JOINT_NAMES.index("right_hand"),
+)
+ELBOW_ANGLE_TRIPLES = (
+    tuple(JOINT_NAMES.index(name) for name in ("left_shoulder", "left_elbow", "left_wrist")),
+    tuple(JOINT_NAMES.index(name) for name in ("right_shoulder", "right_elbow", "right_wrist")),
+)
+KNEE_ANGLE_TRIPLES = (
+    tuple(JOINT_NAMES.index(name) for name in ("left_hip", "left_knee", "left_ankle")),
+    tuple(JOINT_NAMES.index(name) for name in ("right_hip", "right_knee", "right_ankle")),
+)
+
+# V3-2: 9-part grouping of SMPL-24 joints.  The part order is the decoder
+# query order, not the numerical SMPL order.
+# Non-root joints are parent-local rotations, so part grouping is representation-
 # safe.  Single source of truth — eval_protocol.py and the archived
 # part_decoder.py import from here.
 PART_NAMES = (
@@ -162,20 +158,23 @@ PART_NAMES = (
     "l_leg", "r_leg", "l_foot", "r_foot",
 )
 PART_JOINTS = (
-    (0,), (1, 2, 3, 4), (5, 6), (7, 8, 9, 10), (11, 12, 13, 14),
-    (15, 16), (19, 20), (17, 18), (21, 22),
+    (0,), (3, 6, 9), (12, 15), (13, 16, 18, 20, 22),
+    (14, 17, 19, 21, 23), (1, 4), (2, 5), (7, 10), (8, 11),
 )
 N_PARTS = len(PART_NAMES)
 
-LEFT_LEG_SLICE = slice(LEFT_LEG_JOINTS[0] * 6, (LEFT_LEG_JOINTS[-1] + 1) * 6)  # 90:114
-RIGHT_LEG_SLICE = slice(RIGHT_LEG_JOINTS[0] * 6, (RIGHT_LEG_JOINTS[-1] + 1) * 6)  # 114:138
-BODY_SLICE = slice(0, LEFT_LEG_JOINTS[0] * 6)  # 0:90
+LEFT_LEG_SLICE = tuple(j for j in LEFT_LEG_JOINTS)
+RIGHT_LEG_SLICE = tuple(j for j in RIGHT_LEG_JOINTS)
+BODY_SLICE = tuple(j for j in BODY_JOINTS)
 
-LEFT_FOOT_JOINT = JOINT_NAMES.index("LeftFoot")
-LEFT_TOE_JOINT = JOINT_NAMES.index("LeftToeBase")
-RIGHT_FOOT_JOINT = JOINT_NAMES.index("RightFoot")
-RIGHT_TOE_JOINT = JOINT_NAMES.index("RightToeBase")
-FOOT_JOINTS = (LEFT_FOOT_JOINT, LEFT_TOE_JOINT, RIGHT_FOOT_JOINT, RIGHT_TOE_JOINT)
+# SMPL has ankle and foot joints but no separate toe-base joint.  Use the
+# terminal foot joints for both the foot-height and tactile-foot direction;
+# never invent a 25th joint or silently map back to Skeleton3.
+LEFT_FOOT_JOINT = JOINT_NAMES.index("left_foot")
+LEFT_TOE_JOINT = LEFT_FOOT_JOINT
+RIGHT_FOOT_JOINT = JOINT_NAMES.index("right_foot")
+RIGHT_TOE_JOINT = RIGHT_FOOT_JOINT
+FOOT_JOINTS = (LEFT_FOOT_JOINT, RIGHT_FOOT_JOINT)
 
 CONFIG_VT = 0
 CONFIG_V = 1
@@ -211,6 +210,7 @@ BATCH_SHAPES = {
     "psi_anchor": (),  # F2a optional scalar
     "root_rot_init": (3, 3),
     "kp_gt": (TW, N_JOINTS, 3),
+    "floor_y": (),  # per-session native-SMPL ground reference (meters)
     "contact_gt": (TW, N_CONTACT),
     "offsets": (N_JOINTS, 3),
     "parents": (N_JOINTS,),

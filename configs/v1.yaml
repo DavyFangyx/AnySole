@@ -1,6 +1,6 @@
 # AnySole V1 配置（E3 基础，2026-09-16 起）
 #
-# 基础 = E3_nocontact 训练口径（其输出 BVH 验证良好：脚踝贴地、无踢腿）：
+# 基础 = E3_nocontact 训练口径：
 #   cosine-1000 schedule、噪声不缩放（noise_scaled=false）、恒定 lr、
 #   λ_pose=3.0 / λ_kp=1.0 / λ_con=0.0、sample 50 步。
 #   注意：E4 的"噪声×pose_std"与 E5 的 linear-200 被证实在输出上引入了
@@ -8,7 +8,7 @@
 #   因此本配置保持 E3 口径，不启用这两个改动。
 #
 # E6.x 系列开关（默认全部关闭 = 纯 E3 行为；各实验单点开启，互不依赖，
-# 详见 anysole/model_fix_note/E6x_series_plan.md）：
+# 详见 anysole/model_fix_note/archived/E6x_series_plan.md）：
 #   E6.1: pose_repr: pos + modal: anysolev1_pos（表示切换）
 #   E6.2: lambda_pose_vel / lambda_bone > 0（帧间平滑 + 骨长刚性，pos 模式）
 #   E6.3: tw / stride（窗口长度与训练步长）
@@ -18,7 +18,9 @@ d_model: 256
 dropout: 0.1
 tw: 20
 batch_size: 256
-lr: 1.0e-3
+# Native SMPL-24 F4 preflight: 1e-3 (including 20-step warmup) worsened full
+# MPJPE; 1e-4 reduced both loss and full MPJPE on the same real fixed batch.
+lr: 1.0e-4
 epochs: 800
 num_workers: 4
 diffusion_train_steps: 1000
@@ -53,9 +55,7 @@ cache_root: /data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/AnySole/hrne
 use_insole_drift: false
 modal: anysolev1
 contact_method: joint_and
-# Main AnySole GT source.  Set to "bvh" only for legacy BVH ablations;
-# MotionPRO/other baselines continue to read their BVHs independently.
-mocap_format: smpl
+# AnySole always reads SMPL NPZ. BVH is a Step2Motion-only baseline format.
 smpl_roots:
   - /data/lizhe/projects/Tactile/Mocap/0804
   - /data/lizhe/projects/Tactile/Mocap/0807

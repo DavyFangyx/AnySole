@@ -19,7 +19,7 @@ pairwise output distances across variants ~ 0 -> output is input-independent;
 gradient ratios ~ 0 -> conditioning cannot be learned (dead path).
 
 Outputs under results_display/Test8_input_ablation/:
-    <session>/<session>_<variant>_<arm>.bvh
+    <session>/<session>_<variant>_<arm>.npz
     test8_report.json
 
 Usage (run from the repository root):
@@ -48,7 +48,7 @@ for path in (REPO_ROOT, SCRIPT_DIR):
 import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
 
-from anysole.data.bvh_io import pose_trans_to_motion, write_bvh  # noqa: E402
+from anysole.data.smpl_io import pelvis_to_smpl_trans, smpl24_pose6d_to_poses, smpl_archive_metadata  # noqa: E402
 from anysole.data.dataset import AnySoleDataset, collate_windows  # noqa: E402
 from anysole.diffusion import GaussianDiffusion  # noqa: E402
 from anysole.eval import _load_model  # noqa: E402
@@ -63,8 +63,13 @@ ARMS = ("ddim", "tau0_gt")
 DEFAULT_CKPT = cli_common.RESULTS_ROOT / "AnySole" / "anysolev1_joint_and" / "checkpoints" / "ckpt_last.pt"
 
 
-def build_variants(v_feat, t_raw, t_phys, input_means, device) -> dict:
-    """Return the four conditioning variants as (V_feat, T_raw, T_phys) triples."""
+def build_variants(v_feat, t_raw, t_phys, input_means, device, v_hmr=None) -> dict:
+    """Return variants including the optional GVHMR channel.
+
+    Keeping V_hmr in lock-step with V_feat is essential for hmr_gvhmr
+    checkpoints; passing the real HMR tensor to a zero/shuffle ablation would
+    make that probe report a false conditioning dependency.
+    """
     bsz = v_feat.shape[0]
     zero = (torch.zeros_like(v_feat), torch.zeros_like(t_raw), torch.zeros_like(t_phys))
     mean = tuple(
@@ -72,7 +77,15 @@ def build_variants(v_feat, t_raw, t_phys, input_means, device) -> dict:
         for key in ("V_feat", "T_raw", "T_phys")
     )
     shuffle = (torch.roll(v_feat, shifts=1, dims=0), torch.roll(t_raw, shifts=1, dims=0), torch.roll(t_phys, shifts=1, dims=0))
-    return {"real": (v_feat, t_raw, t_phys), "zero": zero, "mean": mean, "shuffle": shuffle}
+    if v_hmr is None:
+        return {"real": (*((v_feat, t_raw, t_phys)), None),
+                "zero": (*zero, None), "mean": (*mean, None), "shuffle": (*shuffle, None)}
+    h_zero = torch.zeros_like(v_hmr)
+    h_mean = torch.zeros_like(v_hmr)  # no fitted HMR mean cache; zero is explicit
+    h_shuffle = torch.roll(v_hmr, shifts=1, dims=0)
+    return {"real": (v_feat, t_raw, t_phys, v_hmr),
+            "zero": (*zero, h_zero), "mean": (*mean, h_mean),
+            "shuffle": (*shuffle, h_shuffle)}
 
 
 def gradient_check(model, batch, device) -> dict:
@@ -85,7 +98,7 @@ def gradient_check(model, batch, device) -> dict:
     t_in = batch["T_raw"].clone().requires_grad_(True)
     tp_in = batch["T_phys"].clone().requires_grad_(True)
     with torch.enable_grad():
-        out0 = model(v_in, t_in, tp_in, x_in, zero, cid, batch.get("session_id"))
+        out0 = model(v_in, t_in, tp_in, x_in, zero, cid, batch.get("session_id"), V_hmr=batch.get("V_hmr"))
         loss = F.mse_loss(out0["x0_hat"], batch["pose_gt"])
         grads = torch.autograd.grad(loss, (x_in, v_in, t_in, tp_in), allow_unused=True)
 
@@ -143,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mean-inputs", type=str, default=str(cli_common.DISPLAY_ROOT / "Test6_dataset_check" / "input_means.npz"),
                         help="Train V/T means cache (auto-computed when missing).")
     parser.add_argument("--limit-sessions", type=int, default=0, help="Cap the number of sessions (0 = all).")
-    parser.add_argument("--export-sessions", type=int, default=4, help="First N sessions get BVH exports (0 = all).")
+    parser.add_argument("--export-sessions", type=int, default=4, help="First N sessions get SMPL NPZ exports (0 = all).")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--sample-steps", type=int, default=None)
     parser.add_argument("--device", default="auto")
@@ -179,6 +192,10 @@ def main() -> int:
         window_length=int(config["tw"]),
         session_ids=session_ids,
         contact_method=contact_method,
+        tactile_input=str(ckpt_config.get("tactile_input", "raw108")),
+        no_imu=bool(ckpt_config.get("no_imu", False)),
+        v_input=str(ckpt_config.get("v_input", config.get("v_input", "hrnet"))),
+        v_hmr_model=str(ckpt_config.get("v_hmr_model", config.get("v_hmr_model", "gvhmr"))),
     )
     loader = DataLoader(
         dataset,
@@ -188,6 +205,10 @@ def main() -> int:
         collate_fn=collate_windows,
         pin_memory=device.type == "cuda",
     )
+    beta_by_session = {
+        session["session_id"]: np.asarray(session.get("betas", np.zeros(10)), dtype=np.float32)
+        for session in dataset.sessions
+    }
     input_means = ensure_input_means(args.mean_inputs, config, contact_method)
 
     sums = {arm: {variant: {"mpjpe": 0.0, "n": 0} for variant in VARIANTS} for arm in ARMS}
@@ -210,13 +231,14 @@ def main() -> int:
             zero = torch.zeros(bsz, device=device, dtype=torch.long)
             anchor = batch["trans_anchor"][:, None, :]
             v_feat, t_raw, t_phys = condition_inputs(batch, cid)
-            variants = build_variants(v_feat, t_raw, t_phys, input_means, device)
+            variants = build_variants(v_feat, t_raw, t_phys, input_means, device, batch.get("V_hmr"))
 
             kps = {arm: {} for arm in ARMS}
             poses = {arm: {} for arm in ARMS}
             trans_world = {arm: {} for arm in ARMS}
-            for variant, (v, t, tp) in variants.items():
-                cond = {"V_feat": v, "T_raw": t, "T_phys": tp, "config_id": cid, "session_id": sid}
+            for variant, (v, t, tp, v_hmr) in variants.items():
+                cond = {"V_feat": v, "T_raw": t, "T_phys": tp,
+                        "config_id": cid, "session_id": sid, "V_hmr": v_hmr}
                 pred = diffusion.ddim_sample_loop(
                     model,
                     tau_related_kwargs=cond,
@@ -225,11 +247,11 @@ def main() -> int:
                     eta=0.0,
                     device=device,
                 )
-                out = model(v, t, tp, pred, zero, cid, sid)
+                out = model(v, t, tp, pred, zero, cid, sid, V_hmr=v_hmr)
                 poses["ddim"][variant] = pred
                 trans_world["ddim"][variant] = out["trans_hat"] + anchor
                 kps["ddim"][variant] = fk_pose6d(pred, trans_world["ddim"][variant], batch["offsets"], batch["parents"])
-                out0 = model(v, t, tp, batch["pose_gt"], zero, cid, sid)
+                out0 = model(v, t, tp, batch["pose_gt"], zero, cid, sid, V_hmr=v_hmr)
                 poses["tau0_gt"][variant] = out0["x0_hat"]
                 trans_world["tau0_gt"][variant] = out0["trans_hat"] + anchor
                 kps["tau0_gt"][variant] = fk_pose6d(out0["x0_hat"], trans_world["tau0_gt"][variant], batch["offsets"], batch["parents"])
@@ -246,7 +268,6 @@ def main() -> int:
                                     int(raw_batch["frame_start"][i]),
                                     poses[arm][variant][i].cpu().numpy(),
                                     trans_world[arm][variant][i].cpu().numpy(),
-                                    raw_batch["hierarchy"][i],
                                 )
                             )
                 for a, b in combinations(VARIANTS, 2):
@@ -273,8 +294,16 @@ def main() -> int:
         windows.sort(key=lambda item: item[0])
         pose = np.concatenate([item[1] for item in windows], axis=0)
         trans = np.concatenate([item[2] for item in windows], axis=0)
-        output_path = out_dir / session_id / ("%s_%s_%s.bvh" % (session_id, variant, arm))
-        write_bvh(output_path, windows[0][3], pose_trans_to_motion(pose, trans), 1.0 / FPS)
+        output_path = out_dir / session_id / ("%s_%s_%s.npz" % (session_id, variant, arm))
+        smpl_poses = smpl24_pose6d_to_poses(pose)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        betas = beta_by_session.get(session_id, np.zeros((10,), dtype=np.float32))
+        np.savez_compressed(output_path, poses=smpl_poses, trans=pelvis_to_smpl_trans(pose, trans, betas),
+                            root_orient=smpl_poses[:, :3], pose_body=smpl_poses[:, 3:],
+                            betas=betas,
+                            mocap_frame_rate=np.asarray(FPS, dtype=np.float32),
+                            source_frame_times_s=np.arange(len(pose), dtype=np.float32) / FPS,
+                            **smpl_archive_metadata())
         log.info("wrote {}", output_path)
     (out_dir / "test8_report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     log.info("wrote {}", out_dir / "test8_report.json")

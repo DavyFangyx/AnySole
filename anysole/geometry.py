@@ -1,4 +1,4 @@
-"""YXZ euler, 6D rotation, and BVH forward kinematics."""
+"""SMPL-24 6D rotation/FK plus isolated legacy-BVH conversion helpers."""
 
 from __future__ import annotations
 
@@ -6,30 +6,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.spatial.transform import Rotation as SciRotation
-from scipy.spatial.transform import Slerp
 
 from anysole.types import FPS, N_JOINTS
 
-# F2a: the BVH Hips local forward axis (verified 2026-09-18 by
-# z_note/smoke_f2_roundtrip.py: heading-frame lateral/forward velocity ratio
-# and speed correlation favor +Z on every informative session).
+# F2a: the standard SMPL pelvis local forward axis.  Dataset-level locomotion
+# statistics in z_note/probes/smoke_f2_roundtrip.py also favor +Z over +X.  Movement
+# direction is only a sanity check (side-steps and turns are valid); the exact
+# heading-removal identity is tested separately.
 FORWARD_AXIS = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-
-
-def _as_rotmat_np(eulers_deg: np.ndarray) -> np.ndarray:
-    flat = np.asarray(eulers_deg, dtype=np.float64).reshape(-1, 3)
-    mats = SciRotation.from_euler("YXZ", flat, degrees=True).as_matrix()
-    return mats.reshape(*eulers_deg.shape[:-1], 3, 3)
-
-
-def euler_yxz_to_rotmat(eulers_deg: np.ndarray) -> np.ndarray:
-    return _as_rotmat_np(eulers_deg).astype(np.float64)
-
-
-def rotmat_to_euler_yxz(rotmats: np.ndarray) -> np.ndarray:
-    flat = np.asarray(rotmats, dtype=np.float64).reshape(-1, 3, 3)
-    eulers = SciRotation.from_matrix(flat).as_euler("YXZ", degrees=True)
-    return eulers.reshape(*rotmats.shape[:-2], 3).astype(np.float64)
 
 
 def rotmat_to_6d_np(rotmats: np.ndarray) -> np.ndarray:
@@ -48,14 +32,6 @@ def rot6d_to_rotmat_np(d6: np.ndarray) -> np.ndarray:
     return np.stack((b1, b2, b3), axis=-1)
 
 
-def euler_yxz_to_6d(eulers_deg: np.ndarray) -> np.ndarray:
-    return rotmat_to_6d_np(euler_yxz_to_rotmat(eulers_deg))
-
-
-def rot6d_to_euler_yxz(d6: np.ndarray) -> np.ndarray:
-    return rotmat_to_euler_yxz(rot6d_to_rotmat_np(d6))
-
-
 def rotmat_to_6d(rotmats: torch.Tensor) -> torch.Tensor:
     return torch.cat([rotmats[..., :, 0], rotmats[..., :, 1]], dim=-1)
 
@@ -68,32 +44,6 @@ def rot6d_to_rotmat(d6: torch.Tensor) -> torch.Tensor:
     b2 = F.normalize(b2, dim=-1)
     b3 = torch.cross(b1, b2, dim=-1)
     return torch.stack((b1, b2, b3), dim=-1)
-
-
-def slerp_eulers(src_t: np.ndarray, eulers_deg: np.ndarray, query_t: np.ndarray) -> np.ndarray:
-    """SLERP YXZ euler sequences. `eulers_deg` is (T, J, 3)."""
-    n_src, n_joints, _ = eulers_deg.shape
-    out = np.empty((query_t.size, n_joints, 3), dtype=np.float64)
-    clipped = np.clip(query_t, src_t[0], src_t[-1])
-    if n_src == 1:
-        out[:] = eulers_deg[0]
-        return out
-    for joint_i in range(n_joints):
-        key_rots = SciRotation.from_euler("YXZ", eulers_deg[:, joint_i], degrees=True)
-        slerp = Slerp(src_t, key_rots)
-        out[:, joint_i] = slerp(clipped).as_euler("YXZ", degrees=True)
-    return out
-
-
-def resample_bvh_motion(motion: np.ndarray, frame_time: float, query_t: np.ndarray) -> np.ndarray:
-    """Resample 72-channel BVH motion: linear XYZ, SLERP all 23 joints."""
-    src_t = np.arange(motion.shape[0], dtype=np.float64) * frame_time
-    out = np.empty((query_t.size, motion.shape[1]), dtype=np.float64)
-    for col in range(3):
-        out[:, col] = np.interp(query_t, src_t, motion[:, col])
-    eulers = motion[:, 3:].reshape(motion.shape[0], N_JOINTS, 3)
-    out[:, 3:] = slerp_eulers(src_t, eulers, query_t).reshape(query_t.size, N_JOINTS * 3)
-    return out
 
 
 def fk_local_np(local_rotmats: np.ndarray, offsets: np.ndarray, parents: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -129,7 +79,7 @@ def fk_pose6d(
     offsets: torch.Tensor,
     parents: torch.Tensor,
 ) -> torch.Tensor:
-    """Batched FK. pose_6d (B, T, 138), trans (B, T, 3), offsets (B, 23, 3) or (23, 3)."""
+    """Batched FK for native SMPL-24 pose_6d and per-sequence offsets."""
     batch, time, _ = pose_6d.shape
     rotmats = rot6d_to_rotmat(pose_6d.reshape(batch, time, N_JOINTS, 6))
     if offsets.ndim == 2:
@@ -197,7 +147,7 @@ def positions_to_6d_np(
     offsets: np.ndarray,
     parents: np.ndarray,
 ) -> np.ndarray:
-    """Root-local positions (..., 66) -> 6D rotations (..., 138), rest-frame.
+    """Root-local positions (..., 23*3) -> native SMPL-24 6D rotations.
 
     E6.1 inverse FK (Step2Motion skeleton_pos_to_rot in matrix form): each
     joint's rotation comes from its children's directions - the first child
@@ -208,19 +158,22 @@ def positions_to_6d_np(
     """
     lead = positions.shape[:-1]
     n_frames = int(np.prod(lead)) if lead else 1
+    non_root = N_JOINTS - 1
+    if positions.shape[-1] != non_root * 3:
+        raise ValueError("positions must contain %d non-root SMPL joints" % non_root)
     pos = np.concatenate(
-        [np.zeros(lead + (1, 3), dtype=np.float64), positions.reshape(*lead, 22, 3)],
+        [np.zeros(lead + (1, 3), dtype=np.float64), positions.reshape(*lead, non_root, 3)],
         axis=-2,
-    ).reshape(n_frames, 23, 3)
+    ).reshape(n_frames, N_JOINTS, 3)
     offsets = np.asarray(offsets, dtype=np.float64)
     parents = [int(p) for p in np.asarray(parents).reshape(-1)]
-    children: list = [[] for _ in range(23)]
+    children: list = [[] for _ in range(N_JOINTS)]
     for i, parent in enumerate(parents):
         if i > 0:
             children[parent].append(i)
 
-    rotmats = np.tile(np.eye(3), (n_frames, 23, 1, 1))
-    for j in range(23):
+    rotmats = np.tile(np.eye(3), (n_frames, N_JOINTS, 1, 1))
+    for j in range(N_JOINTS):
         if not children[j]:
             continue
         gpos, grot = fk_local_np(rotmats, offsets, np.asarray(parents))
@@ -244,7 +197,7 @@ def positions_to_6d_np(
 # ---------------------------------------------------------------------------
 # F2a: heading/tilt representation (fix_plan_v2.md §F2a).
 #
-# pose_f2 (..., 138): joints 1-22 keep the parent-local 6D rotations; the root
+# pose_f2 (..., POSE_DIM): non-root joints keep parent-local 6D rotations; root
 #   6D is the TILT = R_yaw(psi)^T @ R_root_world — the world root rotation
 #   with the ground heading removed.
 # traj_f2 (..., 4): [psi_dot (rad/s), v_hx, v_hz (heading-frame horizontal
@@ -257,8 +210,8 @@ def positions_to_6d_np(
 def yaw_rotmat_np(psi: np.ndarray) -> np.ndarray:
     """(...,) heading angles -> (..., 3, 3) rotation about the world Y axis.
 
-    World (x, y, z), y up; a yaw of psi rotates the heading frame's +x axis
-    to world direction (cos psi, 0, sin psi).
+    World (x, y, z), y up; SMPL faces local +Z.  A yaw of psi rotates that
+    local +Z axis to world direction (sin psi, 0, cos psi).
     """
     psi = np.asarray(psi, dtype=np.float64)
     c, s = np.cos(psi), np.sin(psi)
@@ -286,20 +239,23 @@ def yaw_rotmat(psi: torch.Tensor) -> torch.Tensor:
 def heading_from_root_np(root_rotmats: np.ndarray) -> np.ndarray:
     """(T, 3, 3) world root rotations -> ground heading psi (T,), unwrapped.
 
-    psi = atan2(fz, fx) of the world FORWARD_AXIS; np.unwrap removes the
-    +/-pi jumps so frame differences are physical.
+    For SMPL's local +Z forward and the Y-rotation convention used by
+    ``yaw_rotmat_np``, psi = atan2(fx, fz).  This exact pairing is essential:
+    swapping the arguments still makes encode/decode round-trip, but leaves
+    twice the original yaw in the purported "tilt" pose.  ``np.unwrap``
+    removes the +/-pi jumps so frame differences are physical.
     """
     forward = np.einsum("tij,j->ti", root_rotmats, FORWARD_AXIS)
-    psi = np.arctan2(forward[:, 2], forward[:, 0])
+    psi = np.arctan2(forward[:, 0], forward[:, 2])
     return np.unwrap(psi)
 
 
 def f2_to_world_np(pose_f2, traj_f2, psi_anchor, trans_anchor):
-    """(T, 138) tilt pose + (T, 4) traj -> (world_pose_6d (T, 138), world_trans (T, 3)).
+    """Tilt pose + trajectory -> world native SMPL-24 pose and translation.
 
     Integrates psi_dot/v_h from the window anchors (heading frame at
     psi_anchor, position at trans_anchor); world height is traj_f2[:, 3]
-    directly.  Joints 1-22 are untouched (yaw-invariant parent-local 6D).
+    directly.  Non-root joints are untouched (yaw-invariant parent-local 6D).
     """
     pose_f2 = np.asarray(pose_f2, dtype=np.float64).reshape(-1, N_JOINTS, 6)
     traj_f2 = np.asarray(traj_f2, dtype=np.float64).reshape(-1, 4)
@@ -326,8 +282,8 @@ def f2_to_world(pose_f2: torch.Tensor, traj_f2: torch.Tensor,
                 psi_anchor: torch.Tensor, trans_anchor: torch.Tensor):
     """Torch twin of f2_to_world_np; batch-aware.
 
-    pose_f2 (B, T, 138), traj_f2 (B, T, 4), psi_anchor (B,), trans_anchor (B, 3).
-    Returns (world_pose (B, T, 138), world_trans (B, T, 3)).
+    pose_f2 (B, T, POSE_DIM), traj_f2 (B, T, 4), psi_anchor (B,), trans_anchor (B, 3).
+    Returns (world_pose (B, T, POSE_DIM), world_trans (B, T, 3)).
     """
     batch, time = pose_f2.shape[0], pose_f2.shape[1]
     pose = pose_f2.reshape(batch, time, N_JOINTS, 6)

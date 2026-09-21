@@ -1,3 +1,6 @@
+> **已归档（2026-09-20）**：细节留档，不再维护。当前状态与结论见
+> ../model_fix_note.md，当前基座命令见 ../command_manual.md。
+
 # fix_plan_v3 实施修改方案（F5 回退 → 起点确认 → V3 分支实现）
 
 > 2026-09-19。本文是 fix_plan_v3.md 的**代码级实施手册**：先外科手术式回退 F5
@@ -55,7 +58,7 @@
 | eval.py:245-246, 254 | _load_model 读 decoder/gate_mode 并传构造 | 删 + F5 ckpt 显式拒绝（§2.3） |
 | infer.py:215-216 | 同上 | 删 + 拒绝 |
 | results_display/script/ridge_probe.py:86 | part9 分支 | 删（回退后 model 无 decoder 属性，死代码） |
-| z_note/smoke_f5_part.py | 检查 4/5 构造 AnySoleModelV2(decoder=part9) | 检查 1-3 保留（PartDecoder 独立构造仍可跑），4/5 删 + 标注归档 |
+| z_note/probes/smoke_f5_part.py | 检查 4/5 构造 AnySoleModelV2(decoder=part9) | 检查 1-3 保留（PartDecoder 独立构造仍可跑），4/5 删 + 标注归档 |
 | losses.py:235 注释 | 提到 F5 part9 冷启动 | 注释改写（守卫本身保留，见 1.2） |
 
 ### 1.2 明确保留（不回退）
@@ -66,7 +69,7 @@
   V3 全部步骤同样受益，防 F5 式 NaN 重演。
 - part_decoder.py 工作区改动（交叉注意力共享 k/v 修复）：随文件保留。
 - f0_command_manual.md / model_fix_note.md 工作区改动、fix_plan_v3.md、
-  f2_f2p4_structure.md、z_note/probe_f4_tactile_path.py：全部保留。
+  f2_f2p4_structure.md、z_note/probes/probe_f4_tactile_path.py：全部保留。
 - F5A/F5B 四个 ckpt：留档不删；回退后对其 eval 报明确错误（§2.3）。
 
 ### 1.3 起点核实（ckpt config 已 dump 验证）
@@ -82,7 +85,7 @@
 - **f6 标签（V3-0 主体已实现）**：results_display/script/contact_methods.py 已注册
   motion_f6 / pressure_f6 / f6_soft（METHODS 表 + _f6_pipeline 自举标定），部分
   session 已落盘 contact_f6_soft.npy。**剩：全量 144 session 生成 + 验收门回填。**
-- 通路探针：z_note/probe_f4_tactile_path.py（正式化即可，§4.1）。
+- 通路探针：z_note/probes/probe_f4_tactile_path.py（正式化即可，§4.1）。
 - dataset.py 已支持 `--contact-method f6_soft`（读 contact_f6_soft.npy 列 6:8，
   软值直通 contact_gt；缺文件时报错提示生成命令）。
 - train.py 已有 loss 级 nonfinite 守卫（L863）；**缺 per-param 梯度检查（§3.3）**。
@@ -157,7 +160,7 @@ if unexpected or not set(missing) <= _MISSING_OK:
 
 ### 3.2 token 量级 smoke 断言
 
-z_note/smoke_token_scale.py（新）：F4a ckpt 前向取 |v_tok|/|t_tok| 均值断言
+z_note/probes/smoke_token_scale.py（新）：F4a ckpt 前向取 |v_tok|/|t_tok| 均值断言
 ∈ [1,100]；断言 encode_stream 输出（修复后）与 forward 输出同量级（比值 ∈
 [0.5,50]）。防"形状对量级错"再过检（F5 根因）。
 
@@ -184,7 +187,7 @@ if not grads_ok:
 
 ## 4. 阶段三：起点正式化
 
-**4.1 通路探针正式化**：复制 z_note/probe_f4_tactile_path.py →
+**4.1 通路探针正式化**：复制 z_note/probes/probe_f4_tactile_path.py →
 results_display/script/tactile_path_probe.py（docstring 指向 z_note 为草稿），
 输出口径保持 v3 §2.3 的 F / v_tok / t_tok1 三行天花板表；加 `--f2-repr` 适配
 （V3-4 起在 F2p4 基座使用；F4a 基座用默认 False）。
@@ -257,7 +260,7 @@ python -m anysole.train --modal anysolev2 --contact-method f6_soft \
 > smoke_v32_parts.py 四查全过（warm-start 312/336 键复制，跳过键 = 预期
 > 9 个形状变化键）；1-epoch 训练冒烟通过（epoch1 冷启动 VT2M ~207mm，
 > 部位头全新属预期，对照 F5 全新建 decoder 的 859mm）。命令手册 =
-> `Fixv3/v3_command_manual.md` §1。
+> `archived/v3_command_manual.md` §1。
 
 - types.py：新增冻结 `PART_NAMES` / `PART_JOINTS`（内容 = eval_protocol.py:69-77
   现定义）；eval_protocol.py 与 part_decoder.py（归档）改 import 自 types.py，
@@ -277,7 +280,7 @@ python -m anysole.train --modal anysolev2 --contact-method f6_soft \
 - 命令 = V3-1 命令去 ds 开关、加 `--pose-parts 9`（contact-method 可回 joint_and，
   本步不动接触监督）。跑完对照 F4a 看结果再定；显著劣化则弃 9 组粒度、V3-3 降级
   在 3 组上做。
-- smoke：z_note/smoke_v32_parts.py——n_parts=3 vs 9 前向形状、散射拼回顺序正确性
+- smoke：z_note/probes/smoke_v32_parts.py——n_parts=3 vs 9 前向形状、散射拼回顺序正确性
   （恒等输入验证）、warm-start 加载 key 报告。
 
 ### 5.3 V3-3 σ 软门控（tag `v33_sigma_gate`；依赖 V3-1、V3-2 都过门）
@@ -309,7 +312,7 @@ FFN
   per-config 门控（恢复 _evaluate 的 gates 统计，作诊断观察）。
 - 跑完看结果：重点看 g_∅/g_T 行为与三配置指标走向（v3 §V3-3 的失败处置思路留作
   参考：g_∅ 不激活→提前 V3-5；σ 塌缩→查 r_p / 调 β）。
-- smoke：z_note/smoke_v33_gate.py——掩码方向正确（V 掩后 e_V 读不出 T 侧信息）、
+- smoke：z_note/probes/smoke_v33_gate.py——掩码方向正确（V 掩后 e_V 读不出 T 侧信息）、
   g 行和 = 1、β-NLL 梯度回传到 σ MLP、σ 固定期行为。
 
 ### 5.4 鲁棒性验证集（V3-0 起可用）

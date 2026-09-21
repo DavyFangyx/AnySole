@@ -23,8 +23,16 @@ from anysole.types import (
 DEFAULT_TRAJ_DELTAS = (2, 4, 8, 19)
 
 
-def soft_contact_from_keypoints(keypoints: torch.Tensor) -> torch.Tensor:
-    """Compute differentiable left/right contact probabilities from world-space joints."""
+def soft_contact_from_keypoints(
+    keypoints: torch.Tensor, floor_y: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Differentiable contact probability using height above session floor.
+
+    ``keypoints`` is ``(B,T,J,3)`` in native SMPL Y-up coordinates.  SMPL
+    foot joints are above the sole and world Y=0 is not a guaranteed floor,
+    so callers using real data must pass the GT-derived per-session
+    ``floor_y``.  ``None`` remains available for isolated synthetic probes.
+    """
     foot_pairs = (
         (LEFT_FOOT_JOINT, LEFT_TOE_JOINT),
         (RIGHT_FOOT_JOINT, RIGHT_TOE_JOINT),
@@ -33,6 +41,15 @@ def soft_contact_from_keypoints(keypoints: torch.Tensor) -> torch.Tensor:
     for joint_ids in foot_pairs:
         foot = keypoints[:, :, joint_ids, :]
         height = foot[..., 1].amin(dim=2)
+        if floor_y is not None:
+            floor = torch.as_tensor(floor_y, device=height.device, dtype=height.dtype)
+            if floor.ndim == 0:
+                floor = floor.view(1, 1)
+            elif floor.ndim == 1:
+                floor = floor[:, None]
+            elif floor.ndim != 2:
+                raise ValueError("floor_y must be scalar, (B,), or (B,1)")
+            height = height - floor
         if foot.shape[1] > 1:
             speed_rest = torch.linalg.vector_norm(foot[:, 1:] - foot[:, :-1], dim=-1).mean(dim=2)
             speed = torch.cat([speed_rest[:, :1], speed_rest], dim=1) * FPS
@@ -49,9 +66,10 @@ def soft_contact_from_pose(
     trans: torch.Tensor,
     offsets: torch.Tensor,
     parents: torch.Tensor,
+    floor_y: torch.Tensor | None = None,
 ) -> torch.Tensor:
     keypoints = fk_pose6d(pose_6d, trans, offsets, parents)
-    return soft_contact_from_keypoints(keypoints)
+    return soft_contact_from_keypoints(keypoints, floor_y=floor_y)
 
 
 def _weight(weights: Mapping[str, float], name: str, default: float) -> float:
@@ -181,7 +199,7 @@ def compute_losses(out, batch, config_id, weights) -> dict:
     # space, so rigid skeleton lengths are a direct constraint; default 0).
     l_bone = l_pose.new_zeros(())
     if pos_mode:
-        pos3 = out["x0_hat"].reshape(*out["x0_hat"].shape[:2], 22, 3)
+        pos3 = out["x0_hat"].reshape(*out["x0_hat"].shape[:2], N_JOINTS - 1, 3)
         par_ids = [int(JOINT_PARENTS[j]) - 1 for j in range(1, N_JOINTS)]
         ppos = torch.zeros_like(pos3)
         for k, p in enumerate(par_ids):
@@ -236,7 +254,7 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         # poses; inf-inf NaN in the soft-contact speed can then feed the BCE).
         # The clamp is belt-and-suspenders for the enabled case.
         if _weight(weights, "lambda_con", 0.1) > 0.0:
-            soft_contact = soft_contact_from_keypoints(pred_kp)
+            soft_contact = soft_contact_from_keypoints(pred_kp, batch["floor_y"])
             soft_contact = soft_contact.nan_to_num(0.0).clamp(1e-7, 1.0 - 1e-7)
             l_con = F.binary_cross_entropy(soft_contact, batch["contact_gt"])
         else:

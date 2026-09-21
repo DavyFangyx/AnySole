@@ -1,27 +1,33 @@
-"""Render AnySole predicted vs GT root trajectories (Test3).
+"""Render predicted vs GT root trajectories (Test3), protocol-agnostic.
 
-Trajectories are read from the ``<session>_<config>_traj.npz`` files written by
-``anysole.eval`` next to the eval BVHs (``results/AnySole/<modal>/predictions/
-eval_bvh/``); they contain the exact ``pred_trans_world`` / ``gt_trans_world``
-arrays the ``traj_ATE`` metric is computed on, so the visualization is always
-consistent with the metrics.  No model inference happens here.
+SMPL-protocol models (AnySole) provide the standard ``<session>_<config>.npz``
+files written by ``anysole.eval`` (``predictions/eval_motion/``); they contain
+the exact ``pred_pelvis_trans`` / ``gt_pelvis_trans`` arrays used by
+``traj_ATE``.  BVH-protocol models (e.g. Step2Motion) provide ``*.bvh`` motion
+files whose root-joint path is the trajectory; their GT is loaded from the
+session's SMPL/BVH motion.  The file format is detected automatically, no
+protocol flag is needed.  No model inference happens here.
 
-The npz arrays are in the raw mocap BVH frame (y-up, meters).  They are
+The npz arrays are in the raw mocap world frame (y-up, meters).  They are
 converted to the same z-up display frame used by the Test1 skeleton panels:
 display ``(x, -z, y)``, i.e. z is vertical and x/y form the ground plane.
 
 Outputs are written below ``results_display/Test3_trajectory/AnySole/<modal>/
-<config>/`` (or the ``ANYSOLE_RESULTSDISPLAY`` override), with gif/mp4/png kept
-in separate folders.
+<config>/`` for AnySole models, and below ``Test3_trajectory/<model>/gen/``
+for baseline models discovered with ``--auto`` (or the
+``ANYSOLE_RESULTSDISPLAY`` override), with gif/mp4/png kept in separate
+folders.
 
 Usage (run from the repository root):
     python results_display/script/visualize_anysole_traj.py
     python results_display/script/visualize_anysole_traj.py --modal anysolev1 --config-id VT2M
+    python results_display/script/visualize_anysole_traj.py --auto
     python results_display/script/visualize_anysole_traj.py --session S7013
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -34,10 +40,12 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
-from visualize_motionpro import (  # noqa: E402
+from motion_io import load_motion, load_session_gt  # noqa: E402
+from render_common import (  # noqa: E402
     INFO_FONT,
     TITLE_FONT,
     draw_text,
+    session_dir,
 )
 
 PRED_ROOT = cli_common.RESULTS_ROOT / "AnySole"
@@ -57,19 +65,79 @@ INK_SECONDARY = "#52514e"
 
 
 def to_display(trans: np.ndarray) -> np.ndarray:
-    """Convert raw BVH y-up meters to the z-up display frame (x, -z, y)."""
+    """Convert motion y-up meters to the z-up display frame (x, -z, y)."""
     t = np.asarray(trans, dtype=np.float64)
     return np.stack((t[:, 0], -t[:, 2], t[:, 1]), axis=1)
 
 
-def load_traj(npz_path: Path) -> tuple[np.ndarray, np.ndarray]:
-    data = np.load(npz_path)
-    pred = to_display(data["pred_trans_world"])
-    gt = to_display(data["gt_trans_world"])
+def load_traj(path: Path, seq_dir: Path | None = None, fps: float = 40.0) -> tuple[np.ndarray, np.ndarray]:
+    """Load pred/GT trajectories, auto-detecting the motion format.
+
+    SMPL NPZ keeps the eval-embedded pelvis trajectories (the exact source of
+    the traj_ATE metric).  BVH-protocol models carry no embedded trajectory:
+    the root-joint path is used as the prediction, and the GT comes from the
+    session's SMPL (BVH fallback) motion.
+    """
+    path = Path(path)
+    if path.suffix.lower() == ".npz":
+        data = np.load(path)
+        pred_key = "pred_pelvis_trans" if "pred_pelvis_trans" in data else (
+            "pred_trans_world" if "pred_trans_world" in data else "trans"
+        )
+        gt_key = "gt_pelvis_trans" if "gt_pelvis_trans" in data else (
+            "gt_trans_world" if "gt_trans_world" in data else "gt_trans"
+        )
+        pred = to_display(data[pred_key])
+        gt = to_display(data[gt_key])
+        n = min(pred.shape[0], gt.shape[0])
+        if pred.shape[0] != gt.shape[0]:
+            log.warning(f"{path.name}: pred {pred.shape[0]} frames vs gt {gt.shape[0]}, using first {n}")
+        return pred[:n], gt[:n]
+    # BVH: load_motion returns z-up display meters for both protocols.
+    pred = load_motion(path)["joints"][:, 0]
+    if seq_dir is None:
+        raise ValueError(f"BVH trajectory rendering needs the session dir for GT: {path}")
+    meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
+    gt = load_session_gt(seq_dir, min(pred.shape[0], int(meta["n_frames"])), fps)["joints"][:, 0]
     n = min(pred.shape[0], gt.shape[0])
-    if pred.shape[0] != gt.shape[0]:
-        log.warning(f"{npz_path.name}: pred {pred.shape[0]} frames vs gt {gt.shape[0]}, using first {n}")
     return pred[:n], gt[:n]
+
+
+def find_traj_file(pred_root: Path, session_id: str, config_id: str) -> Path | None:
+    """Locate one model's motion file for a session, npz (SMPL) before bvh."""
+    if config_id:
+        for cand in (
+            pred_root / "eval_motion" / f"{session_id}_{config_id}.npz",
+            pred_root / "eval_bvh" / f"{session_id}_{config_id}.bvh",
+        ):
+            if cand.is_file():
+                return cand
+    # Baseline layouts (e.g. Step2Motion predictions/<run>/<session>_gen.bvh);
+    # stats/traj sidecars are not motions.
+    matches = sorted(
+        p for p in pred_root.rglob(f"*{session_id}*")
+        if p.suffix.lower() in (".npz", ".bvh")
+        and "_stats" not in p.name and "_traj" not in p.name
+    )
+    return matches[0] if matches else None
+
+
+def discover_baseline_dirs(results_root: Path) -> list[Path]:
+    """Self-contained non-AnySole model dirs under results/ (Test2 口径).
+
+    Archived ``*_backup*`` trees are excluded; AnySole models are addressed
+    through ``--modal``.
+    """
+    found = []
+    for root in sorted(p for p in results_root.rglob("*") if p.is_dir()):
+        if root.name in {"checkpoints", "predictions", "metrics", "logs", "tensorboard"}:
+            continue
+        rel = root.relative_to(results_root)
+        if any("backup" in part.lower() for part in rel.parts) or "AnySole" in rel.parts:
+            continue
+        if (root / "predictions").is_dir():
+            found.append(rel)
+    return found
 
 
 class TrajProjector:
@@ -315,15 +383,16 @@ def render_traj_figure(
     plt.close(fig)
 
 
-def render_session(npz_path: Path, session_id: str, config_id: str, args: argparse.Namespace, session_out: Path):
-    paths = {args.gen: cli_common.media_path(session_out, f"{session_id}_{config_id}_traj", args.gen)}
+def render_session(traj_path: Path, session_id: str, config_id: str, seq_dir: Path | None, args: argparse.Namespace, session_out: Path):
+    stem = f"{session_id}_{config_id}" if config_id else session_id
+    paths = {args.gen: cli_common.media_path(session_out, f"{stem}_traj", args.gen)}
     if not args.no_png:
-        paths["png"] = session_out / "png" / f"{session_id}_{config_id}_traj.png"
+        paths["png"] = session_out / "png" / f"{stem}_traj.png"
     if cli_common.outputs_ready(paths.values()) and not args.force:
         log.info(f"Skip {session_id}_{config_id}: already exists under {session_out}")
         return "skip"
 
-    pred, gt = load_traj(npz_path)
+    pred, gt = load_traj(traj_path, seq_dir, args.fps)
     n = pred.shape[0]
     ate_mm = np.linalg.norm(pred - gt, axis=1) * 1000.0
     ate_mean_mm = float(ate_mm.mean())
@@ -355,15 +424,22 @@ def render_session(npz_path: Path, session_id: str, config_id: str, args: argpar
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Visualize AnySole root trajectories (pred vs GT) as Test3 outputs.")
-    cli_common.add_common_args(parser, modal=True, contact_method=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test3_trajectory" / "AnySole")
+    parser = argparse.ArgumentParser(description="Visualize root trajectories (pred vs GT) as Test3 outputs, SMPL/BVH auto-detected.")
+    cli_common.add_common_args(parser, seq_root=True, modal=True, contact_method=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test3_trajectory" / "AnySole")
     parser.add_argument("--no-png", action="store_true", help="Skip the static per-session figure (not controlled by --gen).")
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Also scan results/ for self-contained non-AnySole model dirs "
+        "(e.g. Step2Motion predictions/<run>/<session>_gen.bvh); *_backup* trees are excluded.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     orig_cwd = os.getcwd()
+    seq_root = Path(cli_common.resolve_path(args.seq_root, orig_cwd))
     split_csv = Path(cli_common.resolve_path(args.split_csv, orig_cwd))
     out_dir = Path(cli_common.resolve_path(args.out_dir, orig_cwd))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -374,24 +450,38 @@ def main() -> int:
     else:
         log.info(f"Sessions from {args.split} split ({len(session_ids)}): {session_ids}")
 
+    # Jobs: (pred_root, session_out_root, config_id); config_id "" = baseline.
+    jobs: list[tuple[Path, Path, str]] = []
     for modal in cli_common.split_csv_arg(args.modal):
         for contact_method in cli_common.split_csv_arg(args.contact_method):
             model_dir = cli_common.anysole_model_dir(modal, contact_method)
             for config_id in cli_common.split_csv_arg(args.config_id):
-                pred_root = PRED_ROOT / model_dir / "predictions" / "eval_bvh"
-                if not pred_root.is_dir():
-                    log.warning(f"No prediction directory for {model_dir}: {pred_root}")
+                jobs.append((PRED_ROOT / model_dir / "predictions", out_dir / model_dir / config_id, config_id))
+    if args.auto:
+        for rel in discover_baseline_dirs(cli_common.RESULTS_ROOT):
+            jobs.append((cli_common.RESULTS_ROOT / rel / "predictions", out_dir.parent / rel / "gen", "gen"))
+            log.info(f"Discovered baseline model: {rel}")
+
+    for pred_root, session_out, config_id in jobs:
+        if not pred_root.is_dir():
+            log.warning(f"No prediction directory: {pred_root}")
+            continue
+        for session_id in session_ids:
+            traj_path = find_traj_file(pred_root, session_id, config_id)
+            if traj_path is None:
+                log.warning(f"Skip {session_out.parent.name}/{session_out.name}/{session_id}: no SMPL/BVH motion file (re-run eval or the baseline)")
+                continue
+            seq_dir = None
+            if traj_path.suffix.lower() == ".bvh":
+                try:
+                    seq_dir = session_dir(seq_root, session_id)
+                except FileNotFoundError as exc:
+                    log.warning(str(exc))
                     continue
-                session_out = out_dir / model_dir / config_id
-                for session_id in session_ids:
-                    npz_path = pred_root / f"{session_id}_{config_id}_traj.npz"
-                    if not npz_path.is_file():
-                        log.warning(f"Skip {model_dir}/{config_id}/{session_id}: no {npz_path.name} (re-run anysole.eval --write-bvh to export)")
-                        continue
-                    try:
-                        render_session(npz_path, session_id, config_id, args, session_out)
-                    except Exception as exc:  # one bad session must not stop the sweep
-                        log.error(f"{session_id}_{config_id}: {exc}")
+            try:
+                render_session(traj_path, session_id, config_id, seq_dir, args, session_out)
+            except Exception as exc:  # one bad session must not stop the sweep
+                log.error(f"{session_id}_{config_id}: {exc}")
     return 0
 
 

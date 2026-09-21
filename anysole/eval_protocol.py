@@ -5,16 +5,15 @@ Complements eval.py: eval.py keeps the frozen per-window metrics JSON
 (``metrics/<split>.json``); this module adds ``metrics/<split>_fseries.json``
 with the F-series protocol numbers, which every step F0..F9 reports:
 
-- 局部姿态: MPJPE / PA-MPJPE per 9 parts (root/torso/headneck/l_arm/r_arm/
-  l_leg/r_leg/l_foot/r_foot), plus upper (1-14) / lower (15-22) / ankle-feet
-  (17,18,21,22) / hands (10,14) aggregates.  PA-MPJPE uses one per-frame
-  similarity Procrustes alignment over all 23 joints (the eval.py 口径) and
+- 局部姿态: MPJPE / PA-MPJPE per 9 native SMPL-24 parts
+  (root/torso/headneck/l_arm/r_arm/l_leg/r_leg/l_foot/r_foot), plus upper/lower,
+  ankle-feet and hands aggregates.  PA-MPJPE uses one per-frame
+  similarity Procrustes alignment over all 24 joints (the eval.py 口径) and
   reads the part errors from the aligned points.
 - 全局: W-MPJPE (160-frame = 4 s segments, first-frame aligned), RTE_norm
   (root trajectory error normalized by the mean GT per-frame displacement
   length), yaw_abs_deg / yaw_drift_deg (root heading error / accumulated
-  drift; the local forward axis +Z or +X is picked from the data, see
-  _pick_forward_axis).
+  drift; native SMPL local +Z is the fixed forward axis).
 - 时序: jitter (probe_jitter 口径: per-joint frame-to-frame displacement,
   mm/帧 @40Hz), accel_err_ms2 (second difference * FPS^2), seam_jump_mm at
   window boundaries (GT frame-to-frame at the same seams as reference).
@@ -55,29 +54,30 @@ from anysole.geometry import f2_to_world, fk_pose6d, rot6d_to_rotmat
 from anysole.losses import soft_contact_from_keypoints
 from anysole.train import condition_inputs, move_batch
 from anysole.types import (
+    ANKLE_FOOT_JOINTS,
     CONFIG_MODE_NAMES,
     CONFIG_V,
     CONFIG_VT,
+    ELBOW_ANGLE_TRIPLES,
     FPS,
     FOOT_JOINTS,
+    HAND_JOINTS,
+    KNEE_ANGLE_TRIPLES,
+    LOWER_JOINTS,
     N_JOINTS,
     PART_JOINTS,
     PART_NAMES,
+    UPPER_JOINTS,
 )
 
-# Re-exported for probe scripts that import the 9-part grouping from here
-# (single source of truth = anysole.types, fix_plan_v3 §V3-2).
-UPPER_JOINTS = tuple(range(1, 15))  # 1-14
-LOWER_JOINTS = tuple(range(15, 23))  # 15-22
-ANKLE_FOOT_JOINTS = (17, 18, 21, 22)
-HAND_JOINTS = (10, 14)
+# The imported groups remain re-exported for existing probe scripts.  Their
+# single source of truth is the named SMPL-24 protocol in anysole.types.
 W_SEGMENT = 160  # W-MPJPE segment: 4 s at 40 Hz
 JOINT_LIMIT_RAD = math.radians(15.0)  # bone angle below this is anatomically impossible
 
 
 def _pa_align(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Per-frame similarity Procrustes alignment (the exact math of
-    eval._pa_error, applied to all 23 joints) -> aligned pred (..., J, 3)."""
+    """Per-frame similarity Procrustes alignment over the native 24 joints."""
     n_joints = pred.shape[-2]
     x = pred.reshape(-1, n_joints, 3)
     y = target.reshape(-1, n_joints, 3)
@@ -105,35 +105,21 @@ def _circ_diff(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 def _root_rotmats(pose: torch.Tensor) -> torch.Tensor:
-    """(T, 138) 6D pose -> world root rotation matrices (T, 3, 3)."""
+    """(T, POSE_DIM) native SMPL pose -> world root rotations."""
     return rot6d_to_rotmat(pose[None].reshape(1, -1, N_JOINTS, 6))[0, :, 0]
 
 
 def _pick_forward_axis(dataset, device: torch.device) -> int:
-    """Choose the local forward axis, +Z (2) or +X (0), that best explains the
-    GT: the winner is the axis whose GT root yaw tracks the GT horizontal
-    velocity heading with the smaller mean circular error.  This keeps the yaw
-    metrics independent of the skeleton's facing convention; F2a settles the
-    axis with a unit test and the protocol stays data-driven until then."""
-    scores = {0: 0.0, 2: 0.0}
-    weights = 0.0
-    with torch.inference_mode():
-        for i in range(len(dataset)):
-            sample = dataset[i]
-            pose = sample["pose_gt"].to(device)
-            trans_gt = sample["trans_gt"].to(device) + sample["trans_anchor"].to(device)
-            R = _root_rotmats(pose)
-            vel = trans_gt[1:] - trans_gt[:-1]
-            if vel.shape[0] == 0:
-                continue
-            head = torch.atan2(vel[:, 0], vel[:, 2])
-            for axis in (0, 2):
-                yaw = torch.atan2(R[1:, :, axis][:, 0], R[1:, :, axis][:, 2])
-                scores[axis] += float(_circ_diff(yaw, head).abs().mean().item()) * vel.shape[0]
-            weights += float(vel.shape[0])
-    if weights <= 0.0:
-        return 2  # no motion anywhere: default to +Z
-    return 2 if scores[2] <= scores[0] else 0
+    """Return the native SMPL local forward axis (+Z).
+
+    Inferring +X/+Z from locomotion is not a valid protocol operation:
+    side-steps need not follow body yaw, and an F2 dataset stores yaw-removed
+    root *tilt* in ``pose_gt`` so the inference can inspect the wrong
+    representation altogether.  The SMPL convention is fixed and checked by
+    ``smoke_f2_roundtrip.py``.  Arguments remain for call-site compatibility.
+    """
+    del dataset, device
+    return 2
 
 
 def _cop_grid(values: torch.Tensor) -> torch.Tensor:
@@ -187,7 +173,7 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     )[0]
 
     # ---- local pose: MPJPE / PA-MPJPE, per part + aggregates ----
-    err = torch.linalg.vector_norm(pred_kp - kp_gt, dim=-1)  # (T, 23)
+    err = torch.linalg.vector_norm(pred_kp - kp_gt, dim=-1)  # (T, 24)
     accum.add("MPJPE", err.mean(dim=-1), 1000.0)
     for pname, joints in zip(PART_NAMES, PART_JOINTS):
         accum.add("MPJPE_part_%s" % pname, err[:, joints].mean(dim=-1), 1000.0)
@@ -250,16 +236,18 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
         accum.add("seam_jump_gt_mm", torch.linalg.vector_norm(kp_gt[seams] - kp_gt[seams - 1], dim=-1), 1000.0)
 
     # ---- contact ----
-    pred_contact = soft_contact_from_keypoints(pred_kp[None])[0] > 0.5  # (T, 2)
+    pred_contact = soft_contact_from_keypoints(
+        pred_kp[None], seq["floor_y"].reshape(1)
+    )[0] > 0.5  # (T, 2)
     gt_contact = seq["contact_gt"] > 0.5
     contact["tp"] += int((pred_contact & gt_contact).sum().item())
     contact["fp"] += int((pred_contact & ~gt_contact).sum().item())
     contact["fn"] += int((~pred_contact & gt_contact).sum().item())
     contact["tn"] += int((~pred_contact & ~gt_contact).sum().item())
-    foot = pred_kp[:, FOOT_JOINTS][..., [0, 2]]  # world-horizontal XY
-    speed = torch.linalg.vector_norm(foot[1:] - foot[:-1], dim=-1).mean(dim=-1) * 1000.0  # mm/帧
-    pred_stance = pred_contact[1:].any(dim=-1)
-    gt_stance = gt_contact[1:].any(dim=-1)
+    foot = pred_kp[:, FOOT_JOINTS][..., [0, 2]]  # native Y-up horizontal XZ
+    speed = torch.linalg.vector_norm(foot[1:] - foot[:-1], dim=-1) * 1000.0  # (T-1,2), mm/帧
+    pred_stance = pred_contact[1:]
+    gt_stance = gt_contact[1:]
     if bool(pred_stance.any()):
         accum.add("foot_slide_mm", speed[pred_stance])
     if bool(gt_stance.any()):
@@ -268,15 +256,21 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     # ---- joint limits (elbow/knee bone angle on the PREDICTED pose: the
     # plausibility check is that generated upper bodies don't fold joints
     # past what anatomy allows) ----
-    viol = (
-        (_bone_angle(pred_kp[:, 7], pred_kp[:, 8], pred_kp[:, 9]) < JOINT_LIMIT_RAD)
-        | (_bone_angle(pred_kp[:, 11], pred_kp[:, 12], pred_kp[:, 13]) < JOINT_LIMIT_RAD)
-    ).float()
+    elbow_angles = [
+        _bone_angle(pred_kp[:, shoulder], pred_kp[:, elbow], pred_kp[:, wrist])
+        for shoulder, elbow, wrist in ELBOW_ANGLE_TRIPLES
+    ]
+    viol = torch.stack(
+        [angle < JOINT_LIMIT_RAD for angle in elbow_angles], dim=-1
+    ).any(dim=-1).float()
     accum.add("joint_limit_viol_elbow", viol)
-    viol_knee = (
-        (_bone_angle(pred_kp[:, 15], pred_kp[:, 16], pred_kp[:, 17]) < JOINT_LIMIT_RAD)
-        | (_bone_angle(pred_kp[:, 19], pred_kp[:, 20], pred_kp[:, 21]) < JOINT_LIMIT_RAD)
-    ).float()
+    knee_angles = [
+        _bone_angle(pred_kp[:, hip], pred_kp[:, knee], pred_kp[:, ankle])
+        for hip, knee, ankle in KNEE_ANGLE_TRIPLES
+    ]
+    viol_knee = torch.stack(
+        [angle < JOINT_LIMIT_RAD for angle in knee_angles], dim=-1
+    ).any(dim=-1).float()
     accum.add("joint_limit_viol_knee", viol_knee)
 
     # ---- pressure output quality (V2M only: T input is zeroed, so these
@@ -349,7 +343,8 @@ def _evaluate_config(
                 pred_pose = out["x0_hat"]
             else:
                 cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
-                        "T_s2m": t_s2m, "config_id": config_id,
+                        "T_s2m": t_s2m, "V_hmr": batch.get("V_hmr") if v_hmr_mode else None,
+                        "config_id": config_id,
                         "session_id": batch.get("session_id")}
                 prior = model.pose_head.pose_mean.view(1, 1, -1).expand(bsz, tw, -1) if warm_start else None
                 x_T = _sample_x_t_init(model, bsz, tw, device, prior=prior)
@@ -377,6 +372,7 @@ def _evaluate_config(
                     "gt_trans": (batch["trans_gt"] + anchor).reshape(-1, 3),
                     "kp_gt": batch["kp_gt"].reshape(-1, N_JOINTS, 3),
                     "contact_gt": batch["contact_gt"].reshape(-1, 2),
+                    "floor_y": batch["floor_y"][0],
                     "pressure_gt": batch["T_raw"].reshape(-1, batch["T_raw"].shape[-1]),
                     "pressure_pred": (out["pressure_hat"].reshape(-1, out["pressure_hat"].shape[-1])
                                       if out.get("pressure_hat") is not None else None),
@@ -391,6 +387,7 @@ def _evaluate_config(
                     "gt_trans": (batch["trans_gt"] + anchor).reshape(-1, 3),
                     "kp_gt": batch["kp_gt"].reshape(-1, N_JOINTS, 3),
                     "contact_gt": batch["contact_gt"].reshape(-1, 2),
+                    "floor_y": batch["floor_y"][0],
                     "pressure_gt": batch["T_raw"].reshape(-1, batch["T_raw"].shape[-1]),
                     "pressure_pred": (out["pressure_hat"].reshape(-1, out["pressure_hat"].shape[-1])
                                       if out.get("pressure_hat") is not None else None),
@@ -404,6 +401,11 @@ def _evaluate_config(
     result["contact_f1"] = 2.0 * p * r / max(p + r, 1e-8)
     result["contact_acc"] = (contact["tp"] + contact["tn"]) / max(
         contact["tp"] + contact["fp"] + contact["fn"] + contact["tn"], 1
+    )
+    result["contact_recall"] = contact["tp"] / max(contact["tp"] + contact["fn"], 1)
+    result["air_recall"] = contact["tn"] / max(contact["tn"] + contact["fp"], 1)
+    result["contact_balanced_acc"] = 0.5 * (
+        result["contact_recall"] + result["air_recall"]
     )
     if "accel_mag_upper_ms2" in result:
         result["accel_dist_err_upper_ms2"] = abs(
