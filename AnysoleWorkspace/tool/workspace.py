@@ -20,6 +20,7 @@ SOURCE_LINKS = {
     WORKSPACE / "sources/raw": Path("/data/lizhe/projects/Tactile/1_Data"),
     WORKSPACE / "sources/published": Path("/data/lizhe/projects/Tactile/4_Dataset"),
     WORKSPACE / "sources/calibration_artifacts": Path("/data/lizhe/projects/Tactile/0_Calibration"),
+    WORKSPACE / "sources/smpl": Path("/data/lizhe/projects/Tactile/Mocap"),
 }
 
 # PressureWasher runtime data is kept with the other source-side datasets.
