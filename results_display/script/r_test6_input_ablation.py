@@ -18,7 +18,7 @@ Reading: MPJPE(shuffle) - MPJPE(real) small -> conditioning is ignored;
 pairwise output distances across variants ~ 0 -> output is input-independent;
 gradient ratios ~ 0 -> conditioning cannot be learned (dead path).
 
-Outputs under results_display/Test8_input_ablation/:
+Outputs under results_display/r_test6_input_ablation/:
     <session>/<session>_<variant>_<arm>.npz
     test8_report.json
 
@@ -148,7 +148,7 @@ def parse_args() -> argparse.Namespace:
         stride=False,
         max_frames=False,
         out_dir=True,
-        out_dir_default=cli_common.DISPLAY_ROOT / "Test8_input_ablation",
+        out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test6_input_ablation",
     )
     parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--ckpt", type=str, default=str(DEFAULT_CKPT))

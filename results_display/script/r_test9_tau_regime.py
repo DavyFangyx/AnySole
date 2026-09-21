@@ -37,7 +37,7 @@ cross-attn 条件路径（F）是低噪声区通路的污染源，对 F 做 τ �
   tau0 PASS 且 lowband PASS       → 门控 + SNR 主因确认，结构改法对症.
   tau0 PASS 且 lowband FAIL       → 低噪声区也压不到个位数，带宽不足（同上）.
 
-Outputs under results_display/Test11_tau_regime/:
+Outputs under results_display/r_test9_tau_regime/:
     tau_regime_log.csv       arm, lr, step, L_pose, tau0_mpjpe_mm, ddim_mpjpe_mm
     tau_regime_curves.png    L_pose / tau0 MPJPE 曲线 + 各 arm 最终 tau0 柱状图
     tau_regime_report.json   各 arm × lr 最终数值 + PASS/FAIL 判定 + 诊断结论
@@ -264,7 +264,7 @@ def parse_args() -> argparse.Namespace:
         stride=False,
         max_frames=False,
         out_dir=True,
-        out_dir_default=cli_common.DISPLAY_ROOT / "Test11_tau_regime",
+        out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test9_tau_regime",
     )
     parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--contact-method", type=str, default="", help="Contact-label scheme (default: config's).")

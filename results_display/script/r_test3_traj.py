@@ -12,8 +12,8 @@ The npz arrays are in the raw mocap world frame (y-up, meters).  They are
 converted to the same z-up display frame used by the Test1 skeleton panels:
 display ``(x, -z, y)``, i.e. z is vertical and x/y form the ground plane.
 
-Outputs are written below ``results_display/Test3_trajectory/AnySole/<modal>/
-<config>/`` for AnySole models, and below ``Test3_trajectory/<model>/gen/``
+Outputs are written below ``results_display/r_test3_traj/AnySole/<modal>/
+<config>/`` for AnySole models, and below ``r_test3_traj/<model>/gen/``
 for baseline models discovered with ``--auto`` (or the
 ``ANYSOLE_RESULTSDISPLAY`` override), with gif/mp4/png kept in separate
 folders.
@@ -425,7 +425,7 @@ def render_session(traj_path: Path, session_id: str, config_id: str, seq_dir: Pa
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize root trajectories (pred vs GT) as Test3 outputs, SMPL/BVH auto-detected.")
-    cli_common.add_common_args(parser, seq_root=True, modal=True, contact_method=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test3_trajectory" / "AnySole")
+    cli_common.add_common_args(parser, seq_root=True, modal=True, contact_method=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test3_traj" / "AnySole")
     parser.add_argument("--no-png", action="store_true", help="Skip the static per-session figure (not controlled by --gen).")
     parser.add_argument(
         "--auto",

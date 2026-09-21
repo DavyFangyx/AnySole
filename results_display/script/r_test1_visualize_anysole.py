@@ -4,7 +4,7 @@ Predictions are read from standard SMPL NPZ files written by ``anysole.eval``;
 legacy BVH files are detected automatically for Step2Motion results. Panel rendering uses the shared
 ``render_common`` helpers so every Test1 output keeps the same visual style.
 
-Outputs are written below ``results_display/Test1_visualization/AnySole/<modal>/<config>``
+Outputs are written below ``results_display/r_test1_visualize/AnySole/<modal>/<config>``
 (or the ``ANYSOLE_RESULTSDISPLAY`` override).
 
 Usage (run from the repository root):
@@ -115,7 +115,7 @@ def render_session(seq_dir: Path, pred_path: Path, session_id: str, config_id: s
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize AnySole motion vs tactile input and SMPL GT.")
-    cli_common.add_common_args(parser, seq_root=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test1_visualization" / "AnySole")
+    cli_common.add_common_args(parser, seq_root=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test1_visualize" / "AnySole")
     parser.add_argument(
         "--modal",
         type=str,

@@ -18,7 +18,7 @@ batch), the pose target and pipeline are sound; generalization failures are
 then a matter of undertraining / weak conditioning (see Test7/Test8).  If it
 cannot fit, the target or the pipeline is broken (see Test6).
 
-Outputs under results_display/Test9_overfit/:
+Outputs under results_display/r_test7_legacy_overfit/:
     overfit_log.csv       lr, step, L_pose, tau0 MPJPE, DDIM MPJPE
     overfit_curves.png    one curve per lr
     overfit_report.json   per-lr final numbers + PASS/FAIL verdict
@@ -157,7 +157,7 @@ def parse_args() -> argparse.Namespace:
         stride=False,
         max_frames=False,
         out_dir=True,
-        out_dir_default=cli_common.DISPLAY_ROOT / "Test9_overfit",
+        out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test7_legacy_overfit",
     )
     parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--contact-method", type=str, default="", help="Contact-label scheme (default: config's).")

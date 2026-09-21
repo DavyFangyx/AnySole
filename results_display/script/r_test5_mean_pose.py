@@ -16,7 +16,7 @@ training target (undertrained / weak conditioning); |tau0_mean - tau0_gt|
 shows how much the output follows the input pose; ddim_mean500 vs ddim_gt500
 shows how much the sampled output depends on the init pose.
 
-Outputs under results_display/Test7_mean_pose/:
+Outputs under results_display/r_test5_mean_pose/:
     <session>/<session>_<arm>.npz   per-arm SMPL archive (first --export-sessions sessions)
     test7_report.json               per-arm MPJPE + pairwise output distances
 
@@ -113,7 +113,7 @@ def parse_args() -> argparse.Namespace:
         stride=False,
         max_frames=False,
         out_dir=True,
-        out_dir_default=cli_common.DISPLAY_ROOT / "Test7_mean_pose",
+        out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test5_mean_pose",
     )
     parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--ckpt", type=str, default=str(DEFAULT_CKPT))

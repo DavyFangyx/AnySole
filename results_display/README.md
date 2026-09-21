@@ -20,7 +20,8 @@
 | D_Test1 原始数据可视化 | Test1 的 GT/输入部分 | `d_test1_data_viz.py`（BVH/SMPL GT 渲染） |
 | D_Test2 数据集自检 | Test6 | `d_test2_dataset_check.py` |
 | D_Test3 接触检测 | Test5 | `contact_methods.py` → `AnysoleWorkspace/tool/contact_labels.py`；`d_test3_contact.py` |
-| D_Test4 SMPL 协议预检 | F4 预检 | `d_test4_smpl_protocol.py` + `d_test4_smpl_{bvh_axes,export_roundtrip,protocol_sanity}.py` |
+| ~~D_Test4~~（2026-09-21 撤销：属探针非实验，已回 `z_note/probes/`） | F4 预检 | `probe_f4_smpl24_preflight.py` + `probe_smpl_{bvh_axes,export_roundtrip,protocol}.py` |
+| D_Test5 基线触觉审计 | 新增 | `d_test5_baseline_tactile.py` | 四基线触觉格式审计（Agent_06 前置） |
 | R_Test1 模型可视化 | Test1 的模型部分 | `visualize_{motionpro,step2motion,anysole}.py` → `r_test1_visualize.py` |
 | R_Test2 参数对照 | Test2 | `r_test2_compare.py` |
 | R_Test3 轨迹可视化 | Test3 | `r_test3_traj.py` |
@@ -42,12 +43,11 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   ├── motion_io.py                    # 统一动作读取器（格式自动检测）
 │   ├── render_common.py                # 共享渲染公共件
 │   ├── ── 数据检验（D_TestN）──
-│   │   ├── d_test1_data_viz.py         # D_Test1：GT 原始渲染
+│   │   ├── d_test1_data_viz.py         # D_Test1：GT 原始渲染（SMPL-24/BVH-23 双协议）
 │   │   ├── d_test2_dataset_check.py      # D_Test2：数据集自检
 │   │   │   │（D_Test3 标签生成器在 AnysoleWorkspace/tool/contact_labels.py，不在本目录）
 │   │   ├── d_test3_contact.py            # D_Test3：接触标签动画 + 阈值分析
-│   │   ├── d_test4_smpl_protocol.py# D_Test4：真实 SMPL-24 batch/warm-start/loss/backward
-│   │   └── d_test4_smpl_*.py          # D_Test4：SMPL 轴系/写出读回/协议 sanity 探针
+│   │   └── d_test5_baseline_tactile.py # D_Test5：四基线触觉格式审计
 │   └── ── 结果检验（R_TestN）──
 │       ├── r_test1_visualize_motionpro.py      # R_Test1：MotionPRO 动画
 │       ├── r_test1_visualize_step2motion.py    # R_Test1：Step2Motion 动画
@@ -62,20 +62,23 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │       ├── r_test8_v2t.py              # R_Test8：V2T 触觉生成
 │       ├── r_test9_tau_regime.py        # R_Test9：τ 训练区间消融
 │       └── test12_*.py                 # R_Test10：pose head 系列探针
-├── ── 数据检验产物（P1-4 起 data/d_testN/；现为 TestN_* 目录）──
-│   ├── Test5_contact/                  # D_Test3 输出（按方案分目录）
-│   └── Test6_dataset_check/            # D_Test2 输出（自检 JSON + 均值姿态 npz）
-└── ── 结果检验产物（P1-4 起 result/r_testN/；现为 TestN_* 目录）──
-    ├── Test1_visualization/            # R_Test1 输出
-    ├── Test2_comparison/               # R_Test2 输出（只出指标，不做动画）
-    ├── Test3_trajectory/               # R_Test3 输出
-    ├── Test4_insole_drift/             # R_Test4 输出
-    ├── Test7_mean_pose/                # R_Test5 输出
-    ├── Test8_input_ablation/           # R_Test6 输出
-    ├── Test9_overfit/                  # R_Test7 输出（legacy）
-    ├── Test9_1_sampler/                # R_Test7 输出（legacy）
-    ├── Test10_tgen/                    # R_Test8 输出
-    └── Test11_tau_regime/              # R_Test9 输出
+├── ── 数据检验产物（data/d_testN/）──
+│   ├── d_test1_data_viz/               # D_Test1 输出（<session>/<smp24|bvh23>/）
+│   ├── d_test2_dataset_check/          # D_Test2 输出（自检 JSON + 均值姿态 npz）
+│   ├── d_test3_contact/                # D_Test3 输出（按方案分目录）
+│   └── d_test5_baseline_tactile/       # D_Test5 输出（01-06 诊断图 + numbers.json + summary.md）
+└── ── 结果检验产物（result/r_testN/）──
+    ├── r_test1_visualize/              # R_Test1 输出（AnySole/MotionPRO/Step2Motion 分栏）
+    ├── r_test2_compare/                # R_Test2 输出（只出指标，不做动画）
+    ├── r_test3_traj/                   # R_Test3 输出
+    ├── r_test4_insole_drift/           # R_Test4 输出
+    ├── r_test5_mean_pose/              # R_Test5 输出
+    ├── r_test6_input_ablation/         # R_Test6 输出
+    ├── r_test7_legacy_overfit/         # R_Test7 输出（legacy）
+    ├── r_test7_legacy_sampler/         # R_Test7 输出（legacy）
+    ├── r_test8_v2t/                    # R_Test8 输出
+    ├── r_test9_tau_regime/             # R_Test9 输出
+    └── （r_test10_pose_head/ 预留：探针仅 stdout，无持久产物）
 ```
 
 ## 时间对齐约定（动捕 ↔ 触觉/视频）
@@ -107,15 +110,15 @@ results_display/                        # 纯产物目录（实验代码在 scri
 
 | 脚本 | 作用 |
 | --- | --- |
-| `d_test1_data_viz.py` | 原始 GT 动捕 BVH 的骨架渲染（纯 BVH 可视化） |
-| （SMPL GT 渲染，P1-4 并入 `d_test1_data_viz.py`） | 原始 SMPL-24 GT 的骨架渲染 |
+| `d_test1_data_viz.py` | 原始 GT 骨架渲染，**双协议**：默认 auto（有 SMPL-24 用 SMPL，缺失回退 BVH-23）；`--protocol smp24/bvh23` 强制单协议；`--bvh <路径>` 单文件 BVH |
 
 ```bash
 conda activate touch_gait
 
-# BVH 原始数据可视化
+# 原始数据可视化（auto：SMPL-24 优先，BVH-23 回退）
 python results_display/script/d_test1_data_viz.py
-python results_display/script/d_test1_data_viz.py --bvh <单个.bvh>
+python results_display/script/d_test1_data_viz.py --protocol bvh23   # 强制 BVH-23
+python results_display/script/d_test1_data_viz.py --bvh <单个.bvh>    # 单文件 BVH
 ```
 
 ## D_Test2 数据集自检（GT 自洽 + 均值姿态基线）
@@ -190,19 +193,36 @@ python results_display/script/d_test3_contact.py --methods bvh_h --session S1102
 `threshold_analysis.csv`（逐帧左右脚 48 格压力和）、`threshold_analysis_hist.csv`
 （64 分箱分布）与 `comparison.{csv,png}`（各方案 vs bvh_h 参考的一致率/假接触率/假离地率）。
 
-## D_Test4 SMPL-24 协议预检
+## D_Test4（已撤销，2026-09-21）
 
-F4/AnySoleV2 请使用真实训练路径探针；它会检查 24×6D、SMPL parent tree、shape-dependent
-offset、`joint_and` sidecar、旧 23/138 warm-start 隔离、各 loss 分量、梯度裁剪以及固定 batch
-优化。默认 `lambda_con=0`，所以 contact 在当前命令中仅参与评估，不参与反向传播。
+SMPL-24 协议预检属一次性探针而非实验，已按用户裁定撤销 D_Test4 编号并移回
+`z_note/probes/`（`probe_f4_smpl24_preflight.py`、`probe_smpl_bvh_axes.py`、
+`probe_smpl_export_roundtrip.py`、`probe_smpl_protocol.py`）。
+运行方式：仓库根执行 `python z_note/probes/probe_f4_smpl24_preflight.py --device cpu --steps 20 ...`。
+
+## D_Test5 基线触觉审计（Agent_06 前置）
+
+`d_test5_baseline_tactile.py` 把 AnySole 自身触觉口径（48 格/脚 = 4 宽行 × 12 长列，
+160×120 渲染图）与四基线实际消费的触觉输入并排可视化 + 数值审计，只读数据不加载模型：
+
+| 基线 | 触觉输入 | 与 AnySole 的对应 |
+| --- | --- | --- |
+| MotionPRO | pressure.npz → bilinear 96×96 /255（FRAPPE 口径） | 同源：160×120 渲染图降采样 |
+| pressure_tookit | insole `{'insole': [L(31,11), R(31,11)]}`，load_contact 只判 !=0 → 9 标签/脚 | D2 长度映射 4×12→31×11（已定）；宽度待标定（图内占位） |
+| Step2Motion | gait pt 每帧 50 维 = 每脚 pressure16+acc3+gyro3+force1+cop2（--no-imu 38 维） | 4×12→16 通道确定性池化（process_gait 口径） |
+| VP-MoCap | insole 31×11 → sigmoidNorm → 242 有效像素 → contact_smpl (2,96) | 与 toolkit 共用 MMVP 硬件几何 |
+
+关键实测（numbers.json）：MMVP mask 242 像素/脚；corr(顶点 z, 平均映射行) L −0.996 /
+R −0.9956（复核任务书）；gait pt 存未裁剪原始值（pressure16 峰值 2608 > PRESSURE_CLIP 1023，
+而 160×120 渲染 clip@1023 会饱和）；noimu == 删 IMU 列逐值相等；contact.npy 仅 col6/7 非零。
+pressure_tookit essential 缺，其面板为格式图（mask 取自 FPP-Net essentials 同款几何）。
+
+产出（`d_test5_baseline_tactile/`）：`01_anysole_raw.png`–`06_correspondence.png`、
+`numbers.json`、`summary.md`。
 
 ```bash
-PYTHONPATH=. /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python \
-  results_display/script/d_test4_smpl_protocol.py \
-  --device cpu --steps 20 --grad-clip 5.0 --lr 1e-4
-
-PYTHONPATH=. /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python \
-  results_display/script/d_test4_smpl_export_roundtrip.py
+conda activate touch_gait
+python results_display/script/d_test5_baseline_tactile.py
 ```
 
 # 第二部分：结果检验（R_TestN）
@@ -355,7 +375,7 @@ python results_display/script/r_test6_input_ablation.py --session S10103 --expor
 ## R_Test7 Legacy 扩散诊断（diffusion V1 历史诊断，不用于 F4 验收）
 
 `r_test7_legacy_overfit.py` 保留用于旧 diffusion V1 诊断。它不是 AnySoleV2/F4 的可执行验收入口；
-当前 F4 必须使用 D_Test4 的 `d_test4_smpl_protocol.py`。
+当前 F4 必须使用 `z_note/probes/probe_f4_smpl24_preflight.py`。
 训到 loss≈0 → 目标/管线正常，泛化差是欠训/条件弱；
 训不下去 → 目标/管线有问题。
 

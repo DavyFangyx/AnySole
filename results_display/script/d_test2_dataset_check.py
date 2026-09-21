@@ -19,7 +19,7 @@ B. Mean-pose baseline: predict the train-split mean pose on the test split.
    if B1 is clearly below the model's MPJPE, the model is worse than doing
    nothing (a bug, not undertraining).
 
-Outputs under results_display/Test6_dataset_check/:
+Outputs under results_display/d_test2_dataset_check/:
     fk_selfcheck.json     A1-A5 per-check max errors and geometry stats
     mean_baseline.json    B1/B2 MPJPE (mm), per-joint breakdown, kp std
     mean_pose.npz         train mean pose (valid 6D + kp relative to Hips)
@@ -342,7 +342,7 @@ def parse_args() -> argparse.Namespace:
         stride=False,
         max_frames=False,
         out_dir=True,
-        out_dir_default=cli_common.DISPLAY_ROOT / "Test6_dataset_check",
+        out_dir_default=cli_common.DISPLAY_ROOT / "data/d_test2_dataset_check",
     )
     parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--contact-method", type=str, default="tactile_abs",

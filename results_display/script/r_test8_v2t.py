@@ -13,7 +13,7 @@ Three conditioning arms (same names as eval.py ``--config-id``):
     V2M    real V + zero T   the V2T generation itself (headline)
     T2M    zero V + real T   tactile self-reconstruction (input-side sanity)
 
-Outputs under results_display/Test10_tgen/:
+Outputs under results_display/r_test8_v2t/:
 
     gif/ or mp4/<session>_<mode>_tgen.{gif,mp4}  GT | generated | |GT-Gen| animation
     cells/<session>_<mode>_cells.{npz,png}      96-cell MAE + static error map
@@ -256,7 +256,7 @@ def parse_args() -> argparse.Namespace:
         max_frames=True,
         force=True,
         out_dir=True,
-        out_dir_default=cli_common.DISPLAY_ROOT / "Test10_tgen",
+        out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test8_v2t",
     )
     parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--ckpt", type=str, default=str(DEFAULT_CKPT))

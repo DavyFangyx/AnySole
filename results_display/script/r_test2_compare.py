@@ -7,7 +7,7 @@ semantic intersection, and evaluates against GT expressed in the *same native
 protocol* as that prediction.  SMPL is converted to the display/common z-up
 coordinate convention by ``motion_io``; BVH remains z-up.
 
-Writes only metrics to ``results_display/Test2_comparison``:
+Writes only metrics to ``results_display/r_test2_compare``:
 ``comparison_per_session.csv`` (full detail), ``comparison_summary.csv``
 (model x metrics only) and ``comparison_summary.png`` (table render of the
 summary).  Visualization is Test1's job and lives in
@@ -444,7 +444,7 @@ def main() -> int:
     ap.add_argument("--results-root", type=Path, default=ROOT / "results")
     ap.add_argument("--auto-scan", action="store_true", help="Scan results/ model directories instead of YAML")
     ap.add_argument("--split", default="test")
-    ap.add_argument("--out-dir", type=Path, default=cli_common.DISPLAY_ROOT / "Test2_comparison")
+    ap.add_argument("--out-dir", type=Path, default=cli_common.DISPLAY_ROOT / "result/r_test2_compare")
     ap.add_argument("--force", action="store_true", help="Rebuild and overwrite existing outputs.")
     ap.add_argument("--fps", type=float, default=40.0)
     ap.add_argument("--modal", default="anysolev1,anysolev1_insole_drift", help="AnySole modal(s), comma-separated")

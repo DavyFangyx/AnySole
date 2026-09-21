@@ -20,7 +20,7 @@ import numpy as np
 # locations here, before importing AnySole, so every visualization entry point
 # gets the same format adapter without requiring callers to set PYTHONPATH.
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parents[1]
+REPO_ROOT = SCRIPT_DIR.parents[2]  # utils/ -> script/ -> gait repo root
 for entry in (REPO_ROOT, SCRIPT_DIR):
     if str(entry) not in sys.path:
         sys.path.insert(0, str(entry))

@@ -33,7 +33,7 @@ Checks 1-3 are model-free (--skip-train runs them instantly); checks 2b/4/5
 need the overfit model (default: retrain one lr, 3000 steps, like Test9, or
 --ckpt to load a saved overfit checkpoint).
 
-Outputs under results_display/Test9_1_sampler/:
+Outputs under results_display/r_test7_legacy_sampler/:
     train_log.csv       single-lr overfit log (same schema as Test9)
     check3_tau_grid.csv tau schedule + per-step norms vs q_sample envelope
     check4_trace.csv    per-step model trace (tau, |x_in|, |x0_hat-GT|, ...)
@@ -619,7 +619,7 @@ def parse_args() -> argparse.Namespace:
         stride=False,
         max_frames=False,
         out_dir=True,
-        out_dir_default=cli_common.DISPLAY_ROOT / "Test9_1_sampler",
+        out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test7_legacy_sampler",
     )
     parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--contact-method", type=str, default="", help="Contact-label scheme (default: config's).")

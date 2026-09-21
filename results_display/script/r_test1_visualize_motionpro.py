@@ -6,7 +6,7 @@ Usage (run from the repository root):
     python results_display/script/r_test1_visualize_motionpro.py \
         --checkpoint results://MotionPRO/checkpoints/imagepressure2smpl/init/5e-05/imagepressure2smpl_best.pth
 
-Outputs are written below ``results_display/Test1_visualization/MotionPRO`` (or the
+Outputs are written below ``results_display/r_test1_visualize/MotionPRO`` (or the
 ``ANYSOLE_RESULTSDISPLAY`` override).
 """
 from __future__ import annotations
@@ -495,7 +495,7 @@ def load_model(checkpoint, device):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualize tactile vs predicted SMPL vs GT BVH.")
-    cli_common.add_common_args(parser, seq_root=True, out_dir_default=cli_common.DISPLAY_ROOT / "Test1_visualization" / "MotionPRO")
+    cli_common.add_common_args(parser, seq_root=True, out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test1_visualize" / "MotionPRO")
     parser.add_argument("--smpl-model", type=str, default=str(cli_common.WORKSPACE_ROOT / "dependencies/smpl/SMPL_NEUTRAL.pkl"))
     parser.add_argument(
         "--checkpoint",

@@ -21,7 +21,7 @@ import numpy as np
 from PIL import Image
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]  # utils/ -> script/ -> results_display/ -> gait repo root
 WORKSPACE_ROOT = Path(os.environ.get("ANYSOLE_WORKSPACE", REPO_ROOT / "AnysoleWorkspace")).expanduser()
 RESULTS_ROOT = Path(os.environ.get("ANYSOLE_RESULTS", REPO_ROOT / "results")).expanduser()
 DISPLAY_ROOT = Path(os.environ.get("ANYSOLE_RESULTSDISPLAY", REPO_ROOT / "results_display")).expanduser()

@@ -6,7 +6,7 @@ Usage (run from the repository root):
         results://Step2Motion/predictions/gait_model/S7063_gen.bvh
     python results_display/script/r_test1_visualize_step2motion.py --self-test
 
-Outputs are written below ``results_display/Test1_visualization/Step2Motion/gait_model`` (or the
+Outputs are written below ``results_display/r_test1_visualize/Step2Motion/gait_model`` (or the
 ``ANYSOLE_RESULTSDISPLAY`` override).
 """
 from __future__ import annotations
@@ -46,7 +46,7 @@ HIGHLIGHT_JOINTS = (0, 3, 4, 7, 8, 13, 17, 21)
 
 GAIT_ROOT = REPO_ROOT
 SEQ_ROOT = cli_common.WORKSPACE_ROOT / "derived/MotionPRO/sequences/cam3"
-DEFAULT_VIZ_DIR = cli_common.DISPLAY_ROOT / "Test1_visualization/Step2Motion/gait_model"
+DEFAULT_VIZ_DIR = cli_common.DISPLAY_ROOT / "r_test1_visualize/Step2Motion/gait_model"
 MIN_FRAMES = 101
 TARGET_HZ = 40.0
 DEFAULT_PRED_DIR = cli_common.RESULTS_ROOT / "Step2Motion/predictions/gait_model"
