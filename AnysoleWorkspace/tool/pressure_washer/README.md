@@ -62,7 +62,7 @@ frame_idx,t_us,1,2,3,...,48
 
 ## 2. Project Layout
 
-脚本位于 `AnysoleWorkspace/tools/PressureWasher/`；运行产物位于
+脚本位于 `AnysoleWorkspace/tool/pressure_washer/`；运行产物位于
 `AnysoleWorkspace/sources/PressureWasher/outputs/`，不会写回工具目录。
 
 ```text

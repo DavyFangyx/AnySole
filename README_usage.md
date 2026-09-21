@@ -9,7 +9,7 @@ session split。主模型 AnySole 使用标准 SMPL-24 关节协议（BVH-23 仅
 ```bash
 cd /data/fangyuxuan/projects/gait
 conda activate touch_gait
-python AnysoleWorkspace/script/build_workspace.py doctor
+python AnysoleWorkspace/tool/workspace.py doctor
 ```
 
 默认路径：
@@ -49,10 +49,10 @@ Depth Pro 深度图是 GPU 密集型步骤。`gen_kps` 当前实现固定使用 
 如果 `PressureWasher/outputs/fake_marked/` 已准备好，可跳过：
 
 ```bash
-python AnysoleWorkspace/script/prepare_pressure_data.py inspect --skip-existing
-python AnysoleWorkspace/script/prepare_pressure_data.py reconstruct --skip-existing
-python AnysoleWorkspace/script/prepare_pressure_data.py mark-fake --skip-existing
-python AnysoleWorkspace/script/prepare_pressure_data.py encode --skip-existing
+python AnysoleWorkspace/tool/pressure_washer/run.py inspect --skip-existing
+python AnysoleWorkspace/tool/pressure_washer/run.py reconstruct --skip-existing
+python AnysoleWorkspace/tool/pressure_washer/run.py mark-fake --skip-existing
+python AnysoleWorkspace/tool/pressure_washer/run.py encode --skip-existing
 ```
 
 执行顺序为 `inspect → reconstruct → mark-fake → encode`。
@@ -101,7 +101,7 @@ python -m lib.util.gen_kps --cam-id 3 --skip-existing
 ```bash
 cd /data/fangyuxuan/projects/gait
 conda activate touch_gait
-CUDA_VISIBLE_DEVICES=N python AnysoleWorkspace/script/generate_hrnet_cache.py \
+CUDA_VISIBLE_DEVICES=N python AnysoleWorkspace/tool/generate_hrnet_cache.py \
   --cam-id 3 --batch-size 32 --skip-existing
 ```
 

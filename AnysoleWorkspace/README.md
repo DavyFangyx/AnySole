@@ -4,7 +4,7 @@
 
 ## 目录索引
 
-`sources/PressureWasher` 只保存触觉清洗、审核及运行产物；`tools/PressureWasher` 仅保存脚本、配置和文档。
+`sources/PressureWasher` 只保存触觉清洗、审核及运行产物；`tool/pressure_washer/` 仅保存脚本、配置和文档。
 
 ```text
 AnysoleWorkspace/
@@ -14,7 +14,7 @@ AnysoleWorkspace/
 │   └── outputs/                         # stats/reconstructed/fake_marked/encoded
 ├── sources/published/                   # 发布数据
 ├── sources/calibration_artifacts/       # 标定原始文件
-├── tools/PressureWasher/                # 工具代码、配置和文档
+├── tool/pressure_washer/                # 工具代码、配置和文档
 ├── derived/MotionPRO/sequences/cam3/    # MotionPRO 序列
 ├── derived/AnySole/hrnet_cache/cam3/    # HRNet + bbox 特征
 ├── derived/Step2Motion/gait/            # Step2Motion 数据
@@ -57,10 +57,10 @@ CSV 的列 `1` 到 `48` 是单脚压力通道，每行是一帧；双脚单帧�
 ## 流程
 
 ```bash
-python AnysoleWorkspace/script/prepare_pressure_data.py inspect
-python AnysoleWorkspace/script/prepare_pressure_data.py reconstruct
-python AnysoleWorkspace/script/prepare_pressure_data.py mark-fake
-python AnysoleWorkspace/script/prepare_pressure_data.py encode
+python AnysoleWorkspace/tool/pressure_washer/run.py inspect
+python AnysoleWorkspace/tool/pressure_washer/run.py reconstruct
+python AnysoleWorkspace/tool/pressure_washer/run.py mark-fake
+python AnysoleWorkspace/tool/pressure_washer/run.py encode
 ```
 
 输出依次位于 `sources/PressureWasher/outputs/stats`、`reconstructed`、`fake_marked`、`encoded`；可用 `--input PATH` 指定输入、`--overwrite` 覆盖输出。
@@ -72,7 +72,7 @@ python AnysoleWorkspace/script/prepare_pressure_data.py encode
 存在是为了 Step2Motion 基线，AnySole 训练/推理仍只读取 SMPL。
 
 ```bash
-python AnysoleWorkspace/script/build_workspace.py init
-python AnysoleWorkspace/script/build_workspace.py doctor
-python AnysoleWorkspace/script/build_workspace.py relink
+python AnysoleWorkspace/tool/workspace.py init
+python AnysoleWorkspace/tool/workspace.py doctor
+python AnysoleWorkspace/tool/workspace.py relink
 ```

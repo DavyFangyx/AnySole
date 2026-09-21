@@ -27,7 +27,7 @@ AnysoleWorkspace/dependencies/MotionPRO/mmdetection/checkpoints/yolox_x_8x8_300e
    ```bash
    cd /data/fangyuxuan/projects/gait/Baselines/MotionPRO
    conda activate touch_gait
-   python ../../tools/manage_anysole_workspace.py doctor
+   python AnysoleWorkspace/tool/workspace.py doctor
    test -f ../../AnysoleWorkspace/splits/default/splits.csv
    test -d ../../AnysoleWorkspace/derived/MotionPRO/sequences/cam3
    ```

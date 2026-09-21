@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-PRESSURE_ROOT = REPO_ROOT / "AnysoleWorkspace" / "tools" / "PressureWasher"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+PRESSURE_ROOT = Path(__file__).resolve().parent
 PRESSURE_DATA_ROOT = REPO_ROOT / "AnysoleWorkspace" / "sources" / "PressureWasher"
 PYTHON = sys.executable
 

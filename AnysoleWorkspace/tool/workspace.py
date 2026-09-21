@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 RESULTS = REPO_ROOT / "results"
 DISPLAY = REPO_ROOT / "results_display"
@@ -20,7 +20,6 @@ SOURCE_LINKS = {
     WORKSPACE / "sources/raw": Path("/data/lizhe/projects/Tactile/1_Data"),
     WORKSPACE / "sources/published": Path("/data/lizhe/projects/Tactile/4_Dataset"),
     WORKSPACE / "sources/calibration_artifacts": Path("/data/lizhe/projects/Tactile/0_Calibration"),
-    WORKSPACE / "sources/pressure_washer": Path("../tools/PressureWasher"),
 }
 
 # PressureWasher runtime data is kept with the other source-side datasets.

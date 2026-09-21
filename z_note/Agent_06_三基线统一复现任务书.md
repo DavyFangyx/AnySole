@@ -190,7 +190,7 @@
    - insole：48 点按 §4.2 的同一 31×11 确定性膨胀（FPP-Net 与 toolkit 共用一份
      适配产物）；sigmoid 归一化由 FPP-Net 内部 `sigmoidNorm(p, weight/484)` 完成，
      适配层只负责写入与 weight 同单位的原始压力。
-   - `sub_info.npy`（D7 已定）：新脚本 `AnysoleWorkspace/scripts/build_sub_info.py`。
+   - `sub_info.npy`（D7 已定）：新脚本 `AnysoleWorkspace/tool/build_sub_info.py`。
      判据：每受试者取第一个动作中「双脚着地（左右脚 48 点总和均 > 阈值）且 BVH
      运动速度最小」的一帧，`weight = 该帧左右脚压力总和`（与 insole 写入同一
      /255 口径），`max_value = 255`、`height = -1`。产出与上游同构的

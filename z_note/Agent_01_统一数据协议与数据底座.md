@@ -34,7 +34,7 @@
 
 ### 3. 压力布局测试
 
-将测试代码/脚本放在 `tests/` 或 `AnysoleWorkspace/scripts/`（不改模型代码），覆盖 48 点原始压力到各适配表示的确定性映射。
+将测试代码/脚本放在 `tests/` 或 `AnysoleWorkspace/tool/`（不改模型代码），覆盖 48 点原始压力到各适配表示的确定性映射。
 
 ## 执行步骤
 
@@ -77,10 +77,10 @@
 在仓库根目录执行（按实际脚本名称替换）：
 
 ```bash
-python AnysoleWorkspace/scripts/build_manifest.py --fps 40 --camera cam3
-python AnysoleWorkspace/scripts/check_data_quality.py --manifest AnysoleWorkspace/manifests/session_manifest.jsonl
-python AnysoleWorkspace/scripts/test_pressure_layout.py
-python AnysoleWorkspace/scripts/check_splits.py --manifest AnysoleWorkspace/manifests/session_manifest.jsonl
+python AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3
+python AnysoleWorkspace/tool/check_data_quality.py --manifest AnysoleWorkspace/manifests/session_manifest.jsonl
+python AnysoleWorkspace/tool/pressure_washer/test_pressure_layout.py
+python AnysoleWorkspace/tool/check_splits.py --manifest AnysoleWorkspace/manifests/session_manifest.jsonl
 ```
 
 若脚本尚不存在，先实现最小可运行版本或提供等价命令；命令必须返回非零状态表示失败。所有测试不得修改原始输入。
