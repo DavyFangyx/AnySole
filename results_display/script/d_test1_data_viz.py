@@ -21,14 +21,14 @@ import argparse
 import json
 from pathlib import Path
 
-import cli_common
+from utils import cli_common
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from bvh_aligner_pose import parse_bvh_aligner
+from utils.bvh_aligner_pose import parse_bvh_aligner
 
 
 def parse_args() -> argparse.Namespace:

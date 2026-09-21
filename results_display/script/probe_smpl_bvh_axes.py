@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from evaluate_compare import bvh_joints, protocol_gt, select_common_joints
-from motion_io import LEGACY_BVH_NAMES, load_motion, smpl_yup_to_display
+from utils.motion_io import LEGACY_BVH_NAMES, load_motion, smpl_yup_to_display
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

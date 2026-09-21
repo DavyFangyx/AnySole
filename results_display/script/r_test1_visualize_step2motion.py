@@ -23,14 +23,14 @@ STEP2MOTION_SRC = REPO_ROOT / "Baselines/Step2Motion/src"
 if str(STEP2MOTION_SRC) not in sys.path:
     sys.path.insert(0, str(STEP2MOTION_SRC))
 
-import cli_common
+from utils import cli_common
 import cv2
 import numpy as np
 from matplotlib import cm
 from PIL import Image, ImageDraw, ImageFont
 from scipy.spatial.transform import Rotation as SciRotation
 from bvh_export import write_bvh
-from bvh_aligner_pose import parse_bvh_aligner
+from utils.bvh_aligner_pose import parse_bvh_aligner
 
 
 PANEL_W = 460

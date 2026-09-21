@@ -48,7 +48,7 @@ for path in (REPO_ROOT, SCRIPT_DIR, TOOL_DIR):
 import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
-import cli_common  # noqa: E402
+from utils import cli_common  # noqa: E402
 import contact_labels as contact_methods  # noqa: E402
 import cv2  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
@@ -58,7 +58,7 @@ from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 
 from anysole.data.pressure import load_session_pressure  # noqa: E402
 from anysole.types import CONTACT_SUM_THRESH  # noqa: E402
-from motion_io import load_session_gt  # noqa: E402
+from utils.motion_io import load_session_gt  # noqa: E402
 
 # --- Rendering constants, same visual style as Test1's panels. ---
 LEFT_FOOT_BOX = (slice(40, 120), slice(6, 54))

@@ -45,7 +45,7 @@ for path in (REPO_ROOT, SCRIPT_DIR):
 import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
-import cli_common  # noqa: E402
+from utils import cli_common  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 from loguru import logger as log  # noqa: E402
 from PIL import Image, ImageDraw  # noqa: E402

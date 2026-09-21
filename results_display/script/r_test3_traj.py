@@ -38,10 +38,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import cli_common  # noqa: E402
+from utils import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
-from motion_io import load_motion, load_session_gt  # noqa: E402
-from render_common import (  # noqa: E402
+from utils.motion_io import load_motion, load_session_gt  # noqa: E402
+from utils.render_common import (  # noqa: E402
     INFO_FONT,
     TITLE_FONT,
     draw_text,

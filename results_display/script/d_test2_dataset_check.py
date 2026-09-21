@@ -46,7 +46,7 @@ for path in (REPO_ROOT, SCRIPT_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-import cli_common  # noqa: E402
+from utils import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
 
 from anysole.data.smpl_io import smpl24_pose6d_to_poses  # noqa: E402

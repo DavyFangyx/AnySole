@@ -27,14 +27,14 @@ from typing import Any
 
 import numpy as np
 
-import cli_common
+from utils import cli_common
 
 ROOT = cli_common.REPO_ROOT
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from anysole.types import JOINT_NAMES  # noqa: E402
-from motion_io import LEGACY_BVH_NAMES, load_motion  # noqa: E402
+from utils.motion_io import LEGACY_BVH_NAMES, load_motion  # noqa: E402
 
 METRICS = ("MPJPE_mm", "PA_MPJPE_mm", "WMPJPE_mm", "WAMPJPE_mm", "RTE_mm", "Accel_mps2", "Jitter_1e-3_mps2")
 

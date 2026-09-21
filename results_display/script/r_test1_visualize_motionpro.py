@@ -17,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-import cli_common
+from utils import cli_common
 
 
 REPO_ROOT = cli_common.REPO_ROOT
@@ -36,7 +36,7 @@ from scipy.spatial.transform import Rotation as SciRotation
 
 from lib.model.FRAPPE import FRAPPE
 from lib.util.io import load_smpl_npy
-from bvh_aligner_pose import parse_bvh_aligner
+from utils.bvh_aligner_pose import parse_bvh_aligner
 
 
 SMPL_EDGES = [

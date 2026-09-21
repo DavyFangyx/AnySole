@@ -72,7 +72,7 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-import cli_common  # noqa: E402
+from utils import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
 
 from anysole.data.dataset import AnySoleDataset, collate_windows  # noqa: E402

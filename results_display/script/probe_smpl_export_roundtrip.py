@@ -35,7 +35,7 @@ from anysole.types import (  # noqa: E402
     N_JOINTS,
     SMPL_ROOTS,
 )
-from motion_io import detect_motion_format  # noqa: E402
+from utils.motion_io import detect_motion_format  # noqa: E402
 
 
 def _first_source() -> Path:
