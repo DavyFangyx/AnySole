@@ -20,7 +20,7 @@
 | D_Test1 原始数据可视化 | Test1 的 GT/输入部分 | `d_test1_data_viz.py`（BVH/SMPL GT 渲染） |
 | D_Test2 数据集自检 | Test6 | `d_test2_dataset_check.py` |
 | D_Test3 接触检测 | Test5 | `contact_methods.py` → `AnysoleWorkspace/tool/contact_labels.py`；`d_test3_contact.py` |
-| D_Test4 SMPL 协议预检 | F4 预检 | `d_test4_smpl_protocol.py` + `probe_smpl_*` → `d_test4_smpl_protocol.py` |
+| D_Test4 SMPL 协议预检 | F4 预检 | `d_test4_smpl_protocol.py` + `d_test4_smpl_{bvh_axes,export_roundtrip,protocol_sanity}.py` |
 | R_Test1 模型可视化 | Test1 的模型部分 | `visualize_{motionpro,step2motion,anysole}.py` → `r_test1_visualize.py` |
 | R_Test2 参数对照 | Test2 | `r_test2_compare.py` |
 | R_Test3 轨迹可视化 | Test3 | `r_test3_traj.py` |
@@ -47,7 +47,7 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   │   │   │（D_Test3 标签生成器在 AnysoleWorkspace/tool/contact_labels.py，不在本目录）
 │   │   ├── d_test3_contact.py            # D_Test3：接触标签动画 + 阈值分析
 │   │   ├── d_test4_smpl_protocol.py# D_Test4：真实 SMPL-24 batch/warm-start/loss/backward
-│   │   └── probe_smpl_*.py             # D_Test4：SMPL 写出/读回、轴系、协议契约探针
+│   │   └── d_test4_smpl_*.py          # D_Test4：SMPL 轴系/写出读回/协议 sanity 探针
 │   └── ── 结果检验（R_TestN）──
 │       ├── r_test1_visualize_motionpro.py      # R_Test1：MotionPRO 动画
 │       ├── r_test1_visualize_step2motion.py    # R_Test1：Step2Motion 动画
@@ -202,7 +202,7 @@ PYTHONPATH=. /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python \
   --device cpu --steps 20 --grad-clip 5.0 --lr 1e-4
 
 PYTHONPATH=. /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python \
-  results_display/script/probe_smpl_export_roundtrip.py
+  results_display/script/d_test4_smpl_export_roundtrip.py
 ```
 
 # 第二部分：结果检验（R_TestN）
