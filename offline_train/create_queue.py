@@ -24,7 +24,6 @@ def main():
         index += 1
         text = f'MODEL={model}\nRUN_NAME={model}\nCONDA_ENV=touch_gait\n'
         if model.startswith('anysole'): text += 'CONFIG_FILE=anysole/configs/v1.yaml\n'
-        if model == 'step2motion': text += 'CONFIG_FILE=Baselines/Step2Motion/configs/config_gait.json\n'
         put(gpus[(index - 1) % len(gpus)], f'{index:03d}_{model}', text)
     if 'pressure_toolkit' not in models: return
     rows = [json.loads(line) for line in Path(args.manifest).read_text().splitlines() if line.strip()]

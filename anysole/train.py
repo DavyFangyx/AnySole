@@ -26,6 +26,7 @@ from anysole.types import (
     CONFIG_V,
     DEFAULT_CONFIG_PATH,
     FOOT_JOINTS,
+    GAIT_ROOT,
     HRNET_CACHE_ROOT,
     JOINT_PROTOCOL_CHECKSUM,
     MOTION_PROTOCOL,
@@ -781,6 +782,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if str(config.get("wandb_mode", "disabled")) != "disabled":
         try:
             import wandb
+            # Local run data lives under results/wandb (not a repo-root wandb/).
+            os.environ.setdefault("WANDB_DIR", str(Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results"))) / "wandb"))
             # Identity fields consumed by Wandb_Analyzer: experiment_tag groups a
             # training batch, run_kind/model/stage/fold decide the raw/ directory
             # tree. Single-stage, non-cross-validation runs use stage=single,

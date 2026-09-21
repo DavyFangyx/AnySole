@@ -7,7 +7,7 @@ cd "$repo"
 run_dir="${RUN_DIR:-$repo/results/offline/$RUN_NAME}"
 [[ "$run_dir" = /* ]] || run_dir="$repo/$run_dir"
 mkdir -p "$run_dir"; cp "$cfg" "$run_dir/task.conf"; date -Is > "$run_dir/started_at"
-export PYTHONUNBUFFERED=1 WANDB_MODE="${WANDB_MODE:-disabled}" ANYSOLE_WORKSPACE="${ANYSOLE_WORKSPACE:-$repo/AnysoleWorkspace}" ANYSOLE_RESULTS="${ANYSOLE_RESULTS:-$repo/results}"
+export PYTHONUNBUFFERED=1 WANDB_MODE="${WANDB_MODE:-disabled}" WANDB_DIR="${WANDB_DIR:-$repo/results/wandb}" ANYSOLE_WORKSPACE="${ANYSOLE_WORKSPACE:-$repo/AnysoleWorkspace}" ANYSOLE_RESULTS="${ANYSOLE_RESULTS:-$repo/results}"
 py="${PYTHON_BIN:-python}"
 if [[ "${CONDA_ENV:-touch_gait}" != none && "${CONDA_ENV:-touch_gait}" != 无 ]]; then
   command -v conda >/dev/null || { echo 'conda is required' >&2; exit 2; }
@@ -20,7 +20,6 @@ case "$MODEL" in
   motionpro)
     cd Baselines/MotionPRO
     "$py" -m app.train_frappe task.gpu="$CUDA_VISIBLE_DEVICES" task.checkpoint_dir="$run_dir/checkpoints" task.result_dir="$run_dir/metrics" task.output_dir="$run_dir/debug" task.epochs="${EPOCHS:-1000}" task.batch_size="${BATCH_SIZE:-16}" wandb_mode=disabled ;;
-  step2motion) "$py" "$root/step2motion_task.py" "$cfg" "$run_dir" ;;
   pressure_toolkit)
     cd Baselines/pressure_tookit
     "$py" main_singleview.py -c "$repo/$CONFIG_FILE" --dataset "$DATASET" --sub_ids "$SUB_IDS" --seq_name "$SEQ_NAME" --fitting_stage "$FITTING_STAGE" --start_idx "$START_IDX" --end_idx "$END_IDX" --output_dir "$run_dir" --basdir "$BASDIR" --essential_root "$ESSENTIAL_ROOT" --model_gender "${MODEL_GENDER:-male}" ;;
