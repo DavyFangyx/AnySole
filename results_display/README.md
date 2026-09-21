@@ -156,9 +156,9 @@ python results_display/script/test6_dataset_check.py --session S10103 --limit-se
 背景：原 `contact.npy` 标签口径为「48 格鞋垫 CSV 逐帧压力和 > 100」
 （`prepare_sequences.py:contact_from_insoles`，阈值 `CONTACT_SUM_THRESH`），但大量鞋垫在脚
 离地后压力不归零（如 S11023 左脚摆动相压力和最低 653），曾导致大量运动学离地帧被错标为接触。
-为对比候选修复方案，Test5 改为**按方案分子目录**：`contact_methods.py` 为每个方案生成
+为对比候选修复方案，Test5 改为**按方案分子目录**：`contact_labels.py` 为每个方案生成
 `contact_<method>.npy`（与 `contact.npy` 同目录、同 10 列格式），`test5_contact.py --methods ...`
-渲染判定动画。标签生成器属数据构建代码，P1-3 起迁 `AnysoleWorkspace/tool/contact_labels.py`。
+渲染判定动画。标签生成器属数据构建代码，位于 `AnysoleWorkspace/tool/contact_labels.py`。
 
 | 方法 | 判据 |
 | --- | --- |
@@ -174,7 +174,7 @@ python results_display/script/test6_dataset_check.py --session S10103 --limit-se
 ```bash
 conda activate touch_gait
 # 1) 生成全部方案的标签（全部 session）+ 对比报告
-python results_display/script/contact_methods.py
+python AnysoleWorkspace/tool/contact_labels.py
 # 2) 渲染动画（默认全部方案 × test split；标签缺失时自动补齐）
 python results_display/script/test5_contact.py --methods bvh_soft --gen mp4 --session S11113
 # 单方案 / 单 session 冒烟

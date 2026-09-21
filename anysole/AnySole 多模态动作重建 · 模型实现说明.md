@@ -47,7 +47,7 @@ pose_head,traj_head,aux_heads,model,model_v2}.py`（模型）、`diffusion.py`
   `trans_anchor` (3,)、`psi_anchor`（仅 f2）、`root_rot_init` (3,3)、`floor_y`、
   `offsets/parents` (24 关节)、`config_id`、`session_id`。`assert_batch_shapes`
   在训练前逐项校验。
-- **接触标签**（`--contact-method`，由 `results_display/script/contact_methods.py`
+- **接触标签**（`--contact-method`，由 `AnysoleWorkspace/tool/contact_labels.py`
   生成 `contact_<method>.npy`）：`tactile_abs`（48 格压力和>100，即原 contact.npy）、
   `bvh_soft`、`bvh_h`、`joint_or`、`joint_and`、以及 F6 系列 `motion_f6` /
   `pressure_f6` / `f6_soft`（V3-0 主体已实现，标签清洗未完成）。

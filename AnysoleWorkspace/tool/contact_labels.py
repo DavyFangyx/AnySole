@@ -36,15 +36,16 @@ disagrees with the reference (session, foot, frame range, direction, and
 in-interval height/speed/sum context), sorted by span.
 
 Usage (from the repository root):
-    python results_display/script/contact_methods.py                     # 全部 session, 全部方法 + 对比报告
-    python results_display/script/contact_methods.py --session S11023    # 单个 session
-    python results_display/script/contact_methods.py --methods bvh_h --no-report
+    python AnysoleWorkspace/tool/contact_labels.py                     # 全部 session, 全部方法 + 对比报告
+    python AnysoleWorkspace/tool/contact_labels.py --session S11023    # 单个 session
+    python AnysoleWorkspace/tool/contact_labels.py --methods bvh_h --no-report
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -57,11 +58,64 @@ for path in (REPO_ROOT, SCRIPT_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-import cli_common  # noqa: E402
 from anysole.data.pressure import load_session_pressure  # noqa: E402
-from anysole.types import CONTACT_SUM_THRESH  # noqa: E402
-from bvh_aligner_pose import parse_bvh_aligner  # noqa: E402
+from anysole.types import (  # noqa: E402
+    CONTACT_SUM_THRESH,
+    GAIT_ROOT,
+    SEQ_ROOT,
+    WORKSPACE_ROOT,
+)
 from loguru import logger as log  # noqa: E402
+
+from _bvh_aligner_pose import parse_bvh_aligner  # noqa: E402
+
+# ---- 本地路径解析（原 results_display/script/cli_common.py 的最小子集，
+# 该库属展示层公共件，工具层不反向依赖）----
+DISPLAY_ROOT = Path(
+    os.environ.get("ANYSOLE_RESULTSDISPLAY", str(GAIT_ROOT / "results_display"))
+).expanduser()
+
+
+def _resolve_raw_bvh(path: Path) -> Path:
+    """Resolve BVHs recorded before the workspace was reorganized."""
+    marker = "/mocap_ori_bvh/"
+    normalized = path.as_posix()
+    if marker not in normalized:
+        return path
+    suffix = normalized.split(marker, 1)[1]
+    matches = sorted((WORKSPACE_ROOT / "sources/raw").glob("*/mocap_ori_bvh/" + suffix))
+    return matches[0] if matches else path
+
+
+def resolve_path(value, base_dir=None) -> Path:
+    """Resolve a path that may use the ``workspace://`` scheme."""
+    text = str(value or "")
+    if text.startswith("workspace://"):
+        return Path(WORKSPACE_ROOT) / text[len("workspace://"):]
+    normalized = text.replace("\\", "/").rstrip("/")
+    path = Path(os.path.expandvars(text)).expanduser()
+    if path.is_absolute():
+        return _resolve_raw_bvh(path)
+    if base_dir is None:
+        candidate = WORKSPACE_ROOT / path
+        if candidate.exists() or "/mocap_ori_bvh/" in candidate.as_posix():
+            return _resolve_raw_bvh(candidate)
+        return path
+    return _resolve_raw_bvh(Path(base_dir) / path)
+
+
+def split_csv_arg(value) -> list:
+    """Split a comma-separated list argument, tolerating braces and semicolons."""
+    text = str(value or "").strip()
+    if not text:
+        return []
+    text = text.replace("{", " ").replace("}", " ").replace(";", ",")
+    out = []
+    for chunk in text.replace(" ", ",").split(","):
+        item = chunk.strip()
+        if item:
+            out.append(item)
+    return out
 
 FPS = 40.0
 N_CONTACT_COLS = 10
@@ -84,7 +138,7 @@ def load_aligned(seq_dir: Path) -> dict:
     n = int(meta["n_frames"])
     t_grid = float(meta["visual_start_s"]) + np.arange(n, dtype=np.float64) / FPS
     out = load_session_pressure(meta, t_grid)
-    parsed = parse_bvh_aligner(cli_common.resolve_path(meta["bvh_path"]), trim_leading_seconds=0.0)
+    parsed = parse_bvh_aligner(resolve_path(meta["bvh_path"]), trim_leading_seconds=0.0)
     joints_src, frame_time, names = parsed["joints"], parsed["frame_time"], parsed["names"]
     t_mocap = t_grid - float(meta["offset_s"])
     src_t = np.arange(joints_src.shape[0], dtype=np.float64) * float(frame_time)
@@ -493,10 +547,10 @@ def ensure_labels(dirs: list[Path], methods: list[str], force: bool = False) -> 
 
 
 def generate(args: argparse.Namespace) -> None:
-    root = Path(cli_common.resolve_path(args.seq_root))
+    root = Path(resolve_path(args.seq_root))
     dirs = seq_dirs(root)
     if args.session:
-        wanted = set(cli_common.split_csv_arg(args.session))
+        wanted = set(split_csv_arg(args.session))
         dirs = [d for d in dirs if d.name in wanted]
     if not dirs:
         raise SystemExit(f"No sequence dirs under {root}")
@@ -532,10 +586,10 @@ def report(args: argparse.Namespace, out_dir: Path) -> None:
         font_manager.fontManager.addfont(cjk)
         plt.rcParams["font.family"] = "Noto Sans CJK JP"
 
-    root = Path(cli_common.resolve_path(args.seq_root))
+    root = Path(resolve_path(args.seq_root))
     dirs = seq_dirs(root)
     if args.session:
-        wanted = set(cli_common.split_csv_arg(args.session))
+        wanted = set(split_csv_arg(args.session))
         dirs = [d for d in dirs if d.name in wanted]
     methods = METHOD_NAMES if args.methods == "all" else [m for m in METHOD_NAMES if m in args.methods]
 
@@ -685,10 +739,10 @@ def diff_report(args: argparse.Namespace, out_dir: Path) -> None:
         font_manager.fontManager.addfont(cjk)
         plt.rcParams["font.family"] = "Noto Sans CJK JP"
 
-    root = Path(cli_common.resolve_path(args.seq_root))
+    root = Path(resolve_path(args.seq_root))
     dirs = seq_dirs(root)
     if args.session:
-        wanted = set(cli_common.split_csv_arg(args.session))
+        wanted = set(split_csv_arg(args.session))
         dirs = [d for d in dirs if d.name in wanted]
     methods = METHOD_NAMES if args.methods == "all" else [m for m in METHOD_NAMES if m in args.methods]
 
@@ -813,19 +867,9 @@ def _plot_diff_groups(method: str, method_dir: Path, counts: dict, sid_subject: 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate per-method contact labels and compare them.")
-    cli_common.add_common_args(
-        parser,
-        seq_root=True,
-        session=True,
-        split_csv=False,
-        split=False,
-        gen=False,
-        fps=False,
-        stride=False,
-        max_frames=False,
-        force=True,
-        out_dir=False,
-    )
+    parser.add_argument("--session", type=str, default="", help="Session ids, e.g. S14103,S14023. Empty uses the split column.")
+    parser.add_argument("--seq-root", type=str, default=str(SEQ_ROOT), help="Centralized sequence root.")
+    parser.add_argument("--force", action="store_true", help="Rebuild and overwrite existing outputs.")
     parser.add_argument("--methods", type=str, default="all", help="Comma-separated methods or 'all'.")
     parser.add_argument("--no-report", action="store_true", help="Skip the comparison report.")
     parser.add_argument("--no-diff", action="store_true", help="Skip the per-interval difference list (method_diffs.csv).")
@@ -838,7 +882,7 @@ def main() -> int:
     if not args.report_only:
         generate(args)
     if not args.no_report:
-        out_dir = cli_common.DISPLAY_ROOT / "Test5_contact"
+        out_dir = DISPLAY_ROOT / "Test5_contact"
         out_dir.mkdir(parents=True, exist_ok=True)
         report(args, out_dir)
         if not args.no_diff:

@@ -77,7 +77,7 @@ python data_prep/make_splits.py --skip-existing
 
 `prepare_sequences.py` 同时为各 session 生成 `contact.npy`，口径为「48 格压力和 > 100」
 （即 Test5 的 `tactile_abs` 方案）。如需用 Test5 的其他接触检测方案训练/评估
-（见 3.1 与 4.1 的 `--contact-method`），先用 `results_display/script/contact_methods.py`
+（见 3.1 与 4.1 的 `--contact-method`），先用 `AnysoleWorkspace/tool/contact_labels.py`
 额外生成 `contact_<method>.npy`，详见 `results_display/README.md` 的「## Test5 接触检测」。
 
 默认只生成一份中央 split：
@@ -380,7 +380,7 @@ RTM-pose 观测。
 - `No module named 'lib'`：MotionPRO 的 `python -m lib.util.*` 必须在
   `Baselines/MotionPRO/` 下执行。
 - 缺少 `contact_<method>.npy`（指定 `--contact-method` 后报错）：先运行
-  `python results_display/script/contact_methods.py --methods <method>` 生成对应方案标签。
+  `python AnysoleWorkspace/tool/contact_labels.py --methods <method>` 生成对应方案标签。
 - 缺少 pressure toolkit 的 essential、标定或 floor 文件：停止拟合，不下载或伪造文件。
 - CUDA 不可用：检查 `CUDA_VISIBLE_DEVICES`、`nvidia-smi` 和当前环境的 PyTorch CUDA 版本。
 

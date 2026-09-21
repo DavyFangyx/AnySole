@@ -16,13 +16,18 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 
+TOOL_DIR = Path(__file__).resolve().parents[2] / "AnysoleWorkspace" / "tool"
+if str(TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOL_DIR))
+
 from anysole.data.dataset import find_session_dir
 from anysole.types import SEQ_ROOT, SPLIT_CSV
-from contact_methods import apply_method, foot_signal, load_aligned, soft_prob
+from contact_labels import apply_method, foot_signal, load_aligned, soft_prob
 
 
 def _metrics(pred: np.ndarray, gt: np.ndarray) -> dict[str, float]:

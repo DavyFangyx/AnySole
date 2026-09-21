@@ -5,7 +5,7 @@ skeleton aligned to the 40 Hz session grid next to the tactile insole
 heatmaps, with a per-foot contact indicator driven by the method's labels
 (red = contact, green = no contact), plus a full-session contact timeline
 strip.  Each method gets its own subfolder so variants can be compared side
-by side; labels come from ``contact_<method>.npy`` (see ``contact_methods.py``).
+by side; labels come from ``contact_<method>.npy`` (see ``AnysoleWorkspace/tool/contact_labels.py``).
 
 Outputs land under ``results_display/Test5_contact/<method>/``:
 
@@ -19,7 +19,7 @@ Outputs land under ``results_display/Test5_contact/<method>/``:
     threshold_analysis_hist.csv    (root) the same 64-bin distribution as
                                    plotted (bin_start/bin_end/count per side)
     comparison.csv / comparison.png (root) method scorecard across methods,
-                                   produced by ``contact_methods.py --report``
+                                   produced by ``AnysoleWorkspace/tool/contact_labels.py --report``
 
 Usage (run from the repository root):
     python results_display/script/test5_contact.py
@@ -40,7 +40,8 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = Path(__file__).resolve().parent
-for path in (REPO_ROOT, SCRIPT_DIR):
+TOOL_DIR = REPO_ROOT / "AnysoleWorkspace" / "tool"
+for path in (REPO_ROOT, SCRIPT_DIR, TOOL_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
@@ -48,7 +49,7 @@ import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
 import cli_common  # noqa: E402
-import contact_methods  # noqa: E402
+import contact_labels as contact_methods  # noqa: E402
 import cv2  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 from loguru import logger as log  # noqa: E402
@@ -545,7 +546,7 @@ def parse_args() -> argparse.Namespace:
         "--methods",
         type=str,
         default="all",
-        help="Contact methods (see contact_methods.py): comma-separated or 'all' (default: all).",
+        help="Contact methods (see AnysoleWorkspace/tool/contact_labels.py): comma-separated or 'all' (default: all).",
     )
     return parser.parse_args()
 
