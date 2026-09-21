@@ -426,12 +426,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--pose-parts",
-        choices=(3, 9),
+        choices=(3, 9, 24),
         type=int,
         default=None,
-        help="V3-2: pose-head query granularity. 3 = SMPL-24 joint queries in body/"
+        help="V3-2/V4A: pose-head query granularity. 3 = SMPL-24 joint queries in body/"
         "left/right groups (F0b baseline); 9 = one query + one unembed head "
-        "per part (PART_JOINTS, fix_plan_v3.md §V3-2). Saved into the checkpoint.",
+        "per part (PART_JOINTS, fix_plan_v3.md §V3-2); 24 = one slot per "
+        "joint — the V4A clustering run (方案 A) discovers the grouping from "
+        "a near-uniform assignment instead of assuming it. Saved into the checkpoint.",
     )
     parser.add_argument(
         "--soft-parts",
@@ -455,7 +457,60 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=float,
         default=None,
         help="V3-3: weight of L_assign (assignment entropy + slot-load balance; "
-        "only active with --soft-parts). Default 0.05.",
+        "only active with --soft-parts). Default 0.05. V4A clustering passes "
+        "1.0 here and scales the three cluster terms with --lambda-assign-*.",
+    )
+    parser.add_argument(
+        "--assign-cluster",
+        action="store_true",
+        help="V4A (方案 A, prove_partition design): learn the part grouping "
+        "from a near-uniform assignment. Requires --pose-parts 24 --soft-parts. "
+        "Replaces the V3-3 L_assign with annealed entropy + concentration "
+        "reward + dead-slot tax; A gets its own optimizer lr (--assign-lr-mult) "
+        "and is frozen after --assign-lock-frac of the run. Saved into the checkpoint.",
+    )
+    parser.add_argument(
+        "--lambda-assign-ent", type=float, default=0.05,
+        help="V4A: weight of the ANNEALED per-joint assignment entropy (early "
+        "softness; anneals to 0 by --assign-anneal-frac).",
+    )
+    parser.add_argument(
+        "--lambda-assign-conc", type=float, default=0.01,
+        help="V4A: weight of the concentration reward (N_JOINTS^2 - sum mass^2, "
+        ">= 0). Bigger = fewer, larger slots (K emerges from the recon-loss tension).",
+    )
+    parser.add_argument(
+        "--lambda-assign-dead", type=float, default=0.02,
+        help="V4A: weight of the dead-slot tax (sum exp(-beta*mass)) that "
+        "rounds crumb loads to 0 so the effective K reads cleanly.",
+    )
+    parser.add_argument(
+        "--assign-dead-beta", type=float, default=2.0,
+        help="V4A: sharpness of the dead-slot tax exp(-beta*mass).",
+    )
+    parser.add_argument(
+        "--assign-temp-init", type=float, default=1.0,
+        help="V4A: assignment softmax temperature at step 0 (soft start).",
+    )
+    parser.add_argument(
+        "--assign-temp-final", type=float, default=0.2,
+        help="V4A: assignment softmax temperature at the end of the anneal "
+        "(sharp). eval/readout restore this value from the checkpoint.",
+    )
+    parser.add_argument(
+        "--assign-anneal-frac", type=float, default=0.7,
+        help="V4A: fraction of total steps over which temperature and entropy "
+        "anneal linearly to their final/zero values.",
+    )
+    parser.add_argument(
+        "--assign-lock-frac", type=float, default=0.7,
+        help="V4A: fraction of total steps after which part_logits (A) is "
+        "frozen so the heads settle against a fixed grouping (M step).",
+    )
+    parser.add_argument(
+        "--assign-lr-mult", type=float, default=5.0,
+        help="V4A: optimizer lr multiplier for part_logits (A) relative to the "
+        "rest of the model. Only active with --assign-cluster.",
     )
     parser.add_argument(
         "--lambda-sigma",
@@ -769,10 +824,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["lambda_sigma"] = float(args.lambda_sigma)
     if args.sigma_freeze_frac is not None:
         config["sigma_freeze_frac"] = float(args.sigma_freeze_frac)
-    if bool(config.get("soft_parts", False)) and int(config.get("pose_parts", 3)) != 9:
-        raise ValueError("--soft-parts requires --pose-parts 9 (V3-3)")
+    if args.assign_cluster:
+        config["assign_cluster"] = True
+        for key in ("lambda_assign_ent", "lambda_assign_conc", "lambda_assign_dead",
+                    "assign_dead_beta", "assign_temp_init", "assign_temp_final",
+                    "assign_anneal_frac", "assign_lock_frac", "assign_lr_mult"):
+            config[key] = float(getattr(args, key))
+        if int(config.get("pose_parts", 3)) != 24 or not bool(config.get("soft_parts", False)):
+            raise ValueError("--assign-cluster requires --pose-parts 24 --soft-parts (V4A)")
+        if float(config["lambda_assign"]) != 1.0:
+            print("NOTE: V4A clustering expects --lambda-assign 1.0 (the cluster "
+                  "terms carry their own --lambda-assign-* weights); got %s"
+                  % config["lambda_assign"])
+    if bool(config.get("soft_parts", False)) and int(config.get("pose_parts", 3)) not in (9, 24):
+        raise ValueError("--soft-parts requires --pose-parts 9 (V3-3) or 24 (V4A)")
     if str(config.get("gate", "none")) != "none" and int(config.get("pose_parts", 3)) != 9:
         raise ValueError("--gate requires --pose-parts 9 (V3-3)")
+    # V4A: the anneal progress consumed by the cluster L_assign each step;
+    # defaults to fully-annealed (1.0) for every non-cluster run.
+    config.setdefault("assign_anneal", 1.0)
     if args.lr_warmup_frac is not None:
         config["lr_warmup_frac"] = float(args.lr_warmup_frac)
     if args.tactile_direct:
@@ -963,7 +1033,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("traj f2 stats: mean %s std %s"
               % (config["traj_f2_stats"]["mean"], config["traj_f2_stats"]["std"]))
     diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
-    optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))
+    # V4A clustering: part_logits (A) gets its own optimizer group with an lr
+    # multiplier, so the assignment can move faster than the heads while they
+    # co-train (soft EM).  The per-epoch/per-step lr setters below multiply
+    # by each group's "assign_mult".
+    assign_lr_mult = float(config.get("assign_lr_mult", 1.0))
+    if assign_lr_mult != 1.0 and bool(config.get("soft_parts", False)):
+        part_logits = model.pose_head.part_logits
+        rest = [p for p in model.parameters() if p is not part_logits]
+        optimizer = torch.optim.Adam(
+            [
+                {"params": rest, "assign_mult": 1.0},
+                {"params": [part_logits], "assign_mult": assign_lr_mult},
+            ],
+            lr=float(config["lr"]),
+        )
+    else:
+        optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))
     out_dir = Path(config["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     warn_legacy_output_checkpoint(out_dir)
@@ -979,6 +1065,24 @@ def main(argv: Optional[List[str]] = None) -> int:
               % (lr_warmup_frac, int(config["epochs"]), len(loader), warmup_steps))
 
     global_step = 0
+    # V4A clustering schedule (方案 A): temperature/entropy anneal linearly
+    # over the first assign_anneal_frac of total steps, then A is frozen for
+    # the last (1 - assign_lock_frac) of the run so the heads settle against
+    # a fixed grouping.  Non-cluster runs keep the defaults (temp 1.0, no
+    # lock) so V3-3 behavior is byte-identical.
+    cluster_mode = bool(config.get("assign_cluster", False))
+    if cluster_mode:
+        total_steps = int(config["epochs"]) * len(loader)
+        anneal_steps = int(float(config.get("assign_anneal_frac", 0.7)) * total_steps)
+        lock_steps = int(float(config.get("assign_lock_frac", 0.7)) * total_steps)
+        temp_init = float(config.get("assign_temp_init", 1.0))
+        temp_final = float(config.get("assign_temp_final", 0.2))
+        print("V4A cluster schedule: anneal %d steps (temp %.2f -> %.2f, entropy -> 0), "
+              "lock A after step %d, A lr mult %.1f"
+              % (anneal_steps, temp_init, temp_final, lock_steps, assign_lr_mult))
+    else:
+        anneal_steps = lock_steps = 0
+        temp_init = temp_final = 1.0
     # Best-ckpt tracking (loss-explosion protection): the val eval cadence is
     # the only visibility into val quality, so the best-so-far model by
     # val/tau0_mpjpe/VT is snapshotted to ckpt_best.pt — a finite-gradient
@@ -1005,7 +1109,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             progress = epoch / float(config["epochs"])
             epoch_lr = float(config["lr"]) * 0.5 * (1.0 + math.cos(math.pi * progress))
         for group in optimizer.param_groups:
-            group["lr"] = epoch_lr
+            group["lr"] = epoch_lr * float(group.get("assign_mult", 1.0))
         epoch_start_step = global_step
         nonfinite_skips = 0
         epoch_sums = {"loss_total": 0.0, "loss_pose": 0.0, "loss_traj": 0.0, "loss_con": 0.0, "loss_kp": 0.0, "loss_pose_vel": 0.0, "loss_bone": 0.0, "loss_assign": 0.0, "loss_sigma": 0.0, "loss_Trec_Tmissing": 0.0, "loss_Vrec_Vmissing": 0.0, "grad_norm": 0.0, "n": 0, "n_tmissing": 0, "n_vmissing": 0}
@@ -1019,6 +1123,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             # F1: hmr_gvhmr checkpoints consume the GVHMR channel; V1 models
             # have no V_hmr parameter.
             v_kw = {"V_hmr": batch.get("V_hmr")} if str(config.get("v_input", "hrnet")) == "hmr_gvhmr" else {}
+
+            if cluster_mode:
+                # V4A per-step schedule: anneal the assignment temperature
+                # (soft -> sharp) and the L_assign entropy scale, and freeze
+                # part_logits (A) after the lock point (the M step).
+                anneal_prog = min(1.0, global_step / float(max(anneal_steps, 1)))
+                model.pose_head.set_assign_temp(temp_init + (temp_final - temp_init) * anneal_prog)
+                config["assign_anneal"] = 1.0 - anneal_prog
+                if lock_steps > 0:
+                    model.pose_head.part_logits.requires_grad_(global_step < lock_steps)
 
             optimizer.zero_grad(set_to_none=True)
             if sigma_freeze_steps:
@@ -1101,7 +1215,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # value is set on the groups at the top of the loop).
                 ramp = min(1.0, global_step / float(warmup_steps))
                 for group in optimizer.param_groups:
-                    group["lr"] = epoch_lr * ramp
+                    group["lr"] = epoch_lr * ramp * float(group.get("assign_mult", 1.0))
             optimizer.step()
             n = batch_size
             epoch_sums["n"] += n
@@ -1126,6 +1240,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             "epoch": epoch + 1,
             "config": dict(config),
         }
+        # V4A: assign_anneal is per-step scratch for the L_assign entropy
+        # scale, not a static config value — don't persist it.
+        checkpoint["config"].pop("assign_anneal", None)
         # Atomic replace: a reader (auto-eval torch.load) must never see a
         # half-written file when several runs share one out_dir.  Each process
         # writes its own temp file, so a concurrent save cannot corrupt it.
@@ -1187,6 +1304,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                     log["gate/%s_gV" % pname] = float(summary[p, 0])
                     log["gate/%s_gT" % pname] = float(summary[p, 1])
                     log["gate/%s_gE" % pname] = float(summary[p, 2])
+            # V4A cluster probes: per-slot loads + effective K so the grouping
+            # emergence is watchable live (wandb prefix "assign/").  The final
+            # grouping itself is audited off the checkpoint via
+            # z_note/probes/probe_v4a_readout.py.
+            if cluster_mode:
+                assign = model.pose_head.assignment().detach()
+                loads = assign.sum(dim=1)
+                log["assign/effective_K_ge0.5"] = float((loads >= 0.5).sum())
+                log["assign/effective_K_ge1.0"] = float((loads >= 1.0).sum())
+                log["assign/max_load"] = float(loads.max())
+                log["assign/mean_entropy"] = float(
+                    -(assign * (assign + 1e-12).log()).sum(dim=0).mean()
+                )
+                for k in range(int(loads.shape[0])):
+                    log["assign/load_%02d" % k] = float(loads[k])
             # Optional capped logging (--loss-cap): the first epochs spike far
             # above the converged range (loss_total 30 -> 0.1, loss_pose 1.5 ->
             # 0.01), which stretches the raw charts' y-axis and hides

@@ -204,23 +204,32 @@ SMPL-24 协议预检属一次性探针而非实验，已按用户裁定撤销 D_
 
 `d_test5_baseline_tactile.py` 是纯可视化前端：先确保转换产物落盘（产物齐全则跳过，
 缺则 subprocess 调用 `AnysoleWorkspace/tool/generate_baseline_tactile.py`；`--force`
-强制重生成），再读落盘文件渲染 1×4 横向逐帧动画。转换口径（点对点按 SMPL 模板足底系
-欧氏最近点）在生成器里，与前端逐函数一致：
+强制重生成）。
 
-| 基线 | 触觉输入 | 落盘位置 |
+| 工作 | 触觉输入 | 落盘位置 |
 | --- | --- | --- |
+| AnySole（主方法） | 原始 pressure.npz → 原生 4×12 / 脚 | `AnysoleWorkspace/derived/MotionPRO/sequences/cam3/<date>/<sub>/<sid>/pressure.npz` |
 | MotionPRO | pressure.npz → bilinear 96×96 /255（FRAPPE 口径；可视化按 L/R 脚区等尺度显示） | `AnysoleWorkspace/derived/MotionPRO/pressure_96/<sid>.npz` |
+| MMVP（pressure_tookit / VP-MoCap） | 共享同一份 insole `{'insole': [L(31,11), R(31,11)]}`；两棵目录逐帧一致 | `AnysoleWorkspace/derived/pressure_tookit/.../insole/%03d.npy` + `AnysoleWorkspace/derived/VP-MoCap/.../insole/%03d.npy` |
 | Step2Motion | 16 通道/脚（process_gait 冻结池化，展示/审计产物） | `AnysoleWorkspace/derived/Step2Motion/pressure_16ch/<sid>.npz` |
-| pressure_tookit | insole `{'insole': [L(31,11), R(31,11)]}`，load_contact 只判 !=0 → 9 标签/脚 | `AnysoleWorkspace/derived/pressure_tookit/images/<date>/<sub>/<sid>/insole/%03d.npy` |
-| VP-MoCap | 与 toolkit 共用同一套 insole 文件（FPP-Net 内部 sigmoidNorm） | `AnysoleWorkspace/derived/VP-MoCap/<date>/<sub>/<sid>/insole/%03d.npy` |
+
+   方法                                  实际数据                            当前显示
+  ━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   AnySole              4×12 = 48 格/脚，96 格/帧                      48 格/脚，正确
+  ─────────────  ─────────────────────────────────  ──────────────────────────────────
+   MotionPRO      输入是 96×96 图像，即 9216 个像    当前没有显式网格，只显示连续热图
+                    素；底层来源仍是 48 格/脚，共
+                                    96 个传感器格
+  ─────────────  ─────────────────────────────────  ──────────────────────────────────
+   MMVP               31×11 = 341 个位置/脚；有效                       31×11 网格/脚
+                            mask 约 242/241 个/脚
+  ─────────────  ─────────────────────────────────  ──────────────────────────────────
+   Step2Motion             16 通道/脚，32 通道/帧     当前显示 48 格/脚，但只有 16 个
+                                                              唯一值，每个值重复 3 格
 
 关键实测（`AnysoleWorkspace/derived/baseline_tactile/<sid>/meta.json`）：MMVP mask 242/241 像素/脚；
 最近格距离 L 均值 9.2mm / R 8.7mm；FPP weight = 静立帧总压；布局文件未标注内外侧
 方向，默认与模板 x 同向（`--mirror-x` 翻转，透传生成器）。
-
-产出（`d_test5_baseline_tactile/`）：每 session 一个 `<sid>_adapted_tactile.gif` 或
-`<sid>_adapted_tactile.mp4`（四面板 1x4 横向同帧对齐动画）。默认 CLI 只输出启动与汇总信息，
-需要逐步日志时加 `--verbose`。关键数值在生成器 meta：`AnysoleWorkspace/derived/baseline_tactile/<sid>.json`。
 
 ```bash
 conda activate touch_gait

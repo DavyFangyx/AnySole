@@ -268,6 +268,9 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
         )
     # E4: match the checkpoint's training noise scale (see train.py noise_scaled).
     model.noise_scaled = bool(saved_config.get("noise_scaled", False))
+    # V4A: restore the checkpoint's final assignment temperature (see eval.py).
+    if getattr(model.pose_head, "soft_parts", False) and bool(saved_config.get("assign_cluster", False)):
+        model.pose_head.set_assign_temp(float(saved_config.get("assign_temp_final", 1.0)))
     model.eval()
     diffusion = GaussianDiffusion(n_train_steps=int(saved_config.get("diffusion_train_steps", config["diffusion_train_steps"])))
     sample_steps = int(args.sample_steps or config["diffusion_sample_steps"])

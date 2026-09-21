@@ -201,11 +201,26 @@ FFN
 - **失败处置一**：g_∅ 不激活 → 先验路径容量不足 → 提前 V3-5 轻量 AMASS。
 - **失败处置二**：σ 塌缩成常数 → 查 r_p 是否在变（段丢弃/遮挡强度），调 β。
 
-### V3-4 f2 表示移植（V3-1~3 的机制在 F2p4 基座上重跑；tag `v34_f2`）
+### V3-4 f2 表示移植（用户裁定 2026-09-21：f2 成为链的标准表征，编号 V3-4a/b/c）
 
-- 改动 = `--f2-repr` + warm-start 自 F2p4_combo；机制代码零改动（深监督头/门控
-  天然支持 4 维轨迹与 tilt，实现时按 f2 口径适配输出维度）。
-- 验收：T2M ≤92 且 PA ≤36（向 F2 的 89.7/35.8 看齐）；VT2M ≤65；F1–F4 全协议。
+> **2026-09-21 用户裁定**：T-only 偏航乱飘的根因是信息论性的（压力无绝对朝向，
+> probe_v33b_yaw_t2m.py：yaw_abs 71.5°、速率 231°/s vs GT 12.6°/s）——**表征
+> 统一改预测朝向变化（f2），三配置共用一套权重，不给 T 单独开头**。F2/F2p4 =
+> F0b/F4a 的 f2 重训版已存在（F2p4 = 链起点）；V3 机制组在 f2 基座上按
+> **V3-4a（9 部位）→ V3-4b（+soft A）→ V3-4c（+σ 门控 + β-NLL 填坑）**
+> 三步串行，每步单变量、每步验收（命令见 ../command_manual.md V3-4 节）。
+> 非 f2 的 V3-2/V3-3A/V3-3B 标记为"错误表征证据"，不再推进。
+
+- 命令 = 现有 V3-2/V3-3A/V3-3B 命令各加 `--f2-repr`，init-from 换成 f2 链父
+  节点（F2p4 → V3-4a → V3-4b → V3-4c）；V3-4c 额外
+  `--lambda-sigma 0.01 --sigma-freeze-frac 0.1`（σ 修复，§8.4 二轮审计）。
+- 机制代码零改动：f2 是数据/几何侧开关（pose head 照出 144、traj head 自动
+  4 维、β-NLL r² 在标准化空间照常、门控掩码视图不变）；F2p4 的 4 维
+  traj_head.proj 同形继承，9 部位/soft A/门控新结构按名字跳过。
+- 验收（沿用原 V3-4 线）：V3-4a 打平 F2p4（VT ≤69±2、T2M ≤135±3）；
+  V3-4b 不劣于 V3-4a；V3-4c = F4 差分判据（§2.3 修订版）+ T2M ≤92 且
+  PA ≤36、VT2M ≤65（向 BVH 时代 F2 的 89.7/35.8 看齐）。yaw 验收用
+  probe_v33b_yaw_t2m.py：T2M yaw_abs 回到 ≤10° 量级。
 - 数值警戒：f2 的 f2_to_world + FK 归一化脆弱（F5B_gated NaN 实录），NaN-grad
   守卫必开，监控 train/nonfinite_skips。
 
@@ -253,7 +268,7 @@ FFN
 | V3-1 | `--t-encoder foot_conv --init-from F4a_footconv --lambda-ds-t 0.3 --lambda-ds-v 0.1`（待实现） | 3700 | v31_ds |
 | V3-2 | `--t-encoder foot_conv --pose-parts 9 --init-from F4a_footconv`（待实现） | 3700 | v32_part9min |
 | V3-3 | 两阶段：先 `--pose-parts 9 --soft-parts`，后叠加 `--gate sigma`（已实现，§8；命令见 ../command_manual.md） | 3700×2 | v33_softA / v33_sigma_gate |
-| V3-4 | V3-3 全开关 + `--f2-repr --init-from F2p4_combo` | 3700 | v34_f2 |
+| V3-4 | 三步 f2 链：V3-4a（F2p4+`--f2-repr --pose-parts 9`）→ V3-4b（+`--soft-parts`）→ V3-4c（+`--gate sigma --lambda-sigma 0.01 --sigma-freeze-frac 0.1`） | 3700×3 | v34a / v34b / v34c |
 | V3-6 | + `--lambda-contact 1 --lambda-skate <w> --lambda-height <w>` | 3700 | v36_contact |
 
 **验收口径（每步同表）**：功能验收协议 F1–F4（§2.3）+ eval 全套 fseries 指标 +
@@ -270,7 +285,8 @@ ridge 通路探针表 + 训练面板（loss 分量、grad_norm、nonfinite_skips
 - [x] V3-2：pose_head n_parts=9 最小移植 → 验收打平 F4a（2026-09-21 已回填）
 - [~] V3-3：双掩码交叉注意力 + σ 路由 + 软分配 A 矩阵（2026-09-21 实现 v1，
       smoke 全过；β-NLL σ 监督未实现；训练验收待跑，见 §8.4）
-- [ ] V3-4：f2 移植（F2p4 基座）→ 验收
+- [ ] V3-4（2026-09-21 裁定 = f2 三步链）：V3-4a → V3-4b → V3-4c（每步验收，
+      详见 §V3-4 修订与 ../command_manual.md）
 - [ ] V3-5：先验（按 V3-3 门控结果触发：正式 F8a 或轻量 AMASS finetune）
 - [ ] V3-6：L_contact/L_skate/L_height（v2 §F6b）
 - [ ] （并行）F8a AMASS→BVH23 转换 + refiner 预训练（v2 §F8a）

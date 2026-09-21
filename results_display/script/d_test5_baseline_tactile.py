@@ -1,17 +1,16 @@
-"""D_Test5: 三基线触觉适配可视化（Agent_06 前置）。
+"""D_Test5: AnySole + 三基线触觉适配可视化（Agent_06 前置）。
 
 可视化前端，不做任何转换计算：先确保 AnysoleWorkspace/tool/generate_baseline_
 tactile.py 的产物落盘（产物齐全则跳过生成，缺则调用生成脚本；--force 强制
-重生成），再读落盘文件渲染 1x4 横向逐帧动画。四个面板数据全部来自落盘：
+重生成），再读统一压力源和落盘文件渲染 1x4 横向逐帧动画。四个面板为：
 
+    AnySole         原始 pressure.npz → 原生 4x12 / 脚（主方法参考坐标）
     MotionPRO       AnysoleWorkspace/derived/MotionPRO/pressure_96/<sid>.npz
-                    （FRAPPE 实际输入的 96x96；可视化按左右脚等尺度显示）
+                    （FRAPPE 实际输入的 96x96；可视化按左右脚等尺度并旋转到参考坐标）
+    MMVP            pressure_tookit 与 VP-MoCap 共用的 31x11 原始压力
+                    （两棵目录逐帧校验一致，只显示一个逻辑工作）
     Step2Motion     AnysoleWorkspace/derived/Step2Motion/pressure_16ch/<sid>.npz
-                    （16 通道/脚，组值回填 4x12 仅作展示）
-    pressure_tookit AnysoleWorkspace/derived/pressure_tookit/images/<date>/<sub>/
-                    <sid>/insole/%03d.npy（31x11 原始压力）
-    VP-MoCap        同一 insole 文件 + sigmoidNorm(weight) 展示
-                    （weight/pw 取 AnysoleWorkspace/derived/baseline_tactile/<sid>.json）
+                    （16 通道/脚，回填为统一脚形仅作展示）
 
 映射口径（生成器与 meta 为准）：点对点按 SMPL 模板足底系欧氏最近点，厂商布局
 48 点对齐模板足底包围盒，--mirror-x 翻转内外侧（默认同向假定）。
@@ -64,10 +63,10 @@ GENERATOR = TOOL_DIR / "generate_baseline_tactile.py"
 DEFAULT_OUT = REPO_ROOT / "results_display" / "data" / "d_test5_baseline_tactile"
 
 # 面板基线标注色（工作名标题同色，仅作身份标识）
+C_ANYSOLE = (120, 220, 150)
 C_MOTIONPRO = (255, 170, 80)
-C_S2M = (80, 200, 255)
 C_TOOLKIT = (230, 120, 230)
-C_FPP = (200, 120, 200)
+C_S2M = (80, 200, 255)
 
 PANEL_W = 360          # 单面板宽：1x4 横向对比
 PANEL_H = 390          # 单面板高：标题区 + 标签区 + 252 高内容区
@@ -156,12 +155,15 @@ def motionpro_foot_crops(img: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def render_motionpro_foot_blocks(img: np.ndarray, title: str, subtitle: str,
                                  color: tuple) -> np.ndarray:
-    """MotionPRO 96x96 输入按左右脚裁切后，使用与其他三面板相同的脚尺寸。"""
+    """MotionPRO 96x96 输入按左右脚裁切、逆时针旋转 90° 后显示。"""
     canvas, draw = base_panel(title, subtitle, color)
     left_crop, right_crop = motionpro_foot_crops(img)
     foot_images = []
     for crop in (left_crop, right_crop):
-        resized = cv2.resize(np.clip(crop, 0.0, 255.0), (FOOT_W, FOOT_H),
+        # Rasterizer 的压力图轴为 (4 rows, 12 cols)，与 AnySole 的竖直
+        # (12 length, 4 width) 显示约定相差 90°；这里只改可视化，不改模型输入。
+        canonical = np.ascontiguousarray(np.rot90(crop, k=1))
+        resized = cv2.resize(np.clip(canonical, 0.0, 255.0), (FOOT_W, FOOT_H),
                              interpolation=cv2.INTER_LINEAR)
         cells = resized / 255.0
         rgb = (cm.inferno(cells)[..., :3] * 255.0).astype(np.uint8)
@@ -200,7 +202,7 @@ def compose_1x4(panels: list[np.ndarray], header: str, subheader: str) -> Image.
 # ---------------------------------------------------------------- 生成衔接
 
 def pool_ids() -> np.ndarray:
-    """(4,12) 每格 → 其 16 通道池化组编号（展示回填；组定义与生成器 pool_48_to_16 同）。"""
+    """(4,12) 每格对应的 16 通道池化组编号（仅用于 Step2Motion 展示回填）。"""
     ids = np.zeros((4, 12), dtype=int)
     for r in range(4):
         for g in range(2):
@@ -209,9 +211,8 @@ def pool_ids() -> np.ndarray:
             ids[r, 3 * g:3 * g + 3] = ch + 8
     return ids
 
-
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="D_Test5: 三基线触觉适配可视化（GIF/MP4）")
+    p = argparse.ArgumentParser(description="D_Test5: AnySole + 三基线触觉可视化（GIF/MP4）")
     p.add_argument("--session", type=str, default="",
                    help="单 session（默认空 = splits.csv 全部 session）")
     p.add_argument("--split", type=str, default="all", choices=["train", "val", "test", "all"],
@@ -227,14 +228,8 @@ def parse_args() -> argparse.Namespace:
                    help="即使产物齐全也强制重新生成")
     p.add_argument("--skip-generate", action="store_true",
                    help="跳过生成步骤（产物必须已存在）")
-    p.add_argument("--verbose", action="store_true", help="显示逐 session 的详细处理日志")
+    p.add_argument("--verbose", action="store_true", help="同时显示生成器内部的详细日志")
     return p.parse_args()
-
-
-def configure_logging(verbose: bool) -> None:
-    """默认只保留警告/错误；--verbose 才展开逐步日志。"""
-    log.remove()
-    log.add(sys.stderr, level="INFO" if verbose else "WARNING", format="{message}")
 
 
 def ensure_generated(sid: str, args: argparse.Namespace) -> dict:
@@ -275,14 +270,14 @@ def render_one(sid: str, args: argparse.Namespace) -> None:
     """单 session：确保产物落盘 → 读盘渲染一个 GIF/MP4。"""
     paths = ensure_generated(sid, args)
     meta = json.loads(paths["meta"].read_text(encoding="utf-8"))
+    source = gen.load_nine_piece(gen.resolve_session(sid)["seq_dir"])
+    anysole_cells = gen.crop_cells(source["pressure"])
     pressure96 = np.load(paths["motionpro_npz"])["pressure"]
     left16 = np.load(paths["s2m_npz"])["left16"]
     right16 = np.load(paths["s2m_npz"])["right16"]
     n = int(meta["n_frames"])
-    pw = float(meta["fpp_pw"])
-    log.info("{}: {} 帧（有效 {}），读 {} / {} / {}",
-             sid, n, meta["n_valid"], paths["motionpro_npz"].name,
-             paths["s2m_npz"].name, paths["toolkit_insole_dir"])
+    log.info("{}: {} 帧（有效 {}），读取 AnySole / MotionPRO / MMVP / Step2Motion",
+             sid, n, meta["n_valid"])
 
     valid = np.asarray(meta["valid_frame_indices"], dtype=int)
     if len(valid) == 0:  # 全 fake session：无有效帧可抽，GIF 回退全帧展示
@@ -296,25 +291,32 @@ def render_one(sid: str, args: argparse.Namespace) -> None:
     pids = pool_ids()
     frames: list[np.ndarray] = []
     for fi in frame_ids:
+        # AnySole 主方法：4x12 原生格，统一旋转到竖直脚底显示。
+        p_anysole = render_foot_blocks(
+            np.rot90(anysole_cells[fi, 0], k=1),
+            np.rot90(anysole_cells[fi, 1], k=1),
+            "AnySole", "原生 4×12 · 48 格/脚", C_ANYSOLE)
         # MotionPRO：生成器落盘的 96x96 实际输入
         p_motion = render_motionpro_foot_blocks(
             pressure96[fi], "MotionPRO", "FRAPPE 96×96 · L/R 等尺度", C_MOTIONPRO)
-        # Step2Motion：16 通道组值回填 4x12（仅展示）
-        up_l, up_r = left16[fi][pids], right16[fi][pids]
-        p_s2m = render_foot_blocks(np.rot90(up_l, k=1), np.rot90(up_r, k=1),
-                                   "Step2Motion", "16 通道/脚 · 冻结池化", C_S2M)
-        # MMVP：同一份 insole 文件（toolkit 原始 / FPP sigmoid 展示）
+        # MMVP：pressure_tookit 与 VP-MoCap 两棵目录必须是同一份观测。
         grid = load_insole_frame(paths["toolkit_insole_dir"], fi)
-        sig = 1.0 / (1.0 + np.exp(-(grid - pw) / max(pw, 1e-6)))
-        p_toolkit = render_foot_blocks(grid[:, :11], grid[:, 11:],
-                                       "pressure_tookit", "31×11 原始压力", C_TOOLKIT)
-        p_fpp = render_foot_blocks(sig[:, :11] * 255.0, sig[:, 11:] * 255.0,
-                                   "VP-MoCap", f"31×11 sigmoidNorm · pw={pw:.1f}", C_FPP)
+        fpp_grid = load_insole_frame(paths["fpp_insole_dir"], fi)
+        if not np.array_equal(grid, fpp_grid):
+            raise ValueError(f"MMVP pressure_tookit/VP-MoCap mismatch at frame {fi}")
+        p_mmvp = render_foot_blocks(
+            grid[:, :11], grid[:, 11:],
+            "MMVP", "pressure_tookit / VP-MoCap · shared 31×11", C_TOOLKIT)
+        # Step2Motion：16 通道组值回填 4x12，再使用同一脚形显示尺寸。
+        up_l, up_r = left16[fi][pids], right16[fi][pids]
+        p_s2m = render_foot_blocks(
+            np.rot90(up_l, k=1), np.rot90(up_r, k=1),
+            "Step2Motion", "16 通道/脚 · 冻结池化", C_S2M)
 
-        header = f"{sid} · 三基线触觉适配"
+        header = f"{sid} · AnySole + 三基线触觉适配"
         subheader = (f"源 AnySole 4×12 每脚 48 格 · frame {fi}/{n - 1} · "
                      f"t={fi / FPS:.2f}s · {FPS:.0f}Hz")
-        frame_img = compose_1x4([p_motion, p_s2m, p_toolkit, p_fpp], header, subheader)
+        frame_img = compose_1x4([p_anysole, p_motion, p_mmvp, p_s2m], header, subheader)
         frames.append(np.asarray(frame_img))
     log.info("合成 {} {} 帧，每帧 {}x{}", args.gen.upper(), len(frames),
              frames[0].shape[1], frames[0].shape[0])
@@ -326,27 +328,26 @@ def render_one(sid: str, args: argparse.Namespace) -> None:
         cli_common.write_gif(frames, media, frame_fps)
     else:
         cli_common.write_mp4(frames, media, frame_fps)
-    log.info("wrote {}", media)
+    log.info("Wrote {}", media)
 
 
 def main() -> None:
     args = parse_args()
-    configure_logging(args.verbose)
     sessions = [args.session] if args.session else gen.split_sessions(args.split)
     if not sessions:
         raise SystemExit("无 session：--session 为空且 splits.csv 无数据")
-    print(f"[D_Test5] 开始：{len(sessions)} 个 session，输出 {args.gen.upper()} → {args.out_dir}",
-          flush=True)
+    log.info("共 {} 个 session（split={}），输出格式={}，输出目录={}",
+             len(sessions), args.split if not args.session else "-", args.gen.upper(), args.out_dir)
 
     failures: list[tuple[str, str]] = []
     for i, sid in enumerate(sessions, 1):
+        log.info("[{}/{}] Session {}", i, len(sessions), sid)
         try:
             render_one(sid, args)
         except Exception as exc:  # noqa: BLE001 批量跑单 session 失败不中断
             log.error("[{}/{}] {} 失败: {}", i, len(sessions), sid, exc)
             failures.append((sid, str(exc)))
-    print(f"[D_Test5] 完成：{len(sessions) - len(failures)} 成功 / {len(failures)} 失败",
-          flush=True)
+    log.info("done: {} 成功 / {} 失败", len(sessions) - len(failures), len(failures))
     if failures:
         for sid, err in failures:
             log.error("FAILED {}: {}", sid, err)

@@ -4,6 +4,10 @@
 > Agent_04（pressure toolkit）中已过时的部分（Skeleton3/23 关节、`data/` 相对路径、
 > BVH 派生 GT 口径等），并新增 VP-MoCap 工作包。原则不变：**模型代码沿用上游，
 > 数据、训练、测试全部接入 AnysoleWorkspace 统一体系**。
+>
+> **2026-09-21 起执行请以 `Agent_06_剩余修改适配项.md` 为现行工作清单**（含口径
+> 修正：三基线 = MMVP 两模型 + MotionPRO + Step2Motion；D2 作废改 nearest-cell；
+> D3 被 nearest-cell 消解；test split = 36）。
 
 ## 1. 目标
 

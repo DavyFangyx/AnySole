@@ -163,6 +163,20 @@ def _f2_trajectory_losses(out, batch, weights):
     )
 
 
+def _cluster_assign_terms(assign, anneal, dead_beta):
+    """V4A cluster L_assign terms from a (N_PARTS, N_JOINTS) assignment A:
+    annealed per-joint entropy (soft early so the grouping can reorganize),
+    shifted concentration reward N^2 - sum(mass^2) (>= 0; K emerges from the
+    recon-loss tension), and the dead-slot tax sum(mass * exp(-beta*mass))
+    whose gradient rounds crumb loads (0 < mass < 1/beta) down to exactly 0.
+    Pure functions so smoke_v4a_cluster24.py can verify the signs directly."""
+    mass = assign.sum(dim=1)                          # (N_PARTS,) slot loads
+    l_ent = anneal * -(assign * (assign + 1e-12).log()).sum(dim=0).mean()
+    l_conc = float(assign.shape[1]) ** 2 - (mass * mass).sum()
+    l_dead = (mass * torch.exp(-dead_beta * mass)).sum()
+    return l_ent, l_conc, l_dead
+
+
 def compute_losses(out, batch, config_id, weights) -> dict:
     """Return all frozen V1 loss terms as scalar tensors."""
     pose_gt = batch["pose_gt"]
@@ -261,21 +275,46 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         else:
             l_con = l_pose.new_zeros(())
 
-    # V3-3 soft assignment regularization (fix_plan_v3.md §V3-3/§8): the
-    # learned A matrix must stay sharp (each joint owned by one slot) and
-    # balanced (no slot owns everything).  Both terms are entropies of the
-    # softmax'd part_logits; zero for every model without soft_parts.
-    # The balance term is -H(mass), whose floor is -log(N); +log(N) shifts it
-    # to be non-negative so the total loss stays an error measure (2026-09-21
-    # fix: the raw term made loss_total negative once the warm-started MSE
-    # terms converged — a constant shift leaves the gradient untouched).
-    if bool(weights.get("soft_parts", False)) and out.get("part_logits") is not None:
-        log_assign = F.log_softmax(out["part_logits"], dim=0)
-        assign = log_assign.exp()
-        l_ent = -(assign * log_assign).sum(dim=0).mean()      # per-joint entropy -> minimize
-        mass = assign.mean(dim=1)
-        l_balance = (mass * (mass + 1e-8).log()).sum() + math.log(mass.numel())
-        l_assign = l_ent + l_balance
+    # V3-3 soft assignment regularization (fix_plan_v3.md §V3-3/§8) + V4A
+    # clustering terms.  Common input: the assignment A actually used by the
+    # forward (temperature-scaled softmax; model_v2 exports it detached as
+    # part_assignment).  Zero for every model without soft_parts.
+    if bool(weights.get("soft_parts", False)) and out.get("part_assignment") is not None:
+        assign = out["part_assignment"]                       # (N_PARTS, N_JOINTS)
+        if bool(weights.get("assign_cluster", False)):
+            # V4A (方案 A): discover the grouping from a near-uniform init.
+            # The V3-3 pair (per-joint entropy + load balance) hardens onto
+            # the init and locks it there (2026-09-21 audit of V3_3A/B), so
+            # here the entropy is ANNEALED (assign_anneal: 1 -> 0 over the
+            # anneal phase, kept soft early so the assignment can reorganize),
+            # balance is REPLACED by a concentration reward + dead-slot tax
+            # (K then emerges from the recon-loss tension instead of being
+            # forced to n_parts), and A gets its own optimizer lr in train.py.
+            l_ent, l_conc, l_dead = _cluster_assign_terms(
+                assign,
+                float(weights.get("assign_anneal", 1.0)),
+                float(weights.get("assign_dead_beta", 2.0)),
+            )
+            l_assign = (
+                float(weights.get("lambda_assign_ent", 0.05)) * l_ent
+                + float(weights.get("lambda_assign_conc", 0.01)) * l_conc
+                + float(weights.get("lambda_assign_dead", 0.02)) * l_dead
+            )
+        else:
+            # V3-3 original: A must stay sharp (each joint owned by one slot)
+            # and balanced (no slot owns everything).  Both terms are
+            # entropies of the softmax'd part_logits.  The balance term is
+            # -H(mass), whose floor is -log(N); +log(N) shifts it to be
+            # non-negative so the total loss stays an error measure
+            # (2026-09-21 fix: the raw term made loss_total negative once the
+            # warm-started MSE terms converged — a constant shift leaves the
+            # gradient untouched).
+            log_assign = F.log_softmax(out["part_logits"], dim=0)
+            assign_init = log_assign.exp()
+            l_ent = -(assign_init * log_assign).sum(dim=0).mean()  # per-joint entropy -> minimize
+            mass = assign_init.mean(dim=1)
+            l_balance = (mass * (mass + 1e-8).log()).sum() + math.log(mass.numel())
+            l_assign = l_ent + l_balance
     else:
         l_assign = l_pose.new_zeros(())
 

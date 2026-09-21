@@ -314,6 +314,10 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
     # (train.py saves noise_scaled=True when it scales q_sample noise by
     # pose_std; older checkpoints lack the flag and sample unscaled).
     model.noise_scaled = bool(saved_config.get("noise_scaled", False))
+    # V4A: the assignment softmax temperature must match the checkpoint's
+    # final annealed value (default 1.0 = the plain V3-3 softmax).
+    if getattr(model.pose_head, "soft_parts", False) and bool(saved_config.get("assign_cluster", False)):
+        model.pose_head.set_assign_temp(float(saved_config.get("assign_temp_final", 1.0)))
     model.eval()
     return model
 

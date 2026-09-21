@@ -7,14 +7,21 @@
 
 - **目录编号 = `{模型版本}_{contact-method}`**（现在全部 SMPL-24，不再有任何协议
   后缀）。当前所有基座都用 `joint_and` 标签：`F0b_joint_and` / `F4a_joint_and` /
-  `F2_joint_and` / `F2p4_joint_and` / `V3_2_joint_and`。
+  `F2_joint_and` / `F2p4_joint_and` / `V3_2_joint_and` / `V3_3A_joint_and` /
+  `V3_3B_joint_and`（V4A 聚类组目录 `V4A_joint_and`）。
 - **checkpoint 状态**：group_ids 修复（2026-09-20）后，此前全部权重已归档
   `results/backup/AnySole_BVH_backup/`。**2026-09-21 warm-start 链重训完成**：
-  F0b / F4a / F2 / F2+4 / V3-2 五个基座全部训出并过 val 协议验收
-  （各节已回填实测数字）。V3-3（soft A + σ 门控）代码已实现、smoke 全过，
-  **尚未训练**（两阶段命令见 V3-3 节）。
-- 训练顺序（warm-start 链）：**F0b（from-scratch）→ F4a / F2（←F0b）→
-  F2+4（←F2）→ V3-2（←F4a）→ V3-3A（←V3-2）→ V3-3B（←V3-3A）**。
+  F0b / F4a / F2 / F2+4 / V3-2 / V3-3A / V3-3B 基座全部训出并过 val 协议验收
+  （各节已回填实测数字，均为**非 f2 历史口径**）。**现行链 = V3-4 f2 链
+  （V3-4a/b/c）尚未训练**（F2p4 已训、为链起点；V3-4c 带 σ 填坑开关）。
+- 训练顺序（warm-start 链）：
+  - **历史链（非 f2 口径，已训完、不再推进）**：F0b → F4a / F2 → F2+4 →
+    V3-2 → V3-3A → V3-3B（各节命令 = 产生其实测数字的原样，数字为历史记录）。
+  - **现行链（f2 标准表征，见 V3-4 节）**：F2p4（已训，链起点）→
+    **V3-4a → V3-4b → V3-4c**，三步串行；V3-4c = σ 门控 + β-NLL 填坑版
+    （`--lambda-sigma 0.01 --sigma-freeze-frac 0.1`）。
+  - **证明组（V4A 节，与主线并行）**：V4A ← F4a（24 槽梯度聚类，分组从数据
+    学、K 不预设）；后续 V4B = 学到的分组硬重训对照 V3-2。
 - `anysole/configs/v1.yaml` 已是 SMPL-24 训练配置：raw108、tw=20、stride=20、lr=1e-4
   （**`--lr` 不是 CLI**，要改 lr 就改 yaml）、λ_pose=3 / λ_kp=1 / λ_traj=1 /
   λ_trec=0.1 / λ_vrec=0.1 / λ_con=0、joint_and。实验差异全部由 CLI 传入，
@@ -46,6 +53,8 @@
 ---
 
 ## 基座 F0b · 回归本体（`--modal anysolev2`，from-scratch）
+
+> **历史口径（非 f2）**：命令 = 产生下记实测数字的原样，不再改动；f2 版 = F2 节。
 
 **2026-09-21 实测**（400ep from-scratch，wandb fxemwdt8；val 协议 seed0）：
 VT2M MPJPE 78.1 / PA 44.8、V2M 81.4 / 46.2、T2M 154.9 / 72.4；
@@ -83,6 +92,8 @@ from-scratch 400ep 是筛选预算，显著弱于 BVH 时代 warm-start 的 F0b_
 ---
 
 ## 基座 F4a · 按脚卷积触觉（`--t-encoder foot_conv`，warm-start 自 F0b）
+
+> **历史口径（非 f2）**：命令 = 产生下记实测数字的原样，不再改动；f2 版 = F2p4 节。
 
 模型：anysolev2 + `--t-encoder foot_conv`（数据不动，只换编码器）。
 历史 BVH 口径结果（仅参照）：VT 55.5/23.0、T2M 123.8/40.3；T-only 全身退化
@@ -201,7 +212,9 @@ PA 39.3、V2M 64.5 / 36.2、**T2M 134.9 / 77.7（链内最优）**、yaw_drift 2
 
 ---
 
-## V3-2 · 九部位移植（结构线主线，warm-start 自 F4a）
+## V3-2 · 九部位移植（历史口径（非 f2），warm-start 自 F4a）
+
+> **历史口径（非 f2）**：已训完、不再推进；f2 版 = V3-4 节的 **V3-4a**。
 
 模型：anysolev2 + `--t-encoder foot_conv --pose-parts 9 --lr-warmup-frac 0.05`
 （V3 结构步：前 5% 步数线性 warmup）。**前两次训练同型爆炸**（xd6kcdk2 ep386、
@@ -248,8 +261,10 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
 
 ---
 
-## V3-3 · soft A 矩阵 + σ 门控（两阶段单变量，warm-start 自 V3-2）
+## V3-3 · soft A 矩阵 + σ 门控（历史口径（非 f2），warm-start 自 V3-2）
 
+> **历史口径（非 f2）**：A/B 已训完，数字与审计见下，不再推进；f2 版 = V3-4 节的
+> **V3-4b**（soft A）与 **V3-4c**（σ 门控 + β-NLL 填坑）。
 > 设计与机制关系（A 矩阵/门控/先验）见 `archived/fix_plan_v3.md` §8；
 > smoke 必过：`z_note/probes/smoke_v33_soft_gate.py`（训练前跑）。
 > **2026-09-21 首训审计已修两处缺陷**（§8.4）：① L_assign 负载均衡项天生为负
@@ -267,12 +282,11 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
 > **二轮实测结论（2026-09-21 深夜，V3-3B 740ep）**：指标链内最优但 σ 未学会
 > 路由（三配置门控差 ≤0.018）、A 冻结于人工划分、F4 原判据区分不了静态/动态 →
 > 判据已改差分式（§2.3 F4 修订），σ 已修（输入 [z,e_V,e_T] + β-NLL 信任监督 +
-> 前 10% 冻结）。**V3-3C = V3-3B 命令 + `--lambda-sigma 0.01
-> --sigma-freeze-frac 0.1`**（warm-start 自 V3_3B 终值），验收读
-> `z_note/probes/probe_v33b_gates.py` 的差分判据（T vs VT Δg_T(foot)>0.2、
-> T-only root g_V 下降 >0.2）。T2M 偏航乱飘已量化（probe_v33b_yaw_t2m.py：
-> yaw_abs 71.5°、速率 231°/s vs GT 12.6°/s）——压力无朝向信息，结构解法 =
-> V3-4 f2 移植，不是门控。
+> 前 10% 冻结）。**σ 填坑版 = V3-4 节的 V3-4c**（`--lambda-sigma 0.01
+> --sigma-freeze-frac 0.1`），验收读 `z_note/probes/probe_v33b_gates.py` 的差分
+> 判据（T vs VT Δg_T(foot)>0.2、T-only root g_V 下降 >0.2）。T2M 偏航乱飘已量化
+> （probe_v33b_yaw_t2m.py：yaw_abs 71.5°、速率 231°/s vs GT 12.6°/s）——压力无
+> 朝向信息，结构解法 = f2 表征（V3-4 链），不是门控。
 
 ```bash
 # ===== V3-3A：soft A 矩阵（warm-start 自 V3-2） =====
@@ -285,7 +299,7 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --init-from results/AnySole/V3_2_joint_and/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/V3_3A_joint_and/checkpoints \
   --wandb_mode online --wandb_experiment_tag v33a_jointand \
-  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:5
+  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:6
 
 # ② 评估
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
@@ -335,6 +349,158 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
 > query / group_emb）按名字继承；T 分支交叉注意力 / σ MLP / τ_p / part_logits /
 > 9 个全宽输出头自动新初始化（smoke 第 7 项验证）。gate 与 `--tactile-direct`
 > 互斥（构造期报错）；`--soft-parts`/`--gate` 均要求 `--pose-parts 9`。
+
+---
+
+## V3-4 · f2 标准表征链（现行主线，2026-09-21 用户裁定；三步串行）
+
+> **定位**：T-only 偏航根因 = 压力无绝对朝向（probe_v33b_yaw_t2m.py：yaw_abs
+> 71.5°、速率 231°/s vs GT 12.6°/s）。f2 把整条链的预测目标从"绝对朝向"改为
+> "朝向变化/相对量"（根 6D=tilt、轨迹=4 维朝向系 [psi_dot, v_hx, v_hz, h]），
+> 三配置共用一套权重。F2/F2p4 = F0b/F4a 的 f2 版（已训，F2p4 为链起点）；
+> V3 机制组按三步在 f2 基座上重跑，**必须等上一步收敛后再启下一步**：
+>
+> | 步 | 内容 | 填的坑 | 验收 |
+> |---|---|---|---|
+> | **V3-4a** | 9 部位（`--pose-parts 9`），warm-start 自 F2p4 | 部位结构基座 | 打平 F2p4（VT ≤69±2、T2M ≤135±3） |
+> | **V3-4b** | + soft A（`--soft-parts`） | 学习分组 | 不劣于 V3-4a，A 保持可识别部位 |
+> | **V3-4c** | + σ 门控 + **β-NLL 填坑**（`--gate sigma --lambda-sigma 0.01 --sigma-freeze-frac 0.1`） | **σ 无法学习的坑**：τ_p 饱和 → softmax 梯度 g(1−g)→0 → σ 梯度死亡（V3-3B 因果链实测：信号到 z 变了 79%，σ logit 只动 0.12、门控 ≤0.018）。β-NLL 给 σ 直连梯度（不经 softmax），前 10% 步 σ 冻结让 τ_p 先定初始分工 | F4 差分判据（probe_v33b_gates.py）+ T2M ≤92 且 PA ≤36、VT2M ≤65 + yaw 探针 T2M yaw_abs ≤10° |
+
+```bash
+# ===== V3-4a：9 部位（f2 基座，warm-start 自 F2p4） =====
+# ① 训练
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
+  --modal anysolev2 --contact-method joint_and \
+  --t-encoder foot_conv --f2-repr --pose-parts 9 --lr-warmup-frac 0.05 \
+  --epochs 740 --grad-clip 5.0 \
+  --init-from results/AnySole/F2p4_joint_and/checkpoints/ckpt_last.pt \
+  --out-dir results/AnySole/V3_4a_joint_and/checkpoints \
+  --wandb_mode online --wandb_experiment_tag v34a_jointand \
+  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:5
+
+# ② 评估（协议 seed0 + 导出 SMPL NPZ，R_Test1/R_Test3 依赖此步）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
+  --ckpt results/AnySole/V3_4c_joint_and/checkpoints/ckpt_last.pt \
+  --modal anysolev2 --contact-method joint_and \
+  --split val --write-motion results/AnySole/V3_4c_joint_and/predictions/eval_motion \
+  --protocol-seed 0 --no-robustness --device cuda:4
+
+# ③ 可视化 R_Test1（骨架动画 → results_display/result/r_test1_visualize/AnySole/V3_4a/）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test1_visualize_anysole.py \
+  --modal V3_4c --contact-method joint_and --split val \
+  --config-id VT2M,V2M,T2M --gen gif --force
+
+# ④ 可视化 R_Test3（轨迹对比 → results_display/result/r_test3_traj/AnySole/V3_4a/）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test3_traj.py \
+  --modal V3_4c --contact-method joint_and --split val \
+  --config-id VT2M,V2M,T2M --gen gif --force
+
+# ===== V3-4b：+ soft A（warm-start 自 V3-4a） =====
+# ① 训练
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
+  --modal anysolev2 --contact-method joint_and \
+  --t-encoder foot_conv --f2-repr --pose-parts 9 --soft-parts \
+  --lambda-assign 0.05 --lr-warmup-frac 0.05 \
+  --epochs 740 --grad-clip 5.0 \
+  --init-from results/AnySole/V3_4a_joint_and/checkpoints/ckpt_last.pt \
+  --out-dir results/AnySole/V3_4b_joint_and/checkpoints \
+  --wandb_mode online --wandb_experiment_tag v34b_jointand \
+  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:6
+
+# ② 评估 / ③ R_Test1 / ④ R_Test3：同上，目录与 --modal 换 V3_4b
+
+# ===== V3-4c：+ σ 门控（β-NLL 填坑版，warm-start 自 V3-4b） =====
+# ① 训练
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
+  --modal anysolev2 --contact-method joint_and \
+  --t-encoder foot_conv --f2-repr --pose-parts 9 --soft-parts --gate sigma \
+  --lambda-assign 0.05 --lambda-sigma 0.01 --sigma-freeze-frac 0.1 \
+  --lr-warmup-frac 0.05 \
+  --epochs 740 --grad-clip 5.0 \
+  --init-from results/AnySole/V3_4b_joint_and/checkpoints/ckpt_last.pt \
+  --out-dir results/AnySole/V3_4c_joint_and/checkpoints \
+  --wandb_mode online --wandb_experiment_tag v34c_jointand \
+  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:7
+
+# ② 评估 / ③ R_Test1 / ④ R_Test3：同上，目录与 --modal 换 V3_4c
+# 门控差分验收（F4 修订判据：T vs VT 的 Δg_T(foot)>0.2、T-only 时 root g_V 较 VT 下降>0.2）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/probe_v33b_gates.py \
+  --ckpt results/AnySole/V3_4c_joint_and/checkpoints/ckpt_last.pt --device cuda:5
+
+# T2M 偏航验收（目标 yaw_abs ≤10°）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/probe_v33b_yaw_t2m.py \
+  --motion-dir results/AnySole/V3_4c_joint_and/predictions/eval_motion
+```
+
+> warm-start 继承（每步）：共享结构按名字继承（F2p4 的 4 维 traj_head.proj、
+> foot_conv、decoder 共享部分）；新结构（9 部位 query/out_parts、part_logits、
+> T 分支交叉注意力/σ/τ_p）自动新初始化。每步训练前 smoke 照跑
+> （smoke_v33_soft_gate.py / smoke_v32_parts.py / smoke_f2_roundtrip.py）。
+
+---
+
+## V4A · 24 槽梯度聚类（证明组：分组从数据学，不预设 K；warm-start 自 F4a）
+
+> **定位**：V3-3A/B 审计结论——A 矩阵从人为划分初始化后 740ep 冻结（100% 一致），
+> σ 门控退化为静态分工，两个"学习"机制都没兑现。V4A 直接回答"人为 9 部位到底
+> 是不是数据支持的最优分组"：**24 槽（每关节一槽，K 上界）、A 均匀初始化、
+> 分组完全由梯度发现**。与 V3_2（F4a + 人为 9 部位，740ep）同起点同预算，
+> 唯一差异 = 分组来源（学习 vs 人为）。**历史口径（非 f2）**，与 V3-4 主线并行。
+>
+> 机制（实现见 pose_head.py / losses.py `_cluster_assign_terms` / train.py）：
+> - 24 slot × 24 关节的 A 矩阵，softmax 温度从 1.0 退火到 0.2（`--assign-temp-*`）；
+> - L_assign 换成三件套：**退火熵**（前 `--assign-anneal-frac` 线性降到 0，防随机
+>   锁定，替代 V3-3 会锁死 init 的固定熵）、**聚集奖励**（N²−Σm² ≥ 0，K 由它与
+>   重构损失的张力涌现，替代强制 K=9 的负载均衡）、**死槽税**（Σm·e^(−βm)，把
+>   碎渣负载归零让 K 读出干净）；
+> - **软 EM**：A 用独立 lr（`--assign-lr-mult 5`），步数过 `--assign-lock-frac`
+>   后 A 冻结（M 步：头部在固定分组下收敛）；
+> - wandb 曲线 `assign/effective_K_ge0.5`、`assign/load_*` 实时观察分组涌现。
+>
+> 训练前 smoke 必过：`z_note/probes/smoke_v4a_cluster24.py`（构造规则 / 均匀
+> 初始化 / 温度 / 聚类损失项符号 / F4a warm-start 继承）。
+
+```bash
+# ① 训练（740ep warm-start 自 F4a；预算与 V3_2/V3_3A/B 对齐）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
+  --modal anysolev2 --contact-method joint_and \
+  --t-encoder foot_conv --pose-parts 24 --soft-parts --assign-cluster \
+  --lambda-assign 1.0 --lambda-assign-ent 0.05 --lambda-assign-conc 0.01 \
+  --lambda-assign-dead 0.02 --assign-dead-beta 2.0 \
+  --assign-temp-init 1.0 --assign-temp-final 0.2 \
+  --assign-anneal-frac 0.7 --assign-lock-frac 0.7 --assign-lr-mult 5.0 \
+  --lr-warmup-frac 0.05 \
+  --epochs 740 --grad-clip 5.0 \
+  --init-from results/AnySole/F4a_joint_and/checkpoints/ckpt_last.pt \
+  --out-dir results/AnySole/V4A_joint_and/checkpoints \
+  --wandb_mode online --wandb_experiment_tag v4a_jointand \
+  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:6
+
+# ② 评估（常规三配置；分组本身是产物，指标供 V4B 对照参考）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
+  --ckpt results/AnySole/V4A_joint_and/checkpoints/ckpt_last.pt \
+  --modal anysolev2 --contact-method joint_and \
+  --split val --write-motion results/AnySole/V4A_joint_and/predictions/eval_motion \
+  --protocol-seed 0 --no-robustness --device cuda:4
+
+# ③ 读出学到的分组（A 矩阵 / 有效 K / 与人为划分的 ARI·NMI / 左右对称检验；
+#    落盘 metrics/partition_v4a_learned.json 供 V4B 硬重训）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/probe_v4a_readout.py \
+  --ckpt results/AnySole/V4A_joint_and/checkpoints/ckpt_last.pt --device cuda:5
+```
+
+> **验收（读出阶段）**：① 有效 K 落在合理区间（如 4–12；K=1 或 K=24 均为失败，
+> 见校准）；② **左右对称 sanity**：9 对左右关节多数成对共槽（梯度聚类应自行发现
+> 对称，发现不了 = 机制没在工作）；③ ARI/NMI vs 人为 9 部位（量化偏离度）；
+> ④ partition_v4a_learned.json 非空。
+> **校准**（wandb 曲线判读）：K 塌到 1 → `--lambda-assign-conc` 减半（0.005）；
+> K 停在 24 → 翻倍（0.02）或加大 `--lambda-assign-dead`；前 20% 步就硬化 →
+> `--assign-anneal-frac 0.9` 且 `--lambda-assign-ent 0.1`。
+> **后续**：V4B = 把学到的 K/分组硬训练（同 V3_2 预算）与 V3_2 对比——需要
+> `--part-json` 载入自定义硬分组的支持（待实现；实现前可手工把读出分组写进
+> PART_JOINTS 变体）。`--assign-cluster` 要求 `--pose-parts 24 --soft-parts`，
+> 与 `--gate` 互斥（构造期报错）；`--lambda-assign` 固定 1.0（三个聚类项自带
+> `--lambda-assign-*` 权重）。
 
 ---
 

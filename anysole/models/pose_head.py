@@ -110,6 +110,14 @@ def _part_logits_init() -> torch.Tensor:
     return logits
 
 
+def _part_logits_cluster_init(n_parts: int) -> torch.Tensor:
+    """(n_parts, N_JOINTS) logits for the V4A clustering run: near-uniform
+    softmax — every joint starts ~equally owned by every slot, so the
+    grouping must be DISCOVERED — with tiny asymmetric noise so dropout and
+    the reconstruction gradient can break the slot symmetry."""
+    return torch.randn(n_parts, N_JOINTS) * 0.02
+
+
 def _tau_from_assignment(assign: torch.Tensor) -> torch.Tensor:
     """(N_PARTS,) tau_p prior bias derived from a (N_PARTS, N_JOINTS)
     assignment: low for T-informative slots, high for V-informative slots."""
@@ -238,14 +246,19 @@ class PoseHead(nn.Module):
         super().__init__()
         if head_mode not in ("diffusion", "regress"):
             raise ValueError("Unknown head_mode %r; expected 'diffusion' or 'regress'" % head_mode)
-        if n_parts not in (3, 9):
-            raise ValueError("n_parts must be 3 or 9, got %r" % n_parts)
+        if n_parts not in (3, 9, 24):
+            raise ValueError("n_parts must be 3, 9 or 24, got %r" % n_parts)
         if n_parts != 3 and (head_mode != "regress" or repr != "6d"):
-            raise ValueError("n_parts=9 requires head_mode='regress' and repr='6d' (V3-2)")
+            raise ValueError("n_parts=9/24 requires head_mode='regress' and repr='6d' (V3-2/V4A)")
         if gate not in ("none", "sigma"):
             raise ValueError("gate must be 'none' or 'sigma', got %r" % gate)
-        if soft_parts and n_parts != 9:
-            raise ValueError("soft_parts requires n_parts=9 (V3-3)")
+        if soft_parts and n_parts not in (9, 24):
+            raise ValueError("soft_parts requires n_parts=9 (V3-3) or 24 (V4A)")
+        if n_parts == 24 and not soft_parts:
+            # 24 slots only exist for the V4A clustering run, whose per-slot
+            # full-pose heads + learned A are the soft_parts structure; a hard
+            # 24-part model has no PART_JOINTS to hang heads on.
+            raise ValueError("n_parts=24 requires soft_parts (V4A clustering)")
         if gate == "sigma" and n_parts != 9:
             raise ValueError("gate='sigma' requires n_parts=9 (V3-3)")
         if embeddings is None:
@@ -260,6 +273,10 @@ class PoseHead(nn.Module):
         self.soft_parts = bool(soft_parts)
         self.gate = gate
         self._last_hypo = None  # (N_PARTS, B, tw, N_JOINTS, 6) detach, gate mode
+        # V4A: temperature on the assignment softmax, annealed by train.py
+        # via set_assign_temp (1.0 = soft; lower = sharper A).  eval/readout
+        # restore the final value from the checkpoint config.
+        self.assign_temp = 1.0
         if repr == "pos":
             # All 23 non-root SMPL joints as root-local positions (root excluded).
             self.n_body = len(BODY_JOINTS) - 1
@@ -277,10 +294,11 @@ class PoseHead(nn.Module):
             self.n_right = len(RIGHT_LEG_JOINTS)
             self.per_joint = 6
             self.pose_dim = POSE_DIM
-            if n_parts == 9:
-                # V3-2: one query token per part (9) instead of one per joint
-                # (24 in 3 groups); the part embedding IS the part identity.
-                group_ids = torch.arange(N_PARTS, dtype=torch.long)
+            if n_parts in (9, 24):
+                # V3-2/V4A: one query token per slot (9 parts, or 24 = one
+                # slot per joint in the clustering run); the slot embedding IS
+                # the slot identity.
+                group_ids = torch.arange(n_parts, dtype=torch.long)
             else:
                 # Tokens are concatenated [body, left, right] in _embed and
                 # _forward_regress; tag by TOKEN position, not joint index —
@@ -296,8 +314,8 @@ class PoseHead(nn.Module):
         nn.init.normal_(self.group_emb.weight, std=0.02)
         self.register_buffer("group_ids", group_ids, persistent=True)
         n_tokens = self.n_body + self.n_left + self.n_right
-        if n_parts == 9:
-            n_tokens = N_PARTS
+        if n_parts in (9, 24):
+            n_tokens = n_parts
         self.n_tokens = n_tokens
 
         if head_mode == "regress":
@@ -338,15 +356,19 @@ class PoseHead(nn.Module):
             )
             self.decoder = nn.TransformerDecoder(layer, num_layers=n_layers)
 
-        if n_parts == 9 and soft_parts:
-            # V3-3 soft assignment: one head per slot, each emitting a full
-            # 144-d pose hypothesis; the learned A matrix (part_logits) blends
-            # the hypotheses per joint.  A is initialized to reproduce the
-            # frozen PART_JOINTS grouping (joint order output, no scatter).
+        if soft_parts and n_parts in (9, 24):
+            # V3-3/V4A soft assignment: one full-pose head per slot, blended
+            # per joint by the learned A matrix (part_logits).  n_parts=9
+            # initializes A to reproduce the frozen PART_JOINTS grouping
+            # (V3-3); n_parts=24 initializes near-uniform — the grouping must
+            # be discovered (V4A clustering run).
             self.out_parts = nn.ModuleList(
-                [nn.Linear(dim, POSE_DIM) for _ in range(N_PARTS)]
+                [nn.Linear(dim, POSE_DIM) for _ in range(n_parts)]
             )
-            self.part_logits = nn.Parameter(_part_logits_init())
+            if n_parts == 9:
+                self.part_logits = nn.Parameter(_part_logits_init())
+            else:
+                self.part_logits = nn.Parameter(_part_logits_cluster_init(n_parts))
             self.out_body = self.out_left = self.out_right = None
         elif n_parts == 9:
             # V3-2: one unembed head per part; outputs concatenated in PART
@@ -367,7 +389,7 @@ class PoseHead(nn.Module):
             # PART_JOINTS otherwise): T-informative parts (root/legs/feet)
             # start with LOW tau, V-informative (torso/headneck/arms) HIGH.
             if soft_parts:
-                assign = F.softmax(self.part_logits.detach(), dim=0)
+                assign = F.softmax(self.part_logits.detach() / self.assign_temp, dim=0)
             else:
                 assign = torch.zeros(N_PARTS, N_JOINTS)
                 for p, joints in enumerate(PART_JOINTS):
@@ -420,18 +442,26 @@ class PoseHead(nn.Module):
         )
         return tokens.reshape(batch, tw * self.group_ids.shape[0], self.dim)
 
+    def set_assign_temp(self, temp: float) -> None:
+        """V4A: set the assignment softmax temperature (annealed down over
+        training by train.py; eval/readout restore the checkpoint's final
+        value).  Only affects soft_parts forward/assignment."""
+        self.assign_temp = float(temp)
+
     def _unembed(self, h):
         batch = h.shape[0]
-        if self.n_parts == 9 and self.soft_parts:
-            # V3-3: 9 slots -> 9 full-pose hypotheses -> per-joint blend by
-            # the learned soft assignment A (joint order out, no scatter).
+        if self.n_parts in (9, 24) and self.soft_parts:
+            # V3-3/V4A: n_parts slots -> n_parts full-pose hypotheses ->
+            # per-joint blend by the learned soft assignment A (joint order
+            # out, no scatter).  Temperature-scaled so the V4A anneal can
+            # sharpen the assignment over training.
             tokens = h.view(batch, self.tw, self.n_tokens, self.dim)
             parts = torch.stack(
                 [head(tokens[:, :, p]) for p, head in enumerate(self.out_parts)],
                 dim=0,
-            )  # (N_PARTS, B, tw, POSE_DIM)
-            parts = parts.reshape(N_PARTS, batch, self.tw, N_JOINTS, 6)
-            assign = F.softmax(self.part_logits, dim=0)  # (N_PARTS, N_JOINTS)
+            )  # (n_parts, B, tw, POSE_DIM)
+            parts = parts.reshape(self.n_parts, batch, self.tw, N_JOINTS, 6)
+            assign = F.softmax(self.part_logits / self.assign_temp, dim=0)  # (n_parts, N_JOINTS)
             out = torch.einsum("pj,pbtjc->btjc", assign, parts)
             return out.reshape(batch, self.tw, POSE_DIM)
         if self.n_parts == 9:
@@ -544,18 +574,19 @@ class PoseHead(nn.Module):
             parts = torch.stack(
                 [head(tokens[:, :, p]) for p, head in enumerate(self.out_parts)],
                 dim=0,
-            )  # (N_PARTS, B, tw, POSE_DIM)
-            return parts.reshape(N_PARTS, batch, self.tw, N_JOINTS, 6)
+            )  # (n_parts, B, tw, POSE_DIM)
+            return parts.reshape(self.n_parts, batch, self.tw, N_JOINTS, 6)
         out = h.new_zeros(N_PARTS, batch, self.tw, N_JOINTS, 6)
         for p, (joints, head) in enumerate(zip(PART_JOINTS, self.out_parts)):
             out[p, :, :, joints, :] = head(tokens[:, :, p]).view(batch, self.tw, len(joints), 6)
         return out
 
     def part_assignment(self) -> torch.Tensor:
-        """(N_PARTS, N_JOINTS) assignment matrix: the learned softmax A in
-        soft mode, the frozen one-hot PART_JOINTS in hard mode."""
+        """(N_PARTS, N_JOINTS) assignment matrix: the learned temperature-
+        scaled softmax A in soft mode, the frozen one-hot PART_JOINTS in hard
+        mode."""
         if self.soft_parts:
-            return F.softmax(self.part_logits.detach(), dim=0)
+            return F.softmax(self.part_logits.detach() / self.assign_temp, dim=0)
         assign = torch.zeros(N_PARTS, N_JOINTS, device=self.group_emb.weight.device)
         for p, joints in enumerate(PART_JOINTS):
             assign[p, joints] = 1.0
@@ -593,10 +624,11 @@ class PoseHead(nn.Module):
 
     def assignment(self) -> torch.Tensor:
         """Detached (N_PARTS, N_JOINTS) soft assignment matrix A (soft_parts
-        only) — the learned grouping, printable/auditable every checkpoint."""
+        only) at the current temperature — the learned grouping, printable/
+        auditable every checkpoint."""
         if not self.soft_parts:
             raise ValueError("assignment() is only defined for soft_parts=True")
-        return F.softmax(self.part_logits.detach(), dim=0)
+        return F.softmax(self.part_logits.detach() / self.assign_temp, dim=0)
 
     def gate_summary(self) -> torch.Tensor:
         """(N_PARTS, 3) mean gate weights [g_V, g_T, g_∅] over batch and frames

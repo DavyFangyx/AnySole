@@ -112,9 +112,11 @@ class AnySoleModelV2(nn.Module):
             "pressure_hat": pressure_hat,
             "vfeat_hat": vfeat_hat,
             "F": fused,
-            # V3-3: the learned (N_PARTS, N_JOINTS) assignment logits for
-            # L_assign in losses.py (None for every other configuration).
+            # V3-3/V4A: the learned (N_PARTS, N_JOINTS) assignment logits for
+            # L_assign in losses.py, plus the temperature-scaled softmax A
+            # actually used by the forward (None for every other config).
             "part_logits": self.pose_head.part_logits if self.soft_parts else None,
+            "part_assignment": self.pose_head.part_assignment() if self.soft_parts else None,
         }
         if self.gate == "sigma":
             # Beta-NLL sigma supervision inputs (losses.py): the last layer's
@@ -125,7 +127,6 @@ class AnySoleModelV2(nn.Module):
                 "gate_sigma": self.pose_head.last_gate_sigma(),
                 "gate_g": self.pose_head.last_gate_g(),
                 "part_hypotheses": self.pose_head.last_part_hypotheses(),
-                "part_assignment": self.pose_head.part_assignment(),
                 "pose_mean": self.pose_head.pose_mean,
                 "pose_std": self.pose_head.pose_std,
                 "sigma_frozen": bool(self.pose_head.decoder.layers[-1].sigma_frozen),
