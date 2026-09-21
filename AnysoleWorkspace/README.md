@@ -38,7 +38,22 @@ AnysoleWorkspace/
 
 ## 数据准备 CLI 手册
 
-一条中间数据一条命令，直接复制执行。先 init/doctor，再按需执行；常用参数见各脚本 `--help`。
+### 总纲
+
+| # | 中间数据 | 产物 | 依赖 |
+| --- | --- | --- | --- |
+| 0 | workspace 初始化/体检 | sources 软链、本地目录、calibration 软链 | — |
+| 1 | session manifest + splits | `manifests/session_manifest.csv\|jsonl`、`splits/default/splits.csv` | 0 |
+| 2 | 数据质检 | `manifests/data_quality_report.md` | 1 |
+| 3 | 触觉清洗（4 stage） | `sources/PressureWasher/outputs/{stats,reconstructed,fake_marked,encoded}` | 0 |
+| 4 | HRNet 特征缓存 | `derived/AnySole/hrnet_cache/cam3/*.pt` | 0 |
+| 5 | 接触 npz | 序列目录下 `contact_<method>.npy` | 0 |
+| 6 | 鞋垫模板 | `calibration/insole_templates.json` | 1 |
+| 7 | MotionPRO 序列 | `derived/MotionPRO/sequences/cam3/` | 历史数据 |
+| 8 | Step2Motion gait 数据集 | `derived/Step2Motion/gait/*.pt` | 迁移自 Baselines |
+| 9 | pressure_tookit 深度适配 | `derived/pressure_tookit/` | 待写 |
+
+训练侧（anysole）消费 1/4/5/6 的产物。以下每条一个命令块，直接复制执行；常用参数见各脚本 `--help`。
 
 ### 0. workspace 初始化/体检
 
