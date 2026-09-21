@@ -16,7 +16,7 @@ fi
 case "$MODEL" in
   anysole|anysole_insole_drift)
     modal="${MODAL:-anysolev1}"; [[ "$MODEL" == anysole_insole_drift ]] && modal=anysolev1_insole_drift
-    "$py" -m anysole.train --config "${CONFIG_FILE:-configs/v1.yaml}" --modal "$modal" --device cuda --out-dir "$run_dir/checkpoints" --epochs "${EPOCHS:-200}" --batch-size "${BATCH_SIZE:-256}" ;;
+    "$py" -m anysole.train --config "${CONFIG_FILE:-anysole/configs/v1.yaml}" --modal "$modal" --device cuda --out-dir "$run_dir/checkpoints" --epochs "${EPOCHS:-200}" --batch-size "${BATCH_SIZE:-256}" ;;
   motionpro)
     cd Baselines/MotionPRO
     "$py" -m app.train_frappe task.gpu="$CUDA_VISIBLE_DEVICES" task.checkpoint_dir="$run_dir/checkpoints" task.result_dir="$run_dir/metrics" task.output_dir="$run_dir/debug" task.epochs="${EPOCHS:-1000}" task.batch_size="${BATCH_SIZE:-16}" wandb_mode=disabled ;;

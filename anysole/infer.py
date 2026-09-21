@@ -38,9 +38,9 @@ from anysole.types import (
     CONFIG_T,
     CONFIG_V,
     CONFIG_VT,
+    DEFAULT_CONFIG_PATH,
     FAKE_MARKED_ROOT,
     FPS,
-    GAIT_ROOT,
     JOINT_PROTOCOL_CHECKSUM,
     MOTION_PROTOCOL,
     N_JOINTS,
@@ -79,7 +79,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Model-dir suffix when --ckpt is omitted (anysolev1_{ablation}_{contact_method}).",
     )
     parser.add_argument("--session", required=True)
-    parser.add_argument("--config", type=Path, default=GAIT_ROOT / "configs" / "v1.yaml")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument(
         "--config-id",
         default=None,

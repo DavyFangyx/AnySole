@@ -24,13 +24,18 @@ from anysole.types import (
     CONFIG_PROBS,
     CONFIG_T,
     CONFIG_V,
+    DEFAULT_CONFIG_PATH,
     FOOT_JOINTS,
-    GAIT_ROOT,
+    HRNET_CACHE_ROOT,
     JOINT_PROTOCOL_CHECKSUM,
     MOTION_PROTOCOL,
     N_JOINTS,
     POSE_DIM,
+    SEQ_ROOT,
+    SMPL_ROOTS,
+    SPLIT_CSV,
     T_S2M_DIM,
+    WORKSPACE_ROOT,
     anysole_model_dir,
     assert_batch_shapes,
 )
@@ -63,29 +68,29 @@ DEFAULT_CONFIG = {
     "lambda_bone": 0.0,         # E6.2: 骨长刚性损失权重（0 = 关闭，仅 pos 模式）
     "continuation": False,      # E6.4: eval/infer 续写式推理
     "warm_start": False,        # E6.5: 采样起点对齐训练边缘分布
-    "noise_scaled": True,       # E4 起的噪声缩放；E3 基础 = False
-    "lr_schedule": "cosine",    # E4 起的余弦衰减；E3 基础 = "constant"
-    "lambda_pose": 1.0,
+    "noise_scaled": False,      # E3 口径（E4 的噪声缩放被证伪）；默认与 anysole/configs/v1.yaml 对齐
+    "lr_schedule": "constant",  # E3 口径（E5 的 cosine 被证伪）
+    "lambda_pose": 3.0,
     "lambda_traj": 1.0,
     "lambda_trec": 0.1,
     "lambda_vrec": 0.1,
     "lambda_kp": 1.0,
-    "lambda_con": 0.1,
+    "lambda_con": 0.0,          # E3 口径（接触标签默认不参与训练损失）
     "traj_velocity_w": 1.0,
     "traj_delta_w": 1.0,
     "traj_delta_weight_power": 1.0,
     "traj_deltas": [2, 4, 8, 19],
     "config_probs": list(CONFIG_PROBS),
     "cam_id": 3,
-    "seq_root": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/MotionPRO/sequences/cam3",
-    "split_csv": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/splits/default/splits.csv",
-    "cache_root": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/AnySole/hrnet_cache/cam3",
-    "out_dir": "/data/fangyuxuan/projects/gait/AnySole/outputs/v1",
+    # 路径一律引用 anysole/types.py 的集中常量，避免与配置文件的字面量双重维护。
+    "seq_root": str(SEQ_ROOT),
+    "split_csv": str(SPLIT_CSV),
+    "cache_root": str(HRNET_CACHE_ROOT),
     "use_insole_drift": False,
     "contact_method": "tactile_abs",
-    "smpl_roots": ["/data/lizhe/projects/Tactile/Mocap/0804", "/data/lizhe/projects/Tactile/Mocap/0807", "/data/lizhe/projects/Tactile/Mocap/0808", "/data/lizhe/projects/Tactile/Mocap/0810"],
+    "smpl_roots": [str(p) for p in SMPL_ROOTS],
     "modal": MODEL_ANYSOLEV1,
-    "template_path": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/calibration/insole_templates.json",
+    "template_path": str(WORKSPACE_ROOT / "calibration" / "insole_templates.json"),
     "wandb_mode": "disabled",
     "wandb_project": "Anysole",
     "wandb_entity": "davyfangyuxuan-nanjing-university-of-aeronautics-and-ast",
@@ -305,7 +310,7 @@ def warn_legacy_output_checkpoint(out_dir: Path) -> None:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train AnySole V1.")
-    parser.add_argument("--config", type=Path, default=GAIT_ROOT / "configs" / "v1.yaml")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument(

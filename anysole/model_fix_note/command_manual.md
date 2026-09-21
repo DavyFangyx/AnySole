@@ -13,7 +13,7 @@
   `results/backup/AnySole_BVH_backup/`，必须按下面的链条从零重训。
 - 训练顺序（warm-start 链）：**F0b（from-scratch）→ F4a / F2（←F0b）→
   F2+4（←F2）→ V3-2（←F4a）**。
-- `configs/v1.yaml` 已是 SMPL-24 训练配置：raw108、tw=20、stride=20、lr=1e-4
+- `anysole/configs/v1.yaml` 已是 SMPL-24 训练配置：raw108、tw=20、stride=20、lr=1e-4
   （**`--lr` 不是 CLI**，要改 lr 就改 yaml）、λ_pose=3 / λ_kp=1 / λ_traj=1 /
   λ_trec=0.1 / λ_vrec=0.1 / λ_con=0、joint_and。实验差异全部由 CLI 传入，
   覆盖值随 ckpt 保存，eval/infer 从 ckpt 读配置。

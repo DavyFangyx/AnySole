@@ -185,7 +185,7 @@ python -m anysole.ablations.insole_drift.build_templates \
   --out AnysoleWorkspace/calibration/insole_templates.json
 ```
 
-该命令读取压力数据并写出 `configs/v1.yaml` 中 `template_path` 指向的文件；普通
+该命令读取压力数据并写出 `anysole/configs/v1.yaml` 中 `template_path` 指向的文件；普通
 `anysolev1` 主模型不依赖此文件。
 
 ```bash
@@ -282,7 +282,7 @@ python -m anysole.eval \
 模型由 `--modal` 与 `--contact-method` 两个参数唯一确定：自动读取
 `results/AnySole/<modal>_<contact_method>/checkpoints/ckpt_last.pt`，BVH 与轨迹 npz
 默认写入同目录 `predictions/eval_bvh`，指标写入 `metrics/test.json`。其余参数均有默认值：
-`--config` 默认 `configs/v1.yaml`、`--device` 默认 `auto`（有 CUDA 自动用 GPU）、
+`--config` 默认 `anysole/configs/v1.yaml`、`--device` 默认 `auto`（有 CUDA 自动用 GPU）、
 `--split` 默认 `test`、`--config-id` 默认 `VT2M,V2M,T2M`。需要评估其他 checkpoint 或
 自定义导出目录时，用 `--ckpt <路径>`、`--write-bvh <目录>` 覆盖；`--no-write-bvh`
 关闭默认的 BVH 导出（训练结束时的自动评估即用此开关，只出指标）。

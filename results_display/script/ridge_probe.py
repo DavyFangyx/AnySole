@@ -47,7 +47,7 @@ from anysole.geometry import fk_pose6d
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Ridge-on-F readout ceiling probe (F0a).")
     parser.add_argument("--ckpt", type=Path, required=True)
-    parser.add_argument("--config", type=Path, default=REPO / "configs" / "v1.yaml")
+    parser.add_argument("--config", type=Path, default=REPO / "anysole" / "configs" / "v1.yaml")
     parser.add_argument("--split", choices=("val", "test"), default="val",
                         help="Evaluation split (the ridge is always fitted on train).")
     parser.add_argument("--batch-size", type=int, default=32)

@@ -258,7 +258,7 @@ def parse_args() -> argparse.Namespace:
         out_dir=True,
         out_dir_default=cli_common.DISPLAY_ROOT / "Test10_tgen",
     )
-    parser.add_argument("--config", type=str, default=str(REPO_ROOT / "configs" / "v1.yaml"))
+    parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--ckpt", type=str, default=str(DEFAULT_CKPT))
     parser.add_argument("--config-id", type=str, default="VT2M,V2M,T2M", help="Conditioning arms, comma-separated.")
     parser.add_argument("--limit-sessions", type=int, default=0, help="Cap the number of sessions (0 = all).")

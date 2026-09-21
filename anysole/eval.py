@@ -33,6 +33,7 @@ from anysole.types import (
     CONFIG_T,
     CONFIG_V,
     CONFIG_VT,
+    DEFAULT_CONFIG_PATH,
     FPS,
     GAIT_ROOT,
     JOINT_PROTOCOL_CHECKSUM,
@@ -120,7 +121,7 @@ class MetricSums:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate AnySole V1 with DDIM sampling.")
-    parser.add_argument("--config", type=Path, default=GAIT_ROOT / "configs" / "v1.yaml")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument(
         "--ckpt",
         type=Path,
@@ -252,7 +253,7 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         )
     d_model = int(saved_config.get("d_model", config["d_model"]))
     # tw always comes from the checkpoint, so evaluating an older model stays
-    # correct even after configs/v1.yaml has moved on.
+    # correct even after anysole/configs/v1.yaml has moved on.
     tw = int(saved_config.get("tw", config["tw"]))
     modal = str(saved_config.get("modal", MODEL_ANYSOLEV1))
     if modal not in MODEL_NAMES:

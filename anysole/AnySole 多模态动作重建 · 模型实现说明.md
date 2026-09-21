@@ -131,7 +131,7 @@ std 下限 1e-2）；时间 PE；分组嵌入；6 层 pre-LN TransformerDecoder
 
 - 辅助头（跨模态信息机制）：T 重建头读 `F` 的 T 半段 → `pressure_hat` (B,20,96)
   （归一化 T_raw）；V 重建头读 V 半段 → `vfeat_hat` (B,20,2051)。
-- 损失表（`configs/v1.yaml` 默认权重）：
+- 损失表（`anysole/configs/v1.yaml` 默认权重）：
 
 | 损失 | 定义 | 权重 |
 |---|---|---|

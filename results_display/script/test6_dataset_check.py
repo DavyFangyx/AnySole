@@ -344,7 +344,7 @@ def parse_args() -> argparse.Namespace:
         out_dir=True,
         out_dir_default=cli_common.DISPLAY_ROOT / "Test6_dataset_check",
     )
-    parser.add_argument("--config", type=str, default=str(REPO_ROOT / "configs" / "v1.yaml"))
+    parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--contact-method", type=str, default="tactile_abs",
                         help="Contact-label scheme for dataset loading (labels do not affect Test6 checks).")
     parser.add_argument("--limit-sessions", type=int, default=0, help="Cap the number of test sessions (0 = all).")

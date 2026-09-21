@@ -159,7 +159,7 @@ def parse_args() -> argparse.Namespace:
         out_dir=True,
         out_dir_default=cli_common.DISPLAY_ROOT / "Test9_overfit",
     )
-    parser.add_argument("--config", type=str, default=str(REPO_ROOT / "configs" / "v1.yaml"))
+    parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--contact-method", type=str, default="", help="Contact-label scheme (default: config's).")
     parser.add_argument("--modal", type=str, default=MODEL_ANYSOLEV1)
     parser.add_argument("--batch-size", type=int, default=8, help="Windows in the fixed batch.")

@@ -14,6 +14,10 @@ from pathlib import Path
 
 GAIT_ROOT = Path("/data/fangyuxuan/projects/gait")
 ANYSOLE_ROOT = Path(__file__).resolve().parents[1]
+# Default training config lives with the package, not at the repo root.
+# (ANYSOLE_ROOT above is the repo root for historical reasons; anchor this
+# one to the package directory itself.)
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "v1.yaml"
 MOTIONPRO_ROOT = GAIT_ROOT / "Baselines" / "MotionPRO"
 WORKSPACE_ROOT = GAIT_ROOT / "AnysoleWorkspace"
 SEQ_ROOT = WORKSPACE_ROOT / "derived" / "MotionPRO" / "sequences" / "cam3"

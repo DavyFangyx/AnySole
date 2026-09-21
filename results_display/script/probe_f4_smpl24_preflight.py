@@ -59,7 +59,7 @@ def _mpjpe_mm(pose, trans, batch) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=REPO_ROOT / "configs/v1.yaml")
+    parser.add_argument("--config", type=Path, default=REPO_ROOT / "anysole/configs/v1.yaml")
     parser.add_argument(
         "--init-from",
         type=Path,

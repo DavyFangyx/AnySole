@@ -133,7 +133,7 @@ totals["mpjpe"] += float(torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=
 
 ```bash
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --config configs/v1.yaml \
+  --config anysole/configs/v1.yaml \
   --ckpt results/AnySole/anysolev1_tactile_abs/checkpoints/ckpt_last.pt \
   --split test --write-bvh results/AnySole/anysolev1_tactile_abs/predictions/eval_bvh
 ```
