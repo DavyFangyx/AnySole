@@ -19,10 +19,10 @@ for baseline models discovered with ``--auto`` (or the
 folders.
 
 Usage (run from the repository root):
-    python results_display/script/visualize_anysole_traj.py
-    python results_display/script/visualize_anysole_traj.py --modal anysolev1 --config-id VT2M
-    python results_display/script/visualize_anysole_traj.py --auto
-    python results_display/script/visualize_anysole_traj.py --session S7013
+    python results_display/script/r_test3_traj.py
+    python results_display/script/r_test3_traj.py --modal anysolev1 --config-id VT2M
+    python results_display/script/r_test3_traj.py --auto
+    python results_display/script/r_test3_traj.py --session S7013
 """
 from __future__ import annotations
 

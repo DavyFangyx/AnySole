@@ -42,7 +42,7 @@
   `init_shape → init_pose → tracking` 三阶段、逐 session 生成任务（同 GPU 串行）。
 - **统一评估契约**：`results/<Model>/predictions/eval_motion/<session>.npz`
   （`joint_xyz_world (T,J,3) + joint_names + valid_mask`，SMPL-24 或 BVH-23 协议自识别），
-  由 `results_display/script/evaluate_compare.py` 做 19 关节语义交集对比，产出
+  由 `results_display/script/r_test2_compare.py` 做 19 关节语义交集对比，产出
   `results_display/Test2_comparison/comparison_{per_session,summary}.csv`。
   当前 MotionPRO 行为全 NaN（`results/MotionPRO` 无预测）。
 - **环境**：`touch_gait`（py3.8/torch2.4）、`depthpro`（py3.10/torch2.4）、
@@ -83,7 +83,7 @@
      映射并写单测。
 4. **输出**：统一导出 `results/<Model>/predictions/eval_motion/<session>.npz`
    （SMPL-24 协议 `joint_xyz_world` + `joint_names` + `valid_mask`），fake 帧不参与。
-5. **评估**：`evaluate_compare.py` 统一口径（MPJPE/PA-MPJPE/WMPJPE/WAMPJPE/RTE/
+5. **评估**：`r_test2_compare.py` 统一口径（MPJPE/PA-MPJPE/WMPJPE/WAMPJPE/RTE/
    Accel/Jitter @40Hz，19 关节语义交集），Test2 对比表必须有数值行。
 
 ## 4. 分基线方案
@@ -108,8 +108,8 @@
 5. **导出与评估**：`test_frappe.py` 已能产 `test_metrics.csv`；补一个导出步骤
    （SessionAccumulator 拼回整段 → FK SMPL-24 → `joint_xyz_world` 写
    `results/MotionPRO/predictions/eval_motion/<session>.npz`）→
-   `evaluate_compare.py` → Test2 行非 NaN。
-6. **可视化**：`results_display/script/visualize_motionpro.py` 已存在，补跑。
+   `r_test2_compare.py` → Test2 行非 NaN。
+6. **可视化**：`results_display/script/r_test1_visualize_motionpro.py` 已存在，补跑。
 
 ### 4.2 pressure_tookit（中等）
 
@@ -173,7 +173,7 @@
 5. **导出**：逐帧 `smpl_{idx}.npz`（body_pose 69 轴角 + global_rot + transl 地面系米
    + betas + scale）→ FK SMPL（含 `model_scale_opt`/betas[:,0] 尺度）→ 地面系→
    世界系（标定变换）→ `results/pressure_tookit/predictions/eval_motion/<session>.npz`。
-6. **评估与可视化**：`evaluate_compare.py` → Test2；trimesh 渲染 →
+6. **评估与可视化**：`r_test2_compare.py` → Test2；trimesh 渲染 →
    `results_display/Test1_visualization/pressure_tookit/`。
 
 ### 4.3 VP-MoCap（最大，全新工作包）
@@ -241,7 +241,7 @@
    ZoeDepth——口径与其他基线一致，记为偏离）。
 5. 运行 `python -m app.optimize` → `opt_result.pth`（pose (B,24,3,3) + beta + trans）
    → FK SMPL-24 → 世界系 → 统一导出 npz。范围同 D6：先 test split。
-6. 评估：`evaluate_compare.py` → Test2；渲染 → Test1_visualization/VP-MoCap/。
+6. 评估：`r_test2_compare.py` → Test2；渲染 → Test1_visualization/VP-MoCap/。
 
 ## 5. 需要下载的依赖与 ckpt（用户手动下载清单）
 
@@ -301,7 +301,7 @@ smoke → test split 全量 → 导出。验收：opt_result.pth 形状/平滑�
 与 GT 在同一坐标系（RTE 量级合理）；路径修复后两目录启动均可运行。
 
 **Phase 5（统一评估收口）**：三模型 `predictions/eval_motion/` 齐全 →
-`evaluate_compare.py` → Test2 四行（AnySole/MotionPRO/Step2Motion/pressure_tookit/
+`r_test2_compare.py` → Test2 四行（AnySole/MotionPRO/Step2Motion/pressure_tookit/
 VP-MoCap）全有数值 → `results_display/Test1_visualization/` 各基线可视化 →
 更新 `z_note/总体验收矩阵.md` 状态列与协议表。
 

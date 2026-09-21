@@ -1,8 +1,8 @@
 """Shared frame-rendering helpers for the results_display Test scripts.
 
-Extracted from ``visualize_motionpro.py`` so AnySole Test1/Test3 rendering no
+Extracted from ``r_test1_visualize_motionpro.py`` so AnySole Test1/Test3 rendering no
 longer imports the MotionPRO baseline tree (``Baselines/MotionPRO/lib``).
-MotionPRO-specific model/checkpoint logic stays in ``visualize_motionpro.py``.
+MotionPRO-specific model/checkpoint logic stays in ``r_test1_visualize_motionpro.py``.
 """
 from __future__ import annotations
 

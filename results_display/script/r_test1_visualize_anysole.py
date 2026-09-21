@@ -8,10 +8,10 @@ Outputs are written below ``results_display/Test1_visualization/AnySole/<modal>/
 (or the ``ANYSOLE_RESULTSDISPLAY`` override).
 
 Usage (run from the repository root):
-    python results_display/script/visualize_anysole.py
-    python results_display/script/visualize_anysole.py --modal anysolev1 --config-id VT2M
-    python results_display/script/visualize_anysole.py --session S7013
-    python results_display/script/visualize_anysole.py --modal anysolev1 --contact-method bvh_soft,joint_and
+    python results_display/script/r_test1_visualize_anysole.py
+    python results_display/script/r_test1_visualize_anysole.py --modal anysolev1 --config-id VT2M
+    python results_display/script/r_test1_visualize_anysole.py --session S7013
+    python results_display/script/r_test1_visualize_anysole.py --modal anysolev1 --contact-method bvh_soft,joint_and
 """
 from __future__ import annotations
 

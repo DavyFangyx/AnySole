@@ -317,7 +317,7 @@ python -m anysole.infer \
 ```bash
 cd /data/fangyuxuan/projects/gait/Baselines/MotionPRO
 python -m app.test_frappe
-python ../../results_display/script/visualize_motionpro.py
+python ../../results_display/script/r_test1_visualize_motionpro.py
 ```
 
 指标写入 `results/MotionPRO/metrics/`，可视化写入 `results_display/Test1_visualization/MotionPRO/`。

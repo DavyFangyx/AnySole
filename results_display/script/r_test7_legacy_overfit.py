@@ -25,8 +25,8 @@ Outputs under results_display/Test9_overfit/:
     overfit_ckpt_<lr>.pt  only with --save-ckpt
 
 Usage (run from the repository root):
-    python results_display/script/test9_overfit.py
-    python results_display/script/test9_overfit.py --lrs 3e-4 --steps 100
+    python results_display/script/r_test7_legacy_overfit.py
+    python results_display/script/r_test7_legacy_overfit.py --lrs 3e-4 --steps 100
 """
 from __future__ import annotations
 

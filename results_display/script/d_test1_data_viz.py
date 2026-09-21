@@ -11,9 +11,9 @@ Outputs are written below ``results_display/Test1_visualization/gt``:
 ``ANYSOLE_RESULTSDISPLAY`` overrides the display root.
 
 Example:
-    python results_display/script/visualize_gt_bvh.py
-    python results_display/script/visualize_gt_bvh.py --session S7013 --gen gif
-    python results_display/script/visualize_gt_bvh.py --bvh /path/to/single.bvh --gen mp4
+    python results_display/script/d_test1_data_viz.py
+    python results_display/script/d_test1_data_viz.py --session S7013 --gen gif
+    python results_display/script/d_test1_data_viz.py --bvh /path/to/single.bvh --gen mp4
 """
 from __future__ import annotations
 

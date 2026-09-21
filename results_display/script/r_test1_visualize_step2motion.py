@@ -1,10 +1,10 @@
 """Render Step2Motion tactile input, generated BVH, and aligned raw BVH.
 
 Usage (run from the repository root):
-    python results_display/script/visualize_step2motion.py
-    python results_display/script/visualize_step2motion.py \
+    python results_display/script/r_test1_visualize_step2motion.py
+    python results_display/script/r_test1_visualize_step2motion.py \
         results://Step2Motion/predictions/gait_model/S7063_gen.bvh
-    python results_display/script/visualize_step2motion.py --self-test
+    python results_display/script/r_test1_visualize_step2motion.py --self-test
 
 Outputs are written below ``results_display/Test1_visualization/Step2Motion/gait_model`` (or the
 ``ANYSOLE_RESULTSDISPLAY`` override).
@@ -417,9 +417,9 @@ def discover_pred_files(pred_bvh):
     hint = (
         "Generated BVH not found: %s\n"
         "Default visualizes every test-set export:\n"
-        "  python results_display/script/visualize_step2motion.py\n"
+        "  python results_display/script/r_test1_visualize_step2motion.py\n"
         "One clip:\n"
-        "  python results_display/script/visualize_step2motion.py results://Step2Motion/predictions/gait_model/S7063_gen.bvh"
+        "  python results_display/script/r_test1_visualize_step2motion.py results://Step2Motion/predictions/gait_model/S7063_gen.bvh"
     ) % pred_bvh
     raise SystemExit(hint)
 

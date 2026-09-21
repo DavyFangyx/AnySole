@@ -21,8 +21,8 @@ Outputs under results_display/Test7_mean_pose/:
     test7_report.json               per-arm MPJPE + pairwise output distances
 
 Usage (run from the repository root):
-    python results_display/script/test7_mean_pose_infer.py
-    python results_display/script/test7_mean_pose_infer.py --session S10103 --export-sessions 1
+    python results_display/script/r_test5_mean_pose.py
+    python results_display/script/r_test5_mean_pose.py --session S10103 --export-sessions 1
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ from anysole.eval import _load_model  # noqa: E402
 from anysole.geometry import fk_pose6d  # noqa: E402
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device  # noqa: E402
 from anysole.types import CONFIG_VT, FPS, POSE_DIM  # noqa: E402
-from test6_dataset_check import ensure_mean_pose  # noqa: E402
+from d_test2_dataset_check import ensure_mean_pose  # noqa: E402
 
 ARMS = ("tau0_mean", "tau0_gt", "ddim_noise", "ddim_mean500", "ddim_gt500")
 

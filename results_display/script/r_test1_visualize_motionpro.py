@@ -1,9 +1,9 @@
 """Render MotionPRO tactile input, prediction, and GT as one animation.
 
 Usage (run from the repository root):
-    python results_display/script/visualize_motionpro.py
-    python results_display/script/visualize_motionpro.py --session S14103
-    python results_display/script/visualize_motionpro.py \
+    python results_display/script/r_test1_visualize_motionpro.py
+    python results_display/script/r_test1_visualize_motionpro.py --session S14103
+    python results_display/script/r_test1_visualize_motionpro.py \
         --checkpoint results://MotionPRO/checkpoints/imagepressure2smpl/init/5e-05/imagepressure2smpl_best.pth
 
 Outputs are written below ``results_display/Test1_visualization/MotionPRO`` (or the

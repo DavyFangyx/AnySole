@@ -23,8 +23,8 @@ Outputs under results_display/Test8_input_ablation/:
     test8_report.json
 
 Usage (run from the repository root):
-    python results_display/script/test8_input_ablation.py
-    python results_display/script/test8_input_ablation.py --session S10103 --export-sessions 1
+    python results_display/script/r_test6_input_ablation.py
+    python results_display/script/r_test6_input_ablation.py --session S10103 --export-sessions 1
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ from anysole.eval import _load_model  # noqa: E402
 from anysole.geometry import fk_pose6d  # noqa: E402
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device  # noqa: E402
 from anysole.types import CONFIG_VT, FPS, POSE_DIM  # noqa: E402
-from test6_dataset_check import ensure_input_means  # noqa: E402
+from d_test2_dataset_check import ensure_input_means  # noqa: E402
 
 VARIANTS = ("real", "zero", "mean", "shuffle")
 ARMS = ("ddim", "tau0_gt")

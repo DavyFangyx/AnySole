@@ -41,8 +41,8 @@ Outputs under results_display/Test9_1_sampler/:
     overfit_ckpt_<lr>.pt  only with --save-ckpt (reusable via --ckpt)
 
 Usage (run from the repository root):
-    python results_display/script/test9_1_sampler_checks.py
-    python results_display/script/test9_1_sampler_checks.py --skip-train
+    python results_display/script/r_test7_legacy_sampler_checks.py
+    python results_display/script/r_test7_legacy_sampler_checks.py --skip-train
 """
 from __future__ import annotations
 
@@ -262,12 +262,12 @@ def check2a_same_batch(batch, cond) -> dict:
         "cond_session_id_same_buffer": _same_tensor(cond["session_id"], batch["session_id"]),
     }
     # Test9's code inspection: _tau0_mpjpe_mm and _ddim_mpjpe_mm both read from the
-    # same `batch` dict (test9_overfit.py), config_id forced to CONFIG_VT for both.
+    # same `batch` dict (r_test7_legacy_overfit.py), config_id forced to CONFIG_VT for both.
     all_shared = all(checks.values())
     result = {
         "tensor_identity": checks,
         "test9_probes_share_batch": True,
-        "note": "In test9_overfit.py both probes receive the same fixed `batch`; "
+        "note": "In r_test7_legacy_overfit.py both probes receive the same fixed `batch`; "
                 "the 169->220 DDIM series and the tau0 series are same-batch numbers. "
                 "Cross-batch tau0 (check 2b) quantifies what a batch mismatch would cost.",
         "verdict": "PASS" if all_shared else "FAIL",
@@ -488,7 +488,7 @@ def check5_rotations(batch, out0, pred, final, device) -> dict:
     torch_np_max_diff = float(np.abs(gt_np.reshape(gt_torch.shape) - gt_torch).max())
     result = {
         "fk_path_shared": True,
-        "fk_path_note": "test9_overfit.py: both _tau0_mpjpe_mm and _ddim_mpjpe_mm call the same "
+        "fk_path_note": "r_test7_legacy_overfit.py: both _tau0_mpjpe_mm and _ddim_mpjpe_mm call the same "
                         "anysole.geometry.fk_pose6d -> rot6d_to_rotmat (torch Gram-Schmidt); "
                         "both anchor with batch['trans_gt'] + trans_anchor.",
         "orthonormality": stats,

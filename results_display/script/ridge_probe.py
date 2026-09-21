@@ -1,5 +1,5 @@
 """Formalized ridge-on-F probe (F0a): the linear readout ceiling of the fused
-memory F.  Formalizes z_note/test12_stage_probes.py — fix_plan_v2.md §2 makes
+memory F.  Formalizes z_note/r_test10_stage_probes.py — fix_plan_v2.md §2 makes
 this a per-step mandatory probe (E3 reference ≈ 85 mm MPJPE); when a step
 improves, the ridge ceiling should move with it.
 

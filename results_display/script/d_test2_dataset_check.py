@@ -26,8 +26,8 @@ Outputs under results_display/Test6_dataset_check/:
     input_means.npz       train per-timestep V/T means (consumed by Test7/8)
 
 Usage (run from the repository root):
-    python results_display/script/test6_dataset_check.py
-    python results_display/script/test6_dataset_check.py --session S10103 --limit-sessions 1 --max-windows 16
+    python results_display/script/d_test2_dataset_check.py
+    python results_display/script/d_test2_dataset_check.py --session S10103 --limit-sessions 1 --max-windows 16
 """
 from __future__ import annotations
 

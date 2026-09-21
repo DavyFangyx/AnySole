@@ -21,9 +21,9 @@ Outputs under results_display/Test10_tgen/:
     tgen_report.json                            aggregate per mode + V2T summary
 
 Usage (run from the repository root):
-    python results_display/script/test10_tgen.py
-    python results_display/script/test10_tgen.py --session S10103
-    python results_display/script/test10_tgen.py --config-id VT2M,V2M --export-sessions 2
+    python results_display/script/r_test8_v2t.py
+    python results_display/script/r_test8_v2t.py --session S10103
+    python results_display/script/r_test8_v2t.py --config-id VT2M,V2M --export-sessions 2
 """
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ from anysole.types import (  # noqa: E402
     T_RAW_DIM,
     V_FEAT_DIM,
 )
-from test5_contact import (  # noqa: E402
+from d_test3_contact import (  # noqa: E402
     INFO_FONT,
     INSOLE_H,
     INSOLE_W,

@@ -8,28 +8,28 @@
   模型输出的可视化、参数对照、轨迹与专项消融。
 
 实验代码位于 `script/`（唯一被 git 跟踪的目录），生成物落在对应的实验目录。
-本文已按 D/R 编号组织；**脚本与产物目录的改名在 P1-4 落盘**，当前磁盘上脚本
-仍为旧名（命令照抄可用），新旧对应见下方对照表。
+本文已按 D/R 编号组织；P1-4 的脚本平铺改名已落盘（命令照抄可用），
+新旧对应见下方对照表。
 
 可用环境变量 `ANYSOLE_RESULTSDISPLAY` 覆盖本根目录。
 
 ## 编号对照（旧 TestN ↔ 新编号）
 
-| 新编号 | 旧 | 脚本（现名 → P1-4 新名） |
+| 新编号 | 旧 | 脚本（P1-4 改名后） |
 | --- | --- | --- |
-| D_Test1 原始数据可视化 | Test1 的 GT/输入部分 | `visualize_gt_bvh.py` → `d_test1_data_viz.py`（BVH/SMPL GT 渲染） |
-| D_Test2 数据集自检 | Test6 | `test6_dataset_check.py` → `d_test2_dataset_check.py` |
-| D_Test3 接触检测 | Test5 | `contact_methods.py` → `AnysoleWorkspace/tool/contact_labels.py`；`test5_contact.py` → `d_test3_contact.py` |
-| D_Test4 SMPL 协议预检 | F4 预检 | `probe_f4_smpl24_preflight.py` + `probe_smpl_*` → `d_test4_smpl_protocol.py` |
+| D_Test1 原始数据可视化 | Test1 的 GT/输入部分 | `d_test1_data_viz.py`（BVH/SMPL GT 渲染） |
+| D_Test2 数据集自检 | Test6 | `d_test2_dataset_check.py` |
+| D_Test3 接触检测 | Test5 | `contact_methods.py` → `AnysoleWorkspace/tool/contact_labels.py`；`d_test3_contact.py` |
+| D_Test4 SMPL 协议预检 | F4 预检 | `d_test4_smpl_protocol.py` + `probe_smpl_*` → `d_test4_smpl_protocol.py` |
 | R_Test1 模型可视化 | Test1 的模型部分 | `visualize_{motionpro,step2motion,anysole}.py` → `r_test1_visualize.py` |
-| R_Test2 参数对照 | Test2 | `evaluate_compare.py` → `r_test2_compare.py` |
-| R_Test3 轨迹可视化 | Test3 | `visualize_anysole_traj.py` → `r_test3_traj.py` |
-| R_Test4 鞋垫偏移补偿 | Test4 | `test4_insole_drift.py` → `r_test4_insole_drift.py` |
-| R_Test5 均值姿态推理 | Test7 | `test7_mean_pose_infer.py` → `r_test5_mean_pose.py` |
-| R_Test6 输入-输出消融 | Test8 | `test8_input_ablation.py` → `r_test6_input_ablation.py` |
-| R_Test7 legacy 扩散诊断 | Test9 / Test9.1 | `test9_overfit.py` + `test9_1_sampler_checks.py` → `r_test7_legacy_diffusion.py` |
-| R_Test8 触觉生成 | Test10 | `test10_tgen.py` → `r_test8_v2t.py` |
-| R_Test9 τ 训练区间 | Test11 | `test11_tau_regime.py` → `r_test9_tau_regime.py` |
+| R_Test2 参数对照 | Test2 | `r_test2_compare.py` |
+| R_Test3 轨迹可视化 | Test3 | `r_test3_traj.py` |
+| R_Test4 鞋垫偏移补偿 | Test4 | `r_test4_insole_drift.py` → `r_r_test4_insole_drift.py` |
+| R_Test5 均值姿态推理 | Test7 | `r_test5_mean_pose.py` |
+| R_Test6 输入-输出消融 | Test8 | `r_test6_input_ablation.py` |
+| R_Test7 legacy 扩散诊断 | Test9 / Test9.1 | `r_test7_legacy_overfit.py` + `r_test7_legacy_sampler_checks.py` → `r_test7_legacy_diffusion.py` |
+| R_Test8 触觉生成 | Test10 | `r_test8_v2t.py` |
+| R_Test9 τ 训练区间 | Test11 | `r_test9_tau_regime.py` |
 | R_Test10 pose head 系列 | Test12 | `test12_*.py` ×6 → `r_test10_pose_head.py` |
 
 ## 目录结构
@@ -42,25 +42,25 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   ├── motion_io.py                    # 统一动作读取器（格式自动检测）
 │   ├── render_common.py                # 共享渲染公共件
 │   ├── ── 数据检验（D_TestN）──
-│   │   ├── visualize_gt_bvh.py         # D_Test1：GT 原始渲染
-│   │   ├── test6_dataset_check.py      # D_Test2：数据集自检
-│   │   ├── contact_methods.py          # D_Test3：多方案接触标签生成（→ tool/contact_labels.py）
-│   │   ├── test5_contact.py            # D_Test3：接触标签动画 + 阈值分析
-│   │   ├── probe_f4_smpl24_preflight.py# D_Test4：真实 SMPL-24 batch/warm-start/loss/backward
+│   │   ├── d_test1_data_viz.py         # D_Test1：GT 原始渲染
+│   │   ├── d_test2_dataset_check.py      # D_Test2：数据集自检
+│   │   │   │（D_Test3 标签生成器在 AnysoleWorkspace/tool/contact_labels.py，不在本目录）
+│   │   ├── d_test3_contact.py            # D_Test3：接触标签动画 + 阈值分析
+│   │   ├── d_test4_smpl_protocol.py# D_Test4：真实 SMPL-24 batch/warm-start/loss/backward
 │   │   └── probe_smpl_*.py             # D_Test4：SMPL 写出/读回、轴系、协议契约探针
 │   └── ── 结果检验（R_TestN）──
-│       ├── visualize_motionpro.py      # R_Test1：MotionPRO 动画
-│       ├── visualize_step2motion.py    # R_Test1：Step2Motion 动画
-│       ├── visualize_anysole.py        # R_Test1：AnySole 动画（自动识别 SMPL NPZ/BVH）
-│       ├── evaluate_compare.py         # R_Test2：跨模型/参数对照评估
-│       ├── visualize_anysole_traj.py   # R_Test3：轨迹对比动画 + 静态图
-│       ├── test4_insole_drift.py       # R_Test4：鞋垫漂移补偿器测试
-│       ├── test7_mean_pose_infer.py    # R_Test5：均值/GT 姿态推理
-│       ├── test8_input_ablation.py     # R_Test6：输入-输出相关性消融
-│       ├── test9_overfit.py            # R_Test7：legacy diffusion 过拟合
-│       ├── test9_1_sampler_checks.py   # R_Test7：τ0 vs DDIM 五项定位
-│       ├── test10_tgen.py              # R_Test8：V2T 触觉生成
-│       ├── test11_tau_regime.py        # R_Test9：τ 训练区间消融
+│       ├── r_test1_visualize_motionpro.py      # R_Test1：MotionPRO 动画
+│       ├── r_test1_visualize_step2motion.py    # R_Test1：Step2Motion 动画
+│       ├── r_test1_visualize_anysole.py        # R_Test1：AnySole 动画（自动识别 SMPL NPZ/BVH）
+│       ├── r_test2_compare.py         # R_Test2：跨模型/参数对照评估
+│       ├── r_test3_traj.py   # R_Test3：轨迹对比动画 + 静态图
+│       ├── r_test4_insole_drift.py       # R_Test4：鞋垫漂移补偿器测试
+│       ├── r_test5_mean_pose.py    # R_Test5：均值/GT 姿态推理
+│       ├── r_test6_input_ablation.py     # R_Test6：输入-输出相关性消融
+│       ├── r_test7_legacy_overfit.py            # R_Test7：legacy diffusion 过拟合
+│       ├── r_test7_legacy_sampler_checks.py   # R_Test7：τ0 vs DDIM 五项定位
+│       ├── r_test8_v2t.py              # R_Test8：V2T 触觉生成
+│       ├── r_test9_tau_regime.py        # R_Test9：τ 训练区间消融
 │       └── test12_*.py                 # R_Test10：pose head 系列探针
 ├── ── 数据检验产物（P1-4 起 data/d_testN/；现为 TestN_* 目录）──
 │   ├── Test5_contact/                  # D_Test3 输出（按方案分目录）
@@ -96,7 +96,7 @@ results_display/                        # 纯产物目录（实验代码在 scri
 | BVH-23 | Step2Motion 等 baseline | `predictions/<run>/<session>_gen.bvh`（Skeleton3） | `.bvh` 后缀 → bvh23 |
 
 - GT 读取统一走 `motion_io.load_session_gt`：优先会话 SMPL，缺失时回退 BVH（仅限展示层）。
-- R_Test2 的跨协议指标统一映射到 common19 语义关节（`evaluate_compare.py` 的 `protocol_gt`）。
+- R_Test2 的跨协议指标统一映射到 common19 语义关节（`r_test2_compare.py` 的 `protocol_gt`）。
 - 归档的 `*_backup*` 目录不参与任何自动扫描。
 
 # 第一部分：数据检验（D_TestN）
@@ -107,20 +107,20 @@ results_display/                        # 纯产物目录（实验代码在 scri
 
 | 脚本 | 作用 |
 | --- | --- |
-| `visualize_gt_bvh.py` | 原始 GT 动捕 BVH 的骨架渲染（纯 BVH 可视化） |
+| `d_test1_data_viz.py` | 原始 GT 动捕 BVH 的骨架渲染（纯 BVH 可视化） |
 | （SMPL GT 渲染，P1-4 并入 `d_test1_data_viz.py`） | 原始 SMPL-24 GT 的骨架渲染 |
 
 ```bash
 conda activate touch_gait
 
 # BVH 原始数据可视化
-python results_display/script/visualize_gt_bvh.py
-python results_display/script/visualize_gt_bvh.py --bvh <单个.bvh>
+python results_display/script/d_test1_data_viz.py
+python results_display/script/d_test1_data_viz.py --bvh <单个.bvh>
 ```
 
 ## D_Test2 数据集自检（GT 自洽 + 均值姿态基线）
 
-`test6_dataset_check.py` 只读数据集、不加载任何模型，回答两个问题：
+`d_test2_dataset_check.py` 只读数据集、不加载任何模型，回答两个问题：
 
 - **A. GT 自洽**：FK(GT 6D, GT offsets) 必须能逐关节还原数据集内的 `kp_gt`。
   A1 numpy FK（数据集构建路径）/ A2 torch FK（train/eval 路径）交叉验证、A3 单位与几何量程、A4 SMPL axis-angle↔6D 回环、
@@ -142,14 +142,14 @@ python results_display/script/visualize_gt_bvh.py --bvh <单个.bvh>
 
 ```bash
 conda activate touch_gait
-python results_display/script/test6_dataset_check.py
+python results_display/script/d_test2_dataset_check.py
 # 单 session 冒烟
-python results_display/script/test6_dataset_check.py --session S10103 --limit-sessions 1 --max-windows 16
+python results_display/script/d_test2_dataset_check.py --session S10103 --limit-sessions 1 --max-windows 16
 ```
 
 ## D_Test3 接触检测
 
-`test5_contact.py` 渲染自动识别的 GT motion 骨架 + 触觉鞋垫热力图，并叠加接触指示
+`d_test3_contact.py` 渲染自动识别的 GT motion 骨架 + 触觉鞋垫热力图，并叠加接触指示
 （**红色=接触、绿色=无接触**）：鞋垫描边与徽章、骨架足部关节着色、底部整段接触时间轴。
 每帧同步显示 48 格压力和值。
 
@@ -157,7 +157,7 @@ python results_display/script/test6_dataset_check.py --session S10103 --limit-se
 （`prepare_sequences.py:contact_from_insoles`，阈值 `CONTACT_SUM_THRESH`），但大量鞋垫在脚
 离地后压力不归零（如 S11023 左脚摆动相压力和最低 653），曾导致大量运动学离地帧被错标为接触。
 为对比候选修复方案，Test5 改为**按方案分子目录**：`contact_labels.py` 为每个方案生成
-`contact_<method>.npy`（与 `contact.npy` 同目录、同 10 列格式），`test5_contact.py --methods ...`
+`contact_<method>.npy`（与 `contact.npy` 同目录、同 10 列格式），`d_test3_contact.py --methods ...`
 渲染判定动画。标签生成器属数据构建代码，位于 `AnysoleWorkspace/tool/contact_labels.py`。
 
 | 方法 | 判据 |
@@ -176,9 +176,9 @@ conda activate touch_gait
 # 1) 生成全部方案的标签（全部 session）+ 对比报告
 python AnysoleWorkspace/tool/contact_labels.py
 # 2) 渲染动画（默认全部方案 × test split；标签缺失时自动补齐）
-python results_display/script/test5_contact.py --methods bvh_soft --gen mp4 --session S11113
+python results_display/script/d_test3_contact.py --methods bvh_soft --gen mp4 --session S11113
 # 单方案 / 单 session 冒烟
-python results_display/script/test5_contact.py --methods bvh_h --session S11023
+python results_display/script/d_test3_contact.py --methods bvh_h --session S11023
 ```
 
 产出（`Test5_contact/`）：每个方案一个子目录（`<method>/`）：
@@ -198,7 +198,7 @@ offset、`joint_and` sidecar、旧 23/138 warm-start 隔离、各 loss 分量、
 
 ```bash
 PYTHONPATH=. /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python \
-  results_display/script/probe_f4_smpl24_preflight.py \
+  results_display/script/d_test4_smpl_protocol.py \
   --device cpu --steps 20 --grad-clip 5.0 --lr 1e-4
 
 PYTHONPATH=. /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python \
@@ -211,24 +211,24 @@ PYTHONPATH=. /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python \
 
 | 脚本 | 作用 | 默认输出 |
 | --- | --- | --- |
-| `visualize_motionpro.py` | MotionPRO 触觉输入/预测/GT 三栏对比动画 | `Test1_visualization/MotionPRO/<checkpoint tag>/` |
-| `visualize_step2motion.py` | Step2Motion 足底压力/生成 BVH/GT 对比动画 | `Test1_visualization/Step2Motion/gait_model/` |
-| `visualize_anysole.py` | AnySole 主模型与消融（足底压力/预测动作/SMPL GT；自动检测格式） | `Test1_visualization/AnySole/<modal>/<config>/` |
+| `r_test1_visualize_motionpro.py` | MotionPRO 触觉输入/预测/GT 三栏对比动画 | `Test1_visualization/MotionPRO/<checkpoint tag>/` |
+| `r_test1_visualize_step2motion.py` | Step2Motion 足底压力/生成 BVH/GT 对比动画 | `Test1_visualization/Step2Motion/gait_model/` |
+| `r_test1_visualize_anysole.py` | AnySole 主模型与消融（足底压力/预测动作/SMPL GT；自动检测格式） | `Test1_visualization/AnySole/<modal>/<config>/` |
 
 ```bash
 conda activate touch_gait
 
 # motionpro 可视化
-python results_display/script/visualize_motionpro.py
+python results_display/script/r_test1_visualize_motionpro.py
 --session S14103
 --checkpoint results://MotionPRO/checkpoints/imagepressure2smpl/init/5e-05/imagepressure2smpl_best.pth
 
 # step2motion 可视化
-python results_display/script/visualize_step2motion.py
+python results_display/script/r_test1_visualize_step2motion.py
 --self-test
 
 # 默认 主模型 + 消融，全部 config，全部concat
-CUDA_VISIBLE_DEVICES=4 python results_display/script/visualize_anysole.py --modal anysolev1 --gen gif --contact-method joint_and
+CUDA_VISIBLE_DEVICES=4 python results_display/script/r_test1_visualize_anysole.py --modal anysolev1 --gen gif --contact-method joint_and
 --modal anysolev1,anysolev1_insole_drift
 --contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
 --config-id VT2M
@@ -238,27 +238,27 @@ CUDA_VISIBLE_DEVICES=4 python results_display/script/visualize_anysole.py --moda
 
 ## R_Test2 参数对照
 
-`evaluate_compare.py` 对 AnySole（modal × config 组合）、MotionPRO、Step2Motion 统一计算 MPJPE / PA-MPJPE / W-MPJPE / WAMPJPE / RTE / Accel / Jitter 指标。
+`r_test2_compare.py` 对 AnySole（modal × config 组合）、MotionPRO、Step2Motion 统一计算 MPJPE / PA-MPJPE / W-MPJPE / WAMPJPE / RTE / Accel / Jitter 指标。
 产出（`Test2_comparison/`）：
 `comparison_per_session.csv`（逐会话明细）、`comparison_summary.csv`（精简表：仅模型 × 指标）、
 `comparison_summary.png`（精简表的表格图）、`evaluation.log`（运行信息 + 各模型 checkpoint）。
 
 ```bash
-python results_display/script/evaluate_compare.py \
+python results_display/script/r_test2_compare.py \
   --manifest AnysoleWorkspace/manifests/session_manifest.csv \
   --modal anysolev1,anysolev1_insole_drift \
   --config-id VT2M,V2M,T2M \
   --split test
 
 # 或者完全自动扫描 results/ 下的自包含模型目录
-python results_display/script/evaluate_compare.py --auto-scan
+python results_display/script/r_test2_compare.py --auto-scan
 ```
 
 模型清单默认由脚本扫描 `results/` 自动构建；也可用 `--models-config <yaml|json>` 指定固定清单。
 
 ## R_Test3 轨迹可视化
 
-`visualize_anysole_traj.py` 可视化预测根轨迹 vs 真实轨迹（**SMPL/BVH 协议自动检测**）：
+`r_test3_traj.py` 可视化预测根轨迹 vs 真实轨迹（**SMPL/BVH 协议自动检测**）：
 单面板 3D 空间动画（gif/mp4）+ 每 session 一张静态图（png，3D 斜视图 / 俯视 / 高度曲线）。
 动画中 GT 整段显示（橙）、预测轨迹随帧生长（蓝），窗口边界用小点标记（每窗口在 GT 锚点处重新锚定），footer 实时显示当前帧 ATE 与整段 ATE。
 
@@ -282,11 +282,11 @@ python -m anysole.eval \
   --contact-method tactile_abs
 
 # R_Test3 渲染（默认 主模型 + 消融 × 全部 config × test split）
-python results_display/script/visualize_anysole_traj.py --modal anysolev1 --gen gif --contact-method joint_and
+python results_display/script/r_test3_traj.py --modal anysolev1 --gen gif --contact-method joint_and
 # 单 session / 单 config
-python results_display/script/visualize_anysole_traj.py --session S7013 --config-id VT2M
+python results_display/script/r_test3_traj.py --session S7013 --config-id VT2M
 # baseline 模型（扫描 results/ 下自包含模型目录，排除 *_backup*）
-python results_display/script/visualize_anysole_traj.py --auto
+python results_display/script/r_test3_traj.py --auto
 ```
 
 输出：`Test3_trajectory/AnySole/<modal>/<config>/{gif,mp4,png}/<session>_<config>_traj.{gif,mp4,png}`；
@@ -298,20 +298,20 @@ baseline 模型输出在 `Test3_trajectory/<model>/gen/`。
 
 ## R_Test4 鞋垫偏移补偿模块
 
-`test4_insole_drift.py` 验证 insole-drift 补偿器（`anysole.ablations.insole_drift`）
+`r_test4_insole_drift.py` 验证 insole-drift 补偿器（`anysole.ablations.insole_drift`）
 在 `anysolev1_insole_drift` 模态下的行为。
 
 ```bash
 conda activate touch_gait
 # 全部 test split
-python results_display/script/test4_insole_drift.py
+python results_display/script/r_test4_insole_drift.py
 # 单 session
-python results_display/script/test4_insole_drift.py --session S7013
+python results_display/script/r_test4_insole_drift.py --session S7013
 ```
 
 ## R_Test5 均值姿态推理（模型输出 vs 输入姿态）
 
-`test7_mean_pose_infer.py` 用 `results/AnySole/anysolev1_joint_and/checkpoints/ckpt_last.pt`（`--ckpt` 可换）
+`r_test5_mean_pose.py` 用 `results/AnySole/anysolev1_joint_and/checkpoints/ckpt_last.pt`（`--ckpt` 可换）
 把不同输入姿态送进模型（条件固定为真实 VT），导出原生 SMPL-24 NPZ：
 
 | arm | 输入 | 说明 |
@@ -324,18 +324,18 @@ python results_display/script/test4_insole_drift.py --session S7013
 
 看两件事：`tau0_mean` vs `tau0_gt` 输出距离（输出对输入姿态的敏感度）；`ddim_mean500` vs `ddim_gt500` 的
 MPJPE 差（初值对最终输出的影响）。NPZ 写进 `Test7_mean_pose/<session>/`，可用
-`visualize_anysole.py`/统一 `motion_io.py` 自动识别并查看骨架动画。
+`r_test1_visualize_anysole.py`/统一 `motion_io.py` 自动识别并查看骨架动画。
 
 ```bash
 conda activate touch_gait
 # 全部 test，前 4 个 session 出 BVH
-python results_display/script/test7_mean_pose_infer.py
-python results_display/script/test7_mean_pose_infer.py --session S10103 --export-sessions 1
+python results_display/script/r_test5_mean_pose.py
+python results_display/script/r_test5_mean_pose.py --session S10103 --export-sessions 1
 ```
 
 ## R_Test6 输入-输出相关性消融（输出是否与输入无关）
 
-`test8_input_ablation.py` 固定模型与初始噪声，置换条件输入（`real` / `zero` / `mean` / `shuffle`，
+`r_test6_input_ablation.py` 固定模型与初始噪声，置换条件输入（`real` / `zero` / `mean` / `shuffle`，
 shuffle = batch 内错位配对，真实输入、错误窗口），各跑一遍 DDIM 与 tau=0 GT 重建，
 并对第一个 batch 做梯度检查（∂L/∂V、∂L/∂T vs ∂L/∂x）：
 
@@ -348,14 +348,14 @@ shuffle = batch 内错位配对，真实输入、错误窗口），各跑一遍 
 
 ```bash
 conda activate touch_gait
-python results_display/script/test8_input_ablation.py
-python results_display/script/test8_input_ablation.py --session S10103 --export-sessions 1
+python results_display/script/r_test6_input_ablation.py
+python results_display/script/r_test6_input_ablation.py --session S10103 --export-sessions 1
 ```
 
 ## R_Test7 Legacy 扩散诊断（diffusion V1 历史诊断，不用于 F4 验收）
 
-`test9_overfit.py` 保留用于旧 diffusion V1 诊断。它不是 AnySoleV2/F4 的可执行验收入口；
-当前 F4 必须使用 D_Test4 的 `probe_f4_smpl24_preflight.py`。
+`r_test7_legacy_overfit.py` 保留用于旧 diffusion V1 诊断。它不是 AnySoleV2/F4 的可执行验收入口；
+当前 F4 必须使用 D_Test4 的 `d_test4_smpl_protocol.py`。
 训到 loss≈0 → 目标/管线正常，泛化差是欠训/条件弱；
 训不下去 → 目标/管线有问题。
 
@@ -364,24 +364,24 @@ python results_display/script/test8_input_ablation.py --session S10103 --export-
 
 ```bash
 conda activate touch_gait
-python results_display/script/test9_overfit.py
+python results_display/script/r_test7_legacy_overfit.py
 ```
 
 Test9 只留 L_pose，λ_con = λ_kp = λ_traj = λ_T = λ_V = 0，batch 降到 4–8 个窗口，lr 扫 {1e-3, 3e-4, 1e-4, 3e-5}，3000 步。CLI指令：
 ```bash
 # 默认：batch=8 窗 × lr{1e-3,3e-4,1e-4,3e-5} × 3000 步
-CUDA_VISIBLE_DEVICES=4 python results_display/script/test9_overfit.py
+CUDA_VISIBLE_DEVICES=4 python results_display/script/r_test7_legacy_overfit.py
 
 # 自定义扫描（batch 4 窗）
-python results_display/script/test9_overfit.py --batch-size 4 --lrs 1e-3,3e-4,1e-4,3e-5 --steps 3000
+python results_display/script/r_test7_legacy_overfit.py --batch-size 4 --lrs 1e-3,3e-4,1e-4,3e-5 --steps 3000
 
 # 保存每个 lr 的过拟合 checkpoint
-python results_display/script/test9_overfit.py --save-ckpt
+python results_display/script/r_test7_legacy_overfit.py --save-ckpt
 ```
 
 ### R_Test7b τ0 vs DDIM 差距定位（五项检查）
 
-Test9 同一 batch 上 τ0 ≈ 58mm 而 DDIM ≈ 220mm，且 DDIM 在训练中单调变差、τ0 同期变好——两个指标反向走，说明除了"模型只输出 g(F)"之外还存在第二个独立故障。`test9_1_sampler_checks.py` 按序跑五项检查：
+Test9 同一 batch 上 τ0 ≈ 58mm 而 DDIM ≈ 220mm，且 DDIM 在训练中单调变差、τ0 同期变好——两个指标反向走，说明除了"模型只输出 g(F)"之外还存在第二个独立故障。`r_test7_legacy_sampler_checks.py` 按序跑五项检查：
 
 1. **假模型**：DDIM 每步用 GT x0 替换模型输出，终点必须 ≈0mm（隔离采样器本身）；
 2. **同批**：确认 τ0 与 DDIM 读同一 batch 张量，并测 held-out batch 的 τ0 量化"8 窗不泛化"的代价；
@@ -397,18 +397,18 @@ Test9 同一 batch 上 τ0 ≈ 58mm 而 DDIM ≈ 220mm，且 DDIM 在训练中�
 ```bash
 conda activate touch_gait
 # 完整：重训 + 五项检查
-CUDA_VISIBLE_DEVICES=5 python results_display/script/test9_1_sampler_checks.py --save-ckpt
+CUDA_VISIBLE_DEVICES=5 python results_display/script/r_test7_legacy_sampler_checks.py --save-ckpt
 
 # 只跑模型无关的检查 1-3
-python results_display/script/test9_1_sampler_checks.py --skip-train
+python results_display/script/r_test7_legacy_sampler_checks.py --skip-train
 
 # 复用上次的过拟合 checkpoint，跳过训练
-python results_display/script/test9_1_sampler_checks.py --ckpt results_display/Test9_1_sampler/overfit_ckpt_3e-05.pt
+python results_display/script/r_test7_legacy_sampler_checks.py --ckpt results_display/Test9_1_sampler/overfit_ckpt_3e-05.pt
 ```
 
 ## R_Test8 触觉生成（V2T）
 
-`test10_tgen.py` 用 V-only 条件（触觉输入置零）跑模型，让辅助头 `pressure_hat` 变成
+`r_test8_v2t.py` 用 V-only 条件（触觉输入置零）跑模型，让辅助头 `pressure_hat` 变成
 **视觉→触觉（V2T）生成器**：模型仅凭 HRNet 视觉特征输出 96 格足底压力。触觉头不经过
 扩散采样，每个窗口一次 tau=0 前向即可得到确定性的生成触觉，无需 DDIM。
 
@@ -430,9 +430,9 @@ session 的 GT | 生成 | |GT-Gen| 三栏热力图动画（`gif|mp4/<session>_<m
 
 ```bash
 conda activate touch_gait
-python results_display/script/test10_tgen.py                     # 全部 test split
-python results_display/script/test10_tgen.py --session S10103    # 单 session 冒烟
-python results_display/script/test10_tgen.py --config-id VT2M,V2M --export-sessions 2
+python results_display/script/r_test8_v2t.py                     # 全部 test split
+python results_display/script/r_test8_v2t.py --session S10103    # 单 session 冒烟
+python results_display/script/r_test8_v2t.py --config-id VT2M,V2M --export-sessions 2
 ```
 
 > 注意：首版仅支持主模型 `anysolev1`；`anysolev1_insole_drift` 对零触觉输入先过漂移补偿器，
@@ -440,7 +440,7 @@ python results_display/script/test10_tgen.py --config-id VT2M,V2M --export-sessi
 
 ## R_Test9 τ 训练区间消融（τ≡0 恒等映射 / 低噪声带训练）
 
-`test11_tau_regime.py` 在训练集固定一个 batch（同 Test9 设置：关模态 dropout、VT-only、关模型 dropout、
+`r_test9_tau_regime.py` 在训练集固定一个 batch（同 Test9 设置：关模态 dropout、VT-only、关模型 dropout、
 pose-only 损失，lr 扫 {1e-3, 3e-4, 1e-4, 3e-5} × 3000 步），把训练时的 τ 采样分布切成三种区间，
 定位「τ0 MPJPE 压不下去」的根因：
 
@@ -458,9 +458,9 @@ DDIM 无意义。
 
 ```bash
 conda activate touch_gait
-python results_display/script/test11_tau_regime.py                     # tau0 + lowband + full × 4 lr × 3000 步
-python results_display/script/test11_tau_regime.py --arms tau0 --lrs 1e-3 --steps 1000   # 单臂冒烟
-python results_display/script/test11_tau_regime.py --no-cond --save-ckpt                # 追加 tau0-nocond 臂 + 存 ckpt
+python results_display/script/r_test9_tau_regime.py                     # tau0 + lowband + full × 4 lr × 3000 步
+python results_display/script/r_test9_tau_regime.py --arms tau0 --lrs 1e-3 --steps 1000   # 单臂冒烟
+python results_display/script/r_test9_tau_regime.py --no-cond --save-ckpt                # 追加 tau0-nocond 臂 + 存 ckpt
 ```
 
 产出（`Test11_tau_regime/`）：`tau_regime_log.csv`、`tau_regime_curves.png`、

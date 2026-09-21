@@ -44,8 +44,8 @@ Outputs under results_display/Test11_tau_regime/:
     tau_regime_ckpt_<arm>_<lr>.pt  仅 --save-ckpt 时输出
 
 Usage (run from the repository root):
-    python results_display/script/test11_tau_regime.py
-    python results_display/script/test11_tau_regime.py --arms tau0 --lrs 1e-3 --steps 1000
+    python results_display/script/r_test9_tau_regime.py
+    python results_display/script/r_test9_tau_regime.py --arms tau0 --lrs 1e-3 --steps 1000
 """
 from __future__ import annotations
 

@@ -20,9 +20,9 @@ Outputs land under ``results_display/Test4_insole_drift/``:
     theta_summary.csv                    per-session drift statistics
 
 Usage (run from the repository root):
-    python results_display/script/test4_insole_drift.py
-    python results_display/script/test4_insole_drift.py --session S7013
-    python results_display/script/test4_insole_drift.py --session S7013 --stride 1
+    python results_display/script/r_test4_insole_drift.py
+    python results_display/script/r_test4_insole_drift.py --session S7013
+    python results_display/script/r_test4_insole_drift.py --session S7013 --stride 1
 """
 from __future__ import annotations
 

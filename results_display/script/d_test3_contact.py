@@ -22,10 +22,10 @@ Outputs land under ``results_display/Test5_contact/<method>/``:
                                    produced by ``AnysoleWorkspace/tool/contact_labels.py --report``
 
 Usage (run from the repository root):
-    python results_display/script/test5_contact.py
-    python results_display/script/test5_contact.py --methods bvh_h,tactile_gmm
-    python results_display/script/test5_contact.py --session S10103 --max-frames 100
-    python results_display/script/test5_contact.py --force
+    python results_display/script/d_test3_contact.py
+    python results_display/script/d_test3_contact.py --methods bvh_h,tactile_gmm
+    python results_display/script/d_test3_contact.py --session S10103 --max-frames 100
+    python results_display/script/d_test3_contact.py --force
 """
 from __future__ import annotations
 

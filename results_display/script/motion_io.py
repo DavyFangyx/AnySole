@@ -14,7 +14,7 @@ from typing import Optional
 import numpy as np
 
 # ``motion_io`` is shared by scripts that are commonly launched as files, for
-# example ``python results_display/script/visualize_anysole.py``.  In that
+# example ``python results_display/script/r_test1_visualize_anysole.py``.  In that
 # launch mode Python adds only ``results_display/script`` to ``sys.path``, not
 # the repository root that contains the ``anysole`` package.  Bootstrap both
 # locations here, before importing AnySole, so every visualization entry point

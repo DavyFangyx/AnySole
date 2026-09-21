@@ -82,7 +82,7 @@ AnysoleWorkspace/dependencies/MotionPRO/mmdetection/checkpoints/yolox_x_8x8_300e
 7. 生成 test 可视化（可选但作为完整验收推荐执行）：
 
    ```bash
-   python ../../results_display/script/visualize_motionpro.py
+   python ../../results_display/script/r_test1_visualize_motionpro.py
    ```
 
 ## 统一输出清单
