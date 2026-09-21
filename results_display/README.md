@@ -21,7 +21,7 @@
 | D_Test2 数据集自检 | Test6 | `d_test2_dataset_check.py` |
 | D_Test3 接触检测 | Test5 | `contact_methods.py` → `AnysoleWorkspace/tool/contact_labels.py`；`d_test3_contact.py` |
 | ~~D_Test4~~（2026-09-21 撤销：属探针非实验，已回 `z_note/probes/`） | F4 预检 | `probe_f4_smpl24_preflight.py` + `probe_smpl_{bvh_axes,export_roundtrip,protocol}.py` |
-| D_Test5 基线触觉审计 | 新增 | `d_test5_baseline_tactile.py` | 四基线触觉格式审计（Agent_06 前置） |
+| D_Test5 基线触觉审计 | 新增 | `d_test5_baseline_tactile.py` → `AnysoleWorkspace/tool/generate_baseline_tactile.py` | 三基线触觉格式审计 + 落盘（Agent_06 前置） |
 | R_Test1 模型可视化 | Test1 的模型部分 | `visualize_{motionpro,step2motion,anysole}.py` → `r_test1_visualize.py` |
 | R_Test2 参数对照 | Test2 | `r_test2_compare.py` |
 | R_Test3 轨迹可视化 | Test3 | `r_test3_traj.py` |
@@ -47,7 +47,7 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   │   ├── d_test2_dataset_check.py      # D_Test2：数据集自检
 │   │   │   │（D_Test3 标签生成器在 AnysoleWorkspace/tool/contact_labels.py，不在本目录）
 │   │   ├── d_test3_contact.py            # D_Test3：接触标签动画 + 阈值分析
-│   │   └── d_test5_baseline_tactile.py # D_Test5：四基线触觉格式审计
+│   │   └── d_test5_baseline_tactile.py # D_Test5：三基线触觉格式审计（生成器前置，产物落盘）
 │   └── ── 结果检验（R_TestN）──
 │       ├── r_test1_visualize_motionpro.py      # R_Test1：MotionPRO 动画
 │       ├── r_test1_visualize_step2motion.py    # R_Test1：Step2Motion 动画
@@ -66,7 +66,7 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   ├── d_test1_data_viz/               # D_Test1 输出（<session>/<smp24|bvh23>/）
 │   ├── d_test2_dataset_check/          # D_Test2 输出（自检 JSON + 均值姿态 npz）
 │   ├── d_test3_contact/                # D_Test3 输出（按方案分目录）
-│   └── d_test5_baseline_tactile/       # D_Test5 输出（01-06 诊断图 + numbers.json + summary.md）
+│   └── d_test5_baseline_tactile/       # D_Test5 输出（每 session 一个 <session>_adapted_tactile.gif/.mp4）
 └── ── 结果检验产物（result/r_testN/）──
     ├── r_test1_visualize/              # R_Test1 输出（AnySole/MotionPRO/Step2Motion 分栏）
     ├── r_test2_compare/                # R_Test2 输出（只出指标，不做动画）
@@ -202,27 +202,34 @@ SMPL-24 协议预检属一次性探针而非实验，已按用户裁定撤销 D_
 
 ## D_Test5 基线触觉审计（Agent_06 前置）
 
-`d_test5_baseline_tactile.py` 把 AnySole 自身触觉口径（48 格/脚 = 4 宽行 × 12 长列，
-160×120 渲染图）与四基线实际消费的触觉输入并排可视化 + 数值审计，只读数据不加载模型：
+`d_test5_baseline_tactile.py` 是纯可视化前端：先确保转换产物落盘（产物齐全则跳过，
+缺则 subprocess 调用 `AnysoleWorkspace/tool/generate_baseline_tactile.py`；`--force`
+强制重生成），再读落盘文件渲染 1×4 横向逐帧动画。转换口径（点对点按 SMPL 模板足底系
+欧氏最近点）在生成器里，与前端逐函数一致：
 
-| 基线 | 触觉输入 | 与 AnySole 的对应 |
+| 基线 | 触觉输入 | 落盘位置 |
 | --- | --- | --- |
-| MotionPRO | pressure.npz → bilinear 96×96 /255（FRAPPE 口径） | 同源：160×120 渲染图降采样 |
-| pressure_tookit | insole `{'insole': [L(31,11), R(31,11)]}`，load_contact 只判 !=0 → 9 标签/脚 | D2 长度映射 4×12→31×11（已定）；宽度待标定（图内占位） |
-| Step2Motion | gait pt 每帧 50 维 = 每脚 pressure16+acc3+gyro3+force1+cop2（--no-imu 38 维） | 4×12→16 通道确定性池化（process_gait 口径） |
-| VP-MoCap | insole 31×11 → sigmoidNorm → 242 有效像素 → contact_smpl (2,96) | 与 toolkit 共用 MMVP 硬件几何 |
+| MotionPRO | pressure.npz → bilinear 96×96 /255（FRAPPE 口径；可视化按 L/R 脚区等尺度显示） | `AnysoleWorkspace/derived/MotionPRO/pressure_96/<sid>.npz` |
+| Step2Motion | 16 通道/脚（process_gait 冻结池化，展示/审计产物） | `AnysoleWorkspace/derived/Step2Motion/pressure_16ch/<sid>.npz` |
+| pressure_tookit | insole `{'insole': [L(31,11), R(31,11)]}`，load_contact 只判 !=0 → 9 标签/脚 | `AnysoleWorkspace/derived/pressure_tookit/images/<date>/<sub>/<sid>/insole/%03d.npy` |
+| VP-MoCap | 与 toolkit 共用同一套 insole 文件（FPP-Net 内部 sigmoidNorm） | `AnysoleWorkspace/derived/VP-MoCap/<date>/<sub>/<sid>/insole/%03d.npy` |
 
-关键实测（numbers.json）：MMVP mask 242 像素/脚；corr(顶点 z, 平均映射行) L −0.996 /
-R −0.9956（复核任务书）；gait pt 存未裁剪原始值（pressure16 峰值 2608 > PRESSURE_CLIP 1023，
-而 160×120 渲染 clip@1023 会饱和）；noimu == 删 IMU 列逐值相等；contact.npy 仅 col6/7 非零。
-pressure_tookit essential 缺，其面板为格式图（mask 取自 FPP-Net essentials 同款几何）。
+关键实测（`AnysoleWorkspace/derived/baseline_tactile/<sid>/meta.json`）：MMVP mask 242/241 像素/脚；
+最近格距离 L 均值 9.2mm / R 8.7mm；FPP weight = 静立帧总压；布局文件未标注内外侧
+方向，默认与模板 x 同向（`--mirror-x` 翻转，透传生成器）。
 
-产出（`d_test5_baseline_tactile/`）：`01_anysole_raw.png`–`06_correspondence.png`、
-`numbers.json`、`summary.md`。
+产出（`d_test5_baseline_tactile/`）：每 session 一个 `<sid>_adapted_tactile.gif` 或
+`<sid>_adapted_tactile.mp4`（四面板 1x4 横向同帧对齐动画）。默认 CLI 只输出启动与汇总信息，
+需要逐步日志时加 `--verbose`。关键数值在生成器 meta：`AnysoleWorkspace/derived/baseline_tactile/<sid>.json`。
 
 ```bash
 conda activate touch_gait
+# 默认全部 splits session（train ∪ val ∪ test，缺产物自动生成）
 python results_display/script/d_test5_baseline_tactile.py
+python results_display/script/d_test5_baseline_tactile.py --split test      # 只跑 test
+python results_display/script/d_test5_baseline_tactile.py --session S12072 --force
+python results_display/script/d_test5_baseline_tactile.py --session S12072 --gen mp4
+python AnysoleWorkspace/tool/generate_baseline_tactile.py --split test    # 只落盘不渲染
 ```
 
 # 第二部分：结果检验（R_TestN）

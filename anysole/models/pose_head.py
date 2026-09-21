@@ -32,12 +32,33 @@ V3-2: ``n_parts=9`` (regress only) swaps the SMPL-24 joint queries (3 groups) fo
 9 part queries with one unembed head per part (fix_plan_v3.md §V3-2).
 Everything else — decoder layers, pose stats, time PE, normalization — is
 shared; ``n_parts=3`` (default) keeps the pre-V3-2 path byte-for-byte.
+
+V3-3 (fix_plan_v3.md §V3-3/§8): two orthogonal mechanisms on top of n_parts=9.
+- ``soft_parts=True`` replaces the hard part heads with a learned soft
+  assignment matrix A (9 slots x 24 joints): every slot emits a full-pose
+  hypothesis and A blends them per joint.  A is initialized to reproduce the
+  frozen PART_JOINTS grouping, then adapts during training (see losses.py
+  L_assign: per-joint entropy + slot-load balance).  This is mechanism C's
+  structural half: the grouping itself is prior knowledge.
+- ``gate="sigma"`` replaces the plain decoder layers with GatedDecoderLayer
+  (mechanism B): self-attn -> dual cross-attn to the V/T views of F ->
+  per-slot sigma routing over [V, T, prior] with a learnable per-part prior
+  bias tau_p.  The prior branch (g_∅) is the residual z — the self-attention
+  output with no modality injected (mechanism C's host, plan §V3-3).
+  tau_p is initialized FROM the assignment (A when soft, PART_JOINTS
+  otherwise): T-informative parts (root/legs/feet) get low tau, V-informative
+  parts (torso/headneck/arms) get high tau.  Submodule names mirror
+  nn.TransformerDecoderLayer so self-attn / V-branch cross-attn / norms / FFN
+  warm-start by name from a standard-decoder checkpoint.
+The two switches are independent: soft_parts alone = learned grouping without
+gating; gate alone = gating on the hard PART_JOINTS grouping.
 """
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from anysole.models.embeddings import SharedEmbeddings
 from anysole.types import (
@@ -67,8 +88,153 @@ def _part_place_idx() -> torch.Tensor:
     return torch.tensor([idx for _, idx in flat], dtype=torch.long)
 
 
+# V3-3: PART_JOINTS entries split by which modality informs them, driving the
+# tau_p prior-bias init (plan §V3-3): T-informative parts (root/legs/feet)
+# start with LOW tau (modality streams preferred), V-informative parts
+# (torso/headneck/arms) with HIGH tau (prior preferred when only T is present).
+_T_INFORMATIVE_PARTS = (0, 5, 6, 7, 8)
+_V_INFORMATIVE_PARTS = (1, 2, 3, 4)
+_T_INFORMATIVE_JOINTS = tuple(j for p in _T_INFORMATIVE_PARTS for j in PART_JOINTS[p])
+_V_INFORMATIVE_JOINTS = tuple(j for p in _V_INFORMATIVE_PARTS for j in PART_JOINTS[p])
+_TAU_BASE = 0.0
+_TAU_SCALE = 2.0
+
+
+def _part_logits_init() -> torch.Tensor:
+    """(N_PARTS, N_JOINTS) logits whose softmax reproduces PART_JOINTS: +3 on
+    the member joints, -3 elsewhere, so training starts from the manual
+    grouping instead of a random scramble (V3-3 soft assignment init)."""
+    logits = torch.full((N_PARTS, N_JOINTS), -3.0)
+    for p, joints in enumerate(PART_JOINTS):
+        logits[p, joints] = 3.0
+    return logits
+
+
+def _tau_from_assignment(assign: torch.Tensor) -> torch.Tensor:
+    """(N_PARTS,) tau_p prior bias derived from a (N_PARTS, N_JOINTS)
+    assignment: low for T-informative slots, high for V-informative slots."""
+    t_mass = assign[:, _T_INFORMATIVE_JOINTS].sum(dim=1)
+    v_mass = assign[:, _V_INFORMATIVE_JOINTS].sum(dim=1)
+    return _TAU_BASE + _TAU_SCALE * (v_mass - t_mass)
+
+
+class GatedDecoder(nn.Module):
+    """Container holding the GatedDecoderLayer stack under a ``layers``
+    ModuleList so state-dict keys read ``decoder.layers.<i>.<submodule>`` —
+    exactly the nn.TransformerDecoder layout, which is what makes the
+    by-name warm-start from a standard-decoder checkpoint work."""
+
+    def __init__(self, layers):
+        super().__init__()
+        self.layers = nn.ModuleList(layers)
+
+    def forward(self, z, F, masks):
+        for layer in self.layers:
+            z = layer(z, F, masks)
+        return z
+
+
+class GatedDecoderLayer(nn.Module):
+    """V3-3 decoder block (fix_plan_v3.md §V3-3): pre-LN self-attn -> dual
+    cross-attn to the V/T views of F -> per-slot sigma routing (three-way gate
+    [V, T, prior], tau_p per-part prior bias) -> pre-LN FFN.
+
+    Submodule names mirror nn.TransformerDecoderLayer (self_attn,
+    multihead_attn, norm1/2/3, linear1/2, dropout*, activation) so the shared
+    parts warm-start by name from a standard-decoder checkpoint; the V-branch
+    cross-attn is named ``multihead_attn`` on purpose — it inherits the
+    trained full-F cross-attn weights.  The T-branch cross-attn
+    (``multihead_attn_t``), the sigma MLP and tau_p are new and stay fresh.
+    """
+
+    def __init__(self, dim, nhead=8, dim_feedforward=1024, dropout=0.1,
+                 tw=TW, n_parts=N_PARTS):
+        super().__init__()
+        self.dim = dim
+        self.tw = tw
+        self.n_parts = n_parts
+        self.self_attn = nn.MultiheadAttention(dim, nhead, dropout=dropout, batch_first=True)
+        # V view: cross-attn over F's V-source tokens (masked T).
+        self.multihead_attn = nn.MultiheadAttention(dim, nhead, dropout=dropout, batch_first=True)
+        # T view: cross-attn over F's T-source tokens (masked V).
+        self.multihead_attn_t = nn.MultiheadAttention(dim, nhead, dropout=dropout, batch_first=True)
+        # Per-slot per-stream trust logits sigma_V/sigma_T.  Input = [z, e_V,
+        # e_T] — the three gate candidates — so sigma can see what each stream
+        # would inject (2026-09-21 V3-3B audit: feeding only z made layer-1
+        # sigma structurally input-blind — layer-1 z is the self-attention of
+        # the fixed query — and sigma never learned).  Near-zero init so the
+        # gate starts from the tau_p prior bias alone.
+        self.sigma = nn.Linear(3 * dim, 2)
+        nn.init.normal_(self.sigma.weight, std=0.01)
+        nn.init.zeros_(self.sigma.bias)
+        self.sigma_frozen = False  # train.py sets for the first sigma_freeze_frac of steps
+        # Learnable per-part prior bias; initialized from the part assignment
+        # by PoseHead (set_tau_p) after construction.
+        self.tau_p = nn.Parameter(torch.zeros(n_parts))
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+        self.norm3 = nn.LayerNorm(dim)
+        self.linear1 = nn.Linear(dim, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, dim)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.dropout2_t = nn.Dropout(dropout)
+        self.dropout3 = nn.Dropout(dropout)
+        self.activation = nn.GELU()
+        self.last_g = None      # (B, tw, n_parts, 3) detach, for gate_summary()
+        self.last_sigma = None  # (B, tw, n_parts, 2) raw, for the beta-NLL loss
+
+    def set_tau_p(self, tau: torch.Tensor) -> None:
+        with torch.no_grad():
+            self.tau_p.copy_(torch.as_tensor(tau, dtype=self.tau_p.dtype, device=self.tau_p.device))
+
+    def forward(self, z, F, masks):
+        # NOTE: the memory parameter is named F like the fusion output, which
+        # shadows the module-level `torch.nn.functional as F` — functional
+        # calls in here must go through nn.functional explicitly.
+        ignore_t_mask, ignore_v_mask = masks  # (B, S) bool, True = ignored token
+        # Self-attention (identical to the standard block).
+        z = z + self.dropout1(self.self_attn(self.norm1(z), self.norm1(z), self.norm1(z), need_weights=False)[0])
+        n = self.norm2(z)
+        # Dual cross-attn: e_V reads only F's V-source tokens, e_T only T's.
+        e_v = self.dropout2(
+            self.multihead_attn(n, F, F, key_padding_mask=ignore_t_mask, need_weights=False)[0]
+        )
+        e_t = self.dropout2_t(
+            self.multihead_attn_t(n, F, F, key_padding_mask=ignore_v_mask, need_weights=False)[0]
+        )
+        # Per-slot sigma routing: g = softmax([sigma_V, sigma_T, tau_p]); the
+        # prior branch (g_∅) is the residual z with no modality injected.
+        # sigma sees [z, e_V, e_T] so it can compare what each stream would
+        # inject (fix for the V3-3B "static gate" audit, 2026-09-21).
+        # tau_p is clamped to [-4, 4]: the V3_3B audit showed the unclamped
+        # bias drifting to +9.8/-3.8, which saturates the softmax
+        # (g -> [0,0,1] constant) and kills the sigma gradient (g(1-g) ~ 0) —
+        # the gate then routes nothing.  With the clamp a saturated prior
+        # still leaves the streams able to compete (e.g. sigma ~ 1.8 reaches
+        # g_V = 0.1 at tau = +4), and init tau = +-2 stays inside the range so
+        # it keeps a nonzero gradient from the first step.
+        batch, seq = z.shape[:2]
+        if self.sigma_frozen:
+            # First sigma_freeze_frac of training (plan §3): sigma fixed at 0
+            # (variance 1), the gate runs on the tau_p prior bias alone.
+            sigma = torch.zeros(batch, self.tw, self.n_parts, 2, device=z.device)
+        else:
+            sigma = self.sigma(torch.cat([z, e_v, e_t], dim=-1)).view(batch, self.tw, self.n_parts, 2)
+        tau = self.tau_p.clamp(-4.0, 4.0).view(1, 1, self.n_parts, 1).expand(batch, self.tw, self.n_parts, 1)
+        g = nn.functional.softmax(torch.cat([sigma, tau], dim=-1), dim=-1)  # (B, tw, n_parts, 3)
+        g_flat = g.reshape(batch, seq, 3)
+        z = z + g_flat[..., 0:1] * e_v + g_flat[..., 1:2] * e_t
+        # FFN (identical to the standard block).
+        z = z + self.dropout3(self.linear2(self.dropout(self.activation(self.linear1(self.norm3(z))))))
+        self.last_g = g.detach()
+        self.last_sigma = sigma
+        return z
+
+
 class PoseHead(nn.Module):
-    def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8, dim_feedforward=1024, dropout=0.1, n_layers=6, repr="6d", head_mode="diffusion", n_parts=3):
+    def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8, dim_feedforward=1024, dropout=0.1, n_layers=6, repr="6d", head_mode="diffusion", n_parts=3, soft_parts=False, gate="none"):
         super().__init__()
         if head_mode not in ("diffusion", "regress"):
             raise ValueError("Unknown head_mode %r; expected 'diffusion' or 'regress'" % head_mode)
@@ -76,6 +242,12 @@ class PoseHead(nn.Module):
             raise ValueError("n_parts must be 3 or 9, got %r" % n_parts)
         if n_parts != 3 and (head_mode != "regress" or repr != "6d"):
             raise ValueError("n_parts=9 requires head_mode='regress' and repr='6d' (V3-2)")
+        if gate not in ("none", "sigma"):
+            raise ValueError("gate must be 'none' or 'sigma', got %r" % gate)
+        if soft_parts and n_parts != 9:
+            raise ValueError("soft_parts requires n_parts=9 (V3-3)")
+        if gate == "sigma" and n_parts != 9:
+            raise ValueError("gate='sigma' requires n_parts=9 (V3-3)")
         if embeddings is None:
             embeddings = SharedEmbeddings(dim=dim, tw=tw)
         self.embeddings = embeddings
@@ -85,6 +257,9 @@ class PoseHead(nn.Module):
         self.repr = repr
         self.head_mode = head_mode
         self.n_parts = n_parts
+        self.soft_parts = bool(soft_parts)
+        self.gate = gate
+        self._last_hypo = None  # (N_PARTS, B, tw, N_JOINTS, 6) detach, gate mode
         if repr == "pos":
             # All 23 non-root SMPL joints as root-local positions (root excluded).
             self.n_body = len(BODY_JOINTS) - 1
@@ -141,18 +316,39 @@ class PoseHead(nn.Module):
 
         # MDM decoder block per layer: pre-LN self-attn -> pre-LN cross-attn(F)
         # -> pre-LN FFN, GELU. Full attention on [t_emb; x_tokens].
-        layer = nn.TransformerDecoderLayer(
-            d_model=dim,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.decoder = nn.TransformerDecoder(layer, num_layers=n_layers)
+        # gate="sigma" (V3-3) replaces the standard block with the gated one;
+        # its submodule names mirror TransformerDecoderLayer for warm-start.
+        if gate == "sigma":
+            self.decoder = GatedDecoder([
+                GatedDecoderLayer(
+                    dim, nhead=nhead, dim_feedforward=dim_feedforward,
+                    dropout=dropout, tw=tw, n_parts=n_parts,
+                )
+                for _ in range(n_layers)
+            ])
+        else:
+            layer = nn.TransformerDecoderLayer(
+                d_model=dim,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.decoder = nn.TransformerDecoder(layer, num_layers=n_layers)
 
-        if n_parts == 9:
+        if n_parts == 9 and soft_parts:
+            # V3-3 soft assignment: one head per slot, each emitting a full
+            # 144-d pose hypothesis; the learned A matrix (part_logits) blends
+            # the hypotheses per joint.  A is initialized to reproduce the
+            # frozen PART_JOINTS grouping (joint order output, no scatter).
+            self.out_parts = nn.ModuleList(
+                [nn.Linear(dim, POSE_DIM) for _ in range(N_PARTS)]
+            )
+            self.part_logits = nn.Parameter(_part_logits_init())
+            self.out_body = self.out_left = self.out_right = None
+        elif n_parts == 9:
             # V3-2: one unembed head per part; outputs concatenated in PART
             # order then scattered back to joint order via part_place_idx.
             self.out_parts = nn.ModuleList(
@@ -164,6 +360,21 @@ class PoseHead(nn.Module):
             self.out_body = nn.Linear(dim, self.per_joint)
             self.out_left = nn.Linear(dim, self.per_joint)
             self.out_right = nn.Linear(dim, self.per_joint)
+
+        if gate == "sigma":
+            # V3-3: derive the per-part prior bias from the part assignment
+            # (the initialized softmax A when soft_parts, the frozen
+            # PART_JOINTS otherwise): T-informative parts (root/legs/feet)
+            # start with LOW tau, V-informative (torso/headneck/arms) HIGH.
+            if soft_parts:
+                assign = F.softmax(self.part_logits.detach(), dim=0)
+            else:
+                assign = torch.zeros(N_PARTS, N_JOINTS)
+                for p, joints in enumerate(PART_JOINTS):
+                    assign[p, joints] = 1.0
+            tau = _tau_from_assignment(assign)
+            for block in self.decoder.layers:
+                block.set_tau_p(tau)
 
         # Per-dim mean/std of the pose representation over the training set.
         # Defaults are identity so a fresh/unfitted head still runs; train.py
@@ -211,6 +422,18 @@ class PoseHead(nn.Module):
 
     def _unembed(self, h):
         batch = h.shape[0]
+        if self.n_parts == 9 and self.soft_parts:
+            # V3-3: 9 slots -> 9 full-pose hypotheses -> per-joint blend by
+            # the learned soft assignment A (joint order out, no scatter).
+            tokens = h.view(batch, self.tw, self.n_tokens, self.dim)
+            parts = torch.stack(
+                [head(tokens[:, :, p]) for p, head in enumerate(self.out_parts)],
+                dim=0,
+            )  # (N_PARTS, B, tw, POSE_DIM)
+            parts = parts.reshape(N_PARTS, batch, self.tw, N_JOINTS, 6)
+            assign = F.softmax(self.part_logits, dim=0)  # (N_PARTS, N_JOINTS)
+            out = torch.einsum("pj,pbtjc->btjc", assign, parts)
+            return out.reshape(batch, self.tw, POSE_DIM)
         if self.n_parts == 9:
             # V3-2: 9 part queries -> 9 part heads -> scatter to joint order.
             tokens = h.view(batch, self.tw, self.n_tokens, self.dim)
@@ -276,7 +499,13 @@ class PoseHead(nn.Module):
         """F0b: token = query + time PE + group embedding, straight through the
         6-layer decoder (self-attention, cross-attention to F, FFN), then
         unembed and denormalize with the same fitted stats as the diffusion
-        head."""
+        head.
+
+        gate="sigma" (V3-3): F must be the fused memory (B, 2*tw, dim) with
+        the first tw tokens V-sourced and the last tw T-sourced (fusion's cat
+        order).  Each layer cross-attends twice — once per modality view —
+        and routes them per slot via the sigma gate (tau_p = prior bias).
+        """
         batch = F.shape[0]
         tokens = self.query.expand(batch, -1, -1, -1)  # (B, tw, n_tokens, dim)
         tokens = tokens + self.embeddings.time_pe.to(dtype=tokens.dtype).view(1, self.tw, 1, self.dim)
@@ -284,6 +513,98 @@ class PoseHead(nn.Module):
             1, 1, self.n_tokens, self.dim
         )
         h = tokens.reshape(batch, self.tw * self.n_tokens, self.dim)
-        h = self.decoder(h, F)
+        if self.gate == "sigma":
+            if F.shape[1] != 2 * self.tw:
+                raise ValueError(
+                    "gate='sigma' expects the fused memory F with shape "
+                    "(B, 2*tw, d): first tw tokens V-sourced, last tw T-sourced "
+                    "(fusion.forward cat order); got %s" % (F.shape,)
+                )
+            ignore_t_mask = torch.zeros(batch, 2 * self.tw, dtype=torch.bool, device=F.device)
+            ignore_t_mask[:, self.tw:] = True  # e_V: ignore the T-source tokens
+            ignore_v_mask = ~ignore_t_mask      # e_T: ignore the V-source tokens
+            h = self.decoder(h, F, (ignore_t_mask, ignore_v_mask))
+            # Per-slot hypotheses for the beta-NLL sigma supervision; detached
+            # (the supervision stops the gradient at the error target).
+            self._last_hypo = self._part_hypotheses(h).detach()
+        else:
+            h = self.decoder(h, F)
         x0 = self._unembed(h)
         return x0 * self.pose_std + self.pose_mean
+
+    def _part_hypotheses(self, h):
+        """(N_PARTS, B, tw, N_JOINTS, 6) per-slot pose hypotheses in joint
+        order, raw (normalized space, before denormalization).  Used by the
+        beta-NLL sigma supervision (losses.py) to compute each slot's error.
+        Soft mode = each slot's full-pose head output; hard mode = each part
+        head placed at its PART_JOINTS block (zeros elsewhere)."""
+        batch = h.shape[0]
+        tokens = h.view(batch, self.tw, self.n_tokens, self.dim)
+        if self.soft_parts:
+            parts = torch.stack(
+                [head(tokens[:, :, p]) for p, head in enumerate(self.out_parts)],
+                dim=0,
+            )  # (N_PARTS, B, tw, POSE_DIM)
+            return parts.reshape(N_PARTS, batch, self.tw, N_JOINTS, 6)
+        out = h.new_zeros(N_PARTS, batch, self.tw, N_JOINTS, 6)
+        for p, (joints, head) in enumerate(zip(PART_JOINTS, self.out_parts)):
+            out[p, :, :, joints, :] = head(tokens[:, :, p]).view(batch, self.tw, len(joints), 6)
+        return out
+
+    def part_assignment(self) -> torch.Tensor:
+        """(N_PARTS, N_JOINTS) assignment matrix: the learned softmax A in
+        soft mode, the frozen one-hot PART_JOINTS in hard mode."""
+        if self.soft_parts:
+            return F.softmax(self.part_logits.detach(), dim=0)
+        assign = torch.zeros(N_PARTS, N_JOINTS, device=self.group_emb.weight.device)
+        for p, joints in enumerate(PART_JOINTS):
+            assign[p, joints] = 1.0
+        return assign
+
+    def set_sigma_frozen(self, flag: bool) -> None:
+        """Freeze sigma at 0 for the first sigma_freeze_frac of training
+        (plan §3: gate runs on the tau_p prior bias alone, then sigma comes
+        online).  Only meaningful for gate='sigma'."""
+        if self.gate != "sigma":
+            return
+        for block in self.decoder.layers:
+            block.sigma_frozen = bool(flag)
+
+    def last_gate_sigma(self) -> torch.Tensor:
+        """(B, tw, N_PARTS, 2) raw sigma logits of the last decoder layer
+        (grad-carrying; the beta-NLL loss supervises these)."""
+        if self.gate == "none":
+            raise ValueError("last_gate_sigma() is only defined for gate='sigma'")
+        return self.decoder.layers[-1].last_sigma
+
+    def last_gate_g(self) -> torch.Tensor:
+        """(B, tw, N_PARTS, 3) detached gate weights [g_V, g_T, g_∅] of the
+        last decoder layer — the attribution weights in the beta-NLL loss."""
+        if self.gate == "none":
+            raise ValueError("last_gate_g() is only defined for gate='sigma'")
+        return self.decoder.layers[-1].last_g
+
+    def last_part_hypotheses(self) -> torch.Tensor:
+        """(N_PARTS, B, tw, N_JOINTS, 6) detached per-slot hypotheses from the
+        last forward (gate mode only; the beta-NLL error target)."""
+        if self.gate == "none":
+            raise ValueError("last_part_hypotheses() is only defined for gate='sigma'")
+        return self._last_hypo
+
+    def assignment(self) -> torch.Tensor:
+        """Detached (N_PARTS, N_JOINTS) soft assignment matrix A (soft_parts
+        only) — the learned grouping, printable/auditable every checkpoint."""
+        if not self.soft_parts:
+            raise ValueError("assignment() is only defined for soft_parts=True")
+        return F.softmax(self.part_logits.detach(), dim=0)
+
+    def gate_summary(self) -> torch.Tensor:
+        """(N_PARTS, 3) mean gate weights [g_V, g_T, g_∅] over batch and frames
+        from the last decoder layer (gate='sigma' only; call after a forward).
+        Feeds the plan's F4 acceptance (foot g_T - arm g_T > 0.2 etc.)."""
+        if self.gate == "none":
+            raise ValueError("gate_summary() is only defined for gate='sigma'")
+        last_g = self.decoder.layers[-1].last_g
+        if last_g is None:
+            raise ValueError("gate_summary() requires a forward pass first")
+        return last_g.mean(dim=(0, 1))

@@ -31,6 +31,7 @@ from anysole.types import (
     JOINT_PROTOCOL_CHECKSUM,
     MOTION_PROTOCOL,
     N_JOINTS,
+    PART_NAMES,
     POSE_DIM,
     SEQ_ROOT,
     SMPL_ROOTS,
@@ -433,6 +434,46 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "per part (PART_JOINTS, fix_plan_v3.md §V3-2). Saved into the checkpoint.",
     )
     parser.add_argument(
+        "--soft-parts",
+        action="store_true",
+        help="V3-3 (mechanism C structure, fix_plan_v3.md §V3-3): replace the "
+        "hard 9-part unembed heads with the learned soft assignment matrix A "
+        "(9 slots x 24 joints, initialized to PART_JOINTS) + L_assign "
+        "regularization. Requires --pose-parts 9. Saved into the checkpoint.",
+    )
+    parser.add_argument(
+        "--gate",
+        choices=("none", "sigma"),
+        default=None,
+        help="V3-3 (mechanism B, fix_plan_v3.md §V3-3): 'sigma' = dual-masked "
+        "cross-attention to the V/T views of F + per-slot sigma routing over "
+        "[V, T, prior] with per-part prior bias tau_p (init derived from the "
+        "part assignment). Requires --pose-parts 9. Saved into the checkpoint.",
+    )
+    parser.add_argument(
+        "--lambda-assign",
+        type=float,
+        default=None,
+        help="V3-3: weight of L_assign (assignment entropy + slot-load balance; "
+        "only active with --soft-parts). Default 0.05.",
+    )
+    parser.add_argument(
+        "--lambda-sigma",
+        type=float,
+        default=None,
+        help="V3-3: weight of the beta-NLL sigma supervision (plan §3, mixture-"
+        "variance form; only active with --gate sigma). Default 0 (off); "
+        "recommended 0.01 when enabling sigma calibration.",
+    )
+    parser.add_argument(
+        "--sigma-freeze-frac",
+        type=float,
+        default=None,
+        help="V3-3: fraction of total steps where sigma is frozen at 0 "
+        "(gate runs on the tau_p prior bias alone, plan §3 'first 10% sigma "
+        "fixed'). Default 0.1 with --gate sigma.",
+    )
+    parser.add_argument(
         "--lr-warmup-frac",
         type=float,
         default=None,
@@ -718,6 +759,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["f2_repr"] = True
     if args.pose_parts is not None:
         config["pose_parts"] = int(args.pose_parts)
+    if args.soft_parts:
+        config["soft_parts"] = True
+    if args.gate is not None:
+        config["gate"] = str(args.gate)
+    if args.lambda_assign is not None:
+        config["lambda_assign"] = float(args.lambda_assign)
+    if args.lambda_sigma is not None:
+        config["lambda_sigma"] = float(args.lambda_sigma)
+    if args.sigma_freeze_frac is not None:
+        config["sigma_freeze_frac"] = float(args.sigma_freeze_frac)
+    if bool(config.get("soft_parts", False)) and int(config.get("pose_parts", 3)) != 9:
+        raise ValueError("--soft-parts requires --pose-parts 9 (V3-3)")
+    if str(config.get("gate", "none")) != "none" and int(config.get("pose_parts", 3)) != 9:
+        raise ValueError("--gate requires --pose-parts 9 (V3-3)")
     if args.lr_warmup_frac is not None:
         config["lr_warmup_frac"] = float(args.lr_warmup_frac)
     if args.tactile_direct:
@@ -836,6 +891,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             t_encoder=str(config.get("t_encoder", "linear")),
             f2_repr=bool(config.get("f2_repr", False)),
             pose_parts=int(config.get("pose_parts", 3)),
+            soft_parts=bool(config.get("soft_parts", False)),
+            gate=str(config.get("gate", "none")),
         ).to(device)
     else:
         if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):
@@ -927,6 +984,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     # val/tau0_mpjpe/VT is snapshotted to ckpt_best.pt — a finite-gradient
     # explosion (F0b_warm ep370 / V3_2_part9 ep271, no nonfinite guard fires)
     # can destroy ckpt_last.pt in ~10 epochs; the snapshot survives.
+    # V3-3 sigma freeze schedule (plan §3, "first sigma_freeze_frac sigma
+    # fixed"): sigma stays at 0 while the tau_p prior bias shapes the gate,
+    # then comes online for the remainder of the run.
+    if str(config.get("gate", "none")) != "none":
+        sigma_freeze_steps = int(
+            float(config.get("sigma_freeze_frac", 0.1))
+            * len(loader) * int(config["epochs"])
+        )
+    else:
+        sigma_freeze_steps = 0
     best_vt = None
     for epoch in range(int(config["epochs"])):
         model.train()
@@ -941,7 +1008,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             group["lr"] = epoch_lr
         epoch_start_step = global_step
         nonfinite_skips = 0
-        epoch_sums = {"loss_total": 0.0, "loss_pose": 0.0, "loss_traj": 0.0, "loss_con": 0.0, "loss_kp": 0.0, "loss_pose_vel": 0.0, "loss_bone": 0.0, "loss_Trec_Tmissing": 0.0, "loss_Vrec_Vmissing": 0.0, "grad_norm": 0.0, "n": 0, "n_tmissing": 0, "n_vmissing": 0}
+        epoch_sums = {"loss_total": 0.0, "loss_pose": 0.0, "loss_traj": 0.0, "loss_con": 0.0, "loss_kp": 0.0, "loss_pose_vel": 0.0, "loss_bone": 0.0, "loss_assign": 0.0, "loss_sigma": 0.0, "loss_Trec_Tmissing": 0.0, "loss_Vrec_Vmissing": 0.0, "grad_norm": 0.0, "n": 0, "n_tmissing": 0, "n_vmissing": 0}
         for raw_batch in loader:
             batch = move_batch(raw_batch, device)
             batch_size = batch["pose_gt"].shape[0]
@@ -954,6 +1021,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             v_kw = {"V_hmr": batch.get("V_hmr")} if str(config.get("v_input", "hrnet")) == "hmr_gvhmr" else {}
 
             optimizer.zero_grad(set_to_none=True)
+            if sigma_freeze_steps:
+                model.pose_head.set_sigma_frozen(global_step < sigma_freeze_steps)
             if regress_mode:
                 # F0b: regression head — no tau sampling, no q_sample, no
                 # x_tau. L_pose applies directly to the regression output
@@ -1036,7 +1105,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             optimizer.step()
             n = batch_size
             epoch_sums["n"] += n
-            for key, name in (("loss", "loss_total"), ("L_pose", "loss_pose"), ("L_traj", "loss_traj"), ("L_con", "loss_con"), ("L_kp", "loss_kp"), ("L_pose_vel", "loss_pose_vel"), ("L_bone", "loss_bone")):
+            for key, name in (("loss", "loss_total"), ("L_pose", "loss_pose"), ("L_traj", "loss_traj"), ("L_con", "loss_con"), ("L_kp", "loss_kp"), ("L_pose_vel", "loss_pose_vel"), ("L_bone", "loss_bone"), ("L_assign", "loss_assign"), ("L_sigma", "loss_sigma")):
                 epoch_sums[name] += float(losses[key].detach().item()) * n
             n_tmissing = int((config_id == CONFIG_T).sum().item())
             n_vmissing = int((config_id == CONFIG_V).sum().item())
@@ -1108,6 +1177,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if key == "loss_Vrec_Vmissing": metric_denom = max(epoch_sums["n_vmissing"], 1)
                 log[f"train/{key}"] = value / metric_denom
             log["train/lr"] = optimizer.param_groups[0]["lr"]
+            # V3-3 gate probes (plan §2.3 F4): per-slot mean [g_V, g_T, g_∅]
+            # from the last decoder layer, under wandb prefix "gate/".  The
+            # assignment matrix itself stays auditable via the smoke/probe
+            # scripts off the checkpoint's part_logits parameter.
+            if str(config.get("gate", "none")) != "none":
+                summary = model.pose_head.gate_summary()  # (N_PARTS, 3)
+                for p, pname in enumerate(PART_NAMES):
+                    log["gate/%s_gV" % pname] = float(summary[p, 0])
+                    log["gate/%s_gT" % pname] = float(summary[p, 1])
+                    log["gate/%s_gE" % pname] = float(summary[p, 2])
             # Optional capped logging (--loss-cap): the first epochs spike far
             # above the converged range (loss_total 30 -> 0.1, loss_pose 1.5 ->
             # 0.01), which stretches the raw charts' y-axis and hides

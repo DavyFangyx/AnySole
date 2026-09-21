@@ -11,9 +11,10 @@
 - **checkpoint 状态**：group_ids 修复（2026-09-20）后，此前全部权重已归档
   `results/backup/AnySole_BVH_backup/`。**2026-09-21 warm-start 链重训完成**：
   F0b / F4a / F2 / F2+4 / V3-2 五个基座全部训出并过 val 协议验收
-  （各节已回填实测数字）。
+  （各节已回填实测数字）。V3-3（soft A + σ 门控）代码已实现、smoke 全过，
+  **尚未训练**（两阶段命令见 V3-3 节）。
 - 训练顺序（warm-start 链）：**F0b（from-scratch）→ F4a / F2（←F0b）→
-  F2+4（←F2）→ V3-2（←F4a）**。
+  F2+4（←F2）→ V3-2（←F4a）→ V3-3A（←V3-2）→ V3-3B（←V3-3A）**。
 - `anysole/configs/v1.yaml` 已是 SMPL-24 训练配置：raw108、tw=20、stride=20、lr=1e-4
   （**`--lr` 不是 CLI**，要改 lr 就改 yaml）、λ_pose=3 / λ_kp=1 / λ_traj=1 /
   λ_trec=0.1 / λ_vrec=0.1 / λ_con=0、joint_and。实验差异全部由 CLI 传入，
@@ -222,7 +223,7 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --init-from results/AnySole/F4a_joint_and/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/V3_2_joint_and/checkpoints \
   --wandb_mode online --wandb_experiment_tag v32_jointand \
-  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:4
+  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:5
 
 # ② 评估
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
@@ -244,6 +245,96 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
 
 > epoch 计数口径：每次运行从自己的 epoch 0 开始数，`--init-from` 只加载权重；
 > 判断收敛/爆炸看**总步数**（3700 步短预算 ≈ 740ep batch256 @stride20）。
+
+---
+
+## V3-3 · soft A 矩阵 + σ 门控（两阶段单变量，warm-start 自 V3-2）
+
+> 设计与机制关系（A 矩阵/门控/先验）见 `archived/fix_plan_v3.md` §8；
+> smoke 必过：`z_note/probes/smoke_v33_soft_gate.py`（训练前跑）。
+> **2026-09-21 首训审计已修两处缺陷**（§8.4）：① L_assign 负载均衡项天生为负
+> 导致 loss_total 为负——已加常数 +log9 平移到非负域（**不改梯度**，在跑的
+> V3-3A/B 训练轨迹不受影响，只是曲线记录值为负）；② τ_p 无界漂移（+9.8/−3.8）
+> 把门控软最大化饱和成常数 [0,0,1]、σ 梯度死亡——已加前向钳位 [−4,4]。
+> **两者只对新启动的 run 生效**。③ 执行顺序：**必须等 V3-3A 收敛后再启
+> V3-3B**（首训时两者并跑，V3-3B warm-start 到的是 V3-3A 的 epoch≈1 权重）。
+> β-NLL σ 监督未实现，σ 经软门控端到端训练（首训已实测 σ 未学习，即 plan §3
+> 失败处置二，重启后优先补 β-NLL）。
+> 两阶段单变量纪律（§2.1）：**V3-3A** 只加 `--soft-parts`（验收 = 不劣于 V3-2
+> 且 A 保持可识别部位结构）；**V3-3B** 在 A 上叠加 `--gate sigma`（验收 = plan
+> §2.3 F4：T-only 时 arm/spine g_∅>0.1、VT 时 foot g_T − arm g_T > 0.2；
+> wandb 曲线 `gate/<part>_gV/gT/gE`）。
+> **二轮实测结论（2026-09-21 深夜，V3-3B 740ep）**：指标链内最优但 σ 未学会
+> 路由（三配置门控差 ≤0.018）、A 冻结于人工划分、F4 原判据区分不了静态/动态 →
+> 判据已改差分式（§2.3 F4 修订），σ 已修（输入 [z,e_V,e_T] + β-NLL 信任监督 +
+> 前 10% 冻结）。**V3-3C = V3-3B 命令 + `--lambda-sigma 0.01
+> --sigma-freeze-frac 0.1`**（warm-start 自 V3_3B 终值），验收读
+> `z_note/probes/probe_v33b_gates.py` 的差分判据（T vs VT Δg_T(foot)>0.2、
+> T-only root g_V 下降 >0.2）。T2M 偏航乱飘已量化（probe_v33b_yaw_t2m.py：
+> yaw_abs 71.5°、速率 231°/s vs GT 12.6°/s）——压力无朝向信息，结构解法 =
+> V3-4 f2 移植，不是门控。
+
+```bash
+# ===== V3-3A：soft A 矩阵（warm-start 自 V3-2） =====
+# ① 训练
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
+  --modal anysolev2 --contact-method joint_and \
+  --t-encoder foot_conv --pose-parts 9 --soft-parts \
+  --lambda-assign 0.05 --lr-warmup-frac 0.05 \
+  --epochs 740 --grad-clip 5.0 \
+  --init-from results/AnySole/V3_2_joint_and/checkpoints/ckpt_last.pt \
+  --out-dir results/AnySole/V3_3A_joint_and/checkpoints \
+  --wandb_mode online --wandb_experiment_tag v33a_jointand \
+  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:5
+
+# ② 评估
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
+  --ckpt results/AnySole/V3_3A_joint_and/checkpoints/ckpt_last.pt \
+  --modal anysolev2 --contact-method joint_and \
+  --split val --write-motion results/AnySole/V3_3A_joint_and/predictions/eval_motion \
+  --protocol-seed 0 --no-robustness --device cuda:4
+
+# ③ 可视化 R_Test1（骨架动画 → results_display/result/r_test1_visualize/AnySole/V3_3A/）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test1_visualize_anysole.py \
+  --modal V3_3B --contact-method joint_and --split val \
+  --config-id VT2M,V2M,T2M --gen gif --force
+
+# ④ 可视化 R_Test3（轨迹对比 → results_display/result/r_test3_traj/AnySole/V3_3A/）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test3_traj.py \
+  --modal V3_3B --contact-method joint_and --split val \
+  --config-id VT2M,V2M,T2M --gen gif --force
+
+# ===== V3-3B：叠加 σ 门控（warm-start 自 V3-3A） =====
+# ① 训练
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
+  --modal anysolev2 --contact-method joint_and \
+  --t-encoder foot_conv --pose-parts 9 --soft-parts --gate sigma \
+  --lambda-assign 0.05 --lr-warmup-frac 0.05 \
+  --epochs 740 --grad-clip 5.0 \
+  --init-from results/AnySole/V3_3A_joint_and/checkpoints/ckpt_last.pt \
+  --out-dir results/AnySole/V3_3B_joint_and/checkpoints \
+  --wandb_mode online --wandb_experiment_tag v33b_jointand \
+  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:7
+
+# ② 评估（同 V3-3A，换目录名）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
+  --ckpt results/AnySole/V3_3B_joint_and/checkpoints/ckpt_last.pt \
+  --modal anysolev2 --contact-method joint_and \
+  --split val --write-motion results/AnySole/V3_3B_joint_and/predictions/eval_motion \
+  --protocol-seed 0 --no-robustness --device cuda:4
+
+# ③ 可视化 R_Test1（--modal V3_3B） / ④ 可视化 R_Test3（--modal V3_3B）：同上换名
+
+
+# 训练前 smoke（数值验收，§8.4；可选 --ckpt 验证 warm-start 继承）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/smoke_v33_soft_gate.py \
+  --device cpu --ckpt results/AnySole/V3_2_joint_and/checkpoints/ckpt_last.pt
+```
+
+> warm-start 继承：decoder 共享部分（self-attn / V 分支交叉注意力 / norm / FFN /
+> query / group_emb）按名字继承；T 分支交叉注意力 / σ MLP / τ_p / part_logits /
+> 9 个全宽输出头自动新初始化（smoke 第 7 项验证）。gate 与 `--tactile-direct`
+> 互斥（构造期报错）；`--soft-parts`/`--gate` 均要求 `--pose-parts 9`。
 
 ---
 

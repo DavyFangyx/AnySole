@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Mapping
 
 import torch
@@ -260,6 +261,63 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         else:
             l_con = l_pose.new_zeros(())
 
+    # V3-3 soft assignment regularization (fix_plan_v3.md §V3-3/§8): the
+    # learned A matrix must stay sharp (each joint owned by one slot) and
+    # balanced (no slot owns everything).  Both terms are entropies of the
+    # softmax'd part_logits; zero for every model without soft_parts.
+    # The balance term is -H(mass), whose floor is -log(N); +log(N) shifts it
+    # to be non-negative so the total loss stays an error measure (2026-09-21
+    # fix: the raw term made loss_total negative once the warm-started MSE
+    # terms converged — a constant shift leaves the gradient untouched).
+    if bool(weights.get("soft_parts", False)) and out.get("part_logits") is not None:
+        log_assign = F.log_softmax(out["part_logits"], dim=0)
+        assign = log_assign.exp()
+        l_ent = -(assign * log_assign).sum(dim=0).mean()      # per-joint entropy -> minimize
+        mass = assign.mean(dim=1)
+        l_balance = (mass * (mass + 1e-8).log()).sum() + math.log(mass.numel())
+        l_assign = l_ent + l_balance
+    else:
+        l_assign = l_pose.new_zeros(())
+
+    # V3-3 beta-NLL sigma supervision (plan §3, implemented 2026-09-21 after
+    # the V3-3B "static gate" audit): calibrates the per-slot sigma logits to
+    # the slot's normalized-space pose error through the gate-mixture variance
+    # v = g_V*exp(-sigma_V) + g_T*exp(-sigma_T) — the TRUST convention: high
+    # sigma = high trust = low claimed variance, so the gate weight and the
+    # calibration share one semantics (equilibrium sigma ~ -log r2: the more
+    # accurate a slot, the more trust; "perfect" parts get maximal weight).
+    # Two deviations from the plan's letter: (1) the letter supervises both
+    # sigma_V and sigma_T with the SAME r_p, which degenerates to sigma_V =
+    # sigma_T (no V/T differentiation) — the mixture form attributes the error
+    # by the gate's own weights instead; (2) the letter's variance convention
+    # (sigma = log variance) inverts the gate semantics for accurate parts.
+    # The error target (per-slot hypotheses), the attribution weights g and
+    # the assignment A are stopgrad'd — sigma is the only live parameter.
+    # beta = 0.5, sigma clipped to [-3, 6].  Skipped while sigma is frozen
+    # (plan: sigma fixed at 1 for the first sigma_freeze_frac of steps) and
+    # whenever lambda_sigma = 0.
+    l_sigma = l_pose.new_zeros(())
+    if (
+        out.get("gate_sigma") is not None
+        and not bool(out.get("sigma_frozen", False))
+        and _weight(weights, "lambda_sigma", 0.0) > 0.0
+    ):
+        beta = float(weights.get("sigma_beta", 0.5))
+        sigma_hat = out["gate_sigma"].clamp(-3.0, 6.0)      # (B, tw, N_PARTS, 2)
+        g_streams = out["gate_g"][..., :2]                   # (B, tw, N_PARTS, 2), detach
+        var = (g_streams * (-sigma_hat).exp()).sum(dim=-1)   # (B, tw, N_PARTS)
+        hypo = out["part_hypotheses"]                        # (N_PARTS, B, tw, N_JOINTS, 6), detach
+        assign = out["part_assignment"]                      # (N_PARTS, N_JOINTS)
+        target = (pose_gt - out["pose_mean"]) / out["pose_std"]
+        target = target.reshape(*target.shape[:2], N_JOINTS, 6)
+        err = (hypo - target).square().mean(dim=-1)          # (N_PARTS, B, tw, N_JOINTS)
+        # (N_PARTS, 1, 1) — trailing-dim broadcast against (N_PARTS, B, tw).
+        mass = assign.sum(dim=-1, keepdim=True).clamp(min=1e-6).unsqueeze(-1)
+        r2 = (assign.unsqueeze(1).unsqueeze(2) * err).sum(dim=-1) / mass  # (N_PARTS, B, tw)
+        r2 = r2.permute(1, 2, 0)                             # (B, tw, N_PARTS)
+        nll = r2 / var.clamp(min=1e-4) + var.clamp(min=1e-4).log()
+        l_sigma = beta * nll.mean()
+
     total = (
         _weight(weights, "lambda_pose", 1.0) * l_pose
         + _weight(weights, "lambda_traj", 1.0) * l_traj
@@ -269,6 +327,8 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         + _weight(weights, "lambda_con", 0.1) * l_con
         + _weight(weights, "lambda_pose_vel", 0.0) * l_pose_vel
         + _weight(weights, "lambda_bone", 0.0) * l_bone
+        + _weight(weights, "lambda_assign", 0.05) * l_assign
+        + _weight(weights, "lambda_sigma", 0.0) * l_sigma
     )
     return {
         "L_pose": l_pose,
@@ -281,5 +341,7 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         "L_con": l_con,
         "L_pose_vel": l_pose_vel,
         "L_bone": l_bone,
+        "L_assign": l_assign,
+        "L_sigma": l_sigma,
         "loss": total,
     }

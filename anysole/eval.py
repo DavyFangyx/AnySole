@@ -291,6 +291,8 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
             tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
             v_input=v_input, t_encoder=t_encoder, f2_repr=f2_repr,
             pose_parts=pose_parts,
+            soft_parts=bool(saved_config.get("soft_parts", False)),
+            gate=str(saved_config.get("gate", "none")),
         ).to(device)
     else:
         model = AnySoleModel(

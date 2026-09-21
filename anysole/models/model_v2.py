@@ -33,7 +33,8 @@ class AnySoleModelV2(nn.Module):
     def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1,
                  pose_layers=6, tactile_input="raw108",
                  tactile_direct=False, no_imu=False, v_input="hrnet",
-                 t_encoder="linear", f2_repr=False, pose_parts=3):
+                 t_encoder="linear", f2_repr=False, pose_parts=3,
+                 soft_parts=False, gate="none"):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -45,6 +46,8 @@ class AnySoleModelV2(nn.Module):
         self.t_encoder = str(t_encoder)
         self.f2_repr = bool(f2_repr)
         self.pose_parts = int(pose_parts)
+        self.soft_parts = bool(soft_parts)
+        self.gate = str(gate)
         if self.v_input not in ("hrnet", "hmr_gvhmr"):
             raise ValueError("v_input must be 'hrnet' or 'hmr_gvhmr', got %r" % self.v_input)
         if self.tactile_input not in ("raw108", "s2m50"):
@@ -67,7 +70,7 @@ class AnySoleModelV2(nn.Module):
         self.pose_head = PoseHead(
             self.embeddings, dim=d, tw=tw, nhead=nhead, dropout=dropout,
             n_layers=pose_layers, repr="6d", head_mode="regress",
-            n_parts=self.pose_parts,
+            n_parts=self.pose_parts, soft_parts=self.soft_parts, gate=self.gate,
         )
         self.traj_head = TrajHead(dim=d, tw=tw, nhead=nhead, dropout=dropout,
                                   out_dim=4 if self.f2_repr else 3)
@@ -102,11 +105,29 @@ class AnySoleModelV2(nn.Module):
         x0_hat = self.pose_head(F=memory)
         v_hat, trans_hat = self.traj_head(fused)
         pressure_hat, vfeat_hat = self.aux_heads(fused)
-        return {
+        out = {
             "x0_hat": x0_hat,
             "v_hat": v_hat,
             "trans_hat": trans_hat,
             "pressure_hat": pressure_hat,
             "vfeat_hat": vfeat_hat,
             "F": fused,
+            # V3-3: the learned (N_PARTS, N_JOINTS) assignment logits for
+            # L_assign in losses.py (None for every other configuration).
+            "part_logits": self.pose_head.part_logits if self.soft_parts else None,
         }
+        if self.gate == "sigma":
+            # Beta-NLL sigma supervision inputs (losses.py): the last layer's
+            # raw sigma logits (grad-carrying), detached gate weights
+            # (attribution), detached per-slot hypotheses + assignment and the
+            # pose stats (the normalized-space error target).
+            out.update({
+                "gate_sigma": self.pose_head.last_gate_sigma(),
+                "gate_g": self.pose_head.last_gate_g(),
+                "part_hypotheses": self.pose_head.last_part_hypotheses(),
+                "part_assignment": self.pose_head.part_assignment(),
+                "pose_mean": self.pose_head.pose_mean,
+                "pose_std": self.pose_head.pose_std,
+                "sigma_frozen": bool(self.pose_head.decoder.layers[-1].sigma_frozen),
+            })
+        return out

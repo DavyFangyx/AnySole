@@ -247,6 +247,8 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
             t_encoder=str(saved_config.get("t_encoder", "linear")),
             f2_repr=bool(saved_config.get("f2_repr", False)),
             pose_parts=int(saved_config.get("pose_parts", 3)),
+            soft_parts=bool(saved_config.get("soft_parts", False)),
+            gate=str(saved_config.get("gate", "none")),
         ).to(device)
     else:
         model = AnySoleModel(
