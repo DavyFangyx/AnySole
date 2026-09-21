@@ -1,9 +1,8 @@
 # Baselines: the current tree is rebuilt on the unified data foundation and
-# stays out of git; the BVH-era archive lives in Baselines_backup/ (zipped).
+# stays out of git; the BVH-era archive lives in Baselines_backup/.
 Baselines/
 
 /Baselines_backup/
-/Baselines_backup.zip
 
 # Generated artifacts
 *.png
