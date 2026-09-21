@@ -180,6 +180,16 @@ def doctor() -> int:
     if not calibrations:
         errors.append("no calibration summaries found")
     for path in calibrations:
+        # 识别相机标定文件：calibration/ 下还有非相机 JSON（如
+        # insole_templates.json），只对含 cameras 字典的相机标定摘要做校验；
+        # 无法解析的文件仍报错，不静默放过。
+        try:
+            payload = json.loads(path.read_text())
+        except Exception:
+            errors.append("%s: cannot load JSON" % path)
+            continue
+        if not isinstance(payload.get("cameras"), dict):
+            continue
         errors.extend(validate_calibration(path))
     split = WORKSPACE / "splits/default/splits.csv"
     if not split.is_file():
