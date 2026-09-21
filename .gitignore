@@ -1,10 +1,9 @@
-# Ignore the entire Baselines tree.
+# Baselines: the current tree is rebuilt on the unified data foundation and
+# stays out of git; the BVH-era archive lives in Baselines_backup/ (zipped).
 Baselines/
-# Step2Motion evaluation imports this maintained visualization entry point.
-!Baselines/
-!Baselines/Step2Motion/
-!Baselines/Step2Motion/src/
-!Baselines/Step2Motion/src/visualize_compare.py
+
+/Baselines_backup/
+/Baselines_backup.zip
 
 # Generated artifacts
 *.png
@@ -57,3 +56,7 @@ __pycache__/
 /ReferenceWorks/deep-high-resolution-net.pytorch/
 /ReferenceWorks/inverse-compositional-STN/
 /ReferenceWorks/motion-diffusion-model/
+
+# Probs and execs in znote
+z_note/exec/
+z_note/probes/
