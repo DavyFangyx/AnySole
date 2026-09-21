@@ -1,11 +1,11 @@
 # Results Display
 
-集中存放实验产物。实验分两大部分：
+集中存放实验产物。实验分两大部分，互不耦合：
 
-- **第一部分：数据检验（D_TestN）** —— 只读数据、不加载模型：原始/中间数据的
-  展示、自检、标签判定与协议探针。
-- **第二部分：结果检验（R_TestN）** —— 加载模型评估输出：可视化、参数对照、
-  轨迹与专项消融。
+- **第一部分：数据检验（D_TestN）** —— 处理**原始数据**（对应 AnysoleWorkspace）：
+  原始 GT 的可视化、自检、标签判定与协议探针。
+- **第二部分：结果检验（R_TestN）** —— 处理**实验结果**（对应 results）：
+  模型输出的可视化、参数对照、轨迹与专项消融。
 
 实验代码位于 `script/`（唯一被 git 跟踪的目录），生成物落在对应的实验目录。
 本文已按 D/R 编号组织；**脚本与产物目录的改名在 P1-4 落盘**，当前磁盘上脚本
@@ -17,7 +17,7 @@
 
 | 新编号 | 旧 | 脚本（现名 → P1-4 新名） |
 | --- | --- | --- |
-| D_Test1 数据可视化 | Test1 的 GT/输入部分 | `visualize_gt_bvh.py` → `d_test1_data_viz.py` |
+| D_Test1 原始数据可视化 | Test1 的 GT/输入部分 | `visualize_gt_bvh.py` → `d_test1_data_viz.py`（BVH/SMPL GT 渲染） |
 | D_Test2 数据集自检 | Test6 | `test6_dataset_check.py` → `d_test2_dataset_check.py` |
 | D_Test3 接触检测 | Test5 | `contact_methods.py` → `AnysoleWorkspace/tool/contact_labels.py`；`test5_contact.py` → `d_test3_contact.py` |
 | D_Test4 SMPL 协议预检 | F4 预检 | `probe_f4_smpl24_preflight.py` + `probe_smpl_*` → `d_test4_smpl_protocol.py` |
@@ -101,15 +101,19 @@ results_display/                        # 纯产物目录（实验代码在 scri
 
 # 第一部分：数据检验（D_TestN）
 
-## D_Test1 数据可视化（实验表现）
+## D_Test1 原始数据可视化（BVH / SMPL）
 
-展示原始/中间数据：GT 动捕渲染为参考动画。目标形态（P1-4）合并 GT 骨骼渲染并
-扩展触觉热力图与视频帧，作为数据侧的完整实验表现；当前磁盘上只有 GT 渲染脚本。
+直接渲染 AnysoleWorkspace 的原始 GT 动捕数据，不涉及任何模型输出：
+
+| 脚本 | 作用 |
+| --- | --- |
+| `visualize_gt_bvh.py` | 原始 GT 动捕 BVH 的骨架渲染（纯 BVH 可视化） |
+| （SMPL GT 渲染，P1-4 并入 `d_test1_data_viz.py`） | 原始 SMPL-24 GT 的骨架渲染 |
 
 ```bash
 conda activate touch_gait
 
-# BVH 可视化测试脚本（纯 BVH 可视化）
+# BVH 原始数据可视化
 python results_display/script/visualize_gt_bvh.py
 python results_display/script/visualize_gt_bvh.py --bvh <单个.bvh>
 ```
