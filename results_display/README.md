@@ -377,11 +377,11 @@ python results_display/script/r_test4_v2t.py --config-id VT2M,V2M --export-sessi
 | 编号 | 任务书实验 | 回答的问题 | 脚本 |
 | --- | --- | --- | --- |
 | R_Test5 ρ 网格 | 实验 1 | 模态按任意比例缺失时性能怎么变 | `anysole/rho_grid.py`（生成器）+ `r_test5_rho_grid.py`（前端）✅ |
-| R_Test6 互补分析 | 实验 2 | 融合是互补还是拼贴；F 是不是"完整状态" | `r_test6_complement.py`（2a 已落地；2b/2c 规划中） |
-| R_Test7 dropout 消融 | 实验 3 | 训练时的模态 dropout 是不是必需的 | `r_test7_dropout_ablation.py`（对比表） |
-| R_Test8 T2M 上半身 | 实验 4 | 触觉没有上肢信号，合理上半身从哪来 | `r_test8_t2m_upper.py` |
-| R_Test9 信任堆叠条 | 实验 5 | 每个身体部位"信谁" | `r_test9_trust.py` |
-| R_Test10 单模态训练对比 | 实验 6 | V-only / T-only 各自天花板 | `r_test10_singlemodal_compare.py`（对比表） |
+| R_Test6 互补分析 | 实验 2 | 融合是互补还是拼贴；F 是不是"完整状态" | `r_test6_complement.py`（2a/2c 已落地；2b 探针表规划中）✅ |
+| R_Test7 dropout 消融 | 实验 3 | 训练时的模态 dropout 是不是必需的 | `r_test7_dropout_ablation.py`（C1 对比表 + C2 单流探针）✅ |
+| R_Test8 T2M 上半身 | 实验 4 | 触觉没有上肢信号，合理上半身从哪来 | `r_test8_t2m_upper.py`（t_tok 无先验 ridge 基线）✅ |
+| R_Test9 信任画像 | 实验 5 | 每个身体部位"信谁" | `r_test9_trust.py`（E1 信任堆叠条 + E2 注意力）✅ |
+| R_Test10 单模态训练对比 | 实验 6 | V-only / T-only 各自天花板 | `r_test10_singlemodal_compare.py`（对比表）✅ |
 
 ### R_Test5 ρ 网格（已实装）
 
@@ -409,6 +409,26 @@ python results_display/script/r_test5_rho_grid.py --metric MPJPE
 **V4B val 已跑完（3 种子，自检 diff 全 0）**：整图由 V 主导（同 V 列 T 几乎不动 PA），
 T 仅在 V 缺失时兜底（上限 69.6）；纯先验 77.0 PA / 171.9 MPJPE；全表最低 35.3 在 V80%/T20%。
 完整数值与首读结论见任务书实验 1。
+
+```bash
+# 2c t-SNE（三配置 F 散点，读 ρ 网格 repr dump）
+python results_display/script/r_test6_complement.py --tsne --sessions 8
+
+# 3 C1 对比表（主线 vs nodrop fseries）/ C2 单流探针（v_tok/t_tok ridge 解码）
+python results_display/script/r_test7_dropout_ablation.py --c1 --fs-nodrop <nodrop_fseries>
+python results_display/script/r_test7_dropout_ablation.py --c2 --split val --sessions 6
+
+# 4 D1 T2M 上半身（t_tok 无先验基线 vs 模型 T2M 输出，gap = 先验贡献）
+python results_display/script/r_test8_t2m_upper.py --split val --sessions 6
+
+# 5 E1 信任画像（读 grid_metrics 三角）/ E2 注意力（decoder 钩子，需 GPU）
+python results_display/script/r_test9_trust.py --e1
+python results_display/script/r_test9_trust.py --e2 --ckpt results/AnySole/V4B_joint_and/checkpoints/ckpt_last.pt --sessions 3
+
+# 6 单模态训练对比表（主线 vs vonly/tonly/nodrop fseries）
+python results_display/script/r_test10_singlemodal_compare.py \
+    --fs-vonly <vonly_fseries> --fs-tonly <tonly_fseries>
+```
 
 ### R_Test6 2a 互补 bar（已落地）
 

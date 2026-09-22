@@ -5,7 +5,7 @@
   --bar   2a 互补 bar：每部位 V2M / T2M / VT2M 三根柱（PA-MPJPE）+ Δ 判据图 + 辅助指标。
           纯读已落盘的 fseries（metrics/<split>_fseries.json），零重训、不加载模型。
   --probe 2b 探针表：Ft/Fv/融合 F 的 ridge 读出（依赖 script/utils/ridge_probe.py 扩展，未落地）。
-  --tsne  2c t-SNE：三种配置 F 的降维散点（依赖实验 1 的表征 dump，未落地）。
+  --tsne  2c t-SNE：三配置 F 的降维散点（已实现：读 R_Test5 的表征 dump，自带 torch t-SNE）。
 
 2a 判据（任务书）：下肢/接触 VT2M 应优于 V2M（T 的贡献），全局轨迹/yaw VT2M 应优于
 T2M（V 的贡献），两个方向同时成立才叫互补；只取两者更好的那个 = 拼贴。
@@ -33,6 +33,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 # --- 配色（dataviz 参考调色板，已验证：categorical 前 3 槽 all-pairs 通过）---
 C_V2M = "#2a78d6"   # categorical slot 1 (blue)
@@ -50,6 +51,13 @@ AXIS = "#c3c2b7"
 
 CONFIG_ORDER = ("V2M", "T2M", "VT2M")
 CONFIG_COLORS = {"V2M": C_V2M, "T2M": C_T2M, "VT2M": C_VT2M}
+
+# 2c t-SNE：三个角配置（ρ 网格角格 = 与三配置评测同机制）；动作着色用前 8 槽，其余折 Other
+TSNE_CORNERS = {"VT2M": (100, 100), "V2M": (100, 0), "T2M": (0, 100)}
+TSNE_ACTION_COLORS = {
+    "0": "#2a78d6", "1": "#eb6834", "2": "#1baf7a", "3": "#eda100",
+    "4": "#e87ba4", "5": "#008300", "6": "#4a3aa7", "7": "#e34948",
+}
 
 # 9 部位（fseries 键）+ 聚合 + 总体，按解剖顺序排列
 ANATOMICAL = ["root", "torso", "headneck",
@@ -121,14 +129,20 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="R_Test6 互补分析（任务书实验 2）")
     parser.add_argument("--bar", action="store_true", help="2a 互补 bar（已实现）")
     parser.add_argument("--probe", action="store_true", help="2b 探针表（未落地）")
-    parser.add_argument("--tsne", action="store_true", help="2c t-SNE（未落地）")
+    parser.add_argument("--tsne", action="store_true", help="2c t-SNE（已实现：三配置 F 降维散点）")
     parser.add_argument("--split", choices=("val", "test"), default="val")
     parser.add_argument("--model-dir", type=Path,
                         default=REPO / "results" / "AnySole" / "V4B_joint_and",
                         help="模型目录（含 metrics/<split>_fseries.json）")
+    parser.add_argument("--repr-dir", type=Path, default=None,
+                        help="ρ 网格表征 dump 目录（默认 result/r_test5_rho_grid/repr/）")
     parser.add_argument("--out", type=Path,
                         default=REPO / "results_display" / "result" / "r_test6_complement",
                         help="产物目录")
+    parser.add_argument("--sessions", type=int, default=None,
+                        help="t-SNE 用到的 session 数（默认全部）")
+    parser.add_argument("--max-points", type=int, default=800,
+                        help="t-SNE 每配置采样帧数上限")
     parser.add_argument("--tol", type=float, default=2.0,
                         help="|Δ|<=tol 视为持平（PA-MPJPE 口径 mm；各指标另有按量纲的默认容差）")
     return parser.parse_args(argv)
@@ -373,15 +387,161 @@ def run_bar(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_tsne(args: argparse.Namespace) -> int:
+    """2c t-SNE：三个角配置（VT2M/V2M/T2M）的 F 降维散点，按配置/动作着色。
+
+    期望（任务书）：按动作聚成团、而不是按模态分成两堆 = 模态不变的共享状态。
+    """
+    if not args.tsne:
+        return 0
+    repr_dir = args.repr_dir or (
+        REPO / "results_display" / "result" / "r_test5_rho_grid" / "repr")
+    if not repr_dir.is_dir():
+        raise SystemExit("repr dump 缺失：%s（先跑 python -m anysole.rho_grid）" % repr_dir)
+    npz_files = sorted(repr_dir.glob("*_repr.npz"))
+    if not npz_files:
+        raise SystemExit("repr 目录为空：%s" % repr_dir)
+    sessions = sorted({p.name.split("_")[0] for p in npz_files})
+    if args.sessions is not None:
+        sessions = sessions[: args.sessions]
+
+    frames, configs, actions = [], [], []
+    rng = np.random.RandomState(0)
+    for cfg, (rV, rT) in TSNE_CORNERS.items():
+        f_list, a_list = [], []
+        for sid in sessions:
+            path = repr_dir / ("%s_rhoV%d_rhoT%d_repr.npz" % (sid, rV, rT))
+            if not path.is_file():
+                continue
+            dump = np.load(path)
+            if "F" not in dump or "v_tok" not in dump:
+                raise SystemExit("%s 缺 F/v_tok（旧版 dump？）" % path)
+            tok = dump["v_tok"]
+            n_frames = tok.shape[0]
+            f = dump["F"]
+            per_frame = f.shape[0] // n_frames
+            f = f.reshape(n_frames, per_frame * f.shape[-1])
+            f_list.append(f)
+            a_list.append(np.full(n_frames, sid[2:4], dtype=object))
+        if not f_list:
+            raise SystemExit("配置 %s 无 session 产物" % cfg)
+        F = np.concatenate(f_list)
+        A = np.concatenate(a_list)
+        if len(F) > args.max_points:
+            idx = rng.choice(len(F), args.max_points, replace=False)
+            F, A = F[idx], A[idx]
+        frames.append(torch.from_numpy(F).float())
+        configs.append(np.full(len(F), cfg, dtype=object))
+        actions.append(A)
+    X = torch.cat(frames, dim=0)
+    cfg_labels = np.concatenate(configs)
+    act_labels = np.concatenate(actions)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("t-SNE: %d 帧 × %d 维（device=%s）" % (X.shape[0], X.shape[1], device))
+    Y = _tsne(X, device=device)
+    out_dir = args.out
+    out_dir.mkdir(parents=True, exist_ok=True)
+    np.savetxt(out_dir / "tsne_coords.csv",
+               np.column_stack([Y, cfg_labels, act_labels]),
+               fmt="%s", delimiter=",", header="x,y,config,action", comments="")
+    _tsne_scatter(Y, cfg_labels, "config", out_dir / "tsne_config.png")
+    _tsne_scatter(Y, act_labels, "action", out_dir / "tsne_action.png")
+    print("产物：%s（tsne_coords.csv / tsne_config.png / tsne_action.png）" % out_dir)
+    return 0
+
+
+def _tsne_scatter(Y, labels, kind, path):
+    uniq = sorted(set(labels), key=str)
+    colors = TSNE_ACTION_COLORS if kind == "action" else CONFIG_COLORS
+    fig, ax = plt.subplots(figsize=(7.5, 5.8), dpi=140)
+    fig.patch.set_facecolor(SURFACE)
+    style_ax(ax)
+    ax.set_axisbelow(True)
+    for label in uniq:
+        m = labels == label
+        color = colors.get(str(label), "#c3c2b7")
+        ax.scatter(Y[m, 0], Y[m, 1], s=9, alpha=0.55, color=color,
+                   label=str(label), linewidths=0)
+    ax.set_xlabel("t-SNE 1", color=INK2, fontsize=9)
+    ax.set_ylabel("t-SNE 2", color=INK2, fontsize=9)
+    ax.set_title("F per %s (three conditioning corners)" % kind,
+                 color=INK, fontsize=11, loc="left", pad=12)
+    ax.legend(frameon=False, fontsize=8, markerscale=1.4, loc="best")
+    fig.tight_layout()
+    fig.savefig(path, facecolor=SURFACE)
+    plt.close(fig)
+
+
+def _pca(X, n_components):
+    X = X - X.mean(dim=0, keepdim=True)
+    _, _, V = torch.linalg.svd(X, full_matrices=False)
+    return X @ V.T[:, :n_components]
+
+
+def _tsne(X, perplexity=30.0, n_iter=300, seed=0, device="cpu"):
+    """精确 t-SNE（小规模：PCA 预降维 + 对称 P + 早夸大 + 动量；无 sklearn 依赖）。"""
+    torch.manual_seed(seed)
+    X = _pca(X, n_components=min(30, X.shape[1], X.shape[0] - 1)).to(device)
+    n = X.shape[0]
+    D2 = torch.cdist(X, X) ** 2
+    d2max = D2[D2 > 0].max() + 1e-9
+    P = torch.zeros(n, n, device=device)
+    target = float(np.log(perplexity))
+    for i in range(n):
+        d2 = D2[i]
+        lo, hi = 0.0, 1e6
+        for _ in range(60):
+            beta = (lo + hi) / 2.0
+            w = torch.exp(-d2 * beta)
+            w[i] = 0.0
+            s = w.sum()
+            if s == 0:
+                lo = beta
+                continue
+            H = torch.log(s) + beta * (d2 * w).sum() / s
+            if H < target:
+                lo = beta
+            else:
+                hi = beta
+            if abs(H - target) < 1e-4:
+                break
+        # 防全下溢：exp(-d2*beta) 至少保留 e^-700 的动态范围
+        beta = min(beta, 700.0 / d2max)
+        w = torch.exp(-d2 * beta)
+        w[i] = 0.0
+        P[i] = w / w.sum()
+    P = (P + P.T) / (2 * n)
+    P = P * 12.0  # early exaggeration
+    Y = torch.randn(n, 2, device=device) * 0.0001
+    Y_prev = Y.clone()
+    eta = 100.0
+    for it in range(n_iter):
+        if it == 100:
+            P = P / 12.0
+        diff = Y[:, None, :] - Y[None, :, :]
+        dist2 = (diff ** 2).sum(dim=-1) + 1e-12
+        W = 1.0 / (1.0 + dist2)
+        W.fill_diagonal_(0.0)
+        Q = W / W.sum()
+        # 经典梯度：∂C/∂y = 4 Σ_j (p − q)(y_i − y_j)·w_ij（q·Z = w）
+        grad = 4.0 * (((P - Q) * W).unsqueeze(-1) * diff).sum(dim=1)
+        Y_new = Y + 0.8 * (Y - Y_prev) - eta * grad
+        Y_prev = Y
+        Y = Y_new
+        if torch.isnan(Y).any():
+            raise RuntimeError("t-SNE diverged at iter %d（数据或学习率问题）" % it)
+    return Y.detach().cpu().numpy()
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     if args.bar:
         return run_bar(args)
+    if args.tsne:
+        return run_tsne(args)
     if args.probe:
         print("2b 探针表未落地：需先扩展 script/utils/ridge_probe.py 支持三配置 F 与 contact/yaw 目标（任务书 §二 实验 2b）。")
-        return 1
-    if args.tsne:
-        print("2c t-SNE 未落地：依赖 R_Test5 ρ 网格落盘的表征 dump（任务书 §二 实验 2c）。")
         return 1
     parse_args(["--help"])
     return 0
