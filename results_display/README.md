@@ -377,7 +377,7 @@ python results_display/script/r_test4_v2t.py --config-id VT2M,V2M --export-sessi
 | 编号 | 任务书实验 | 回答的问题 | 脚本 |
 | --- | --- | --- | --- |
 | R_Test5 ρ 网格 | 实验 1 | 模态按任意比例缺失时性能怎么变 | `anysole/rho_grid.py`（生成器）+ `r_test5_rho_grid.py`（前端）✅ |
-| R_Test6 互补分析 | 实验 2 | 融合是互补还是拼贴；F 是不是"完整状态" | `r_test6_complement.py`（2a/2c 已落地；2b 探针表规划中）✅ |
+| R_Test6 互补分析 | 实验 2 | 融合是互补还是拼贴；F 是不是"完整状态" | `r_test6_complement.py`（2a/2b/2c 全落地）✅ |
 | R_Test7 dropout 消融 | 实验 3 | 训练时的模态 dropout 是不是必需的 | `r_test7_dropout_ablation.py`（C1 对比表 + C2 单流探针）✅ |
 | R_Test8 T2M 上半身 | 实验 4 | 触觉没有上肢信号，合理上半身从哪来 | `r_test8_t2m_upper.py`（t_tok 无先验 ridge 基线）✅ |
 | R_Test9 信任画像 | 实验 5 | 每个身体部位"信谁" | `r_test9_trust.py`（E1 信任堆叠条 + E2 注意力）✅ |
@@ -411,6 +411,10 @@ T 仅在 V 缺失时兜底（上限 69.6）；纯先验 77.0 PA / 171.9 MPJPE；
 完整数值与首读结论见任务书实验 1。
 
 ```bash
+# 2b 探针表（Ft/Fv/融合 F 三列 ridge 读出 + 上界判定；fit 需 train repr）
+python -m anysole.rho_grid --ckpt ... --split train --seeds 0 --reuse    # 先落 train repr
+python results_display/script/r_test6_complement.py --probe
+
 # 2c t-SNE（三配置 F 散点，读 ρ 网格 repr dump）
 python results_display/script/r_test6_complement.py --tsne --sessions 8
 

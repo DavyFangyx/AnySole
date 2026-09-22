@@ -32,18 +32,7 @@ import torch
 
 from anysole.data.dataset import AnySoleDataset, load_split_ids
 from anysole.train import load_config
-from anysole.utils.eval_protocol import (
-    ANKLE_FOOT_JOINTS,
-    HAND_JOINTS,
-    LOWER_JOINTS,
-    PART_JOINTS,
-    PART_NAMES,
-    UPPER_JOINTS,
-    _pa_align,
-)
-from anysole.utils.geometry import fk_pose6d
-from utils.repr_readout import align_stream, gt_targets, repr_frames
-from utils.ridge_probe import ridge_apply, ridge_fit
+from utils.repr_readout import gt_targets, repr_frames, stream_readout
 
 KEY_METRICS = ["PA-MPJPE", "MPJPE", "RTE_norm", "yaw_abs_deg", "contact_f1",
                "foot_slide_mm", "joint_limit_viol_elbow", "joint_limit_viol_knee"]
@@ -101,11 +90,6 @@ def run_c1(args: argparse.Namespace) -> int:
     return 0
 
 
-def _circ_diff(a, b):
-    d = a - b
-    return np.arctan2(np.sin(d), np.cos(d))
-
-
 def run_c2(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     repr_dir = args.repr_dir or (
@@ -133,39 +117,13 @@ def run_c2(args: argparse.Namespace) -> int:
     eval_sids = session_ids[n_fit_sessions:]
     for stream, (rV, rT) in STREAM_CORNERS.items():
         frames = repr_frames(repr_dir, rV, rT, session_ids)
-        X_all, Y_pose, Y_contact, Y_yaw, _metas = align_stream(frames, targets, stream)
-        X_fit = {sid: frames[sid] for sid in fit_sids}
-        X_eval = {sid: frames[sid] for sid in eval_sids}
-        Xf, Ypf, Ycf, Yyf, _ = align_stream(X_fit, targets, stream)
-        Xe, Ype, Yce, Yye, _ = align_stream(X_eval, targets, stream)
-        Xf = torch.from_numpy(Xf).float().to(device)
-        Xe = torch.from_numpy(Xe).float().to(device)
-        print("%s: fit %d 帧 × %d 维 / eval %d 帧" % (stream, Xf.shape[0], Xf.shape[1], Xe.shape[0]))
-        for name, Yf, Ye, post in (
-            ("pose", torch.from_numpy(Ypf).float().to(device),
-             torch.from_numpy(Ype).float().to(device), "pose"),
-            ("contact", torch.from_numpy(Ycf).float().to(device),
-             torch.from_numpy(Yce).float().to(device), "contact"),
-            ("yaw", torch.from_numpy(Yyf).float().to(device),
-             torch.from_numpy(Yye).float().to(device), "yaw"),
-        ):
-            W = ridge_fit(Xf, Yf, args.ridge_lam, device)
-            pred = ridge_apply(W, Xe, device)
-            if post == "pose":
-                err = _eval_pose(pred, targets, eval_sids)
-                for agg, v in err.items():
-                    rows.append({"stream": stream, "target": "pose_PA_" + agg,
-                                 "value": round(v, 2)})
-            elif post == "contact":
-                acc = ((pred > 0.5) == (Ye > 0.5)).float().mean().item()
-                rows.append({"stream": stream, "target": "contact_acc",
-                             "value": round(acc, 4)})
-            else:
-                yaw_p = torch.atan2(pred[:, 0], pred[:, 1]).cpu().numpy()
-                yaw_g = torch.atan2(Ye[:, 0], Ye[:, 1]).cpu().numpy()
-                mae = float(np.abs(_circ_diff(yaw_p, yaw_g)).mean() * 180.0 / np.pi)
-                rows.append({"stream": stream, "target": "yaw_MAE_deg",
-                             "value": round(mae, 2)})
+        readout = stream_readout(
+            {s: frames[s] for s in fit_sids},
+            {s: frames[s] for s in eval_sids},
+            targets, stream, args.ridge_lam, device,
+        )
+        for target, value in readout.items():
+            rows.append({"stream": stream, "target": target, "value": value})
     with open(out_dir / "c2_singlestream_readout.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
@@ -176,41 +134,6 @@ def run_c2(args: argparse.Namespace) -> int:
                                  {k: v for k, v in r.items() if k not in ("stream", "target")}))
     print("产物：%s/c2_singlestream_readout.csv" % out_dir)
     return 0
-
-
-def _eval_pose(pred: torch.Tensor, targets: dict, session_ids) -> dict:
-    """解码姿态按帧 Procrustes + 部位聚合（mm）。"""
-    total = 0
-    err = torch.zeros(24, device=pred.device)
-    pa = torch.zeros(24, device=pred.device)
-    n = 0
-    idx = 0
-    for sid in session_ids:
-        t = targets.get(sid)
-        if t is None:
-            continue
-        T = len(t["pose_gt"])
-        pose = pred[idx: idx + T].reshape(1, T, -1)
-        trans = torch.from_numpy(t["gt_trans"]).float().to(pred.device)[None]
-        kp = fk_pose6d(pose, trans,
-                       torch.from_numpy(t["offsets"]).float().to(pred.device)[None],
-                       torch.from_numpy(t["parents"]).long().to(pred.device)[None])[0]
-        kp_gt = torch.from_numpy(t["kp_gt"]).float().to(pred.device)
-        e = torch.linalg.vector_norm(kp - kp_gt, dim=-1)      # (T,24)
-        aligned = _pa_align(kp, kp_gt)
-        p = torch.linalg.vector_norm(aligned - kp_gt, dim=-1)
-        err += e.sum(dim=0)
-        pa += p.sum(dim=0)
-        n += T
-        idx += T
-    err /= n
-    pa /= n
-    out = {"overall": float(pa.mean().item()) * 1000.0}
-    for agg, joints in (("upper", UPPER_JOINTS), ("lower", LOWER_JOINTS),
-                        ("anklefoot", ANKLE_FOOT_JOINTS), ("hands", HAND_JOINTS)):
-        flat = np.asarray(joints).ravel().tolist()
-        out[agg] = float(pa[flat].mean().item()) * 1000.0
-    return out
 
 
 def main(argv=None) -> int:

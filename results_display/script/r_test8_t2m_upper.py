@@ -27,9 +27,8 @@ import torch
 
 from anysole.data.dataset import AnySoleDataset, load_split_ids
 from anysole.train import load_config
-from utils.repr_readout import align_stream, gt_targets, repr_frames
+from utils.repr_readout import align_stream, eval_pose_readout, gt_targets, repr_frames
 from utils.ridge_probe import ridge_apply, ridge_fit
-from r_test7_dropout_ablation import _eval_pose
 
 UPPER_KEYS = ("upper", "hands", "headneck", "l_arm", "r_arm")
 
@@ -88,7 +87,7 @@ def main(argv=None) -> int:
     print("t_tok: fit %d 帧 / eval %d 帧" % (Xf.shape[0], Xe.shape[0]))
     W = ridge_fit(Xf, torch.from_numpy(Ypf).float().to(device), args.ridge_lam, device)
     pred = ridge_apply(W, Xe, device)
-    ridge_upper = _eval_pose(pred, targets, eval_sids)
+    ridge_upper = eval_pose_readout(pred, targets, eval_sids)
 
     rows = []
     for key, label in (("PA-MPJPE_upper", "upper"), ("PA-MPJPE_hands", "hands")):

@@ -4,7 +4,7 @@
 子命令（按任务书阶段逐步落地）：
   --bar   2a 互补 bar：每部位 V2M / T2M / VT2M 三根柱（PA-MPJPE）+ Δ 判据图 + 辅助指标。
           纯读已落盘的 fseries（metrics/<split>_fseries.json），零重训、不加载模型。
-  --probe 2b 探针表：Ft/Fv/融合 F 的 ridge 读出（依赖 script/utils/ridge_probe.py 扩展，未落地）。
+  --probe 2b 探针表（已实现：Ft/Fv/融合 F 三列 ridge 读出 + "融合吃满两边"判定）。
   --tsne  2c t-SNE：三配置 F 的降维散点（已实现：读 R_Test5 的表征 dump，自带 torch t-SNE）。
 
 2a 判据（任务书）：下肢/接触 VT2M 应优于 V2M（T 的贡献），全局轨迹/yaw VT2M 应优于
@@ -128,9 +128,13 @@ def tol_for(key: str, base: float) -> float:
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="R_Test6 互补分析（任务书实验 2）")
     parser.add_argument("--bar", action="store_true", help="2a 互补 bar（已实现）")
-    parser.add_argument("--probe", action="store_true", help="2b 探针表（未落地）")
+    parser.add_argument("--probe", action="store_true", help="2b 探针表（已实现：Ft/Fv/融合 F 的 ridge 读出）")
     parser.add_argument("--tsne", action="store_true", help="2c t-SNE（已实现：三配置 F 降维散点）")
     parser.add_argument("--split", choices=("val", "test"), default="val")
+    parser.add_argument("--fit-split", choices=("train", "val", "test"), default="train",
+                        help="ridge 拟合 split（train 需先跑 python -m anysole.rho_grid --split train）")
+    parser.add_argument("--fit-sessions", type=int, default=None,
+                        help="拟合用 session 数上限（默认全部）")
     parser.add_argument("--model-dir", type=Path,
                         default=REPO / "results" / "AnySole" / "V4B_joint_and",
                         help="模型目录（含 metrics/<split>_fseries.json）")
@@ -140,7 +144,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                         default=REPO / "results_display" / "result" / "r_test6_complement",
                         help="产物目录")
     parser.add_argument("--sessions", type=int, default=None,
-                        help="t-SNE 用到的 session 数（默认全部）")
+                        help="t-SNE / 2b 评测用 session 数（默认全部）")
+    parser.add_argument("--ridge-lam", type=float, default=1.0,
+                        help="2b ridge 正则系数")
     parser.add_argument("--max-points", type=int, default=800,
                         help="t-SNE 每配置采样帧数上限")
     parser.add_argument("--tol", type=float, default=2.0,
@@ -387,6 +393,79 @@ def run_bar(args: argparse.Namespace) -> int:
     return 0
 
 
+PROBE_CORNERS = {"Ft": (0, 100), "Fv": (100, 0), "Ff": (100, 100)}
+PROBE_TOL = {"pose_PA_": 2.0, "contact_acc": 0.02, "yaw_MAE_deg": 2.0}
+
+
+def run_probe(args: argparse.Namespace) -> int:
+    """2b 探针表：Ft（只喂 T 的 F）/ Fv（只喂 V 的 F）/ 融合 F 的 ridge 读出。
+
+    判据（任务书）：融合 F 每行都逼近两个单模态各自的**上界**（Ff ≈ min(Ft,Fv)）
+    = 融合吃满了两边、没被稀释。ridge 在 --fit-split 上拟合（默认 train，需先跑
+    `python -m anysole.rho_grid --split train`），在 --split 上评测。
+    """
+    from anysole.data.dataset import AnySoleDataset, load_split_ids
+    from anysole.train import load_config
+    from utils.repr_readout import gt_targets, repr_frames, stream_readout
+
+    config = load_config(REPO / "anysole" / "configs" / "v1.yaml")
+    repr_dir = args.repr_dir or (
+        REPO / "results_display" / "result" / "r_test5_rho_grid" / "repr")
+    if not repr_dir.is_dir():
+        raise SystemExit("repr dump 缺失：%s（先跑 python -m anysole.rho_grid）" % repr_dir)
+
+    def build_dataset(split, sids):
+        return AnySoleDataset(
+            mode="eval", seq_root=Path(config["seq_root"]),
+            split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]),
+            window_length=int(config["tw"]), session_ids=sids,
+            contact_method=str(config.get("contact_method", "joint_and")),
+        )
+
+    fit_sids = load_split_ids(Path(config["split_csv"]), args.fit_split)
+    eval_sids = load_split_ids(Path(config["split_csv"]), args.split)
+    if args.fit_sessions is not None:
+        fit_sids = fit_sids[: args.fit_sessions]
+    if args.sessions is not None:
+        eval_sids = eval_sids[: args.sessions]
+    targets = gt_targets(build_dataset(args.fit_split, set(fit_sids)), set(fit_sids))
+    targets.update(gt_targets(build_dataset(args.split, set(eval_sids)), set(eval_sids)))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    columns = {}
+    for name, (rV, rT) in PROBE_CORNERS.items():
+        fit_frames = repr_frames(repr_dir, rV, rT, fit_sids)
+        eval_frames = repr_frames(repr_dir, rV, rT, eval_sids)
+        columns[name] = stream_readout(fit_frames, eval_frames, targets, "F",
+                                       args.ridge_lam, device)
+        print("%s: %s" % (name, {k: v for k, v in columns[name].items()}))
+
+    targets_keys = list(columns["Ff"].keys())
+    rows = []
+    for key in targets_keys:
+        tol = next((t for prefix, t in PROBE_TOL.items() if key.startswith(prefix)), 2.0)
+        ft, fv, ff = columns["Ft"][key], columns["Fv"][key], columns["Ff"][key]
+        upper = min(ft, fv)
+        ok = ff <= upper + tol
+        rows.append({"target": key, "Ft": ft, "Fv": fv, "Ff": ff,
+                     "upper_bound": upper, "Ff_minus_upper": round(ff - upper, 3),
+                     "verdict": "融合吃满两边" if ok else "融合被稀释"})
+    out_dir = args.out
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with open(out_dir / "probe_table.csv", "w", newline="", encoding="utf-8") as f:
+        import csv
+        w = csv.DictWriter(f, fieldnames=rows[0].keys())
+        w.writeheader()
+        w.writerows(rows)
+    print("2b 探针表（fit=%s %d sessions / eval=%s %d sessions）："
+          % (args.fit_split, len(fit_sids), args.split, len(eval_sids)))
+    for r in rows:
+        print("  %-18s Ft=%8.2f Fv=%8.2f Ff=%8.2f (上界 %8.2f) -> %s"
+              % (r["target"], r["Ft"], r["Fv"], r["Ff"], r["upper_bound"], r["verdict"]))
+    print("产物：%s/probe_table.csv" % out_dir)
+    return 0
+
+
 def run_tsne(args: argparse.Namespace) -> int:
     """2c t-SNE：三个角配置（VT2M/V2M/T2M）的 F 降维散点，按配置/动作着色。
 
@@ -541,8 +620,7 @@ def main(argv=None) -> int:
     if args.tsne:
         return run_tsne(args)
     if args.probe:
-        print("2b 探针表未落地：需先扩展 script/utils/ridge_probe.py 支持三配置 F 与 contact/yaw 目标（任务书 §二 实验 2b）。")
-        return 1
+        return run_probe(args)
     parse_args(["--help"])
     return 0
 

@@ -57,7 +57,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ρ 网格生成器（R_Test5 / 任务书实验 1）")
     parser.add_argument("--ckpt", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=REPO / "anysole" / "configs" / "v1.yaml")
-    parser.add_argument("--split", choices=("val", "test"), default="val")
+    parser.add_argument("--split", choices=("train", "val", "test"), default="val",
+                        help="train 只用于落 repr/npz 供 ridge train-fit（无 fseries 自检）")
     parser.add_argument("--seeds", type=str, default="0",
                         help="逗号分隔的 mask 种子（val 用 0,1,2 估方差；test 单种子 0）")
     parser.add_argument("--rhos", type=str, default="0,20,40,60,80,100",
@@ -136,8 +137,7 @@ def main(argv=None) -> int:
     no_imu = bool(saved.get("no_imu", False))
     v_hmr_mode = str(saved.get("v_input", "hrnet")) == "hmr_gvhmr"
     f2_repr = bool(saved.get("f2_repr", False))
-    session_ids = load_split_ids(Path(config["split_csv"]),
-                                 {"val": "val", "test": "test"}[args.split])
+    session_ids = load_split_ids(Path(config["split_csv"]), args.split)
     if args.limit_sessions is not None:
         session_ids = session_ids[: args.limit_sessions]
     dataset = AnySoleDataset(
@@ -172,7 +172,7 @@ def main(argv=None) -> int:
     for i in range(len(dataset)):
         groups.setdefault(dataset[i]["session_id"], []).append(i)
 
-    metrics_path = out_dir / "grid_metrics.json"
+    metrics_path = out_dir / ("grid_metrics_%s.json" % args.split)
     prev = {}
     if metrics_path.is_file():
         try:
@@ -220,7 +220,13 @@ def main(argv=None) -> int:
     }
     metrics_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
                             encoding="utf-8")
-    print("wrote %s" % metrics_path)
+    # 规范文件 = 最近一次 val run（前端默认读它）；train/test 只写分 split 副本
+    if args.split == "val":
+        (out_dir / "grid_metrics.json").write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print("wrote %s (+ grid_metrics.json)" % metrics_path)
+    else:
+        print("wrote %s" % metrics_path)
     return 0
 
 
