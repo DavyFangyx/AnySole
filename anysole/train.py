@@ -42,6 +42,7 @@ from anysole.types import (
     assert_batch_shapes,
     stacked_variant_name,
 )
+from anysole.registry import infer_anysole_paths
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.utils.geometry import f2_to_world, fk_pose6d
 from anysole.utils.losses import soft_contact_from_keypoints
@@ -584,13 +585,21 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--out-dir remains an explicit override only.",
     )
     parser.add_argument("--init-from", type=Path, default=None,
-                        help="F0b fast track: warm-start from an existing checkpoint. "
+                        help="Warm-start from an existing checkpoint.  INFERRED from the model "
+                             "registry when omitted (--model-name's parent, or the base model "
+                             "for a variant dir) — this flag is a manual override only. "
                              "Only state-dict keys whose names AND shapes match the current "
                              "model are copied (everything else keeps its fresh init), so "
                              "e.g. an E3 anysolev1 ckpt can seed anysolev2 — the V1 pose-head "
                              "diffusion projections (proj_*/timestep_token) have no V2 "
                              "counterpart and are skipped automatically. --init-drop adds "
                              "explicit prefixes to skip.")
+    parser.add_argument(
+        "--from-scratch",
+        action="store_true",
+        help="Disable the inferred warm-start: train with fresh weights even when the "
+        "registry has a parent for --model-name. Conflicts with --init-from.",
+    )
     parser.add_argument("--init-drop", type=str, default="",
                         help="Comma-separated state-dict key prefixes to skip in addition "
                              "to the automatic name/shape matching (e.g. 'pose_head.' to "
@@ -985,14 +994,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Keep model variants independent in the centralized results tree. An
     # explicit --out-dir remains authoritative for custom experiments.
     # Otherwise the dir is INFERRED (2026-09-22): model-name + contact-method
-    # + stacked hyperparameter fields built from the effective config.
-    if args.out_dir is None:
-        if args.model_name is None:
-            raise ValueError(
-                "--out-dir omitted: pass --model-name (dir identifier, e.g. V3_4a) so the "
-                "output dir is inferred as <model-name>_<contact>[/<stacked fields>]/checkpoints, "
-                "or pass --out-dir explicitly for a custom experiment."
-            )
+    # + stacked hyperparameter fields built from the effective config; the
+    # warm-start source is inferred from the model registry the same way
+    # (--from-scratch disables it, --init-from overrides it manually).
+    if args.model_name is not None:
         contact_method = str(config.get("contact_method", "tactile_abs"))
         variant = stacked_variant_name(
             tw=int(config["tw"]),
@@ -1002,7 +1007,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             lambda_traj=float(config.get("lambda_traj", 1.0)),
             lambda_kp=float(config.get("lambda_kp", 1.0)),
         )
-        config["out_dir"] = str(anysole_model_dir(args.model_name, contact_method, variant) / "checkpoints")
+        inferred = infer_anysole_paths(args.model_name, variant=variant, contact=contact_method)
+        if args.out_dir is None:
+            config["out_dir"] = str(inferred["model_dir"] / "checkpoints")
+        if args.init_from is None and not args.from_scratch:
+            if inferred["init_from"] is None:
+                raise ValueError(
+                    "--model-name %r has no registered parent and --init-from was not given; "
+                    "pass --init-from <ckpt> or --from-scratch." % args.model_name
+                )
+            args.init_from = Path(inferred["init_from"])
+    else:
+        if args.out_dir is None:
+            raise ValueError(
+                "--out-dir omitted: pass --model-name (dir identifier, e.g. V3_4a) so the "
+                "output dir is inferred as <model-name>_<contact>[/<stacked fields>]/checkpoints, "
+                "or pass --out-dir explicitly for a custom experiment."
+            )
+        if args.from_scratch:
+            raise ValueError("--from-scratch requires --model-name")
+    if args.init_from is not None and args.from_scratch:
+        raise ValueError("--from-scratch conflicts with --init-from")
     if modal == MODEL_ANYSOLEV2:
         # F0b: regression model (model_v2.py) — V1 structure, regress pose
         # head, no diffusion pair in forward.

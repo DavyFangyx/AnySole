@@ -42,11 +42,26 @@ from anysole.utils.eval_protocol import (
     _pa_align,
 )
 from anysole.utils.geometry import fk_pose6d
+from anysole.registry import infer_anysole_paths
 
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Ridge-on-F readout ceiling probe (F0a).")
-    parser.add_argument("--ckpt", type=Path, required=True)
+    parser.add_argument("--ckpt", type=Path, default=None,
+                        help="Checkpoint .pt — inferred from --model-name via the registry "
+                        "when omitted (manual override only).")
+    parser.add_argument("--model-name", default=None,
+                        help="Model DIRECTORY identifier (e.g. V3_4a); with --ckpt omitted the "
+                        "checkpoint is inferred as <model-name>_<contact>[/<variant>]/"
+                        "checkpoints/ckpt_{which}.pt.")
+    parser.add_argument("--variant", default=None,
+                        help="Stacked hyperparameter fields under the model dir (e.g. tw40).")
+    parser.add_argument("--contact-method", default="joint_and",
+                        help="Contact-label scheme in the dir name (default joint_and).")
+    parser.add_argument("--which", choices=("last", "best"), default="last",
+                        help="Which checkpoint to address: last = ckpt_last (end of every "
+                        "run), best = ckpt_best (val-metric-best intermediate, for final "
+                        "reports).")
     parser.add_argument("--config", type=Path, default=REPO / "anysole" / "configs" / "v1.yaml")
     parser.add_argument("--split", choices=("val", "test"), default="val",
                         help="Evaluation split (the ridge is always fitted on train).")
@@ -124,6 +139,13 @@ def mpjpe_table(pose_pred: torch.Tensor, dataset, device: torch.device, batch_si
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if args.ckpt is None:
+        if args.model_name is None:
+            raise ValueError("--ckpt is required unless --model-name is given")
+        args.ckpt = infer_anysole_paths(
+            args.model_name, variant=args.variant,
+            contact=args.contact_method, which=args.which,
+        )["ckpt"]
     device = resolve_device(args.device)
     config = load_config(args.config)
     checkpoint = torch.load(args.ckpt, map_location="cpu")

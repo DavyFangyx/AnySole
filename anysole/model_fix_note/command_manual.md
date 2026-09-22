@@ -11,9 +11,13 @@
   `V3_3B_joint_and`（V4A 聚类组目录 `V4A_joint_and`）。
 - **变体命名（字段堆叠，2026-09-22 起）**：基座目录下的超参子目录，字段顺序
   固定 tw→st→lr→lp→lt→lk、默认省略（如 `V3_4a_joint_and/tw40`、
-  `tw40_st20`、`t0003_tw40_lr3e4`）。**模型+接触+超参 = ckpt 地址**——
-  eval 用 `--variant`、R_Test1/R_Test3 用 `--variant`、ridge/探针直接用
-  ckpt 路径，三种定位方式等价。
+  `tw40_st20`、`t0003_tw40_lr3e4`）。**全流程零手写地址（2026-09-22 用户
+  裁定）**：所有真实路径由 `anysole/registry.py` 的 `infer_anysole_paths`
+  从标识推导（模型名+variant+which），warm-start 链 = registry 单一事实源；
+  train 用 `--model-name`（init-from 自动=registry 父节点、out-dir 自动）；
+  eval/infer/ridge 用 `--model-name [--variant] [--which]`；R_Test1/R_Test3
+  用 `--modal`（=目录名）；tune 用 `--model-name`。`--out-dir/--init-from/
+  --ckpt/--write-motion` 一律禁止手写，仅作调试覆盖。
 - **checkpoint 状态**：group_ids 修复（2026-09-20）后，此前全部权重已归档
   `results/backup/AnySole_BVH_backup/`。**2026-09-21 warm-start 链重训完成**：
   F0b / F4a / F2 / F2+4 / V3-2 / V3-3A / V3-3B 基座全部训出并过 val 协议验收
@@ -49,11 +53,12 @@
 - 评估默认自动跑协议 1 次（`--protocol-seed 0`）；`--no-protocol` 只出 metrics；
   `--no-robustness` 关鲁棒集。每步验收读 `metrics/<split>_fseries.json` +
   `metrics/ridge_probe_<split>.json`（ridge 探针每步必跑：
-  `results_display/script/ridge_probe.py --ckpt <ckpt> --split val --device <GPU>`）。
+  `results_display/script/ridge_probe.py --model-name <名称> [--variant <变体>]
+  --split val --device <GPU>`）。
 - wandb tag 与目录同名（如 `f0b_jointand`），与 BVH 时代历史组天然区分。
 - `--device` 按 `nvidia-smi` 空闲卡填（示例用 cuda:4）。
-- 单会话推理（需要时）：`/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.infer --ckpt <ckpt> --modal anysolev2
-  --contact-method joint_and --session <SID> --config-id VT2M --device <GPU>`。
+- 单会话推理（需要时）：`/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.infer --modal anysolev2
+  --contact-method joint_and --model-name <名称> [--variant <变体>] --session <SID> --config-id VT2M --device <GPU>`。
 
 ---
 
@@ -72,15 +77,15 @@ from-scratch 400ep 是筛选预算，显著弱于 BVH 时代 warm-start 的 F0b_
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
   --modal anysolev2 --contact-method joint_and \
   --epochs 400 --grad-clip 5.0 \
-  --out-dir results/AnySole/F0b_joint_and/checkpoints \
+  --model-name F0b --from-scratch \
   --wandb_mode online --wandb_experiment_tag f0b_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:4
 
 # ② 评估（协议 seed0 + 导出 SMPL NPZ，R_Test1/R_Test3 依赖此步）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/F0b_joint_and/checkpoints/ckpt_last.pt \
+  --model-name F0b \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-motion results/AnySole/F0b_joint_and/predictions/eval_motion \
+  --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
 # ③ 可视化 R_Test1（骨架动画 → results_display/result/r_test1_visualize/AnySole/F0b/）
@@ -114,16 +119,15 @@ VT contact_f1 0.62（F0b 0.43）。
   --modal anysolev2 --contact-method joint_and \
   --t-encoder foot_conv \
   --epochs 400 --grad-clip 5.0 \
-  --init-from results/AnySole/F0b_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/F4a_joint_and/checkpoints \
+  --model-name F4a \
   --wandb_mode online --wandb_experiment_tag f4a_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:5
 
 # ② 评估
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/F4a_joint_and/checkpoints/ckpt_last.pt \
+  --model-name F4a \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-motion results/AnySole/F4a_joint_and/predictions/eval_motion \
+  --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
 # ③ 可视化 R_Test1（骨架动画）
@@ -153,16 +157,15 @@ PA 49.3、V2M 72.5 / 42.4、T2M 139.3 / 79.1；**yaw_drift 全配置大幅改善
   --modal anysolev2 --contact-method joint_and \
   --f2-repr \
   --epochs 400 --grad-clip 5.0 \
-  --init-from results/AnySole/F0b_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/F2_joint_and/checkpoints \
+  --model-name F2 \
   --wandb_mode online --wandb_experiment_tag f2_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:6
 
 # ② 评估（eval/协议/导出自动处理 f2→world 恢复）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/F2_joint_and/checkpoints/ckpt_last.pt \
+  --model-name F2 \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-motion results/AnySole/F2_joint_and/predictions/eval_motion \
+  --split val \
   --protocol-seed 0 --no-robustness --device cuda:6
 
 # ③ 可视化 R_Test1（骨架动画）
@@ -192,16 +195,15 @@ PA 39.3、V2M 64.5 / 36.2、**T2M 134.9 / 77.7（链内最优）**、yaw_drift 2
   --modal anysolev2 --contact-method joint_and \
   --f2-repr --t-encoder foot_conv \
   --epochs 400 --grad-clip 5.0 \
-  --init-from results/AnySole/F2_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/F2p4_joint_and/checkpoints \
+  --model-name F2p4 \
   --wandb_mode online --wandb_experiment_tag f2p4_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:7
 
 # ② 评估
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/F2p4_joint_and/checkpoints/ckpt_last.pt \
+  --model-name F2p4 \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-motion results/AnySole/F2p4_joint_and/predictions/eval_motion \
+  --split val \
   --protocol-seed 0 --no-robustness --device cuda:7
 
 # ③ 可视化 R_Test1（骨架动画）
@@ -238,16 +240,15 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --modal anysolev2 --contact-method joint_and \
   --t-encoder foot_conv --pose-parts 9 --lr-warmup-frac 0.05 \
   --epochs 740 --grad-clip 5.0 \
-  --init-from results/AnySole/F4a_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/V3_2_joint_and/checkpoints \
+  --model-name V3_2 \
   --wandb_mode online --wandb_experiment_tag v32_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:5
 
 # ② 评估
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/V3_2_joint_and/checkpoints/ckpt_last.pt \
+  --model-name V3_2 \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-motion results/AnySole/V3_2_joint_and/predictions/eval_motion \
+  --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
 # ③ 可视化 R_Test1（骨架动画）
@@ -301,16 +302,15 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --t-encoder foot_conv --pose-parts 9 --soft-parts \
   --lambda-assign 0.05 --lr-warmup-frac 0.05 \
   --epochs 740 --grad-clip 5.0 \
-  --init-from results/AnySole/V3_2_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/V3_3A_joint_and/checkpoints \
+  --model-name V3_3A \
   --wandb_mode online --wandb_experiment_tag v33a_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:6
 
 # ② 评估
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/V3_3A_joint_and/checkpoints/ckpt_last.pt \
+  --model-name V3_3A \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-motion results/AnySole/V3_3A_joint_and/predictions/eval_motion \
+  --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
 # ③ 可视化 R_Test1（骨架动画 → results_display/result/r_test1_visualize/AnySole/V3_3A/）
@@ -330,24 +330,23 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --t-encoder foot_conv --pose-parts 9 --soft-parts --gate sigma \
   --lambda-assign 0.05 --lr-warmup-frac 0.05 \
   --epochs 740 --grad-clip 5.0 \
-  --init-from results/AnySole/V3_3A_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/V3_3B_joint_and/checkpoints \
+  --model-name V3_3B \
   --wandb_mode online --wandb_experiment_tag v33b_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:7
 
 # ② 评估（同 V3-3A，换目录名）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/V3_3B_joint_and/checkpoints/ckpt_last.pt \
+  --model-name V3_3B \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-motion results/AnySole/V3_3B_joint_and/predictions/eval_motion \
+  --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
 # ③ 可视化 R_Test1（--modal V3_3B） / ④ 可视化 R_Test3（--modal V3_3B）：同上换名
 
 
-# 训练前 smoke（数值验收，§8.4；可选 --ckpt 验证 warm-start 继承）
+# 训练前 smoke（数值验收，§8.4；--model-name 解析 warm-start 检查 ckpt）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/smoke_v33_soft_gate.py \
-  --device cpu --ckpt results/AnySole/V3_2_joint_and/checkpoints/ckpt_last.pt
+  --device cpu --model-name V3_2
 ```
 
 > warm-start 继承：decoder 共享部分（self-attn / V 分支交叉注意力 / norm / FFN /
@@ -378,16 +377,15 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --modal anysolev2 --contact-method joint_and \
   --t-encoder foot_conv --f2-repr --pose-parts 9 --lr-warmup-frac 0.05 \
   --epochs 740 --grad-clip 5.0 \
-  --init-from results/AnySole/F2p4_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/V3_4a_joint_and/checkpoints \
+  --model-name V3_4a \
   --wandb_mode online --wandb_experiment_tag v34a_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:5
 
 # ② 评估（协议 seed0 + 导出 SMPL NPZ，R_Test1/R_Test3 依赖此步）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/V3_4c_joint_and/checkpoints/ckpt_last.pt \
+  --model-name V3_4c \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-motion results/AnySole/V3_4c_joint_and/predictions/eval_motion \
+  --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
 # ③ 可视化 R_Test1（骨架动画 → results_display/result/r_test1_visualize/AnySole/V3_4a/）
@@ -407,8 +405,7 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --t-encoder foot_conv --f2-repr --pose-parts 9 --soft-parts \
   --lambda-assign 0.05 --lr-warmup-frac 0.05 \
   --epochs 740 --grad-clip 5.0 \
-  --init-from results/AnySole/V3_4a_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/V3_4b_joint_and/checkpoints \
+  --model-name V3_4b \
   --wandb_mode online --wandb_experiment_tag v34b_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:6
 
@@ -422,19 +419,18 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --lambda-assign 0.05 --lambda-sigma 0.01 --sigma-freeze-frac 0.1 \
   --lr-warmup-frac 0.05 \
   --epochs 740 --grad-clip 5.0 \
-  --init-from results/AnySole/V3_4b_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/V3_4c_joint_and/checkpoints \
+  --model-name V3_4c \
   --wandb_mode online --wandb_experiment_tag v34c_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:7
 
 # ② 评估 / ③ R_Test1 / ④ R_Test3：同上，目录与 --modal 换 V3_4c
 # 门控差分验收（F4 修订判据：T vs VT 的 Δg_T(foot)>0.2、T-only 时 root g_V 较 VT 下降>0.2）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/probe_v33b_gates.py \
-  --ckpt results/AnySole/V3_4c_joint_and/checkpoints/ckpt_last.pt --device cuda:5
+  --model-name V3_4c --device cuda:5
 
 # T2M 偏航验收（目标 yaw_abs ≤10°）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/probe_v33b_yaw_t2m.py \
-  --motion-dir results/AnySole/V3_4c_joint_and/predictions/eval_motion
+  --model-name V3_4c
 ```
 
 > warm-start 继承（每步）：共享结构按名字继承（F2p4 的 4 维 traj_head.proj、
@@ -461,16 +457,15 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --assign-anneal-frac 0.7 --assign-lock-frac 0.7 --assign-lr-mult 5.0 \
   --lr-warmup-frac 0.05 \
   --epochs 740 --grad-clip 5.0 \
-  --init-from results/AnySole/F4a_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/V4A_joint_and/checkpoints \
+  --model-name V4A \
   --wandb_mode online --wandb_experiment_tag v4a_jointand \
   --wandb_eval_interval 10 --loss-cap 10.0 --device cuda:7
 
 # ② 评估（常规三配置；分组本身是产物，指标供 V4B 对照参考）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/V4A_joint_and/checkpoints/ckpt_last.pt \
+  --model-name V4A \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-motion results/AnySole/V4A_joint_and/predictions/eval_motion \
+  --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
 # ③ 读出学到的分组（A 矩阵 / 有效 K / ARI·NMI / 左右对称；落盘 partition_v4a_learned.json）
@@ -505,16 +500,15 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --t-encoder foot_conv --pose-parts 9 --lr-warmup-frac 0.05 \
   --part-json results/AnySole/F4a_joint_and/metrics/partitions_cluster_b_K9.json \
   --epochs 740 --grad-clip 5.0 \
-  --init-from results/AnySole/F4a_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/V4B_joint_and/checkpoints \
+  --model-name V4B \
   --wandb_mode online --wandb_experiment_tag v4b_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:6
 
 # ③ 评估（与 V3_2 对比 = 终审）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --ckpt results/AnySole/V4B_joint_and/checkpoints/ckpt_last.pt \
+  --model-name V4B \
   --modal anysolev2 --contact-method joint_and \
-  --split val --write-motion results/AnySole/V4B_joint_and/predictions/eval_motion \
+  --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
 # ④ 读出分组（落盘 metrics/partition_v4b_learned.json，格式同 V4A 组）
@@ -552,24 +546,24 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
 > 条缝），勿过度解读。成本估算：740ep ≈ 1.5h / 3.5h / 5h。
 
 ```bash
-# ① 训练（tw=80/120 同模板换 --tw/--stride/variant 名；--device 按 nvidia-smi 填）
+# ① 训练（地址全推断：--model-name + 字段自动拼目录，禁止写 --out-dir；
+#    tw80/120 只需换 --tw/--stride，目录自动落到 tw80/tw120，不可能互相覆盖）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
-  --modal anysolev2 --contact-method joint_and \
+  --modal anysolev2 --contact-method joint_and --model-name V3_4a \
   --t-encoder foot_conv --f2-repr --pose-parts 9 --lr-warmup-frac 0.05 \
-  --tw 60 --stride 40 \
+  --tw 40 --stride 40 \
   --epochs 740 --grad-clip 5.0 \
-  --init-from results/AnySole/V3_4a_joint_and/checkpoints/ckpt_last.pt \
-  --out-dir results/AnySole/V3_4a_joint_and/tw40/checkpoints \
   --wandb_mode online --wandb_experiment_tag tw40_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:2
+#   → out-dir 自动 = results/AnySole/V3_4a_joint_and/tw40/checkpoints
 
-# ② 评估（模型+接触+超参 → ckpt 地址；--write-motion 刷新导出）
+# ② 评估（--model-name + --variant → ckpt 地址自动解析；导出默认落
+#    <模型目录>/predictions/eval_motion，--ckpt/--write-motion 都不写）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --modal anysolev2 --contact-method joint_and --variant tw40 \
-  --split val --write-motion results/AnySole/V3_4a_joint_and/tw40/predictions/eval_motion \
-  --protocol-seed 0 --no-robustness --device cuda:7
+  --modal anysolev2 --contact-method joint_and --model-name V3_4a --variant tw40 \
+  --split val --protocol-seed 0 --no-robustness --device cuda:7
 
-# ③④ 可视化（R_Test1/R_Test3 同样用 --variant 定位）
+# ③④ 可视化（R_Test1/R_Test3 用 --variant 定位，输出自动落到变体名下）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test1_visualize_anysole.py \
   --modal V3_4a --contact-method joint_and --variant tw40 --split val \
   --config-id VT2M,V2M,T2M --gen gif --force
@@ -577,6 +571,13 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
 # ridge 探针每步必跑（ckpt 路径即定位）：
 # results_display/script/ridge_probe.py --ckpt results/AnySole/V3_4a_joint_and/tw40/checkpoints/ckpt_last.pt --split val --device <GPU>
 ```
+
+> **碰撞事故（2026-09-22，教训已入代码）**：三个 tw run 复制粘贴了显式
+> `--out-dir .../tw40/checkpoints`，全部互相覆盖——幸存的 ckpt 实为
+> tw=80/stride=40，已重贴标签为 `tw80_st40`；tw40 干净口径与 tw120 已丢失，
+> 需重跑。**此后所有命令禁止手写 --out-dir / --ckpt / --write-motion**：
+> 目录由 --model-name + 字段自动推断（train），或由 --model-name +
+> --variant 解析（eval），或由 ckpt 路径推导（探针）——地址只从字段来。
 
 ---
 

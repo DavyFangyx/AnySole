@@ -30,6 +30,7 @@ from anysole.utils.geometry import (
     rotmat_to_6d_np,
 )
 from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
+from anysole.registry import infer_anysole_paths
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.train import load_config, resolve_device
 from anysole.types import (
@@ -73,6 +74,25 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "under results/AnySole (checkpoints/ckpt_last.pt is used).",
     )
     parser.add_argument("--modal", choices=MODEL_NAMES, default=None)
+    parser.add_argument(
+        "--model-name",
+        default=None,
+        help="Model DIRECTORY identifier (e.g. V3_4a; distinct from --modal, the model "
+        "class). With --ckpt omitted, the checkpoint is inferred via the registry.",
+    )
+    parser.add_argument(
+        "--variant",
+        default=None,
+        help="Stacked hyperparameter fields under the model dir (e.g. tw40). Requires "
+        "--model-name.",
+    )
+    parser.add_argument(
+        "--which",
+        choices=("last", "best"),
+        default="last",
+        help="Which checkpoint to address when inferred: last = ckpt_last (end of every "
+        "run), best = ckpt_best (val-metric-best intermediate, for final reports).",
+    )
     parser.add_argument(
         "--contact-method",
         default=None,
@@ -476,10 +496,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.ckpt is None:
         if args.modal is None or args.contact_method is None:
             raise ValueError(
-                "--ckpt is required unless both --modal and --contact-method name a "
-                "model dir under results/AnySole (anysolev1_{ablation}_{contact_method})"
+                "--ckpt is required unless --modal and --contact-method (plus optional "
+                "--model-name/--variant) name a model dir under results/AnySole"
             )
-        args.ckpt = anysole_model_dir(args.modal, args.contact_method) / "checkpoints" / "ckpt_last.pt"
+        if args.variant and args.model_name is None:
+            raise ValueError("--variant requires --model-name (the dir identifier, e.g. V3_4a)")
+        dir_name = args.model_name or args.modal
+        args.ckpt = infer_anysole_paths(dir_name, variant=args.variant,
+                                        contact=args.contact_method, which=args.which)["ckpt"]
 
     if not requested_modes:
         # Automatic selection remains available when the mode is omitted.

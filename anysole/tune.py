@@ -31,6 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from anysole.registry import infer_anysole_paths
 from anysole.types import GAIT_ROOT, stacked_variant_name
 
 # Fixed base flags: every trial is V3_4a + sampled knobs, warm-started from
@@ -51,7 +52,7 @@ BASE_EVAL_FLAGS = (
     "--no-write-motion",
     "--no-protocol",
 )
-DEFAULT_BASE_CKPT = "results/AnySole/V3_4a_joint_and/checkpoints/ckpt_last.pt"
+DEFAULT_BASE_MODEL = "V3_4a"  # registry identifier (infer_anysole_paths resolves the ckpt)
 CONFIGS = ("VT2M", "V2M", "T2M")
 
 
@@ -99,10 +100,9 @@ def stacked_name(trial_number: int, params: dict) -> str:
     return "t%04d_%s" % (trial_number, variant)
 
 
-def trial_dir(base_ckpt: str, trial_number: int, params: dict) -> Path:
+def trial_dir(base_model: Path, trial_number: int, params: dict) -> Path:
     """Trial dir = the base model's dir + stacked trial name (model+contact+
     variant == the ckpt address, so eval/infer/probes resolve it unchanged)."""
-    base_model = (GAIT_ROOT / base_ckpt).parent.parent
     return base_model / stacked_name(trial_number, params)
 
 
@@ -132,7 +132,7 @@ def train_command(args, params: dict, out_dir: Path) -> list:
         "--lambda-traj", "%.6g" % params["lambda_traj"],
         "--lambda-kp", "%.6g" % params["lambda_kp"],
         "--epochs", str(args.epochs),
-        "--init-from", str(GAIT_ROOT / args.base_ckpt),
+        "--init-from", str(args.base_ckpt),
         "--out-dir", str(out_dir / "checkpoints"),
         "--device", args.device,
     ]
@@ -157,7 +157,7 @@ def parse_val_metrics(out_dir: Path) -> dict:
 
 
 def run_trial(args, study_name: str, trial_number: int, params: dict) -> dict:
-    out_dir = trial_dir(args.base_ckpt, trial_number, params)
+    out_dir = trial_dir(args.base_model_dir, trial_number, params)
     out_dir.mkdir(parents=True, exist_ok=True)
     log = out_dir / "trial.log"
     with log.open("w") as fh:
@@ -187,7 +187,7 @@ def objective(args, study_name: str):
         params = sample_params(trial)
         if args.dry_run:
             print("[dry-run] trial %04d: %s" % (trial.number, json.dumps(params)))
-            print("[dry-run]   train:", " ".join(train_command(args, params, trial_dir(args.base_ckpt, trial.number, params))))
+            print("[dry-run]   train:", " ".join(train_command(args, params, trial_dir(args.base_model_dir, trial.number, params))))
             return 0.0
         metrics = run_trial(args, study_name, trial.number, params)
         weights = args.objective_weights
@@ -226,7 +226,9 @@ def main(argv=None) -> int:
     ap.add_argument("--study-name", required=True)
     ap.add_argument("--n-trials", type=int, default=30)
     ap.add_argument("--epochs", type=int, default=150, help="Short per-trial budget (v1 has no pruning).")
-    ap.add_argument("--base-ckpt", default=DEFAULT_BASE_CKPT)
+    ap.add_argument("--model-name", default=DEFAULT_BASE_MODEL,
+                    help="Registry identifier of the base model each trial warm-starts from "
+                    "(e.g. V3_4a); its ckpt resolves via infer_anysole_paths.")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--sampler", choices=("tpe", "random"), default="tpe")
     ap.add_argument("--seed", type=int, default=0)
@@ -241,6 +243,12 @@ def main(argv=None) -> int:
     if len(weights) != 3 or any(w < 0 for w in weights) or sum(weights) <= 0:
         raise ValueError("--objective-weights must be three non-negative weights")
     args.objective_weights = weights
+    # Base addresses resolve through the registry (no user-written paths):
+    # every trial warm-starts from the base model's ckpt and lands under the
+    # base model's dir with a stacked trial name.
+    base_paths = infer_anysole_paths(args.model_name)
+    args.base_ckpt = base_paths["ckpt"]
+    args.base_model_dir = base_paths["model_dir"]
 
     storage = resolve_optuna_storage(args.study_name)
     sampler, pruner = build_optuna_components(args)

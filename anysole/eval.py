@@ -27,6 +27,7 @@ from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device
 from anysole.ablations.insole_drift.templates import load_template_bank
+from anysole.registry import infer_anysole_paths
 from anysole.types import (
     ANYSOLE_ROOT,
     CONFIG_MODE_NAMES,
@@ -40,7 +41,6 @@ from anysole.types import (
     MOTION_PROTOCOL,
     N_JOINTS,
     POSE_DIM,
-    anysole_model_dir,
     assert_batch_shapes,
 )
 
@@ -145,6 +145,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "(e.g. tw40 / tw40_st20 / t0003_tw40_lr3e4); model-name+contact+variant "
         "resolves to <model dir>/<variant>/checkpoints/ckpt_last.pt — the "
         "same address --ckpt would name (2026-09-22 stacked naming).",
+    )
+    parser.add_argument(
+        "--which",
+        choices=("last", "best"),
+        default="last",
+        help="Which checkpoint to address when inferred from --model-name. "
+        "last = ckpt_last (end of every run); best = ckpt_best (val-metric-best "
+        "intermediate, may be several epochs older — use for final reports).",
     )
     parser.add_argument(
         "--contact-method",
@@ -359,7 +367,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             (
                 args.modal,
                 args.contact_method,
-                anysole_model_dir(dir_name, args.contact_method, args.variant) / "checkpoints" / "ckpt_last.pt",
+                infer_anysole_paths(dir_name, variant=args.variant,
+                                    contact=args.contact_method, which=args.which)["ckpt"],
             )
         ]
     else:
