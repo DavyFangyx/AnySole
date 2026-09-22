@@ -31,7 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from anysole.types import GAIT_ROOT
+from anysole.types import GAIT_ROOT, stacked_variant_name
 
 # Fixed base flags: every trial is V3_4a + sampled knobs, warm-started from
 # the base checkpoint (the tw-shaped tensors reinitialize per sampled tw).
@@ -84,26 +84,19 @@ def resolve_optuna_storage(study_name: str) -> str:
     return "sqlite:///" + str((storage_dir / ("%s.db" % study_name)).resolve())
 
 
-def _fmt_lr(lr: float) -> str:
-    return "lr%.4g" % lr
-
-
 def stacked_name(trial_number: int, params: dict) -> str:
-    """t{NNNN} + stacked hyperparameter fields (2026-09-22 naming rule):
-    tw always, st when stride != tw, lr/lp/lt/lk only when non-default.
-    Fixed field order tw -> st -> lr -> lp -> lt -> lk."""
-    parts = ["t%04d" % trial_number, "tw%d" % params["tw"]]
-    if params["stride"] == "half":
-        parts.append("st%d" % (params["tw"] // 2))
-    if abs(params["lr"] - 1e-4) > 1e-12:
-        parts.append(_fmt_lr(params["lr"]))
-    if abs(params["lambda_pose"] - 3.0) > 1e-12:
-        parts.append("lp%.4g" % params["lambda_pose"])
-    if abs(params["lambda_traj"] - 1.0) > 1e-12:
-        parts.append("lt%.4g" % params["lambda_traj"])
-    if abs(params["lambda_kp"] - 1.0) > 1e-12:
-        parts.append("lk%.4g" % params["lambda_kp"])
-    return "_".join(parts)
+    """t{NNNN} + stacked hyperparameter fields, built by the SAME rule train
+    inference uses (types.stacked_variant_name) so a trial dir name always
+    matches the out-dir the subprocess derives."""
+    variant = stacked_variant_name(
+        tw=params["tw"],
+        stride=params["tw"] if params["stride"] == "tw" else params["tw"] // 2,
+        lr=params["lr"],
+        lambda_pose=params["lambda_pose"],
+        lambda_traj=params["lambda_traj"],
+        lambda_kp=params["lambda_kp"],
+    )
+    return "t%04d_%s" % (trial_number, variant)
 
 
 def trial_dir(base_ckpt: str, trial_number: int, params: dict) -> Path:

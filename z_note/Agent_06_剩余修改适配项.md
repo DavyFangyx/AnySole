@@ -38,7 +38,7 @@
 
 ### A. 通用/共享（MMVP 两条线 + 队列）
 
-- [ ] **A1 mmvp 环境**：`conda create -n mmvp python=3.8` + torch2.4.0+cu121 + human_body_prior==2.2.2.0 + open3d==0.18.x + torchgeometry 0.1.2 + pyrender + hydra-core 1.3 + trimesh + smplx + tensorboardX + numpy<1.24 + configargparse/icecream/xrprimer（toolkit 依赖）。实测 touch_gait 已含 torchgeometry/pyrender/hydra/trimesh/smplx/chumpy，只缺前两者；报错再退 py3.7/torch1.12
+- [ ] **A1 mmvp 环境**：`conda create -n mmvp python=3.8` + torch2.4.0+cu121 + legacy `human_body_prior==0.8.5.0`（当前 PyPI 索引没有 `2.2.2.0`，使用 `--no-deps` 防止其拉低 Torch）+ open3d==0.18.x + torchgeometry 0.1.2 + pyrender + hydra-core 1.3 + trimesh + smplx + tensorboardX + numpy<1.24 + configargparse/icecream/xrprimer（toolkit 依赖）。实测 touch_gait 已含 torchgeometry/pyrender/hydra/trimesh/smplx/chumpy，只缺前两者；报错再退 py3.7/torch1.12
 - [ ] **A2 RTM-pose keypoints**：新 env（mmpose，`openmim install mmpose`）+ `dependencies/rtmpose/rtmpose-m_..._body7-halpe26_700e-256x192-4d3e73dd_20230605.pth`（config 用 mmpose 包内 `rtmpose-m_8xb256-700e_body7-halpe26-256x192.py`）；对真实 RGB 逐帧出 HALPE-26 → 双路装配：toolkit `input/<sub>/<seq>/keypoints/%03d.npy` + FPP `datadir/<date>/<sub>/<seq>/keypoints/%03d.npy`（同内容两树，写入映射表）；**禁止用 3D GT 投影**
 - [ ] **A3 CLIFF 双格式**：`dependencies/CLIFF/demo.py` + 现有 `dependencies/MotionPRO/cliff_ckpt/hr48-...3dpw.pt`，一次前向出：toolkit 的 `<seq>_cliff_hr48.npz`（`pose` 72 维，进 init_data_dir）与 PoseTransOpt 的 `CLIFF_results.npz`（`shape/pose/global_t`）
 - [ ] **A4 深度**：把 backup 的 `rgb2depth.py` 合入 `Baselines/pressure_tookit/data_prep/`（depthpro env），生成逐帧 `depth/*.png`（uint16 毫米 + meta.json）+ `depth_mask/*.png`（有效性规则写进适配器测试）；PoseTransOpt 的 `template_scene_rgbd.npy` 单帧地面深度从同一源取（替代 ZoeDepth，记录偏离）

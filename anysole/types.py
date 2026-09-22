@@ -54,6 +54,30 @@ CLIFF_CKPT = (
 SMPL_MODEL_PATH = WORKSPACE_ROOT / "dependencies" / "smpl" / "SMPL_NEUTRAL.pkl"
 
 
+def stacked_variant_name(tw, stride, lr, lambda_pose, lambda_traj, lambda_kp) -> Optional[str]:
+    """Stacked hyperparameter variant name (2026-09-22 naming rule): fields in
+    fixed order tw -> st -> lr -> lp -> lt -> lk, a field written only when it
+    deviates from the base defaults (tw 20 / stride = tw / lr 1e-4 / lp 3 /
+    lt 1 / lk 1).  All-defaults -> None (the base model dir itself).
+    ``stride=None`` means "follow tw" (the dataset default)."""
+    tw = int(tw)
+    stride_eff = tw if stride is None else int(stride)
+    parts = []
+    if tw != 20:
+        parts.append("tw%d" % tw)
+    if stride_eff != tw:
+        parts.append("st%d" % stride_eff)
+    if abs(float(lr) - 1e-4) > 1e-12:
+        parts.append("lr%.4g" % float(lr))
+    if abs(float(lambda_pose) - 3.0) > 1e-12:
+        parts.append("lp%.4g" % float(lambda_pose))
+    if abs(float(lambda_traj) - 1.0) > 1e-12:
+        parts.append("lt%.4g" % float(lambda_traj))
+    if abs(float(lambda_kp) - 1.0) > 1e-12:
+        parts.append("lk%.4g" % float(lambda_kp))
+    return "_".join(parts) if parts else None
+
+
 def anysole_model_dir(modal: str, contact_method: str, variant: Optional[str] = None) -> Path:
     """Centralized results dir for one model variant: AnySole/<modal>_<contact_method>.
 

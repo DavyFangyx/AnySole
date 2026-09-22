@@ -40,6 +40,7 @@ from anysole.types import (
     WORKSPACE_ROOT,
     anysole_model_dir,
     assert_batch_shapes,
+    stacked_variant_name,
 )
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.utils.geometry import f2_to_world, fk_pose6d
@@ -572,6 +573,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "Default: config contact_method, falling back to tactile_abs (原 contact.npy).",
     )
     parser.add_argument("--out-dir", type=Path, default=None, help="Override checkpoint output directory.")
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default=None,
+        help="Model directory identifier (e.g. F0b / V3_4a). With --out-dir omitted the "
+        "output dir is INFERRED: <model-name>_<contact-method>[/<stacked fields>]/checkpoints, "
+        "where the stacked fields (tw/st/lr/lp/lt/lk, defaults omitted) are built from the "
+        "effective config — model+contact+fields == the ckpt address (2026-09-22 naming). "
+        "--out-dir remains an explicit override only.",
+    )
     parser.add_argument("--init-from", type=Path, default=None,
                         help="F0b fast track: warm-start from an existing checkpoint. "
                              "Only state-dict keys whose names AND shapes match the current "
@@ -973,12 +984,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     regress_mode = modal == MODEL_ANYSOLEV2
     # Keep model variants independent in the centralized results tree. An
     # explicit --out-dir remains authoritative for custom experiments.
+    # Otherwise the dir is INFERRED (2026-09-22): model-name + contact-method
+    # + stacked hyperparameter fields built from the effective config.
     if args.out_dir is None:
-        # Model dir naming: anysole_{version/ablation}_{contact_method}. Every
-        # contact-label scheme gets its own dir so sweeps never clobber each
-        # other's checkpoints/metrics.
+        if args.model_name is None:
+            raise ValueError(
+                "--out-dir omitted: pass --model-name (dir identifier, e.g. V3_4a) so the "
+                "output dir is inferred as <model-name>_<contact>[/<stacked fields>]/checkpoints, "
+                "or pass --out-dir explicitly for a custom experiment."
+            )
         contact_method = str(config.get("contact_method", "tactile_abs"))
-        config["out_dir"] = str(anysole_model_dir(modal, contact_method) / "checkpoints")
+        variant = stacked_variant_name(
+            tw=int(config["tw"]),
+            stride=config.get("stride"),
+            lr=float(config["lr"]),
+            lambda_pose=float(config.get("lambda_pose", 3.0)),
+            lambda_traj=float(config.get("lambda_traj", 1.0)),
+            lambda_kp=float(config.get("lambda_kp", 1.0)),
+        )
+        config["out_dir"] = str(anysole_model_dir(args.model_name, contact_method, variant) / "checkpoints")
     if modal == MODEL_ANYSOLEV2:
         # F0b: regression model (model_v2.py) — V1 structure, regress pose
         # head, no diffusion pair in forward.

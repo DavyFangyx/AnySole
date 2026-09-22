@@ -131,10 +131,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--modal", choices=MODEL_NAMES, default=None)
     parser.add_argument(
+        "--model-name",
+        default=None,
+        help="Model DIRECTORY identifier (e.g. V3_4a / F0b; distinct from --modal, "
+        "which is the model class). With --ckpt omitted, the checkpoint is inferred "
+        "as <model-name>_<contact>[/<variant>]/checkpoints/ckpt_last.pt. Required "
+        "when --variant is given.",
+    )
+    parser.add_argument(
         "--variant",
         default=None,
         help="Stacked hyperparameter fields under the model dir "
-        "(e.g. tw40 / tw40_st20 / t0003_tw40_lr3e4); model+contact+variant "
+        "(e.g. tw40 / tw40_st20 / t0003_tw40_lr3e4); model-name+contact+variant "
         "resolves to <model dir>/<variant>/checkpoints/ckpt_last.pt — the "
         "same address --ckpt would name (2026-09-22 stacked naming).",
     )
@@ -344,11 +352,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             (args.modal, args.contact_method, args.ckpt)
         ]
     elif args.modal is not None and args.contact_method is not None:
+        if args.variant and args.model_name is None:
+            raise ValueError("--variant requires --model-name (the dir identifier, e.g. V3_4a)")
+        dir_name = args.model_name or args.modal
         targets = [
             (
                 args.modal,
                 args.contact_method,
-                anysole_model_dir(args.modal, args.contact_method, args.variant) / "checkpoints" / "ckpt_last.pt",
+                anysole_model_dir(dir_name, args.contact_method, args.variant) / "checkpoints" / "ckpt_last.pt",
             )
         ]
     else:
