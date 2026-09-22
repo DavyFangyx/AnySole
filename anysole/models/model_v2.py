@@ -77,14 +77,16 @@ class AnySoleModelV2(nn.Module):
                                   out_dim=4 if self.f2_repr else 3)
         self.aux_heads = AuxHeads(dim=d, tw=tw)
 
-    def forward(self, V_feat, T_raw, T_phys, config_id, subject_ids=None, T_s2m=None, V_hmr=None):
+    def forward(self, V_feat, T_raw, T_phys, config_id, subject_ids=None, T_s2m=None,
+                V_hmr=None, mask_v=None, mask_t=None):
         """F0b: same inputs as V1 minus the diffusion pair (x_tau, tau).
 
         The visual stream follows ``v_input``: hrnet = V_feat (2051-d);
         hmr_gvhmr (F1) = V_hmr (1156-d GVHMR channel).  The tactile stream
         follows ``tactile_input``: raw108 = cat([T_raw, T_phys]) (encoded by
         LinearTemporalEncoder or FootConvEncoder per t_encoder); s2m50 =
-        T_s2m.
+        T_s2m.  ``mask_v/mask_t`` (bool, B×tw) are the ρ-grid per-frame
+        null-token masks (missing-rate 实验 1); None = old path.
         """
         if self.tactile_input == "s2m50":
             if T_s2m is None:
@@ -94,7 +96,8 @@ class AnySoleModelV2(nn.Module):
             T_tac = torch.cat([T_raw, T_phys], dim=-1)
         if self.v_input == "hmr_gvhmr" and V_hmr is None:
             raise ValueError("V_hmr is required when v_input='hmr_gvhmr'")
-        v_tok, t_tok = self.encoders(V_feat, T_tac, config_id, V_hmr=V_hmr)
+        v_tok, t_tok = self.encoders(V_feat, T_tac, config_id, V_hmr=V_hmr,
+                                     mask_v=mask_v, mask_t=mask_t)
         fused = self.fusion(v_tok, t_tok)
         memory = fused
         if self.tactile_direct:
@@ -113,6 +116,9 @@ class AnySoleModelV2(nn.Module):
             "pressure_hat": pressure_hat,
             "vfeat_hat": vfeat_hat,
             "F": fused,
+            # ρ 网格 repr dump（missing-rate 实验 2c/5 消费）：编码后 token 流。
+            "v_tok": v_tok,
+            "t_tok": t_tok,
             # V3-3/V4A: the learned (N_PARTS, N_JOINTS) assignment logits for
             # L_assign in losses.py, plus the temperature-scaled softmax A
             # actually used by the forward (None for every other config).

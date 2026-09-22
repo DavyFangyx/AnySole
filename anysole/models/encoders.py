@@ -143,7 +143,10 @@ class ModalEncoders(nn.Module):
                 in_dim = T_RAW_DIM + T_PHYS_DIM
             self.t_enc = LinearTemporalEncoder(in_dim, embeddings, 1)
 
-    def forward(self, V_feat, T_tac, config_id, V_hmr=None):
+    def forward(self, V_feat, T_tac, config_id, V_hmr=None, mask_v=None, mask_t=None):
+        """``mask_v/mask_t`` (bool, B×tw)：逐帧 null-token mask（missing-rate
+        实验 1 / ρ 网格）。True 的位置把该帧 token 换成 null token，叠加在
+        config 级替换之后；None = 不 mask（旧路径逐字节一致，零重训）。"""
         if self.v_input == "hmr_gvhmr":
             if V_hmr is None:
                 raise ValueError("V_hmr is required when v_input='hmr_gvhmr'")
@@ -161,4 +164,18 @@ class ModalEncoders(nn.Module):
 
         v_tok = torch.where(drop_v, null_v, v_tok)
         t_tok = torch.where(drop_t, null_t, t_tok)
+
+        def _apply_mask(mask, tok, null):
+            k = tok.shape[1] // self.tw
+            if tok.shape[1] != k * self.tw:
+                raise ValueError("token stream %d is not k*tw=%d; mask must be full-width"
+                                 % (tok.shape[1], self.tw))
+            m = mask.to(device=tok.device, dtype=torch.bool)
+            m = m.view(tok.shape[0], self.tw, 1).repeat_interleave(k, dim=1)
+            return torch.where(m, null, tok)
+
+        if mask_v is not None:
+            v_tok = _apply_mask(mask_v, v_tok, null_v)
+        if mask_t is not None:
+            t_tok = _apply_mask(mask_t, t_tok, null_t)
         return v_tok, t_tok
