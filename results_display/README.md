@@ -377,11 +377,28 @@ python results_display/script/r_test4_v2t.py --config-id VT2M,V2M --export-sessi
 | 编号 | 任务书实验 | 回答的问题 | 脚本 |
 | --- | --- | --- | --- |
 | R_Test5 ρ 网格 | 实验 1 | 模态按任意比例缺失时性能怎么变 | `anysole/rho_grid.py`（生成器）+ `r_test5_rho_grid.py`（前端） |
-| R_Test6 互补分析 | 实验 2 | 融合是互补还是拼贴；F 是不是"完整状态" | `r_test6_complement.py`（bar/探针表/t-SNE） |
+| R_Test6 互补分析 | 实验 2 | 融合是互补还是拼贴；F 是不是"完整状态" | `r_test6_complement.py`（2a 已落地；2b/2c 规划中） |
 | R_Test7 dropout 消融 | 实验 3 | 训练时的模态 dropout 是不是必需的 | `r_test7_dropout_ablation.py`（对比表） |
 | R_Test8 T2M 上半身 | 实验 4 | 触觉没有上肢信号，合理上半身从哪来 | `r_test8_t2m_upper.py` |
 | R_Test9 信任堆叠条 | 实验 5 | 每个身体部位"信谁" | `r_test9_trust.py` |
 | R_Test10 单模态训练对比 | 实验 6 | V-only / T-only 各自天花板 | `r_test10_singlemodal_compare.py`（对比表） |
+
+### R_Test6 2a 互补 bar（已落地）
+
+纯读 `metrics/<split>_fseries.json`（零重训），出三张图 + 汇总表：每部位三配置
+PA-MPJPE 柱图、发散 Δ 判据图（蓝=融合更优/红=更差/灰=持平）、辅助指标小倍图，
+并给双向判据（V4B val 实测：**V 向 6/6 全增益，T 向 gain 2 / loss 5 / flat 3
+→ 判定「拼贴，仅 V 向增益」**；总体 Δ(VT−V2M)=+5.0 / Δ(VT−T2M)=−29.2 mm）。
+
+```bash
+conda activate touch_gait
+python results_display/script/r_test6_complement.py --bar                     # val
+python results_display/script/r_test6_complement.py --bar --split val \
+    --model-dir results/AnySole/V4B_joint_and
+```
+
+产出（`result/r_test6_complement/`）：`complement_bar.png`、`complement_delta.png`、
+`complement_aux.png`、`complement_summary.{json,csv}`（表视图，Δ 统一"负=融合更好"口径）。
 
 ## 附录：训练侧 dropout 开关（两个独立旋钮）
 
