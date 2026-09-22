@@ -59,3 +59,5 @@ __pycache__/
 # Probs and execs in znote
 z_note/exec/
 z_note/probes/
+# 过程性下载文件（参考 zip/权重），不进 git
+/Download/
