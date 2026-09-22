@@ -436,6 +436,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "a near-uniform assignment instead of assuming it. Saved into the checkpoint.",
     )
     parser.add_argument(
+        "--part-json",
+        type=Path,
+        default=None,
+        help="V3-4b / 方案 B: load a learned hard partition (JSON, either a list "
+        "of joint-index lists or the probe output with a 'partition' key of "
+        "joint-name lists) and train the hard pose head with it. Requires "
+        "--pose-parts == len(partition); rejected with --soft-parts/--gate. "
+        "Saved into the checkpoint config so eval/infer reconstruct it.",
+    )
+    parser.add_argument(
         "--soft-parts",
         action="store_true",
         help="V3-3 (mechanism C structure, fix_plan_v3.md §V3-3): replace the "
@@ -814,6 +824,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["f2_repr"] = True
     if args.pose_parts is not None:
         config["pose_parts"] = int(args.pose_parts)
+    if args.part_json is not None:
+        # V3-4b / 方案 B: learned hard partition (probe_part_cluster_b.py
+        # output or a plain list of joint-index lists).
+        import json as _json
+        doc = _json.loads(Path(args.part_json).read_text())
+        groups = doc["partition"] if isinstance(doc, dict) and "partition" in doc else doc
+        if isinstance(groups, dict):
+            # probe format: {"slot_xx": ["joint_name", ...]} -> index lists
+            from anysole.types import JOINT_NAMES as _JN
+            name_to_idx = {n: i for i, n in enumerate(_JN)}
+            groups = [[name_to_idx[n] for n in names] for names in groups.values()]
+        part_joints = tuple(tuple(int(j) for j in g) for g in groups)
+        if int(config.get("pose_parts", 3)) != len(part_joints):
+            raise ValueError("--pose-parts (%d) must equal len(partition) (%d)"
+                             % (int(config.get("pose_parts", 3)), len(part_joints)))
+        config["part_joints"] = [list(g) for g in part_joints]
+        print("part-json: %d groups %s" % (len(part_joints), [list(g) for g in part_joints]))
     if args.soft_parts:
         config["soft_parts"] = True
     if args.gate is not None:
@@ -963,6 +990,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             pose_parts=int(config.get("pose_parts", 3)),
             soft_parts=bool(config.get("soft_parts", False)),
             gate=str(config.get("gate", "none")),
+            part_joints=tuple(tuple(int(j) for j in g) for g in config["part_joints"])
+            if config.get("part_joints") else None,
         ).to(device)
     else:
         if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):

@@ -286,6 +286,7 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
     if modal == MODEL_ANYSOLEV2:
         # F0b: regression model (model_v2.py); the regress pose head is
         # implied by the modal, and forward takes no diffusion pair.
+        part_joints = saved_config.get("part_joints")
         model = AnySoleModelV2(
             d=d_model, tw=tw, dropout=dropout, pose_layers=pose_layers,
             tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
@@ -293,6 +294,8 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
             pose_parts=pose_parts,
             soft_parts=bool(saved_config.get("soft_parts", False)),
             gate=str(saved_config.get("gate", "none")),
+            part_joints=tuple(tuple(int(j) for j in g) for g in part_joints)
+            if part_joints else None,
         ).to(device)
     else:
         model = AnySoleModel(

@@ -249,6 +249,8 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
             pose_parts=int(saved_config.get("pose_parts", 3)),
             soft_parts=bool(saved_config.get("soft_parts", False)),
             gate=str(saved_config.get("gate", "none")),
+            part_joints=tuple(tuple(int(j) for j in g) for g in saved_config["part_joints"])
+            if saved_config.get("part_joints") else None,
         ).to(device)
     else:
         model = AnySoleModel(

@@ -34,7 +34,7 @@ class AnySoleModelV2(nn.Module):
                  pose_layers=6, tactile_input="raw108",
                  tactile_direct=False, no_imu=False, v_input="hrnet",
                  t_encoder="linear", f2_repr=False, pose_parts=3,
-                 soft_parts=False, gate="none"):
+                 soft_parts=False, gate="none", part_joints=None):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -71,6 +71,7 @@ class AnySoleModelV2(nn.Module):
             self.embeddings, dim=d, tw=tw, nhead=nhead, dropout=dropout,
             n_layers=pose_layers, repr="6d", head_mode="regress",
             n_parts=self.pose_parts, soft_parts=self.soft_parts, gate=self.gate,
+            part_joints=part_joints,
         )
         self.traj_head = TrajHead(dim=d, tw=tw, nhead=nhead, dropout=dropout,
                                   out_dim=4 if self.f2_repr else 3)

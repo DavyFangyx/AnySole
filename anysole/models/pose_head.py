@@ -75,12 +75,13 @@ from anysole.types import (
 )
 
 
-def _part_place_idx() -> torch.Tensor:
+def _part_place_idx(part_joints=PART_JOINTS) -> torch.Tensor:
     """(POSE_DIM,) long tensor mapping joint-space position -> flat index in
     the part-order concatenation (V3-2: 9 unembed heads emit in PART_JOINTS
-    order, which is NOT joint order — r_leg/r_foot are swapped)."""
+    order, which is NOT joint order — r_leg/r_foot are swapped; V3-4b/方案 B
+    passes a learned partition instead)."""
     flat = []  # (joint-space pos, part-flat index)
-    for joints in PART_JOINTS:
+    for joints in part_joints:
         for j in joints:
             for d in range(6):
                 flat.append((6 * j + d, len(flat)))
@@ -242,12 +243,27 @@ class GatedDecoderLayer(nn.Module):
 
 
 class PoseHead(nn.Module):
-    def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8, dim_feedforward=1024, dropout=0.1, n_layers=6, repr="6d", head_mode="diffusion", n_parts=3, soft_parts=False, gate="none"):
+    def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8, dim_feedforward=1024, dropout=0.1, n_layers=6, repr="6d", head_mode="diffusion", n_parts=3, soft_parts=False, gate="none", part_joints=None):
         super().__init__()
         if head_mode not in ("diffusion", "regress"):
             raise ValueError("Unknown head_mode %r; expected 'diffusion' or 'regress'" % head_mode)
-        if n_parts not in (3, 9, 24):
-            raise ValueError("n_parts must be 3, 9 or 24, got %r" % n_parts)
+        if part_joints is not None:
+            # V3-4b / 方案 B: hard partition loaded from --part-json — any K
+            # (2..23) of joint-index groups covering all N_JOINTS once.
+            part_joints = tuple(tuple(int(j) for j in g) for g in part_joints)
+            flat = [j for g in part_joints for j in g]
+            if len(flat) != N_JOINTS or sorted(flat) != list(range(N_JOINTS)):
+                raise ValueError("part_joints must cover 0..%d exactly once, got %r"
+                                 % (N_JOINTS - 1, flat))
+            if not (2 <= len(part_joints) <= N_JOINTS - 1) or not all(g for g in part_joints):
+                raise ValueError("part_joints must be 2..%d non-empty groups" % (N_JOINTS - 1))
+            if soft_parts or gate != "none":
+                raise ValueError("part_joints requires the hard mode (no soft_parts, no gate)")
+            if n_parts != len(part_joints):
+                raise ValueError("n_parts (%d) must equal len(part_joints) (%d)"
+                                 % (n_parts, len(part_joints)))
+        if part_joints is None and n_parts not in (3, 9, 24):
+            raise ValueError("n_parts must be 3, 9 or 24 (or match a --part-json partition), got %r" % n_parts)
         if n_parts != 3 and (head_mode != "regress" or repr != "6d"):
             raise ValueError("n_parts=9/24 requires head_mode='regress' and repr='6d' (V3-2/V4A)")
         if gate not in ("none", "sigma"):
@@ -272,6 +288,7 @@ class PoseHead(nn.Module):
         self.n_parts = n_parts
         self.soft_parts = bool(soft_parts)
         self.gate = gate
+        self.part_joints = part_joints  # None unless a custom partition loads
         self._last_hypo = None  # (N_PARTS, B, tw, N_JOINTS, 6) detach, gate mode
         # V4A: temperature on the assignment softmax, annealed by train.py
         # via set_assign_temp (1.0 = soft; lower = sharper A).  eval/readout
@@ -294,10 +311,11 @@ class PoseHead(nn.Module):
             self.n_right = len(RIGHT_LEG_JOINTS)
             self.per_joint = 6
             self.pose_dim = POSE_DIM
-            if n_parts in (9, 24):
-                # V3-2/V4A: one query token per slot (9 parts, or 24 = one
-                # slot per joint in the clustering run); the slot embedding IS
-                # the slot identity.
+            if n_parts in (9, 24) or part_joints is not None:
+                # V3-2/V4A/custom partition: one query token per slot (9
+                # parts, 24 = one slot per joint in the clustering run, or a
+                # --part-json partition); the slot embedding IS the slot
+                # identity.
                 group_ids = torch.arange(n_parts, dtype=torch.long)
             else:
                 # Tokens are concatenated [body, left, right] in _embed and
@@ -314,7 +332,7 @@ class PoseHead(nn.Module):
         nn.init.normal_(self.group_emb.weight, std=0.02)
         self.register_buffer("group_ids", group_ids, persistent=True)
         n_tokens = self.n_body + self.n_left + self.n_right
-        if n_parts in (9, 24):
+        if n_parts in (9, 24) or part_joints is not None:
             n_tokens = n_parts
         self.n_tokens = n_tokens
 
@@ -370,13 +388,15 @@ class PoseHead(nn.Module):
             else:
                 self.part_logits = nn.Parameter(_part_logits_cluster_init(n_parts))
             self.out_body = self.out_left = self.out_right = None
-        elif n_parts == 9:
-            # V3-2: one unembed head per part; outputs concatenated in PART
-            # order then scattered back to joint order via part_place_idx.
+        elif n_parts == 9 or part_joints is not None:
+            # V3-2 / V3-4b(方案 B): one unembed head per part; outputs
+            # concatenated in PART order then scattered back to joint order
+            # via part_place_idx.  PART_JOINTS is the frozen human partition
+            # unless a --part-json partition is loaded.
             self.out_parts = nn.ModuleList(
-                [nn.Linear(dim, len(joints) * 6) for joints in PART_JOINTS]
+                [nn.Linear(dim, len(joints) * 6) for joints in (part_joints or PART_JOINTS)]
             )
-            self.register_buffer("part_place_idx", _part_place_idx(), persistent=True)
+            self.register_buffer("part_place_idx", _part_place_idx(part_joints or PART_JOINTS), persistent=True)
             self.out_body = self.out_left = self.out_right = None
         else:
             self.out_body = nn.Linear(dim, self.per_joint)
@@ -464,8 +484,9 @@ class PoseHead(nn.Module):
             assign = F.softmax(self.part_logits / self.assign_temp, dim=0)  # (n_parts, N_JOINTS)
             out = torch.einsum("pj,pbtjc->btjc", assign, parts)
             return out.reshape(batch, self.tw, POSE_DIM)
-        if self.n_parts == 9:
-            # V3-2: 9 part queries -> 9 part heads -> scatter to joint order.
+        if self.n_parts == 9 or self.part_joints is not None:
+            # V3-2/V3-4b: n_parts part queries -> n_parts part heads ->
+            # scatter to joint order.
             tokens = h.view(batch, self.tw, self.n_tokens, self.dim)
             parts = torch.cat(
                 [head(tokens[:, :, p]) for p, head in enumerate(self.out_parts)],
@@ -577,7 +598,7 @@ class PoseHead(nn.Module):
             )  # (n_parts, B, tw, POSE_DIM)
             return parts.reshape(self.n_parts, batch, self.tw, N_JOINTS, 6)
         out = h.new_zeros(N_PARTS, batch, self.tw, N_JOINTS, 6)
-        for p, (joints, head) in enumerate(zip(PART_JOINTS, self.out_parts)):
+        for p, (joints, head) in enumerate(zip(self.part_joints or PART_JOINTS, self.out_parts)):
             out[p, :, :, joints, :] = head(tokens[:, :, p]).view(batch, self.tw, len(joints), 6)
         return out
 
@@ -587,8 +608,8 @@ class PoseHead(nn.Module):
         mode."""
         if self.soft_parts:
             return F.softmax(self.part_logits.detach() / self.assign_temp, dim=0)
-        assign = torch.zeros(N_PARTS, N_JOINTS, device=self.group_emb.weight.device)
-        for p, joints in enumerate(PART_JOINTS):
+        assign = torch.zeros(self.n_parts, N_JOINTS, device=self.group_emb.weight.device)
+        for p, joints in enumerate(self.part_joints or PART_JOINTS):
             assign[p, joints] = 1.0
         return assign
 

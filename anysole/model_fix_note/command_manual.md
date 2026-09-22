@@ -439,26 +439,11 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
 
 ---
 
-## V4A · 24 槽梯度聚类（证明组：分组从数据学，不预设 K；warm-start 自 F4a）
+## V4A · 24 槽梯度聚类（证明组：warm-start 自 F4a，历史口径）
 
-> **定位**：V3-3A/B 审计结论——A 矩阵从人为划分初始化后 740ep 冻结（100% 一致），
-> σ 门控退化为静态分工，两个"学习"机制都没兑现。V4A 直接回答"人为 9 部位到底
-> 是不是数据支持的最优分组"：**24 槽（每关节一槽，K 上界）、A 均匀初始化、
-> 分组完全由梯度发现**。与 V3_2（F4a + 人为 9 部位，740ep）同起点同预算，
-> 唯一差异 = 分组来源（学习 vs 人为）。**历史口径（非 f2）**，与 V3-4 主线并行。
->
-> 机制（实现见 pose_head.py / losses.py `_cluster_assign_terms` / train.py）：
-> - 24 slot × 24 关节的 A 矩阵，softmax 温度从 1.0 退火到 0.2（`--assign-temp-*`）；
-> - L_assign 换成三件套：**退火熵**（前 `--assign-anneal-frac` 线性降到 0，防随机
->   锁定，替代 V3-3 会锁死 init 的固定熵）、**聚集奖励**（N²−Σm² ≥ 0，K 由它与
->   重构损失的张力涌现，替代强制 K=9 的负载均衡）、**死槽税**（Σm·e^(−βm)，把
->   碎渣负载归零让 K 读出干净）；
-> - **软 EM**：A 用独立 lr（`--assign-lr-mult 5`），步数过 `--assign-lock-frac`
->   后 A 冻结（M 步：头部在固定分组下收敛）；
-> - wandb 曲线 `assign/effective_K_ge0.5`、`assign/load_*` 实时观察分组涌现。
->
-> 训练前 smoke 必过：`z_note/probes/smoke_v4a_cluster24.py`（构造规则 / 均匀
-> 初始化 / 温度 / 聚类损失项符号 / F4a warm-start 继承）。
+> 24 槽 + 均匀初始化 A + 退火熵/聚集奖励/死槽税 + 软 EM（A 独立 lr、70% 锁定）。
+> 与 V3_2 同起点同预算，唯一差异 = 分组来源（学习 vs 人为）。
+> 训练前 smoke：`smoke_v4a_cluster24.py`。实测与结论见 `model_fix_note.md` 节点 6。
 
 ```bash
 # ① 训练（740ep warm-start 自 F4a；预算与 V3_2/V3_3A/B 对齐）
@@ -474,7 +459,7 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --init-from results/AnySole/F4a_joint_and/checkpoints/ckpt_last.pt \
   --out-dir results/AnySole/V4A_joint_and/checkpoints \
   --wandb_mode online --wandb_experiment_tag v4a_jointand \
-  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:6
+  --wandb_eval_interval 10 --loss-cap 10.0 --device cuda:7
 
 # ② 评估（常规三配置；分组本身是产物，指标供 V4B 对照参考）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
@@ -483,24 +468,61 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --split val --write-motion results/AnySole/V4A_joint_and/predictions/eval_motion \
   --protocol-seed 0 --no-robustness --device cuda:4
 
-# ③ 读出学到的分组（A 矩阵 / 有效 K / 与人为划分的 ARI·NMI / 左右对称检验；
-#    落盘 metrics/partition_v4a_learned.json 供 V4B 硬重训）
+# ③ 读出学到的分组（A 矩阵 / 有效 K / ARI·NMI / 左右对称；落盘 partition_v4a_learned.json）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/probe_v4a_readout.py \
   --ckpt results/AnySole/V4A_joint_and/checkpoints/ckpt_last.pt --device cuda:5
+
+  
 ```
 
-> **验收（读出阶段）**：① 有效 K 落在合理区间（如 4–12；K=1 或 K=24 均为失败，
-> 见校准）；② **左右对称 sanity**：9 对左右关节多数成对共槽（梯度聚类应自行发现
-> 对称，发现不了 = 机制没在工作）；③ ARI/NMI vs 人为 9 部位（量化偏离度）；
-> ④ partition_v4a_learned.json 非空。
-> **校准**（wandb 曲线判读）：K 塌到 1 → `--lambda-assign-conc` 减半（0.005）；
-> K 停在 24 → 翻倍（0.02）或加大 `--lambda-assign-dead`；前 20% 步就硬化 →
-> `--assign-anneal-frac 0.9` 且 `--lambda-assign-ent 0.1`。
-> **后续**：V4B = 把学到的 K/分组硬训练（同 V3_2 预算）与 V3_2 对比——需要
-> `--part-json` 载入自定义硬分组的支持（待实现；实现前可手工把读出分组写进
-> PART_JOINTS 变体）。`--assign-cluster` 要求 `--pose-parts 24 --soft-parts`，
-> 与 `--gate` 互斥（构造期报错）；`--lambda-assign` 固定 1.0（三个聚类项自带
-> `--lambda-assign-*` 权重）。
+> `--assign-cluster` 要求 `--pose-parts 24 --soft-parts`，与 `--gate` 互斥；
+> `--lambda-assign` 固定 1.0（三个聚类项自带 `--lambda-assign-*` 权重）。
+
+---
+
+## V4B · 方案 B 表征聚类 → 学到的分组硬训练（warm-start 自 F4a，对照 V3_2）
+
+> 用户裁定（2026-09-22）：V4A 零启动后，学习分组改走表征聚类。F4a 源 per-joint
+> 表征 → Ward 聚类 + silhouette 定 K → `--part-json` 硬训练，与 V3_2 同预算
+> 对比 = 人为划分终审。实测见 `model_fix_note.md` 节点 6；候选：
+> `results/AnySole/F4a_joint_and/metrics/partitions_cluster_b_K{9,12,13,14}.json`。
+> **实测（740ep，K9）**：test T 198.9 / V 88.3 / VT 92.0 vs V3_2 205.4 / 88.1 /
+> 93.2（打平偏优）；val 协议 T 173.3 / V 65.7 / VT 70.5（F4a 级，不敌 V3_3B）。
+
+```bash
+# ① 表征聚类（F4a 源）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/probe_part_cluster_b.py \
+  --ckpt results/AnySole/F4a_joint_and/checkpoints/ckpt_last.pt --device cuda:5
+
+# ② 硬训练学到的分组（示例 = K9 候选）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
+  --modal anysolev2 --contact-method joint_and \
+  --t-encoder foot_conv --pose-parts 9 --lr-warmup-frac 0.05 \
+  --part-json results/AnySole/F4a_joint_and/metrics/partitions_cluster_b_K9.json \
+  --epochs 740 --grad-clip 5.0 \
+  --init-from results/AnySole/F4a_joint_and/checkpoints/ckpt_last.pt \
+  --out-dir results/AnySole/V4B_joint_and/checkpoints \
+  --wandb_mode online --wandb_experiment_tag v4b_jointand \
+  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:6
+
+# ③ 评估（与 V3_2 对比 = 终审）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
+  --ckpt results/AnySole/V4B_joint_and/checkpoints/ckpt_last.pt \
+  --modal anysolev2 --contact-method joint_and \
+  --split val --write-motion results/AnySole/V4B_joint_and/predictions/eval_motion \
+  --protocol-seed 0 --no-robustness --device cuda:4
+
+# ④ 读出分组（落盘 metrics/partition_v4b_learned.json，格式同 V4A 组）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/probe_v4a_readout.py \
+  --ckpt results/AnySole/V4B_joint_and/checkpoints/ckpt_last.pt --device cuda:5
+
+
+
+```
+
+> 验收：不劣于 V3_2（其 val 协议为过期口径，先重跑 V3_2 ② 评估刷新，或直接比
+> test.json）。K9 若劣，再试 K=12。`--part-json` 与 `--soft-parts`/`--gate`
+> 互斥；分组须覆盖 24 关节恰好一次。
 
 ---
 

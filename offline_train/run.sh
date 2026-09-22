@@ -20,9 +20,23 @@ case "$MODEL" in
   motionpro)
     cd Baselines/MotionPRO
     "$py" -m app.train_frappe task.gpu="$CUDA_VISIBLE_DEVICES" task.checkpoint_dir="$run_dir/checkpoints" task.result_dir="$run_dir/metrics" task.output_dir="$run_dir/debug" task.epochs="${EPOCHS:-1000}" task.batch_size="${BATCH_SIZE:-16}" wandb_mode=disabled ;;
+  step2motion)
+    cd Baselines/Step2Motion
+    "$py" src/train.py --config "${CONFIG_FILE:-configs/config_gait.json}" ;;
   pressure_toolkit)
     cd Baselines/pressure_tookit
     "$py" main_singleview.py -c "$repo/$CONFIG_FILE" --dataset "$DATASET" --sub_ids "$SUB_IDS" --seq_name "$SEQ_NAME" --fitting_stage "$FITTING_STAGE" --start_idx "$START_IDX" --end_idx "$END_IDX" --output_dir "$run_dir" --basdir "$BASDIR" --essential_root "$ESSENTIAL_ROOT" --model_gender "${MODEL_GENDER:-male}" ;;
+  fpp_train)
+    cd Baselines/VP-MoCap/FPP-Net
+    fpp_cfg="${CONFIG_FILE:-configs/temporalKPSMPLCont_series5_mlp.yaml}"; [[ "$fpp_cfg" = /* ]] || fpp_cfg="$repo/$fpp_cfg"
+    "$py" app/train_temporal.py --config "$fpp_cfg" --batch_size "${BATCH_SIZE:-32}" --num_threads "${NUM_THREADS:-0}" --gpus "${CUDA_VISIBLE_DEVICES:-cpu}" ;;
+  fpp_infer)
+    cd Baselines/VP-MoCap/FPP-Net
+    fpp_cfg="${CONFIG_FILE:-configs/temporalKPSMPLCont_series5_mlp.yaml}"; [[ "$fpp_cfg" = /* ]] || fpp_cfg="$repo/$fpp_cfg"
+    "$py" app/infer_smplcont.py --config "$fpp_cfg" --phase "${FPP_PHASE:-test}" --batch_size "${BATCH_SIZE:-1}" --num_threads "${NUM_THREADS:-0}" --gpus "${CUDA_VISIBLE_DEVICES:-cpu}" ;;
+  posetransopt)
+    cd Baselines/VP-MoCap/PoseTransOpt
+    "$py" -m app.optimize task.input_path_base="${INPUT_PATH_BASE:?}" task.scene_rgbd="${SCENE_RGBD:?}" gpu="${CUDA_VISIBLE_DEVICES:-0}" ;;
   *) echo "unknown MODEL=$MODEL" >&2; exit 2;;
 esac
 date -Is > "$run_dir/finished_at"
