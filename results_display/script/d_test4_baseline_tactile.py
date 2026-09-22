@@ -1,4 +1,4 @@
-"""D_Test5: AnySole + 三基线触觉适配可视化（Agent_06 前置）。
+"""D_Test4: AnySole + 三基线触觉适配可视化（Agent_06 前置）。
 
 可视化前端，不做任何转换计算：先确保 AnysoleWorkspace/tool/generate_baseline_
 tactile.py 的产物落盘（产物齐全则跳过生成，缺则调用生成脚本；--force 强制
@@ -15,17 +15,17 @@ tactile.py 的产物落盘（产物齐全则跳过生成，缺则调用生成脚
 映射口径（生成器与 meta 为准）：点对点按 SMPL 模板足底系欧氏最近点，厂商布局
 48 点对齐模板足底包围盒，--mirror-x 翻转内外侧（默认同向假定）。
 
-输出（results_display/data/d_test5_baseline_tactile/）：每 session 仅一个
+输出（results_display/data/d_test4_baseline_tactile/）：每 session 仅一个
 `<sid>_adapted_tactile.{gif|mp4}`（四面板 1x4 横向同帧对齐动画），不写其他文件。
 
 用法（仓库根目录，touch_gait 环境）：
-    python results_display/script/d_test5_baseline_tactile.py
+    python results_display/script/d_test4_baseline_tactile.py
         # 默认：splits.csv 全部 session（train ∪ val ∪ test），逐 session 生成+渲染
-    python results_display/script/d_test5_baseline_tactile.py --split test
-    python results_display/script/d_test5_baseline_tactile.py --session S12072
-    python results_display/script/d_test5_baseline_tactile.py --session S12072 --force
-    python results_display/script/d_test5_baseline_tactile.py --session S12072 --gen mp4
-    python results_display/script/d_test5_baseline_tactile.py --stride 4 --max-frames 40
+    python results_display/script/d_test4_baseline_tactile.py --split test
+    python results_display/script/d_test4_baseline_tactile.py --session S12072
+    python results_display/script/d_test4_baseline_tactile.py --session S12072 --force
+    python results_display/script/d_test4_baseline_tactile.py --session S12072 --gen mp4
+    python results_display/script/d_test4_baseline_tactile.py --stride 4 --max-frames 40
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ for path in (REPO_ROOT, SCRIPT_DIR, TOOL_DIR):
 # Keep Matplotlib's cache warning out of the normal CLI output on this managed
 # workspace, where the default user config directory is read-only.
 if "MPLCONFIGDIR" not in os.environ:
-    os.environ["MPLCONFIGDIR"] = "/tmp/d_test5_matplotlib"
+    os.environ["MPLCONFIGDIR"] = "/tmp/d_test4_matplotlib"
     Path(os.environ["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
 
 import cv2  # noqa: E402
@@ -60,7 +60,7 @@ import generate_baseline_tactile as gen  # noqa: E402
 from utils import cli_common, render_common as rc  # noqa: E402
 
 GENERATOR = TOOL_DIR / "generate_baseline_tactile.py"
-DEFAULT_OUT = REPO_ROOT / "results_display" / "data" / "d_test5_baseline_tactile"
+DEFAULT_OUT = REPO_ROOT / "results_display" / "data" / "d_test4_baseline_tactile"
 
 # 面板基线标注色（工作名标题同色，仅作身份标识）
 C_ANYSOLE = (120, 220, 150)
@@ -212,7 +212,7 @@ def pool_ids() -> np.ndarray:
     return ids
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="D_Test5: AnySole + 三基线触觉可视化（GIF/MP4）")
+    p = argparse.ArgumentParser(description="D_Test4: AnySole + 三基线触觉可视化（GIF/MP4）")
     p.add_argument("--session", type=str, default="",
                    help="单 session（默认空 = splits.csv 全部 session）")
     p.add_argument("--split", type=str, default="all", choices=["train", "val", "test", "all"],

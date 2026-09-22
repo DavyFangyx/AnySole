@@ -1,4 +1,4 @@
-"""Test10: V2T tactile generation — generated vs GT insole heatmaps.
+"""R_Test4: V2T tactile generation — generated vs GT insole heatmaps.
 
 Runs the trained AnySole model in V-only conditioning (tactile inputs zeroed)
 so the aux head ``pressure_hat`` becomes a vision-to-tactile (V2T) generator:
@@ -13,7 +13,7 @@ Three conditioning arms (same names as eval.py ``--config-id``):
     V2M    real V + zero T   the V2T generation itself (headline)
     T2M    zero V + real T   tactile self-reconstruction (input-side sanity)
 
-Outputs under results_display/r_test8_v2t/:
+Outputs under results_display/result/r_test4_v2t/:
 
     gif/ or mp4/<session>_<mode>_tgen.{gif,mp4}  GT | generated | |GT-Gen| animation
     cells/<session>_<mode>_cells.{npz,png}      96-cell MAE + static error map
@@ -21,9 +21,9 @@ Outputs under results_display/r_test8_v2t/:
     tgen_report.json                            aggregate per mode + V2T summary
 
 Usage (run from the repository root):
-    python results_display/script/r_test8_v2t.py
-    python results_display/script/r_test8_v2t.py --session S10103
-    python results_display/script/r_test8_v2t.py --config-id VT2M,V2M --export-sessions 2
+    python results_display/script/r_test4_v2t.py
+    python results_display/script/r_test4_v2t.py --session S10103
+    python results_display/script/r_test4_v2t.py --config-id VT2M,V2M --export-sessions 2
 """
 from __future__ import annotations
 
@@ -244,7 +244,7 @@ def plot_cell_errors(cells_mae: np.ndarray, out_png: Path, session_id: str, mode
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Test10: V2T tactile generation (GT vs generated insoles + error analysis).")
+    parser = argparse.ArgumentParser(description="R_Test4: V2T tactile generation (GT vs generated insoles + error analysis).")
     cli_common.add_common_args(
         parser,
         session=True,
@@ -256,7 +256,7 @@ def parse_args() -> argparse.Namespace:
         max_frames=True,
         force=True,
         out_dir=True,
-        out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test8_v2t",
+        out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test4_v2t",
     )
     parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--ckpt", type=str, default=str(DEFAULT_CKPT))

@@ -18,7 +18,7 @@
 | 编号 | 修正 | 说明 |
 |---|---|---|
 | C1 | **三基线 = MMVP（pressure_tookit + VP-MoCap 两模型）+ MotionPRO + Step2Motion** | 用户口径；原任务书把 pressure_tookit / VP-MoCap / MotionPRO 并列、未含 Step2Motion，书滞后 |
-| C2 | **D2 作废**：不采用 4×12→31×11 分块膨胀，实际采用 **nearest-cell 模板足底系映射** | `AnysoleWorkspace/tool/generate_baseline_tactile.py` 已实装（口径逐函数一致于 `d_test5_baseline_tactile.py`，落盘代替内存） |
+| C2 | **D2 作废**：不采用 4×12→31×11 分块膨胀，实际采用 **nearest-cell 模板足底系映射** | `AnysoleWorkspace/tool/generate_baseline_tactile.py` 已实装（口径逐函数一致于 `d_test4_baseline_tactile.py`，落盘代替内存） |
 | C3 | **D3 被 nearest-cell 方案消解**：落盘 insole 就在上游 31×11 网格 + 模板足底系坐标系上 → FPP-Net 的 contact GT（`getVertsPress` 用上游 `insole2smplL/R.npy`）**直接复用上游文件，无需重建 insole2smpl**；剩一个数值验证项（E2） | 上游 `essentials/insole2cont/` 全套在仓库内 |
 | C4 | test split = **36**（train 92 / val 12 / test 36） | 原书"31 session"是旧数 |
 | C5 | 映射统计 meta 实际落盘为 `derived/baseline_tactile/<sid>.json` | 原生成器 docstring 写 `<sid>/meta.json`，以实际为准 |
