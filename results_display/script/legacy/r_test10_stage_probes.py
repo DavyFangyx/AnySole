@@ -15,7 +15,7 @@ REPO = Path("/data/fangyuxuan/projects/gait")
 sys.path.insert(0, str(REPO))
 
 from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
-from anysole.geometry import fk_pose6d
+from anysole.utils.geometry import fk_pose6d
 from anysole.models import AnySoleModel, MODEL_ANYSOLEV1
 
 CKPT = REPO / "results/AnySole/anysolev1_joint_and/checkpoints/ckpt_last.pt"

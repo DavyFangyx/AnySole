@@ -28,7 +28,7 @@ from anysole.data.smpl_io import (  # noqa: E402
     smpl24_pose6d_to_poses,
     smpl_archive_metadata,
 )
-from anysole.geometry import fk_pose6d_np, rot6d_to_rotmat_np  # noqa: E402
+from anysole.utils.geometry import fk_pose6d_np, rot6d_to_rotmat_np  # noqa: E402
 from anysole.types import (  # noqa: E402
     JOINT_PROTOCOL_CHECKSUM,
     MOTION_PROTOCOL,

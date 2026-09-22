@@ -52,7 +52,7 @@ from loguru import logger as log  # noqa: E402
 from anysole.data.smpl_io import smpl24_pose6d_to_poses  # noqa: E402
 from scipy.spatial.transform import Rotation as SciRotation  # noqa: E402
 from anysole.data.dataset import AnySoleDataset, collate_windows, find_session_dir  # noqa: E402
-from anysole.geometry import fk_pose6d, fk_pose6d_np, rot6d_to_rotmat, rotmat_to_6d  # noqa: E402
+from anysole.utils.geometry import fk_pose6d, fk_pose6d_np, rot6d_to_rotmat, rotmat_to_6d  # noqa: E402
 from anysole.train import load_config  # noqa: E402
 from anysole.types import (  # noqa: E402
     FOOT_JOINTS,

@@ -26,7 +26,7 @@ for entry in (REPO_ROOT, SCRIPT_DIR):
         sys.path.insert(0, str(entry))
 
 from anysole.data.smpl_io import load_smpl, resolve_smpl_path
-from anysole.geometry import fk_pose6d_np
+from anysole.utils.geometry import fk_pose6d_np
 from anysole.types import JOINT_NAMES, SMPL_ROOTS
 try:  # direct script execution
     from bvh_aligner_pose import parse_bvh_aligner

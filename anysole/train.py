@@ -17,8 +17,8 @@ from anysole.data.dataset import (
     load_split_ids,
     sample_config_ids,
 )
-from anysole.diffusion import GaussianDiffusion
-from anysole.losses import compute_losses
+from anysole.utils.diffusion import GaussianDiffusion
+from anysole.utils.losses import compute_losses
 from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_NAMES, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2
 from anysole.types import (
     CONFIG_PROBS,
@@ -42,8 +42,8 @@ from anysole.types import (
     assert_batch_shapes,
 )
 from anysole.ablations.insole_drift.templates import load_template_bank
-from anysole.geometry import f2_to_world, fk_pose6d
-from anysole.losses import soft_contact_from_keypoints
+from anysole.utils.geometry import f2_to_world, fk_pose6d
+from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.types import CONFIG_NAMES
 
 
@@ -605,6 +605,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                              "ep~370 via a FINITE huge gradient (nonfinite guard never fired) "
                              "and never recovered; healthy regression runs stay at "
                              "grad_norm <= 1.3 after warm-up, so 5.0 only bites on explosions.")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="V3-6 Optuna tuning: override the yaml learning rate per "
+                             "trial. The manual's base commands keep the yaml value; "
+                             "this flag exists for the tuning loop only.")
     return parser.parse_args(argv)
 
 
@@ -810,6 +814,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not args.grad_clip > 0.0:
             raise ValueError("--grad-clip must be positive")
         config["grad_clip"] = float(args.grad_clip)
+    if args.lr is not None:
+        if not args.lr > 0.0:
+            raise ValueError("--lr must be positive")
+        config["lr"] = float(args.lr)
     if args.stride is not None:
         if not 1 <= args.stride <= int(config["tw"]):
             raise ValueError("--stride must be in [1, tw]")

@@ -68,8 +68,8 @@ from utils import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
 
 from anysole.data.dataset import AnySoleDataset, collate_windows  # noqa: E402
-from anysole.diffusion import GaussianDiffusion, _extract, _timestep_schedule  # noqa: E402
-from anysole.geometry import fk_pose6d, rot6d_to_rotmat, rot6d_to_rotmat_np  # noqa: E402
+from anysole.utils.diffusion import GaussianDiffusion, _extract, _timestep_schedule  # noqa: E402
+from anysole.utils.geometry import fk_pose6d, rot6d_to_rotmat, rot6d_to_rotmat_np  # noqa: E402
 from anysole.models import AnySoleModel, MODEL_ANYSOLEV1  # noqa: E402
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device  # noqa: E402
 from anysole.types import CONFIG_VT, POSE_DIM, assert_batch_shapes  # noqa: E402
@@ -489,7 +489,7 @@ def check5_rotations(batch, out0, pred, final, device) -> dict:
     result = {
         "fk_path_shared": True,
         "fk_path_note": "r_test7_legacy_overfit.py: both _tau0_mpjpe_mm and _ddim_mpjpe_mm call the same "
-                        "anysole.geometry.fk_pose6d -> rot6d_to_rotmat (torch Gram-Schmidt); "
+                        "anysole.utils.geometry.fk_pose6d -> rot6d_to_rotmat (torch Gram-Schmidt); "
                         "both anchor with batch['trans_gt'] + trans_anchor.",
         "orthonormality": stats,
         "torch_vs_numpy_6d_to_so3_max_diff": torch_np_max_diff,

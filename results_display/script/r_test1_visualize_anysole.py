@@ -163,6 +163,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--contact-method", type=str, default="tactile_abs", help="Contact-label scheme(s), comma-separated; ignored when --modal is 'auto'.")
     parser.add_argument(
+        "--variant",
+        type=str,
+        default=None,
+        help="Stacked hyperparameter subdir under the model dir (e.g. tw40 / tw40_st20); "
+        "model+contact+variant == the ckpt address (2026-09-22 stacked naming). "
+        "Ignored when --modal is 'auto'.",
+    )
+    parser.add_argument(
         "--mesh",
         action="store_true",
         help="Render full SMPL surface panels (mesh + skeleton overlay) for Predicted/GT instead of skeleton-only. "
@@ -205,7 +213,7 @@ def main() -> int:
         log.info(f"Models from {PRED_ROOT} ({len(model_dirs)}): {model_dirs}")
     else:
         model_dirs = [
-            cli_common.anysole_model_dir(modal, contact_method)
+            cli_common.anysole_model_dir(modal, contact_method, args.variant)
             for modal in cli_common.split_csv_arg(args.modal)
             for contact_method in cli_common.split_csv_arg(args.contact_method)
         ]

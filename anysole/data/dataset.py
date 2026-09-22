@@ -19,7 +19,7 @@ from torch.utils.data import Dataset
 from anysole.data.smpl_io import estimate_floor_y, load_smpl, resolve_smpl_path
 from anysole.data.pressure import load_session_pressure, normalize_raw
 from anysole.data.tactile_s2m import build_t_s2m, resolve_legacy_bvh_path
-from anysole.geometry import (
+from anysole.utils.geometry import (
     fk_pose6d_np,
     heading_from_root_np,
     rot6d_to_rotmat_np,

@@ -34,7 +34,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as SciRotation
 from scipy.spatial.transform import Slerp
 
-from anysole.geometry import fk_local_np
+from anysole.utils.geometry import fk_local_np
 from anysole.types import (
     FPS,
     T_S2M_DIM,

@@ -13,7 +13,7 @@ Works for both anysolev1 (diffusion) and anysolev2 (regression) checkpoints —
 only the encoders + fusion are used.
 
 Usage (touch_gait env):
-  python results_display/script/ridge_probe.py \
+  python results_display/script/utils/ridge_probe.py \
     --ckpt results/AnySole/<STEP>/checkpoints/ckpt_last.pt [--split val] [--device cuda]
 """
 
@@ -27,12 +27,12 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-REPO = Path("/data/fangyuxuan/projects/gait")
+REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
 from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.eval import _load_model, load_config, resolve_device
-from anysole.eval_protocol import (
+from anysole.utils.eval_protocol import (
     ANKLE_FOOT_JOINTS,
     HAND_JOINTS,
     LOWER_JOINTS,
@@ -41,7 +41,7 @@ from anysole.eval_protocol import (
     UPPER_JOINTS,
     _pa_align,
 )
-from anysole.geometry import fk_pose6d
+from anysole.utils.geometry import fk_pose6d
 
 
 def parse_args(argv=None) -> argparse.Namespace:

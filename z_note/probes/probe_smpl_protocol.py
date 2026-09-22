@@ -14,7 +14,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as SciRotation
 
 from anysole.data.smpl_io import load_smpl, smpl_archive_metadata
-from anysole.geometry import fk_pose6d_np, rot6d_to_rotmat_np, rotmat_to_6d_np
+from anysole.utils.geometry import fk_pose6d_np, rot6d_to_rotmat_np, rotmat_to_6d_np
 from anysole.types import JOINT_NAMES, JOINT_PARENTS, N_JOINTS, POSE_DIM, SMPL_ROOTS
 
 

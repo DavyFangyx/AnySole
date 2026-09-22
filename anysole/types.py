@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Optional
 
 
 GAIT_ROOT = Path("/data/fangyuxuan/projects/gait")
@@ -53,15 +54,24 @@ CLIFF_CKPT = (
 SMPL_MODEL_PATH = WORKSPACE_ROOT / "dependencies" / "smpl" / "SMPL_NEUTRAL.pkl"
 
 
-def anysole_model_dir(modal: str, contact_method: str) -> Path:
+def anysole_model_dir(modal: str, contact_method: str, variant: Optional[str] = None) -> Path:
     """Centralized results dir for one model variant: AnySole/<modal>_<contact_method>.
 
     The dir name is self-describing (``anysolev1`` / ``anysolev1_insole_drift``
     modal plus the training contact-label scheme), so eval/infer only need the
     two identifiers to locate checkpoints, predictions, and metrics.
+
+    ``variant`` (2026-09-22 stacked-field naming) is the hyperparameter
+    combination under the model dir: ``tw40`` / ``tw40_st20`` /
+    ``t0003_tw40_lr3e4_lp5`` — fields stack in fixed order (tw, st, lr, lp,
+    lt, lk) and defaults are omitted, so the variant name itself is the
+    hyperparameter record.  Model + contact + variant == the ckpt address
+    (base/variant/checkpoints/ckpt_last.pt), which is the single locator
+    used by eval / visualization / probes.
     """
     results_root = Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results")))
-    return results_root / "AnySole" / ("%s_%s" % (modal, contact_method))
+    base = results_root / "AnySole" / ("%s_%s" % (modal, contact_method))
+    return base / variant if variant else base
 HRNET_YAML = (
     MOTIONPRO_ROOT
     / "lib"

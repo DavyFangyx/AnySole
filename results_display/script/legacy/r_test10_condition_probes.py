@@ -16,7 +16,7 @@ REPO = Path("/data/fangyuxuan/projects/gait")
 sys.path.insert(0, str(REPO))
 
 from anysole.data.dataset import AnySoleDataset, collate_windows
-from anysole.geometry import fk_pose6d
+from anysole.utils.geometry import fk_pose6d
 from anysole.types import POSE_DIM, T_PHYS_DIM, T_RAW_DIM, V_FEAT_DIM
 
 device = torch.device("cuda")

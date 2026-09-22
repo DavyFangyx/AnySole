@@ -50,8 +50,8 @@ import torch.nn.functional as F
 
 from anysole.data.dataset import collate_windows
 from anysole.eval import _sample_x_t_init, _session_window_groups, _tactile_corr
-from anysole.geometry import f2_to_world, fk_pose6d, rot6d_to_rotmat
-from anysole.losses import soft_contact_from_keypoints
+from anysole.utils.geometry import f2_to_world, fk_pose6d, rot6d_to_rotmat
+from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.train import condition_inputs, move_batch
 from anysole.types import (
     ANKLE_FOOT_JOINTS,

@@ -9,6 +9,11 @@
   后缀）。当前所有基座都用 `joint_and` 标签：`F0b_joint_and` / `F4a_joint_and` /
   `F2_joint_and` / `F2p4_joint_and` / `V3_2_joint_and` / `V3_3A_joint_and` /
   `V3_3B_joint_and`（V4A 聚类组目录 `V4A_joint_and`）。
+- **变体命名（字段堆叠，2026-09-22 起）**：基座目录下的超参子目录，字段顺序
+  固定 tw→st→lr→lp→lt→lk、默认省略（如 `V3_4a_joint_and/tw40`、
+  `tw40_st20`、`t0003_tw40_lr3e4`）。**模型+接触+超参 = ckpt 地址**——
+  eval 用 `--variant`、R_Test1/R_Test3 用 `--variant`、ridge/探针直接用
+  ckpt 路径，三种定位方式等价。
 - **checkpoint 状态**：group_ids 修复（2026-09-20）后，此前全部权重已归档
   `results/backup/AnySole_BVH_backup/`。**2026-09-21 warm-start 链重训完成**：
   F0b / F4a / F2 / F2+4 / V3-2 / V3-3A / V3-3B 基座全部训出并过 val 协议验收
@@ -523,6 +528,99 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
 > 验收：不劣于 V3_2（其 val 协议为过期口径，先重跑 V3_2 ② 评估刷新，或直接比
 > test.json）。K9 若劣，再试 K=12。`--part-json` 与 `--soft-parts`/`--gate`
 > 互斥；分组须覆盖 24 关节恰好一次。
+
+---
+
+## 窗口扫描（tw sweep，基模 V3_4a）
+
+> **设计（2026-09-22 用户批准，2026-09-22 修订 stride 与目录规则）**：
+> 基线 tw=20 = V3_4a 现成数字（VT 72.1/41.2、V 64.5/35.2、T 121.2/69.1），
+> 不重跑。扫描点 **40 / 80 / 120**（宽间距先定趋势；若 40 附近有拐点再补
+> 30/50）。单变量锁定：**`--stride` 显式传 `<tw>`**（v1.yaml 固定 stride=20，
+> 不传会变成 50% 重叠窗——TW40 首跑即因此污染，见 tw40_st20 记录）、
+> `traj_deltas` 保持 [2,4,8,19]、epochs 740、一律 warm-start 自 V3_4a
+> （**已键级验证**：330/336 键继承，仅 time_pe/query 按新 tw 初始化）。
+> 三个点互不依赖，可三卡并行。
+> **目录规则（字段堆叠命名，2026-09-22 用户裁定）**：扫描点 = 基座目录下的
+> 超参子目录 `V3_4a_joint_and/tw40|tw80|tw120`；字段顺序 tw→st→lr→lp→lt→lk，
+> 默认省略——**模型+接触+超参 = ckpt 地址**，eval 用 `--variant`、可视化用
+> `--variant`、探针直接用 ckpt 路径，三种定位方式等价。
+> **TW40 首跑记录**：`V3_4a_joint_and/tw40_st20` = stride=20 重叠窗污染版
+> （VT 90.5 / V 81.5 / T 148.6，三配置较基线 +17~+27mm），不可判读，干净
+> 口径以 tw40（stride=40）为准。
+> 判读：seam_jump 随 tw 变大而样本数锐减（tw=80/120 时 val 每会话仅 2–3
+> 条缝），勿过度解读。成本估算：740ep ≈ 1.5h / 3.5h / 5h。
+
+```bash
+# ① 训练（tw=80/120 同模板换 --tw/--stride/variant 名；--device 按 nvidia-smi 填）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
+  --modal anysolev2 --contact-method joint_and \
+  --t-encoder foot_conv --f2-repr --pose-parts 9 --lr-warmup-frac 0.05 \
+  --tw 60 --stride 40 \
+  --epochs 740 --grad-clip 5.0 \
+  --init-from results/AnySole/V3_4a_joint_and/checkpoints/ckpt_last.pt \
+  --out-dir results/AnySole/V3_4a_joint_and/tw40/checkpoints \
+  --wandb_mode online --wandb_experiment_tag tw40_jointand \
+  --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:2
+
+# ② 评估（模型+接触+超参 → ckpt 地址；--write-motion 刷新导出）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
+  --modal anysolev2 --contact-method joint_and --variant tw40 \
+  --split val --write-motion results/AnySole/V3_4a_joint_and/tw40/predictions/eval_motion \
+  --protocol-seed 0 --no-robustness --device cuda:7
+
+# ③④ 可视化（R_Test1/R_Test3 同样用 --variant 定位）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test1_visualize_anysole.py \
+  --modal V3_4a --contact-method joint_and --variant tw40 --split val \
+  --config-id VT2M,V2M,T2M --gen gif --force
+
+# ridge 探针每步必跑（ckpt 路径即定位）：
+# results_display/script/ridge_probe.py --ckpt results/AnySole/V3_4a_joint_and/tw40/checkpoints/ckpt_last.pt --split val --device <GPU>
+```
+
+---
+
+## Optuna 调参（`python -m anysole.tune`，基模 V3_4a）
+
+> **定位（2026-09-22 用户批准）**：V3_4a = 最简 V3 结构 + 链内最优 V2M +
+> T2M 121.2，且窗口扫描证明它还有成长空间 → 作为调参对象。模式沿用
+> SurvPGC 的 optuna_utils（TPE/random sampler + sqlite study 存储 +
+> 子进程逐 trial 训练/评估 + trials.csv/best_trial.txt 产物）。
+> **v1 无剪枝**（objective 每 trial 结束才报一次，MedianPruner 无中间值可用）
+> → 预算控制靠短 `--epochs`。study 存 sqlite，中断后同 `--study-name` 续跑。
+> objective = 三配置 val MPJPE 加权均值（默认 1:1:1，最小化）；
+> 每个 trial warm-start 自 V3_4a（tw 形张量按采到的 tw 重新初始化）。
+
+| 搜索维度 | 取值 | 说明 |
+|---|---|---|
+| `tw` | {30, 40, 50, 80} | 上下文长度（主要成长轴） |
+| `lr` | {3e-5, 1e-4, 3e-4, 1e-3} | 经新加的 `--lr` CLI（原 yaml 默认 1e-4） |
+| `lambda_pose` | {2, 3, 5} | 主损失权重 |
+| `lambda_traj` | {0.5, 1, 2} | 轨迹损失 |
+| `lambda_kp` | {0.5, 1, 2} | FK 关键点损失 |
+| `stride` | {tw, tw//2} | 重叠窗（half） |
+
+固定不变：f2 / foot_conv / 9 部位 / λ_con=0 / λ_assign、λ_sigma 无关（V3_4a
+无 A/门控） / grad-clip 5.0 / warmup 5% / 结构开关全锁。
+
+```bash
+# 先 dry-run 抽 2 个 trial 看拼出的命令（不训练）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.tune \
+  --study-name v34a_dry --n-trials 2 --dry-run --seed 0 --device cuda:7
+
+# 正式搜索（150ep/trial ≈ 15–45min 依 tw；30 trials ≈ 8–20 GPU 小时）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.tune \
+  --study-name v34a_sweep1 --n-trials 30 --epochs 150 \
+  --sampler tpe --seed 0 --device cuda:4
+
+# 产物：results/AnySole/optuna/<study>.db（study 本体，可续跑）
+#       results/AnySole/optuna/<study>/optuna_trials.csv + best_trial.txt
+# 每个 trial：results/AnySole/V3_4a_joint_and/<t{NNNN}_字段堆叠>/（ckpt + metrics + trial.log；
+# 字段堆叠规则同窗口扫描节——模型+接触+超参 = ckpt 地址，eval/可视化/探针三种定位等价）
+```
+
+> 依赖：optuna 已装入 touch_gait（2026-09-22）。调参后若发现更优超参组合，
+> 按单变量纪律回灌到对应基座命令再正式重训。
 
 ---
 

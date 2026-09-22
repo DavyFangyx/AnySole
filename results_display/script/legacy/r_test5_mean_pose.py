@@ -47,9 +47,9 @@ from loguru import logger as log  # noqa: E402
 
 from anysole.data.smpl_io import pelvis_to_smpl_trans, smpl24_pose6d_to_poses, smpl_archive_metadata  # noqa: E402
 from anysole.data.dataset import AnySoleDataset, collate_windows  # noqa: E402
-from anysole.diffusion import GaussianDiffusion  # noqa: E402
+from anysole.utils.diffusion import GaussianDiffusion  # noqa: E402
 from anysole.eval import _load_model  # noqa: E402
-from anysole.geometry import fk_pose6d  # noqa: E402
+from anysole.utils.geometry import fk_pose6d  # noqa: E402
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device  # noqa: E402
 from anysole.types import CONFIG_VT, FPS, POSE_DIM  # noqa: E402
 from d_test2_dataset_check import ensure_mean_pose  # noqa: E402

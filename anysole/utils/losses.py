@@ -8,7 +8,7 @@ from typing import Mapping
 import torch
 import torch.nn.functional as F
 
-from anysole.geometry import f2_to_world, fk_pose6d
+from anysole.utils.geometry import f2_to_world, fk_pose6d
 from anysole.types import (
     CONFIG_T,
     FPS,

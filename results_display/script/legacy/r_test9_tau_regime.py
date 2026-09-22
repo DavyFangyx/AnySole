@@ -76,8 +76,8 @@ from utils import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
 
 from anysole.data.dataset import AnySoleDataset, collate_windows  # noqa: E402
-from anysole.diffusion import GaussianDiffusion  # noqa: E402
-from anysole.geometry import fk_pose6d  # noqa: E402
+from anysole.utils.diffusion import GaussianDiffusion  # noqa: E402
+from anysole.utils.geometry import fk_pose6d  # noqa: E402
 from anysole.models import AnySoleModel, MODEL_ANYSOLEV1  # noqa: E402
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device  # noqa: E402
 from anysole.types import CONFIG_VT, POSE_DIM, assert_batch_shapes  # noqa: E402

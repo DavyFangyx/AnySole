@@ -425,7 +425,7 @@ def render_session(traj_path: Path, session_id: str, config_id: str, seq_dir: Pa
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize root trajectories (pred vs GT) as Test3 outputs, SMPL/BVH auto-detected.")
-    cli_common.add_common_args(parser, seq_root=True, modal=True, contact_method=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test3_traj" / "AnySole")
+    cli_common.add_common_args(parser, seq_root=True, modal=True, variant=True, contact_method=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test3_traj" / "AnySole")
     parser.add_argument("--no-png", action="store_true", help="Skip the static per-session figure (not controlled by --gen).")
     parser.add_argument(
         "--auto",
@@ -454,7 +454,7 @@ def main() -> int:
     jobs: list[tuple[Path, Path, str]] = []
     for modal in cli_common.split_csv_arg(args.modal):
         for contact_method in cli_common.split_csv_arg(args.contact_method):
-            model_dir = cli_common.anysole_model_dir(modal, contact_method)
+            model_dir = cli_common.anysole_model_dir(modal, contact_method, getattr(args, "variant", None))
             for config_id in cli_common.split_csv_arg(args.config_id):
                 jobs.append((PRED_ROOT / model_dir / "predictions", out_dir / model_dir / config_id, config_id))
     if args.auto:

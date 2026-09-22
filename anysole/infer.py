@@ -21,8 +21,8 @@ from anysole.data.dataset import (
 )
 from anysole.data.pressure import load_session_pressure, normalize_raw
 from anysole.data.tactile_s2m import build_t_s2m, resolve_legacy_bvh_path
-from anysole.diffusion import GaussianDiffusion
-from anysole.geometry import (
+from anysole.utils.diffusion import GaussianDiffusion
+from anysole.utils.geometry import (
     f2_to_world_np,
     heading_from_root_np,
     positions_to_6d_np,

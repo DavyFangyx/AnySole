@@ -21,9 +21,9 @@ from torch.utils.data import DataLoader
 
 from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.data.smpl_io import pelvis_to_smpl_trans, smpl24_pose6d_to_poses, smpl_archive_metadata
-from anysole.diffusion import GaussianDiffusion
-from anysole.geometry import f2_to_world, fk_pose6d, positions_to_6d_np, rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np
-from anysole.losses import soft_contact_from_keypoints
+from anysole.utils.diffusion import GaussianDiffusion
+from anysole.utils.geometry import f2_to_world, fk_pose6d, positions_to_6d_np, rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np
+from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device
 from anysole.ablations.insole_drift.templates import load_template_bank
@@ -130,6 +130,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "under results/AnySole (checkpoints/ckpt_last.pt is used).",
     )
     parser.add_argument("--modal", choices=MODEL_NAMES, default=None)
+    parser.add_argument(
+        "--variant",
+        default=None,
+        help="Stacked hyperparameter fields under the model dir "
+        "(e.g. tw40 / tw40_st20 / t0003_tw40_lr3e4); model+contact+variant "
+        "resolves to <model dir>/<variant>/checkpoints/ckpt_last.pt — the "
+        "same address --ckpt would name (2026-09-22 stacked naming).",
+    )
     parser.add_argument(
         "--contact-method",
         default=None,
@@ -340,7 +348,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             (
                 args.modal,
                 args.contact_method,
-                anysole_model_dir(args.modal, args.contact_method) / "checkpoints" / "ckpt_last.pt",
+                anysole_model_dir(args.modal, args.contact_method, args.variant) / "checkpoints" / "ckpt_last.pt",
             )
         ]
     else:
@@ -799,7 +807,7 @@ def _evaluate_one(
     # Runs after the frozen per-window metrics so the classic JSON stays the
     # single source for the pre-F0 numbers.
     if not args.no_protocol:
-        from anysole.eval_protocol import run_protocol
+        from anysole.utils.eval_protocol import run_protocol
         run_protocol(
             checkpoint=checkpoint,
             config=config,

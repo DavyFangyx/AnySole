@@ -14,8 +14,8 @@ REPO = Path("/data/fangyuxuan/projects/gait")
 sys.path.insert(0, str(REPO))
 
 from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
-from anysole.diffusion import GaussianDiffusion
-from anysole.geometry import fk_pose6d
+from anysole.utils.diffusion import GaussianDiffusion
+from anysole.utils.geometry import fk_pose6d
 from anysole.models import AnySoleModel, MODEL_ANYSOLEV1
 from anysole.train import condition_inputs
 from anysole.types import POSE_DIM

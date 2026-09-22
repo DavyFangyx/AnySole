@@ -14,8 +14,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from anysole.data.dataset import AnySoleDataset, collate_windows
-from anysole.geometry import fk_pose6d
-from anysole.losses import compute_losses
+from anysole.utils.geometry import fk_pose6d
+from anysole.utils.losses import compute_losses
 from anysole.models import AnySoleModelV2
 from anysole.train import (
     condition_inputs,
