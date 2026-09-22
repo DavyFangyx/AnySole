@@ -406,6 +406,10 @@ python results_display/script/r_test5_rho_grid.py --metric MPJPE
 `npz/<session>_rhoV<rV>_rhoT<rT>[_s<seed>].npz`（接 R_Test1 动画）、
 `repr/<session>_..._repr.npz`（R_Test6 2c / R_Test9 消费）、前端 `heatmap.png` / `slices.png` / `corner_check.csv`。
 
+**V4B val 已跑完（3 种子，自检 diff 全 0）**：整图由 V 主导（同 V 列 T 几乎不动 PA），
+T 仅在 V 缺失时兜底（上限 69.6）；纯先验 77.0 PA / 171.9 MPJPE；全表最低 35.3 在 V80%/T20%。
+完整数值与首读结论见任务书实验 1。
+
 ### R_Test6 2a 互补 bar（已落地）
 
 纯读 `metrics/<split>_fseries.json`（零重训），出三张图 + 汇总表：每部位三配置
