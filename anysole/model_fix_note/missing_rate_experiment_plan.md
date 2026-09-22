@@ -78,12 +78,18 @@
 也不扫比例——口径不同，本实验统一掉。
 
 **需要什么**：
-1. 模型小改：编码器加可选 mask 参数（默认关闭 → 旧 ckpt 完全兼容，**零重训**）；
-2. 生成器脚本：36 格 × 36 session（test split）推理。每格落三样东西：
-   ① 该格协议指标（汇总进一份 JSON，与 fseries 同结构）；
-   ② **每 session 的 SMPL npz**（与现有 eval_motion 同格式 → 可接 Test1 逐帧动画，看"这一格模型输出了什么"）；
+1. 模型小改：编码器加可选 mask 参数（默认关闭 → 旧 ckpt 完全兼容，**零重训**）；✅ 已实装
+   （`ModalEncoders.forward` + `AnySoleModelV2.forward` 的 `mask_v/mask_t` (B,tw)，
+   已实测 config 级 null 与 mask 级全帧 null 输出 max|diff|=0.0）；
+2. 生成器脚本：✅ 已实装 `anysole/rho_grid.py`（36 格 × session × 种子推理；指标复用
+   `eval_protocol._session_metrics` 与 fseries 逐字节同源；角格 vs fseries 自检 corner_check；
+   `--reuse` 断点续跑）。每格落三样东西：
+   ① 该格协议指标（汇总进 `grid_metrics.json`，与 fseries 同结构）；
+   ② **每 session 的 SMPL npz**（与现有 eval_motion 同格式 → 可接 Test1 逐帧动画）；
    ③ 表征 dump（F / t_tok / v_tok，给实验 2、5 用）。
    mask 按 (session, 种子) 确定性生成，可复现。
+3. 前端：✅ 已实装 `results_display/script/r_test5_rho_grid.py`（蓝序贯热力图 +
+   两条 1D 切片 + corner_check.csv）。
 
 ### 实验 2：互补 bar + 探针表 + t-SNE（零重训）
 

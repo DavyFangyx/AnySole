@@ -376,12 +376,35 @@ python results_display/script/r_test4_v2t.py --config-id VT2M,V2M --export-sessi
 
 | 编号 | 任务书实验 | 回答的问题 | 脚本 |
 | --- | --- | --- | --- |
-| R_Test5 ρ 网格 | 实验 1 | 模态按任意比例缺失时性能怎么变 | `anysole/rho_grid.py`（生成器）+ `r_test5_rho_grid.py`（前端） |
+| R_Test5 ρ 网格 | 实验 1 | 模态按任意比例缺失时性能怎么变 | `anysole/rho_grid.py`（生成器）+ `r_test5_rho_grid.py`（前端）✅ |
 | R_Test6 互补分析 | 实验 2 | 融合是互补还是拼贴；F 是不是"完整状态" | `r_test6_complement.py`（2a 已落地；2b/2c 规划中） |
 | R_Test7 dropout 消融 | 实验 3 | 训练时的模态 dropout 是不是必需的 | `r_test7_dropout_ablation.py`（对比表） |
 | R_Test8 T2M 上半身 | 实验 4 | 触觉没有上肢信号，合理上半身从哪来 | `r_test8_t2m_upper.py` |
 | R_Test9 信任堆叠条 | 实验 5 | 每个身体部位"信谁" | `r_test9_trust.py` |
 | R_Test10 单模态训练对比 | 实验 6 | V-only / T-only 各自天花板 | `r_test10_singlemodal_compare.py`（对比表） |
+
+### R_Test5 ρ 网格（已实装）
+
+机制：帧级 null-token mask（`ModalEncoders.forward` 的 `mask_v/mask_t`，默认 None 零重训兼容；
+已实测与 config 级 null 逐字节一致）。生成器按 (session, cell, seed) 确定性推理 36 格，
+指标复用 `eval_protocol._session_metrics`（与 fseries 同源），每格落 eval_motion 同格式 npz
++ F/t_tok/v_tok 表征；末尾 corner_check 自检三角 vs fseries（必须 ≈0）。
+
+```bash
+conda activate touch_gait
+# 生成（val 3 种子估方差；test 单种子；--reuse 断点续跑）
+python -m anysole.rho_grid --ckpt results/AnySole/V4B_joint_and/checkpoints/ckpt_last.pt \
+    --split val --seeds 0,1,2 --reuse
+python -m anysole.rho_grid --ckpt ... --split test --seeds 0 --reuse
+
+# 前端（热力图/切片/自检表）
+python results_display/script/r_test5_rho_grid.py
+python results_display/script/r_test5_rho_grid.py --metric MPJPE
+```
+
+产出（`result/r_test5_rho_grid/`）：`grid_metrics.json`（全格协议指标 + corner_check）、
+`npz/<session>_rhoV<rV>_rhoT<rT>[_s<seed>].npz`（接 R_Test1 动画）、
+`repr/<session>_..._repr.npz`（R_Test6 2c / R_Test9 消费）、前端 `heatmap.png` / `slices.png` / `corner_check.csv`。
 
 ### R_Test6 2a 互补 bar（已落地）
 
