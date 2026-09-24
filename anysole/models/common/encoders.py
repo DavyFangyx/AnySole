@@ -21,9 +21,9 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from anysole.models.embeddings import SharedEmbeddings
-from anysole.models.foot_encoder import FootConvEncoder
-from anysole.models.tactile_encoder import TactileEncoder
+from anysole.models.common.embeddings import SharedEmbeddings
+from anysole.models.common.foot_encoder import FootConvEncoder
+from anysole.models.common.tactile_encoder import TactileEncoder
 from anysole.types import (
     CONFIG_T,
     CONFIG_V,

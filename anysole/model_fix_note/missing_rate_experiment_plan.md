@@ -339,15 +339,13 @@ B3 不再解释成“逐部位信任”，而是判断以下四点：
 
 ## 六、与现有工程资产的对应
 
-工程编号与任务书实验编号固定一一对应：R_Test5–R_Test10 分别就是 A0、A1、A2、B1、B2、B3。
-
 | 实验 | 主要数据/现有资产 | 需要的调整 |
 |---|---|---|
 | A0 | V-only/T-only 专才结果；`singlemodal_analysis.py`（→ `utils/component_analysis.py --a0`） | 按预设分量输出专才差值与赢家 |
-| A1 / R_Test6 | 主线 VT 与专才结果；`R_Test6_complement.py`（→ `component_analysis.py --a1`） | 最佳单路参照与 VT 逐分量比较 |
-| A2 / R_Test7 | 主线 V-only/T-only 输出；`R_Test7_dropout_ablation.py`（→ `--a2`） | 主线 V/T 缺失分支差值 |
-| B1 / R_Test8 | 主线 V、V 专才、主线空输入；`R_Test8_t2m_upper.py`（→ `--b1`） | T 负责分量的三列对照 |
-| B2 / R_Test9 | 主线 T、T 专才、主线空输入；`R_Test9_trust.py`（→ `--b2`） | V 负责分量的三列对照 |
+| A1 | 主线 VT 与专才结果；`complement.py`（→ `component_analysis.py --a1`） | 最佳单路参照与 VT 逐分量比较 |
+| A2 | 主线 V-only/T-only 输出；`dropout_ablation.py`（→ `--a2`） | 主线 V/T 缺失分支差值 |
+| B1 | 主线 V、V 专才、主线空输入；`v2t_upper.py`（→ `--b1`） | T 负责分量的三列对照 |
+| B2 | 主线 T、T 专才、主线空输入；`trust.py`（→ `--b2`） | V 负责分量的三列对照 |
 | B3 | `anysole/rho_grid.py` + `rho_grid_analysis.py`（→ `utils/rho_grid_display.py`） | ρ 热力图、边界切片与判据摘要 |
 
 旧的 dropout 消融、ridge 探针、T2M 上半身先验、注意力图和信任画像不再承担六个主命题的证明任务；如后续需要定位失败原因，可作为建模自查或附录使用。t-SNE、同/异时刻表征相似度和错位模态输入不再进入本实验组。

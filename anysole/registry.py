@@ -6,22 +6,23 @@ from a model identifier plus semantic knobs — the CLI never writes raw
 paths.  train / eval / infer / ridge / tune all resolve their addresses
 through :func:`infer_anysole_paths`.
 
-The registry is the single source of truth for the warm-start lineage.
-``parent`` is what the AUTO-INFERRED --init-from loads when the CLI omits
---init-from.  **A wrong ``parent`` does not error** — the run silently
-warm-starts from the wrong lineage (contamination; cf. the V3-3B epoch-1
-warm-start incident) — so new models must be registered with their true
-parent before their first run.  An unregistered name errors loudly with the
-valid list instead.
+**Independence (2026-09-24 restructure)**: each registered model maps to an
+entry script in ``anysole/models/`` (``f0b.py`` … ``v4b.py``) that fixes the
+model's structure; ``get_builder`` imports that entry.  Every training run —
+base dir or variant dir — starts from random init: there is no warm-start
+lineage, no parent/child relation, and ``infer_anysole_paths`` never infers
+an ``--init-from`` (it stays None; ``--init-from`` in train.py remains a
+debug-only override).  Model + hyperparameters is the full identity of a run.
 
 Variant rule (fixed, needs no registration): a variant dir (``tw40``,
-``t0003_tw40_lr3e4``, ...) always warm-starts from ITS BASE model's
-ckpt_last; only the base models' lineage lives in the registry.
+``t0003_tw40_lr3e4``, ...) is just a hyperparameter subdir under the base
+model dir — same entry, same from-scratch rule, different address.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Optional
 
 from anysole.types import anysole_model_dir
@@ -30,26 +31,23 @@ from anysole.types import anysole_model_dir
 @dataclass(frozen=True)
 class ModelEntry:
     name: str
-    parent: Optional[str]  # None = from-scratch
+    module: str  # entry script under anysole/models/ (e.g. "v3_4b")
     notes: str = ""
 
 
 MODEL_REGISTRY: dict[str, ModelEntry] = {
-    # Historical chain (non-f2, trained, frozen).
-    "F0b": ModelEntry("F0b", None, "regress from-scratch"),
-    "F4a": ModelEntry("F4a", "F0b", "foot_conv"),
-    "F2": ModelEntry("F2", "F0b", "f2 repr"),
-    "F2p4": ModelEntry("F2p4", "F2", "f2 + foot_conv"),
-    "V3_2": ModelEntry("V3_2", "F4a", "9 parts"),
-    "V3_3A": ModelEntry("V3_3A", "V3_2", "soft A"),
-    "V3_3B": ModelEntry("V3_3B", "V3_3A", "sigma gate"),
-    # Current chain (f2 standard representation).
-    "V3_4a": ModelEntry("V3_4a", "F2p4", "9 parts on f2"),
-    "V3_4b": ModelEntry("V3_4b", "V3_4a", "soft A on f2"),
-    "V3_4c": ModelEntry("V3_4c", "V3_4b", "sigma gate on f2 (beta-NLL fill)"),
-    # Proof groups (user's V4 line, manual §V4A/V4B: both warm-start from F4a).
-    "V4A": ModelEntry("V4A", "F4a", "24-slot gradient clustering"),
-    "V4B": ModelEntry("V4B", "F4a", "learned-grouping hard retrain, control = V3_2"),
+    "F0b": ModelEntry("F0b", "f0b", "V2 regression base (linear t-encoder)"),
+    "F4a": ModelEntry("F4a", "f4a", "foot_conv tactile encoder"),
+    "F2": ModelEntry("F2", "f2", "f2 representation"),
+    "F2p4": ModelEntry("F2p4", "f2p4", "f2 + foot_conv"),
+    "V3_2": ModelEntry("V3_2", "v3_2", "9-part pose head"),
+    "V3_3A": ModelEntry("V3_3A", "v3_3a", "9-part + soft A"),
+    "V3_3B": ModelEntry("V3_3B", "v3_3b", "9-part + soft A + sigma gate"),
+    "V3_4a": ModelEntry("V3_4a", "v3_4a", "9-part on f2"),
+    "V3_4b": ModelEntry("V3_4b", "v3_4b", "9-part soft A on f2"),
+    "V3_4c": ModelEntry("V3_4c", "v3_4c", "9-part soft A + sigma gate on f2"),
+    "V4A": ModelEntry("V4A", "v4a", "24-slot gradient clustering"),
+    "V4B": ModelEntry("V4B", "v4b", "learned hard partition (--part-json)"),
 }
 
 
@@ -64,6 +62,13 @@ def get_model_entry(model_name: str) -> ModelEntry:
         raise ValueError(
             "Unknown model %r. Expected one of: %s" % (model_name, sorted(MODEL_REGISTRY))
         ) from exc
+
+
+def get_builder(model_name: str):
+    """Import and return the entry module (STRUCTURE / CONFIG_EXTRA / build)
+    that defines ``model_name``'s architecture."""
+    entry = get_model_entry(model_name)
+    return import_module("anysole.models.%s" % entry.module)
 
 
 def infer_anysole_paths(
@@ -87,23 +92,13 @@ def infer_anysole_paths(
     """
     if which not in ("last", "best"):
         raise ValueError("which must be 'last' or 'best', got %r" % which)
-    entry = get_model_entry(model_name)
+    get_model_entry(model_name)
     model_dir = anysole_model_dir(model_name, contact, variant)
     ckpt_name = "ckpt_last.pt" if which == "last" else "ckpt_best.pt"
-    # init_from: variant dirs always warm-start from their BASE model;
-    # base models follow the registered lineage (None = from-scratch).
-    if variant is not None:
-        base_dir = anysole_model_dir(model_name, contact)
-        init_from = base_dir / "checkpoints" / "ckpt_last.pt"
-    elif entry.parent is not None:
-        parent_dir = anysole_model_dir(entry.parent, contact)
-        init_from = parent_dir / "checkpoints" / "ckpt_last.pt"
-    else:
-        init_from = None
     return {
         "model_dir": model_dir,
         "ckpt": model_dir / "checkpoints" / ckpt_name,
-        "init_from": init_from,
+        "init_from": None,  # independence: never inferred (train --init-from = debug only)
         "predictions_dir": model_dir / "predictions" / "eval_motion",
         "metrics_dir": model_dir / "metrics",
     }

@@ -35,32 +35,30 @@ python results_display/script/complement.py
 python results_display/script/v2t_upper.py
 ```
 
-编号式 `R_Test5–10` shim 入口已删除；分析入口为不带编号的语义化脚本，
-例如 `complement.py`、`dropout_ablation.py` 和 `rho_grid_analysis.py`。
+A/B 系列分析入口为语义化脚本（`complement.py`、`dropout_ablation.py`、
+`rho_grid_analysis.py` 等），编号与产物目录的对应见下表与「目录结构」。
 
-## 编号对照（2026-09-22 第二次重排）
+## 编号对照
 
-| 编号 | 来源 | 脚本 |
+| 编号 | 说明 | 脚本 |
 | --- | --- | --- |
-| D_Test1 原始数据可视化 | Test1 的 GT/输入部分 | `d_test1_data_viz.py`（BVH/SMPL GT 渲染） |
-| D_Test2 数据集自检 | Test6 | `d_test2_dataset_check.py` |
-| D_Test3 接触检测 | Test5 | `AnysoleWorkspace/tool/contact_labels.py`；`d_test3_contact.py` |
-| D_Test4 基线触觉审计 | 09-21 的 D_Test5 | `d_test4_baseline_tactile.py` → `AnysoleWorkspace/tool/generate_baseline_tactile.py` |
-| D_Test5 鞋垫偏移补偿（**待适配**） | 09-21 的 R_Test4 | `d_test5_insole_drift.py` |
-| R_Test1 模型可视化 | Test1 的模型部分 | `r_test1_visualize_{anysole,mmvp,motionpro,step2motion}.py`；`r_test1_compare.py`（跨模型并排，模式对齐） |
-| R_Test2 参数对照 | Test2 | `r_test2_compare.py`（`--by-mode` 模式分块） |
-| R_Test3 轨迹可视化 | Test3 | `r_test3_traj.py`（`--compare` 并排轨迹） |
-| R_Test4 触觉生成 V2T | 09-21 的 R_Test8 | `r_test4_v2t.py` |
-| A0 | 专才分工 | V、T 原本是否各有所长 | `singlemodal_analysis.py`（→ `utils/component_analysis.py --a0`） |
-| A1 | 完整输入融合 | VT 是否吸收两路优势 | `complement.py`（→ `utils/component_analysis.py --a1`） |
-| A2 | 缺失分支分工 | 主线 V-only 与 T-only 谁负责什么 | `dropout_ablation.py`（→ `--a2`） |
-| B1 | V 分支的 T 相关能力 | 从 (F_V) 能否读出 T 负责分量 | `v2t_upper.py`（→ `--b1`） |
-| B2 | T 分支的 V 相关能力 | 从 (F_T) 能否读出 V 负责分量 | `trust.py`（→ `--b2`） |
-| B3 | 连续缺失鲁棒性 | ρ 网格下任意缺失组合是否稳定 | `rho_grid_analysis.py`（→ `utils/rho_grid_display.py`） |
+| D_Test1 原始数据可视化 | GT/输入渲染（BVH/SMPL） | `d_test1_data_viz.py` |
+| D_Test2 数据集自检 | 数据集自检 | `d_test2_dataset_check.py` |
+| D_Test3 接触检测 | 接触标签判定 | `AnysoleWorkspace/tool/contact_labels.py`；`d_test3_contact.py` |
+| D_Test4 基线触觉审计 | 四基线触觉格式审计 | `d_test4_baseline_tactile.py` → `AnysoleWorkspace/tool/generate_baseline_tactile.py` |
+| D_Test5 鞋垫偏移补偿（**待适配**） | 鞋垫漂移补偿器测试 | `d_test5_insole_drift.py` |
+| R_Test1 模型可视化 | 模型动画 | `r_test1_visualize_{anysole,mmvp,motionpro,step2motion}.py`；`r_test1_compare.py`（跨模型并排，模式对齐） |
+| R_Test2 参数对照 | 跨模型/参数对照评估 | `r_test2_compare.py`（`--by-mode` 模式分块） |
+| R_Test3 轨迹可视化 | 轨迹对比动画 | `r_test3_traj.py`（`--compare` 并排轨迹） |
+| R_Test4 触觉生成 V2T | V2T 触觉生成 | `r_test4_v2t.py` |
+| A0 | 专才分工 | `singlemodal_analysis.py`（→ `utils/component_analysis.py --a0`） |
+| A1 | 完整输入融合 | `complement.py`（→ `utils/component_analysis.py --a1`） |
+| A2 | 缺失分支分工 | `dropout_ablation.py`（→ `--a2`） |
+| B1 | V 分支的 T 相关能力 | `v2t_upper.py`（→ `--b1`） |
+| B2 | T 分支的 V 相关能力 | `trust.py`（→ `--b2`） |
+| B3 | 连续缺失鲁棒性 | `rho_grid_analysis.py`（→ `utils/rho_grid_display.py`） |
 
-任务书 = `anysole/model_fix_note/missing_rate_experiment_plan.md`（A0–B3 ↔ R_Test5–10）。
-已归档（编号撤销，见文末历史迁移说明）：09-21 的 R_Test5 均值姿态推理、R_Test6 输入消融、
-R_Test7 legacy 扩散诊断、R_Test9 τ 区间、R_Test10 pose head 系列 → `script/legacy/`。
+任务书 = `anysole/model_fix_note/missing_rate_experiment_plan.md`（实验编号 A0–B3）。
 
 ## 目录结构
 
@@ -69,11 +67,8 @@ results_display/                        # 纯产物目录（实验代码在 scri
 ├── script/                             # 源码（唯一被 git 跟踪的目录）
 │   ├── utils/                          # 共享公共件
 │   │   ├── bvh_aligner_pose.py / cli_common.py / motion_io.py / render_common.py / smpl_mesh.py
-│   │   └── ridge_probe.py              # ridge-on-F 读出天花板公共件（R_Test6/7/8 复用）
-│   ├── legacy/                         # 已归档实验（09-21 编号撤销，保留供查阅）
-│   │   ├── r_test5_mean_pose.py、r_test6_input_ablation.py
-│   │   ├── r_test7_legacy_{overfit,sampler_checks}.py、r_test9_tau_regime.py
-│   │   └── r_test10_*.py ×6
+│   │   └── ridge_probe.py              # ridge-on-F 读出天花板公共件
+│   ├── legacy/                         # 已归档旧实验（保留供查阅，不占编号）
 │   ├── ── 数据检验（D_TestN）──
 │   │   ├── d_test1_data_viz.py         # D_Test1：GT 原始渲染（SMPL-24/BVH-23 双协议）
 │   │   ├── d_test2_dataset_check.py    # D_Test2：数据集自检
@@ -147,8 +142,10 @@ conda activate touch_gait
 
 # 原始数据可视化（auto：SMPL-24 优先，BVH-23 回退）
 python results_display/script/d_test1_data_viz.py
-python results_display/script/d_test1_data_viz.py --protocol bvh23   # 强制 BVH-23
-python results_display/script/d_test1_data_viz.py --bvh <单个.bvh>    # 单文件 BVH
+# 强制 BVH-23
+python results_display/script/d_test1_data_viz.py --protocol bvh23
+# 单文件 BVH
+python results_display/script/d_test1_data_viz.py --bvh <单个.bvh>
 ```
 
 ## D_Test2 数据集自检（GT 自洽 + 均值姿态基线）
@@ -170,8 +167,8 @@ python results_display/script/d_test1_data_viz.py --bvh <单个.bvh>    # 单文
   B2 = 完全静态均值姿态。若模型 MPJPE ≈ B1 → 条件被无视；若 B1 明显低于模型 MPJPE →
   模型比"啥也不干"还差，更像 bug（脚本会自动与 `anysolev1_joint_and/metrics/test.json` 对比）。
 
-产出（`Test6_dataset_check/`）：`fk_selfcheck.json`、`mean_baseline.json`、
-`mean_pose.npz`、`input_means.npz`（后两者被 R_Test5/R_Test6 复用为"均值输入"）。
+产出（`DataTest/D2Test_dataset_check/`）：`fk_selfcheck.json`、`mean_baseline.json`、
+`mean_pose.npz`、`input_means.npz`（后两者作"均值输入"基线）。
 
 ```bash
 conda activate touch_gait
@@ -189,7 +186,7 @@ python results_display/script/d_test2_dataset_check.py --session S10103 --limit-
 背景：原 `contact.npy` 标签口径为「48 格鞋垫 CSV 逐帧压力和 > 100」
 （`prepare_sequences.py:contact_from_insoles`，阈值 `CONTACT_SUM_THRESH`），但大量鞋垫在脚
 离地后压力不归零（如 S11023 左脚摆动相压力和最低 653），曾导致大量运动学离地帧被错标为接触。
-为对比候选修复方案，Test5 改为**按方案分子目录**：`contact_labels.py` 为每个方案生成
+为对比候选修复方案，D_Test3 改为**按方案分子目录**：`contact_labels.py` 为每个方案生成
 `contact_<method>.npy`（与 `contact.npy` 同目录、同 10 列格式），`d_test3_contact.py --methods ...`
 渲染判定动画。标签生成器属数据构建代码，位于 `AnysoleWorkspace/tool/contact_labels.py`。
 
@@ -214,7 +211,7 @@ python results_display/script/d_test3_contact.py --methods bvh_soft --gen mp4 --
 python results_display/script/d_test3_contact.py --methods bvh_h --session S11023
 ```
 
-产出（`Test5_contact/`）：每个方案一个子目录（`<method>/`）：
+产出（`DataTest/D3Test_contact/`）：每个方案一个子目录（`<method>/`）：
 `gif|mp4/<session>_contact.gif/.mp4`（触觉热力图 + GT motion + 该方案接触指示动画）、
 `contact_summary.csv`（逐会话接触率/压力和统计）、`diff_vs_bvh_h.csv`
 （该方案 vs 直接导出 BVH 高度参考的差异区间清单：会话/脚/起止时间s/方向/区间内高度·速度·压力和）、
@@ -258,10 +255,12 @@ python results_display/script/d_test3_contact.py --methods bvh_h --session S1102
 conda activate touch_gait
 # 默认全部 splits session（train ∪ val ∪ test，缺产物自动生成）
 python results_display/script/d_test4_baseline_tactile.py
-python results_display/script/d_test4_baseline_tactile.py --split test      # 只跑 test
+# 只跑 test
+python results_display/script/d_test4_baseline_tactile.py --split test
 python results_display/script/d_test4_baseline_tactile.py --session S12072 --force
 python results_display/script/d_test4_baseline_tactile.py --session S12072 --gen mp4
-python AnysoleWorkspace/tool/generate_baseline_tactile.py --split test    # 只落盘不渲染
+# 只落盘不渲染
+python AnysoleWorkspace/tool/generate_baseline_tactile.py --split test
 ```
 
 ## D_Test5 鞋垫偏移补偿（待适配）
@@ -309,7 +308,8 @@ CUDA_VISIBLE_DEVICES=4 python results_display/script/r_test1_visualize_anysole.p
 --contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
 --config-id VT2M
 
---model-name F0b --contact-method joint_and   # 历史 run 对照
+# 历史 run 对照
+--model-name F0b --contact-method joint_and
 ```
 
 `--render bone,mesh`：面板渲染类型，逗号分隔；`bone` = 骨架面板（默认），`mesh` = 纯 SMPL
@@ -349,7 +349,7 @@ python results_display/script/r_test1_compare.py --model-name V4B --contact-meth
 ## R_Test2 参数对照
 
 `r_test2_compare.py` 是 R_Test 的统一数值评估入口（不是模型推理入口）。它对 AnySole、MotionPRO、Step2Motion 和 MMVP 按 VT2M/V2M/T2M/V2T 分块评估。Motion 模式使用 canonical common19 joint/pose/trajectory/temporal/surface 指标；V2T 单独评估压力重建和接触。
-产出（`Test2_comparison/`）：
+产出（`ResultTest/R2Test_compare/`）：
 `comparison_per_session.csv`（逐会话明细）、`comparison_summary.csv`（精简表：仅模型 × 指标）、
 `comparison_summary.png`（精简表的表格图）、`evaluation.log`（运行信息 + 各模型 checkpoint）。
 
@@ -421,8 +421,8 @@ python results_display/script/r_test3_traj.py --session S7013 --config-id VT2M
 python results_display/script/r_test3_traj.py --auto
 ```
 
-输出：`Test3_trajectory/AnySole/<model-name>/<config>/{gif,mp4,png}/<session>_<config>_traj.{gif,mp4,png}`；
-baseline 模型输出在 `Test3_trajectory/<model>/gen/`。
+输出：`ResultTest/R3Test_traj/AnySole/<model-name>/<config>/{gif,mp4,png}/<session>_<config>_traj.{gif,mp4,png}`；
+baseline 模型输出在 `ResultTest/R3Test_traj/<model>/gen/`。
 
 > 注意：eval 生成的 motion NPZ 必须与 checkpoint 配套。若重新训练了模型，
 > 旧的 `eval_motion/` 产物会与新 metrics 不一致，
@@ -436,8 +436,10 @@ baseline 模型输出在 `Test3_trajectory/<model>/gen/`。
 并记 warning（行内其余模型照常渲染）。
 
 ```bash
-python results_display/script/r_test3_traj.py --compare --session S13013 --mode VT2M          # 冒烟
-python results_display/script/r_test3_traj.py --compare --model-name V4B --contact-method joint_and   # 三模式全出（默认 val，--split test 换正式 36 集）
+# 冒烟
+python results_display/script/r_test3_traj.py --compare --session S13013 --mode VT2M
+# 三模式全出（默认 val，--split test 换正式 36 集）
+python results_display/script/r_test3_traj.py --compare --model-name V4B --contact-method joint_and
 ```
 
 产出（`ResultTest/R3Test_traj/compare/`）：`<mode>/{gif,png}/<session>_<mode>_traj_compare.{gif,png}`。
@@ -478,7 +480,7 @@ python results_display/script/r_test4_v2t.py --source infer --config-id VT2M,V2M
 
 > `--source infer` 是兼容性的诊断入口，不是最终跨模型评估入口。
 
-## R_Test5–10 缺失率实验组（注册式全链路）
+## A/B 组缺失率实验（A0–B3，注册式全链路）
 
 正式入口见 `configs/Z_README.md`。当前由 `configs` 生成两组数据任务
 （主线模型 `V3_3B`），再由 `results_display/` 的分析脚本读取结果并出图；
@@ -493,27 +495,31 @@ A0–B3 不再生成调度 conf。
 | B2 | T 分支的 V 相关能力 | 从 (F_T) 能否读出 V 负责分量 | `trust.py` |
 | B3 | 连续缺失鲁棒性 | ρ 网格下任意缺失组合是否稳定 | `rho_grid_analysis.py` |
 
-### R_Test10 ρ 网格（B3，已实装）
+### B3 ρ 网格（已实装）
 
-机制：帧级 null-token mask（`ModalEncoders.forward` 的 `mask_v/mask_t`，默认 None 零重训兼容；
-已实测与 config 级 null 逐字节一致）。生成器按 (session, cell, seed) 确定性推理 36 格，
-指标复用 `eval_protocol._session_metrics`（与 fseries 同源），每格落 eval_motion 同格式 npz
-+ F/t_tok/v_tok 表征；末尾 corner_check 自检三角 vs fseries（必须 ≈0）。
-网格任务由 `configs` 队列生产（`rho_grid_eval`，生成/运行命令见 `configs/Z_README.md`；
-`runner.py` 消费时调用 `anysole.rho_grid`，内部 `--reuse` 断点续跑）：
+在 (ρV, ρT) 保留率网格上逐一评估：每格对每一帧独立掷硬币，把该模态 token 换成 null
+token（与 config 级 null 逐字节一致；四角 = VT2M/V2M/T2M/纯先验，corner_check 自检 ≈0）。
+
+**生产**（148 个任务 = train 2×2 + val 6×6×3 种子 + test 6×6，`--reuse` 断点续跑）：
 
 ```bash
-conda activate touch_gait
-# 前端（热力图/切片/自检表；val 读 grid_metrics.json，test 读 grid_metrics_test.json）
+python configs/z_gen/rho_grid_eval.py --models V3_3B
+CUDA_VISIBLE_DEVICES=4 bash configs/bg.sh
+```
+
+产出（`results/experiments/rho_grid_eval/V3_3B/`）：
+- `grid_metrics[_<split>].json` —— 全格指标 + corner_check
+- `npz/<session>_rhoV<rV>_rhoT<rT>[_s<seed>].npz` —— eval_motion 同格式（接 R_Test1 动画）
+- `repr/<session>_..._repr.npz` —— F/t_tok/v_tok 表征
+
+**出图**（热力图 + 切片 + 自检表）：
+
+```bash
 python results_display/script/rho_grid_analysis.py --split test
 ```
 
-产出：`results/experiments/rho_grid_eval/V3_3B/grid_metrics[_<split>].json`（全格协议指标 + corner_check）、
-`npz/<session>_rhoV<rV>_rhoT<rT>[_s<seed>].npz`（接 R_Test1 动画）、`repr/` 表征 dump；
 前端输出在 `results_display/BTest/B3Test_rho_grid/V3_3B/`（`heatmap.png` / `slices.png` /
 `corner_check.csv` / `b3_criteria.json`）。
-
-具体数值以本轮 R_Test10 产物为准，本文不引用旧版热力图结论。
 
 ### A0–B2 分量分析
 
@@ -525,12 +531,17 @@ python results_display/script/rho_grid_analysis.py --split test
 
 ```bash
 conda activate touch_gait
-python results_display/script/singlemodal_analysis.py --split val   # A0
-python results_display/script/complement.py --split val             # A1
-python results_display/script/dropout_ablation.py --split val       # A2
-python results_display/script/v2t_upper.py --split val              # B1（需 rho_grid 已跑完）
-python results_display/script/trust.py --split val                  # B2（需 rho_grid 已跑完）
-# --split 默认 test；--model V3_3B 限定模型（可重复）
+# A0
+python results_display/script/singlemodal_analysis.py --split val
+# A1
+python results_display/script/complement.py --split val
+# A2
+python results_display/script/dropout_ablation.py --split val
+# B1（需 rho_grid 已跑完）
+python results_display/script/v2t_upper.py --split val
+# B2（需 rho_grid 已跑完）
+python results_display/script/trust.py --split val
+# --split 默认 test；--model V3_3B 限定模型
 ```
 
 输出：`results_display/{ATest,BTest}/<编号Test_分析名>/V3_3B/`（分析名 = A0Test_specialist /
@@ -558,25 +569,3 @@ python -m anysole.train --contact-method joint_and \
 >
 > 上述 dropout 旋钮仅适用于 anysolev1 扩散线；主线 anysolev2 为回归式模型，忽略这些参数
 > （train.py 会提示 knobs are ignored by modal anysolev2）。
-
-## 历史迁移说明
-
-动画统一进入 `Test1_visualization/`，对照实验进入 `Test2_comparison/`，
-过时配置删除（默认自动扫描 results/）。
-
-> **2026-09-20 SMPL 转向归档**：BVH-23 时代的 AnySole 实验目录已归档至
-> `results/AnySole_BVH_backup/`，baseline 试跑归档至 `results/Baselines_BVH_backup/`；
-> 展示层工具不再消费这些目录（auto 扫描会跳过 `*_backup*`）。当前 AnySole
-> 只产出 SMPL-24 NPZ（`predictions/eval_motion/`）；BVH 格式支持仅服务于
-> MotionPRO / Step2Motion 等 baseline 的展示与对照。
->
-> **2026-09-21 D/R 重组**：实验按「数据检验 D_TestN / 结果检验 R_TestN」两大部分
-> 重排（对照表见文首）；脚本与产物目录的改名在 P1-4 执行，届时本文命令同步更新。
->
-> **2026-09-22 第二次重排（缺失率实验组前置，主线 anysolev2/V4B）**：
-> D_Test5 基线触觉审计 → D_Test4；R_Test4 鞋垫偏移 → D_Test5（待适配）；R_Test8 V2T → R_Test4。
-> 09-21 编号的 R_Test5 均值姿态推理 / R_Test6 输入消融 / R_Test7 legacy 扩散诊断 /
-> R_Test9 τ 区间 / R_Test10 pose head 系列已归档至 `script/legacy/`
-> （诊断对象为 anysolev1 扩散线，主线回归式已不适用）。R_Test5–10 编号由缺失率
-> 任务书实验 1–6 复用。原 D_Test4（SMPL-24 协议预检）维持撤销状态：探针在
-> `z_note/probes/`（probe_f4_smpl24_preflight.py 等，不占 D/R 编号）。R_Test5–10 当前固定对应任务书 A0–B3。

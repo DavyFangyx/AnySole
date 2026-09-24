@@ -291,7 +291,7 @@ python -m anysole.eval \
 每个模式行除 MPJPE/PA-MPJPE/MPJRE/traj_ATE/contact_acc 外，还输出触觉重建指标
 `T_mae`/`T_rmse`/`T_corr`（96 格归一化压力）；其中 **V2M 行即 V2T（仅视觉生成触觉）
 质量**，JSON 顶层 `v2t` 字段为该行摘要。可视化与逐格误差分析见
-`results_display/README.md` 的「## R_Test8 触觉生成（V2T）」。（注：Test10 改名 R_Test8 前，个别旧文仍称 Test10）
+`results_display/README.md` 的「## R_Test4 触觉生成（V2T）」。
 
 单 session 推理：
 

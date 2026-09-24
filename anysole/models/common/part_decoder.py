@@ -34,7 +34,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from anysole.models.embeddings import SharedEmbeddings
+from anysole.models.common.embeddings import SharedEmbeddings
 from anysole.types import D_MODEL, FPS, JOINT_PARENTS, N_PARTS, PART_JOINTS, PART_NAMES, TW
 
 LOCAL_WINDOW = 4  # t-4..t+4 cross-attention window

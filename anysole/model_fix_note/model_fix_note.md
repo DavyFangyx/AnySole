@@ -15,6 +15,7 @@
 | 4 V3 计划 | — | 09-19 | 取代 v2 §F5，主线转向"触觉兑现" |
 | 5 SMPL 版 + 重写 | `3a8acd8` + 工作区 | 09-19~20 | 原生 SMPL-24 迁移（进行中），旧 ckpt 全部失效 |
 | 6 V4 分组证明组 | 工作区 | 09-22 | V4A 梯度聚类零启动（A 均匀 740ep）；改走 V4B 方案 B 表征聚类 |
+| 7 独立性重构 | 工作区 | 09-24 | 废除 warm-start 血缘：每模型独立入口脚本、一律从零训练；旧结果全删 |
 
 > 分支命名（2026-09-21）：`BVH_Motion` = 原 main@`b04a92b`（BVH 末提交）；
 > `SMPL_Motion` = 当前分支@`3a8acd8`（SMPL 切换点）。Baselines 已整体出 index。
@@ -232,6 +233,42 @@ F0b_seed2（400ep，λ_vrec=0.1）VT 63.7 = 当时最强基线；偶发有限值
 
 - K=12 不再试:细粒度同样不可复现(跨源 ARI +0.08),且分组对性能几乎无影响,试了也只是再证一次打平。
 - V3_2 的 val 协议是过期口径:test 侧终审已闭环(两边都新鲜);若你要 val 侧也闭环,重跑一条 V3_2 ② 评估即可(约 15-20 分钟)——需要的话我现在跑。
+
+---
+
+## 节点 7 · 独立性重构（09-24，用户裁定；命令见手册 2026-09-24 版）
+
+**废除 warm-start 血缘：模型 + 超参数 = 一次独立训练**：
+- 起因：用户指出 tw 扫描"在默认参数训练结果上后训练"违背超参扫描原则——
+  tw40 从 tw20 练好的 V3_4a 出发，测的不是 tw=40 而是微调。进而认定 12 个
+  模型之间也不应有父/子初始化关系：每个模型应是从零独立训练的模型。
+- 改动（本节点）：
+  1. `anysole/models/` 重组：公共层移入 `common/`（embeddings/encoders/
+     foot_encoder/tactile_encoder/fusion/pose_head/traj_head/aux_heads +
+     model.py/model_v2.py + 归档 part_decoder）；顶层 = 12 个模型入口脚本
+     （f0b…v4b，`STRUCTURE` + `build(config, part_joints)`，结构硬编码）。
+  2. `registry.py`：删除 parent 字段与 init_from 推断（恒 None），新增
+     `get_builder(name)` 入口导入。
+  3. `train.py`：结构开关全部从 CLI 删除（--t-encoder/--f2-repr/--pose-parts/
+     --soft-parts/--gate/--tactile-input/--no-imu/--v-input/--tactile-direct/
+     --from-scratch）；`--init-from` 仅调试覆盖；模型由入口构建并记录
+     model_name + STRUCTURE 入 ckpt config。
+  4. `eval.py`/`infer.py`：按 ckpt 记录的 model_name 找入口重建 + 结构校验
+     （saved vs entry 不符即报错）。
+  5. 调度器（configs/tools/common.py、runner.py、z_gen/model_registry.py）：
+     删结构 flags、专才改 `--model-name <base> + --out-dir`、全部 TRAIN=true。
+  6. tune.py：trial 从零（删 --init-from/base_ckpt），预算需重设计（150ep
+     从零无效）。
+  7. smoke 探针：删 warm-start 检查项（v33/v32/v4a/f4a）；smoke_f5_part
+     为 F5 归档残留（138D），勿跑。
+- **结果清空**：旧 warm-start 链全部 ckpt/metrics/分组文件已删除；手册各节
+  旧数字降级为"历史记录（warm-start 链口径）"，所有 12 基座待从零重训。
+- tw 扫描新口径：四点（20/40/80/120）全部从零、无先后依赖、可四卡并行；
+  **统一目录层级 + 完整超参记录**（用户裁定）：任何 run 都落
+  `V3_4a_joint_and/{完整字段堆叠}/`（`types.variant_from_config`，字段序
+  tw→st→lr→lp→lt→lk→la→…→sd→pk，**无默认省略**——目录名即超参记录），
+  基座目录只作容器；train/tune/调度器共用同一命名规则，eval/infer/ridge/
+  display 用 `--variant <完整字段串>` 定位。
 
 ---
 

@@ -16,10 +16,10 @@ from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.data.smpl_io import pelvis_to_smpl_trans, smpl24_pose6d_to_poses, smpl_archive_metadata
 from anysole.utils.diffusion import GaussianDiffusion
 from anysole.utils.geometry import f2_to_world, fk_pose6d, positions_to_6d_np, rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np
-from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
+from anysole.models import AnySoleModel, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device
 from anysole.ablations.insole_drift.templates import load_template_bank
-from anysole.registry import infer_anysole_paths
+from anysole.registry import get_builder, infer_anysole_paths
 from anysole.types import (
     ANYSOLE_ROOT,
     CONFIG_MODE_NAMES,
@@ -169,7 +169,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--variant",
         default=None,
         help="Stacked hyperparameter fields under the model dir "
-        "(e.g. tw40 / tw40_st20 / t0003_tw40_lr3e4); model-name+contact+variant "
+        "(the full field stack, e.g. tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_"
+        "ep740_bs256_sd1); model-name+contact+variant "
         "resolves to <model dir>/<variant>/checkpoints/ckpt_last.pt — the "
         "same address --ckpt would name (2026-09-22 stacked naming).",
     )
@@ -321,13 +322,6 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         model_kw.update(templates=templates, subject_to_index=subject_map)
     dropout = float(saved_config.get("dropout", config.get("dropout", 0.1)))
     pose_layers = int(saved_config.get("pose_layers", 6))
-    tactile_input = str(saved_config.get("tactile_input", "raw108"))
-    tactile_direct = bool(saved_config.get("tactile_direct", False))
-    no_imu = bool(saved_config.get("no_imu", False))
-    v_input = str(saved_config.get("v_input", "hrnet"))
-    t_encoder = str(saved_config.get("t_encoder", "linear"))
-    f2_repr = bool(saved_config.get("f2_repr", False))
-    pose_parts = int(saved_config.get("pose_parts", 3))
     # F5 part9 is archived (fix_plan_v3.md supersedes v2 §F5): its checkpoints
     # are kept on disk but the V3 codebase does not load them.
     if str(saved_config.get("decoder", "v1")) == "part9":
@@ -336,25 +330,53 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
             "V3 代码不回载。基线用 F4a_footconv / F2p4_combo。"
         )
     if modal == MODEL_ANYSOLEV2:
-        # F0b: regression model (model_v2.py); the regress pose head is
-        # implied by the modal, and forward takes no diffusion pair.
+        # Registered models are rebuilt from their entry script — the
+        # structure is fixed by the recorded model_name, and the saved
+        # structure flags are validated against the entry (2026-09-24
+        # independence restructure; no warm-start, no flag reconstruction).
+        model_name = str(saved_config.get("model_name", "") or "")
+        if not model_name:
+            raise RuntimeError(
+                "checkpoint config has no model_name; registered-model "
+                "checkpoints must record it (train --model-name writes it)"
+            )
+        entry = get_builder(model_name)
+        saved_struct = {k: saved_config.get(k) for k in entry.STRUCTURE}
+        if saved_config.get("part_joints") is not None and "pose_parts" in saved_struct:
+            # V4B: pose_parts is derived from the partition at build time.
+            saved_struct["pose_parts"] = len(saved_config["part_joints"])
+        if saved_struct != dict(entry.STRUCTURE):
+            raise RuntimeError(
+                "checkpoint structure does not match the %s entry: saved=%s entry=%s"
+                % (model_name, saved_struct, dict(entry.STRUCTURE))
+            )
+        for key, value in getattr(entry, "CONFIG_EXTRA", {}).items():
+            if saved_config.get(key) != value:
+                raise RuntimeError(
+                    "checkpoint flag %s=%r does not match the %s entry (%r)"
+                    % (key, saved_config.get(key), model_name, value)
+                )
+        build_cfg = dict(config)
+        build_cfg["d_model"] = d_model
+        build_cfg["tw"] = tw
+        build_cfg["dropout"] = dropout
+        build_cfg["pose_layers"] = pose_layers
         part_joints = saved_config.get("part_joints")
-        model = AnySoleModelV2(
-            d=d_model, tw=tw, dropout=dropout, pose_layers=pose_layers,
-            tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
-            v_input=v_input, t_encoder=t_encoder, f2_repr=f2_repr,
-            pose_parts=pose_parts,
-            soft_parts=bool(saved_config.get("soft_parts", False)),
-            gate=str(saved_config.get("gate", "none")),
+        model = entry.build(
+            build_cfg,
             part_joints=tuple(tuple(int(j) for j in g) for g in part_joints)
             if part_joints else None,
         ).to(device)
     else:
         model = AnySoleModel(
             d=d_model, tw=tw, modal=modal, use_insole_drift=use_drift, dropout=dropout,
-            pose_layers=pose_layers, tactile_input=tactile_input, tactile_direct=tactile_direct,
-            no_imu=no_imu,
-            v_input=v_input, t_encoder=t_encoder, f2_repr=f2_repr,
+            pose_layers=pose_layers,
+            tactile_input=str(saved_config.get("tactile_input", "raw108")),
+            tactile_direct=bool(saved_config.get("tactile_direct", False)),
+            no_imu=bool(saved_config.get("no_imu", False)),
+            v_input=str(saved_config.get("v_input", "hrnet")),
+            t_encoder=str(saved_config.get("t_encoder", "linear")),
+            f2_repr=bool(saved_config.get("f2_repr", False)),
             **model_kw,
         ).to(device)
     # Quasi-strict load: the only tolerated missing keys are the hygiene-only

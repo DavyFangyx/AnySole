@@ -21,6 +21,11 @@ STATES = ("queue", "running", "done", "failed")
 # These are the only experiments that produce model/evaluation data.  Analysis
 # and visualization live under results_display and are intentionally absent.
 EXPERIMENTS: dict[str, dict[str, Any]] = {
+    "all_models": {
+        "KIND": "model_suite",
+        "MODEL_IDS": list(MODELS),
+        "REQUIRES": [],
+    },
     "singlemodal_eval": {
         "KIND": "singlemodal_compare",
         "MODEL_IDS": ["V3_3B"],
@@ -122,7 +127,12 @@ def _next_sequence() -> int:
 def _task_specs(spec: dict[str, Any], models: list[str]) -> list[tuple[str, str | None]]:
     kind = str(spec["KIND"])
     tasks: list[tuple[str, str | None]] = []
-    if kind == "singlemodal_compare":
+    if kind == "model_suite":
+        # One train+eval transaction per registered base model (no
+        # specialists, no grid cells).
+        for model_id in models:
+            tasks.append(("model_run", model_id))
+    elif kind == "singlemodal_compare":
         for model_id in models:
             tasks.append(("model_run", model_id))
             for specialist in spec.get("SPECIALISTS", []):

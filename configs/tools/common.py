@@ -18,16 +18,11 @@ CONFIG_DIR = Path(__file__).resolve().parents[1]
 # Training knobs (snake_case model-spec keys -> anysole.train CLI flags).
 # The generator validates MODELS train_args against this map; runner.py
 # appends them to the train command.  The flag vocabulary mirrors the
-# command manual.
+# command manual.  Structure flags (t_encoder / f2_repr / pose_parts /
+# soft_parts / gate / v_input / tactile_input) are intentionally ABSENT:
+# the model's entry script fixes the structure (2026-09-24 independence).
 TRAIN_ARG_FLAG_MAP = {
-    "t_encoder": "--t-encoder",
-    "tactile_input": "--tactile-input",
-    "v_input": "--v-input",
-    "f2_repr": "--f2-repr",
-    "pose_parts": "--pose-parts",
     "part_json": "--part-json",
-    "soft_parts": "--soft-parts",
-    "gate": "--gate",
     "assign_cluster": "--assign-cluster",
     "lambda_assign": "--lambda-assign",
     "lambda_assign_ent": "--lambda-assign-ent",
@@ -55,12 +50,10 @@ TRAIN_ARG_FLAG_MAP = {
     "lambda_trec": "--lambda-trec",
     "lambda_vrec": "--lambda-vrec",
     "lambda_con": "--lambda-con",
-    "tactile_direct": "--tactile-direct",
-    "no_imu": "--no-imu",
     "tau_max": "--tau-max",
     "tau_fixed": "--tau-fixed",
 }
-TRAIN_STORE_TRUE = {"f2_repr", "soft_parts", "assign_cluster", "tactile_direct", "no_imu"}
+TRAIN_STORE_TRUE = {"assign_cluster"}
 
 
 def _parse_value(raw: str) -> Any:
@@ -290,11 +283,10 @@ def _lookup_model_spec(registry: dict[str, Any], model_id: str) -> dict[str, Any
 def specialist_paths(registry: dict[str, Any], model_id: str) -> dict[str, Path] | None:
     """Addresses of a derived specialist (not registered, so built directly).
 
-    Warm-start follows the base model's own lineage parent — the same ckpt the
-    base itself started from; --config-probs is dataset-side and architecture
-    is given by the base's train args.
+    Independence (2026-09-24): no warm-start — every specialist trains from
+    random init; --config-probs is dataset-side and the architecture is the
+    base model's entry (runner passes --model-name <base> + --out-dir).
     """
-    from anysole.registry import get_model_entry
     from anysole.types import anysole_model_dir
 
     split = split_specialist(model_id)
@@ -304,15 +296,11 @@ def specialist_paths(registry: dict[str, Any], model_id: str) -> dict[str, Path]
     spec = _lookup_model_spec(registry, base_id)
     contact = str(spec.get("contact_method") or registry.get("defaults", {}).get("contact_method", "joint_and"))
     model_dir = anysole_model_dir(model_id, contact)
-    entry = get_model_entry(str(spec.get("name") or base_id))
-    init_from = None
-    if entry.parent is not None:
-        init_from = anysole_model_dir(entry.parent, contact) / "checkpoints" / "ckpt_last.pt"
     return {
         "model_dir": model_dir,
         "ckpt_best": model_dir / "checkpoints" / "ckpt_best.pt",
         "ckpt_last": model_dir / "checkpoints" / "ckpt_last.pt",
-        "init_from": init_from,
+        "init_from": None,
     }
 
 

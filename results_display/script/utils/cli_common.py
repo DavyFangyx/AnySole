@@ -92,8 +92,9 @@ def split_csv_arg(value) -> list:
 
 def anysole_model_dir(model_name: str, contact_method: str, variant: str | None = None) -> str:
     """Results dir name: <model_name>_<contact_method>, plus the
-    optional stacked-hyperparameter subdir (2026-09-22 naming: tw40 / tw40_st20 /
-    t0003_tw40_lr3e4 — model+contact+variant == the ckpt address)."""
+    stacked-hyperparameter subdir (2026-09-24 naming: the full field stack,
+    e.g. tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1 —
+    model+contact+variant == the ckpt address)."""
     base = f"{model_name}_{contact_method}"
     return f"{base}/{variant}" if variant else base
 
@@ -203,7 +204,7 @@ def add_common_args(
             help="AnySole model name(s), comma-separated (legacy alias: --modal).",
         )
     if variant:
-        parser.add_argument("--variant", type=str, default=None, help="Stacked hyperparameter subdir under the model dir (e.g. tw40); model+contact+variant == the ckpt address.")
+        parser.add_argument("--variant", type=str, default=None, help="Stacked hyperparameter subdir under the model dir (the full field stack, e.g. tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1); model+contact+variant == the ckpt address.")
     if contact_method:
         parser.add_argument("--contact-method", type=str, default=contact_method_default, help="Contact-label scheme(s), comma-separated; model dir is <model-name>_<contact-method>.")
     if config_id:

@@ -1,6 +1,6 @@
 # AnySole 离线实验配置说明
 
-本文只说明两组进入离线队列的数据生产实验，以及 A0–B3 如何消费这些结果。
+本文只说明三组进入离线队列的数据生产实验，以及 A0–B3 如何消费这些结果。
 
 一个 `.conf` 的粒度是：一个模型 + 一份明确配置
 
@@ -16,7 +16,7 @@
 | 训练 stride | `20` | 不重叠窗口 |
 | batch size | `256` | 公共默认值 |
 | 学习率 | `1e-4` | constant schedule |
-| 训练轮数 | `740` | `V3_3B` registry 覆盖公共默认值 `800` |
+| 训练轮数 | `400` / `740` | F 系 400；V3 系 740（registry 逐模型覆盖公共默认 `800`） |
 | train seed | `1` | 训练随机种子 |
 | dropout | `0.1` | 网络 dropout |
 | diffusion steps | `1000 / 50` | train / sample |
@@ -50,7 +50,7 @@ python configs/z_gen/singlemodal_eval.py --models V3_3B
 | lr warmup | `0.05` | 前 5% 训练过程 warmup |
 | grad clip | `5.0` | 梯度裁剪上限 |
 | f2 repr | `false` | 不启用 F2 表征 |
-| train | `false` | 主线使用已有 checkpoint |
+| train | `true` | registry checkpoint 存在则跳过训练；缺失则从零训练 |
 | checkpoint | `results/AnySole/V3_3B_joint_and/checkpoints/ckpt_last.pt` | registry 自动推导 |
 
 主线训练采样概率的顺序固定为 `[VT, V-only, T-only]`：
@@ -166,7 +166,52 @@ results/experiments/rho_grid_eval/V3_3B/grid_metrics_val.json
 results/experiments/rho_grid_eval/V3_3B/grid_metrics_test.json
 ```
 
-## 4. A0–B3 分析与数据对应关系
+## 4. `all_models`：全部 12 基座训练 + 正式评估
+
+```bash
+# 全部 12 个注册模型
+python configs/z_gen/all_models.py
+python configs/z_gen/all_models.py --models F4a,V4B
+```
+
+每个模型一个 conf（`TASK=model_run`）：runner 先从头训练（独立性重构，
+无 warm-start 血缘），训练完成后跑正式 val/test，结果写入：
+
+```text
+results/experiments/all_models/<model>/{metrics,predictions,run.log,...}
+```
+
+训练 checkpoint 仍落在 registry 地址 `results/AnySole/<model>_joint_and/<variant>/`。
+同一个模型若已被其它实验训出 checkpoint，runner 检测到后自动跳过训练、只做
+正式评估（这也是 `singlemodal_eval` 复用自己的 V3_3B 训练的机制）。
+
+| 项目 | 设置 | 含义 |
+|---|---|---|
+| 模型集合 | `MODELS` 表全部 12 基座 | 生成器直接取 registry 表，新增模型自动纳入 |
+| train | `true`（全部） | 每个模型从零独立训练 |
+| epochs | F 系 `400` / V3 系 `740` | registry 逐模型覆盖公共默认 `800` |
+| 重发防护 | queue/running/done 已有同名 conf 则跳过 | 防止重复排队 740 轮训练；`--force` 强制重发 |
+| failed 恢复 | 不拦截 | 修复原因后 `--models <id>` 重发即可 |
+
+### 4.1 V4B 的结构输入（数据版分区，无模型依赖）
+
+V4B 的 `--part-json` 指向**原始训练数据运动学聚类**导出的分区文件（2026-09-24
+裁定：模型无关——不依赖任何已训练模型/ckpt）：
+
+```text
+results/AnySole/partitions/partitions_kinematic_b_K9.json
+```
+
+生成器 `z_note/probes/probe_part_cluster_b_data.py` 对训练窗口逐关节运动学特征
+（速度/加速度/相关性，Ward 聚类 + silhouette 扫描，同方案 B 方法）直接落盘
+K9/K10/K11/K14 多个分区文件，供 V4B 及对照使用。若文件缺失，重跑该 probe 即可
+（无需任何模型训练），随后：
+
+```text
+python configs/z_gen/all_models.py --models V4B
+```
+
+## 5. A0–B3 分析与数据对应关系
 
 A0–B3 不生成 queue conf，只读取 `results/`：
 
@@ -188,12 +233,13 @@ A0–B3 不生成 queue conf，只读取 `results/`：
 | B2 | `singlemodal_eval` + `rho_grid_eval` | `results_display/script/trust.py` |
 | B3 | `rho_grid_eval` | `results_display/script/rho_grid_analysis.py` |
 
-## 5. 运行命令
+## 6. 运行命令
 
 ```bash
+python configs/z_gen/all_models.py
 python configs/z_gen/singlemodal_eval.py --models V3_3B
 python configs/z_gen/rho_grid_eval.py --models V3_3B
-CUDA_VISIBLE_DEVICES=2 bash configs/bg.sh
+CUDA_VISIBLE_DEVICES=0 bash configs/bg.sh
 python configs/tools/status.py
 ```
 

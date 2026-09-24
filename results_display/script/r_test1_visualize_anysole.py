@@ -197,8 +197,9 @@ def parse_args() -> argparse.Namespace:
         "--variant",
         type=str,
         default=None,
-        help="Stacked hyperparameter subdir under the model dir (e.g. tw40 / tw40_st20); "
-        "model+contact+variant == the ckpt address (2026-09-22 stacked naming). "
+        help="Stacked hyperparameter subdir under the model dir (the full field stack, "
+        "e.g. tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1); "
+        "model+contact+variant == the ckpt address (2026-09-24 stacked naming). "
         "Ignored when --model-name is 'auto'.",
     )
     parser.add_argument(

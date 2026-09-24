@@ -1,4 +1,4 @@
-"""ρ 网格 repr dump ↔ GT 对齐的读出工具（R_Test7 C2 / R_Test8 共用）。
+"""ρ 网格 repr dump ↔ GT 对齐的读出工具（A/B 系列共用）。
 
 repr dump 的帧序 = dataset 非重叠窗口序（与 anysole.rho_grid 生成时同一
 dataset 构建口径），因此可以按 session 逐窗口对齐 GT（pose/contact/yaw）。

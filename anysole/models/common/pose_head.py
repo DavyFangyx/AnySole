@@ -60,7 +60,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from anysole.models.embeddings import SharedEmbeddings
+from anysole.models.common.embeddings import SharedEmbeddings
 from anysole.types import (
     BODY_JOINTS,
     D_MODEL,

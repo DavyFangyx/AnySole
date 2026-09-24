@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A0/A1/A2/B1/B2 shared component analysis for the missing-rate task book.
 
-The old R_Test6 probe and t-SNE views are intentionally not part of the main
+The legacy probe and t-SNE views are intentionally not part of the main
 experiment anymore.  This module implements the contrasts used by the
 revised task book (the canonical R_TestN entry points import ``main``):
 
@@ -79,7 +79,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--fs-tspecialist", type=Path, default=None,
                         help="T 专才 fseries；A1/B2 必需")
     parser.add_argument("--prior-grid", type=Path,
-                        default=REPO / "results" / "rho_grid_eval" / "V3_3B" / "grid_metrics.json",
+                        default=REPO / "results" / "experiments" / "rho_grid_eval" / "V3_3B" / "grid_metrics.json",
                         help="主线 rhoV0_rhoT0 先验单元，B1/B2 必需")
     parser.add_argument("--prior-cell", default="rhoV0_rhoT0")
     parser.add_argument("--out", type=Path,

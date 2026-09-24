@@ -43,14 +43,16 @@ from configs.tools.common import (
     load_registry,
     model_root,
     model_run_name,
+    resolve_path,
     resolved_model_spec,
     sha256_file,
     source_checkpoint,
     specialist_paths,
+    split_specialist,
     write_json,
 )
 from anysole.registry import infer_anysole_paths
-from anysole.types import stacked_variant_name
+from anysole.types import variant_from_config
 
 
 PYTHON = sys.executable
@@ -79,18 +81,41 @@ def _merge_model_spec(registry: dict[str, Any], model_id: str) -> dict[str, Any]
     return merged
 
 
-def _effective_variant(spec: dict[str, Any]) -> str | None:
+def _effective_variant(spec: dict[str, Any]) -> str:
     """Variant dir a train run will write to — the exact rule train.py uses
-    (stacked_variant_name over the effective config)."""
+    (types.variant_from_config: fixed field order, every present field
+    written, no default omission)."""
     args = dict(spec.get("train_args") or {})
-    return stacked_variant_name(
-        tw=int(args.get("tw", 20)),
-        stride=args.get("stride"),
-        lr=float(args.get("lr", 1e-4)),
-        lambda_pose=float(args.get("lambda_pose", 3.0)),
-        lambda_traj=float(args.get("lambda_traj", 1.0)),
-        lambda_kp=float(args.get("lambda_kp", 1.0)),
-    )
+    cfg = {
+        "tw": int(args.get("tw", 20)),
+        "stride": args.get("stride"),
+        "lr": float(args.get("lr", 1e-4)),
+        "lambda_pose": float(args.get("lambda_pose", 3.0)),
+        "lambda_traj": float(args.get("lambda_traj", 1.0)),
+        "lambda_kp": float(args.get("lambda_kp", 1.0)),
+        "epochs": int(spec.get("epochs", 800)),
+        "batch_size": int(spec.get("batch_size", 256)),
+        "seed": int(spec.get("train_seed", spec.get("seed", 1))),
+    }
+    for key in ("lambda_assign", "lambda_assign_ent", "lambda_assign_conc",
+                "lambda_assign_dead", "assign_dead_beta", "assign_temp_init",
+                "assign_temp_final", "assign_anneal_frac", "assign_lock_frac",
+                "assign_lr_mult", "lambda_sigma", "sigma_freeze_frac",
+                "lr_warmup_frac", "grad_clip", "loss_cap"):
+        if key in args:
+            cfg[key] = float(args[key])
+    # V4B: the partition K is part of the run's record (train derives it from
+    # --part-json); read the file so the predicted dir matches train's.
+    part_json = args.get("part_json")
+    if part_json:
+        path = resolve_path(str(part_json))
+        if path is not None and path.is_file():
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            groups = doc["partition"] if isinstance(doc, dict) and "partition" in doc else doc
+            if isinstance(groups, dict):
+                groups = list(groups.values())
+            cfg["part_joints"] = [list(group) for group in groups]
+    return variant_from_config(cfg)
 
 
 # train-arg keys (conf MODEL_<ID>_* lines) -> anysole.train CLI flags.
@@ -168,28 +193,42 @@ def _train_command(registry: dict[str, Any], model_id: str) -> list[str]:
         str(seed),
     ]
     if spec.get("specialist_kind"):
-        # Derived single-stream specialist: NOT a registered model.  The dir
-        # and warm-start source are computed from the base's registry entry
-        # (<base>_<kind>_<contact>; --config-probs is not a stacked-variant
-        # field, so --model-name would clobber the base's own ckpt dir).
+        # Derived single-stream specialist: NOT a registered model.  It uses
+        # the BASE model's entry structure (--model-name) with an explicit
+        # --out-dir to the specialist's own dir (<base>_<kind>_<contact>;
+        # --config-probs is not a stacked-variant field, so a plain
+        # --model-name would clobber the base's own ckpt dir).  No
+        # warm-start: every specialist trains from random init.
         paths = specialist_paths(registry, model_id)
         if paths is None:
             raise ValueError("specialist resolution failed for %s" % model_id)
+        base_id, _kind = split_specialist(model_id)
+        base_spec = _merge_model_spec(registry, base_id)
+        base_name = str(base_spec.get("name") or base_id)
+        command += ["--model-name", base_name]
         command += ["--out-dir", str(paths["model_dir"] / "checkpoints")]
-        if paths["init_from"] is None:
-            command.append("--from-scratch")
-        else:
-            command += ["--init-from", str(paths["init_from"])]
     else:
-        # Registered model: --model-name infers the out-dir and the
-        # warm-start lineage from the registry (zero handwritten paths).
+        # Registered model: --model-name infers the out-dir (zero handwritten
+        # paths); the structure comes from the model's entry script and every
+        # run trains from random init.
         command += ["--model-name", str(spec["name"])]
-        inferred = infer_anysole_paths(
-            str(spec["name"]), variant=_effective_variant(spec), contact=contact
-        )
-        if inferred["init_from"] is None:
-            command.append("--from-scratch")
     _append_train_args(command, spec)
+    # V4B guard: the learned partition is structural data.  It is derived
+    # from RAW training-data kinematics (no trained model — 2026-09-24);
+    # fail loudly with the re-derivation recipe instead of a bare
+    # FileNotFoundError.
+    part_json = (spec.get("train_args") or {}).get("part_json")
+    if part_json:
+        path = resolve_path(str(part_json))
+        if path is None or not path.is_file():
+            raise FileNotFoundError(
+                "V4B partition file missing: %s\n"
+                "Re-derive it (data-only, no trained model needed): run "
+                "z_note/probes/probe_part_cluster_b_data.py, then point "
+                "V4B's part_json at one of "
+                "results/AnySole/partitions/partitions_kinematic_b_K*.json."
+                % part_json
+            )
     return command
 
 

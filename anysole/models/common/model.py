@@ -15,13 +15,13 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from anysole.models.aux_heads import AuxHeads
-from anysole.models.embeddings import SharedEmbeddings
-from anysole.models.encoders import ModalEncoders
-from anysole.models.fusion import FusionTransformer
-from anysole.models.model_v2 import MODEL_ANYSOLEV2
-from anysole.models.pose_head import PoseHead
-from anysole.models.traj_head import TrajHead
+from anysole.models.common.aux_heads import AuxHeads
+from anysole.models.common.embeddings import SharedEmbeddings
+from anysole.models.common.encoders import ModalEncoders
+from anysole.models.common.fusion import FusionTransformer
+from anysole.models.common.model_v2 import MODEL_ANYSOLEV2
+from anysole.models.common.pose_head import PoseHead
+from anysole.models.common.traj_head import TrajHead
 from anysole.types import D_MODEL, TW
 from anysole.ablations.insole_drift import InsoleDriftCompensator
 from anysole.ablations.insole_drift.physical_tokens import physical_tokens

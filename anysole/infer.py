@@ -29,8 +29,8 @@ from anysole.utils.geometry import (
     rot6d_to_rotmat_np,
     rotmat_to_6d_np,
 )
-from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
-from anysole.registry import infer_anysole_paths
+from anysole.models import AnySoleModel, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
+from anysole.registry import get_builder, infer_anysole_paths
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.train import load_config, resolve_device
 from anysole.types import (
@@ -83,7 +83,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--variant",
         default=None,
-        help="Stacked hyperparameter fields under the model dir (e.g. tw40). Requires "
+        help="Stacked hyperparameter fields under the model dir (the full field "
+        "stack, e.g. tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1). Requires "
         "--model-name.",
     )
     parser.add_argument(
@@ -253,22 +254,36 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
             )
         v_hmr = assemble_v_hmr(torch.load(hmr_path, map_location="cpu"), n_frames)
     if modal == MODEL_ANYSOLEV2:
-        # F0b: regression model — the regress pose head is implied by the
-        # modal; forward takes no diffusion pair.
+        # Registered models are rebuilt from their entry script — structure
+        # fixed by the recorded model_name, saved flags validated against it
+        # (2026-09-24 independence restructure).
         if str(saved_config.get("decoder", "v1")) == "part9":
             raise ValueError(
                 "F5 part9 checkpoint is archived (v2 §F5 作废，fix_plan_v3 取代)；"
                 "V3 代码不回载。基线用 F4a_footconv / F2p4_combo。"
             )
-        model = AnySoleModelV2(
-            d=d_model, tw=tw, dropout=dropout, pose_layers=pose_layers,
-            tactile_input=tactile_input, tactile_direct=tactile_direct, no_imu=no_imu,
-            v_input=str(saved_config.get("v_input", "hrnet")),
-            t_encoder=str(saved_config.get("t_encoder", "linear")),
-            f2_repr=bool(saved_config.get("f2_repr", False)),
-            pose_parts=int(saved_config.get("pose_parts", 3)),
-            soft_parts=bool(saved_config.get("soft_parts", False)),
-            gate=str(saved_config.get("gate", "none")),
+        model_name = str(saved_config.get("model_name", "") or "")
+        if not model_name:
+            raise RuntimeError(
+                "checkpoint config has no model_name; registered-model "
+                "checkpoints must record it (train --model-name writes it)"
+            )
+        entry = get_builder(model_name)
+        saved_struct = {k: saved_config.get(k) for k in entry.STRUCTURE}
+        if saved_config.get("part_joints") is not None and "pose_parts" in saved_struct:
+            saved_struct["pose_parts"] = len(saved_config["part_joints"])
+        if saved_struct != dict(entry.STRUCTURE):
+            raise RuntimeError(
+                "checkpoint structure does not match the %s entry: saved=%s entry=%s"
+                % (model_name, saved_struct, dict(entry.STRUCTURE))
+            )
+        build_cfg = dict(config)
+        build_cfg["d_model"] = d_model
+        build_cfg["tw"] = tw
+        build_cfg["dropout"] = dropout
+        build_cfg["pose_layers"] = pose_layers
+        model = entry.build(
+            build_cfg,
             part_joints=tuple(tuple(int(j) for j in g) for g in saved_config["part_joints"])
             if saved_config.get("part_joints") else None,
         ).to(device)

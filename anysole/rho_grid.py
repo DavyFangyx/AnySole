@@ -1,4 +1,4 @@
-"""ρ 网格生成器（missing-rate 任务书实验 1 / R_Test5 生成器侧）。
+"""ρ 网格生成器（missing-rate 任务书实验 1 / B3 生成器侧）。
 
 机制：V/T 保留率网格 (rV, rT) ∈ ρ×ρ，每格 = 逐帧独立掷硬币把该帧 token 换成
 null token（保留率 = 不换的概率；mask=True 的位置换 null）。config 恒为 VT，
@@ -55,7 +55,7 @@ FADE = 4
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ρ 网格生成器（R_Test5 / 任务书实验 1）")
+    parser = argparse.ArgumentParser(description="ρ 网格生成器（B3 / 任务书实验 1）")
     parser.add_argument("--ckpt", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=REPO / "anysole" / "configs" / "v1.yaml")
     parser.add_argument("--split", choices=("train", "val", "test"), default="val",

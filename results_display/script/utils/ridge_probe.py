@@ -55,7 +55,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "checkpoint is inferred as <model-name>_<contact>[/<variant>]/"
                         "checkpoints/ckpt_{which}.pt.")
     parser.add_argument("--variant", default=None,
-                        help="Stacked hyperparameter fields under the model dir (e.g. tw40).")
+                        help="Stacked hyperparameter fields under the model dir (the full "
+                        "field stack, e.g. tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1).")
     parser.add_argument("--contact-method", default="joint_and",
                         help="Contact-label scheme in the dir name (default joint_and).")
     parser.add_argument("--which", choices=("last", "best"), default="last",

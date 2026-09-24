@@ -21,7 +21,7 @@ from anysole.data.dataset import (
 )
 from anysole.utils.diffusion import GaussianDiffusion
 from anysole.utils.losses import compute_losses
-from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_NAMES, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2
+from anysole.models import AnySoleModel, MODEL_NAMES, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2
 from anysole.types import (
     CONFIG_PROBS,
     CONFIG_T,
@@ -42,9 +42,9 @@ from anysole.types import (
     WORKSPACE_ROOT,
     anysole_model_dir,
     assert_batch_shapes,
-    stacked_variant_name,
+    variant_from_config,
 )
-from anysole.registry import infer_anysole_paths
+from anysole.registry import get_builder, infer_anysole_paths
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.utils.geometry import f2_to_world, fk_pose6d
 from anysole.utils.losses import soft_contact_from_keypoints
@@ -380,115 +380,32 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "1 = every-frame alignment, Step2Motion-style).",
     )
     parser.add_argument(
-        "--tactile-input",
-        choices=("raw108", "s2m50"),
-        default=None,
-        help="E6.6a: tactile encoder input. raw108 = cat([T_raw, T_phys]) (E3); "
-        "s2m50 = Step2Motion-口径 50-dim channel (16 pooled pressure + synthesized "
-        "IMU + force + CoP). The historical IMU is derived from the directly exported "
-        "BVH-23/ToeBase motion, never from the SMPL target. Saved into the checkpoint.",
-    )
-    parser.add_argument(
-        "--t-encoder",
-        choices=("linear", "foot_conv"),
-        default=None,
-        help="F4a: tactile stream encoder (raw108 only). linear = flat "
-        "LinearTemporalEncoder (E3 口径, default); foot_conv = FootConvEncoder — "
-        "per-foot 4×12 grid conv (right foot mirrored), [left/right/global] "
-        "tokens + temporal transformer. The input DATA is unchanged (108-dim); "
-        "only the encoding changes (anysole/models/foot_encoder.py). "
-        "Saved into the checkpoint.",
-    )
-    parser.add_argument(
-        "--tactile-direct",
-        action="store_true",
-        default=None,
-        help="E6.6b: per-group tactile encoder (TactileEncoder) + direct pose-head "
-        "cross-attention to cat([F, t_tok]). Requires --tactile-input s2m50.",
-    )
-    parser.add_argument(
-        "--no-imu",
-        action="store_true",
-        default=None,
-        help="E6.8: delete the synthesized IMU channels (acc3+gyro3 per foot) from "
-        "the s2m50 tactile input — the data is built as 38-dim (pressure16+force+CoP "
-        "per foot, no IMU values computed or stored) and the encoder's IMU groups are "
-        "removed. Requires --tactile-input s2m50. Saved into the checkpoint.",
-    )
-    parser.add_argument(
-        "--v-input",
-        choices=("hrnet", "hmr_gvhmr"),
-        default=None,
-        help="F1: visual encoder input. hrnet = V_feat (HRNet 2048 + CLIFF bbox, "
-        "E3 口径); hmr_gvhmr = V_hmr (1156-dim GVHMR channel: aa body_pose 63 + "
-        "global_orient 3 + betas 10 + COCO-17 kp2d 51 + HMR2 img features 1024 + "
-        "bbox/q 5). Requires the hmr cache (anysole/data/extract_hmr.py). "
-        "Saved into the checkpoint.",
-    )
-    parser.add_argument(
-        "--f2-repr",
-        action="store_true",
-        default=None,
-        help="F2a: heading/tilt representation. pose target root 6D = tilt "
-        "(yaw removed), trajectory target = 4-dim [psi_dot, v_hx, v_hz, h] "
-        "(geometry.py f2_to_world recovers the world pose/trans). The traj "
-        "head outputs 4-dim; traj stats are fitted on the training set and "
-        "saved into the checkpoint. Saved into the checkpoint.",
-    )
-    parser.add_argument(
-        "--pose-parts",
-        choices=(3, 9, 24),
-        type=int,
-        default=None,
-        help="V3-2/V4A: pose-head query granularity. 3 = SMPL-24 joint queries in body/"
-        "left/right groups (F0b baseline); 9 = one query + one unembed head "
-        "per part (PART_JOINTS, fix_plan_v3.md §V3-2); 24 = one slot per "
-        "joint — the V4A clustering run (方案 A) discovers the grouping from "
-        "a near-uniform assignment instead of assuming it. Saved into the checkpoint.",
-    )
-    parser.add_argument(
         "--part-json",
         type=Path,
         default=None,
-        help="V3-4b / 方案 B: load a learned hard partition (JSON, either a list "
+        help="V4B only: load a learned hard partition (JSON, either a list "
         "of joint-index lists or the probe output with a 'partition' key of "
-        "joint-name lists) and train the hard pose head with it. Requires "
-        "--pose-parts == len(partition); rejected with --soft-parts/--gate. "
-        "Saved into the checkpoint config so eval/infer reconstruct it.",
-    )
-    parser.add_argument(
-        "--soft-parts",
-        action="store_true",
-        help="V3-3 (mechanism C structure, fix_plan_v3.md §V3-3): replace the "
-        "hard 9-part unembed heads with the learned soft assignment matrix A "
-        "(9 slots x 24 joints, initialized to PART_JOINTS) + L_assign "
-        "regularization. Requires --pose-parts 9. Saved into the checkpoint.",
-    )
-    parser.add_argument(
-        "--gate",
-        choices=("none", "sigma"),
-        default=None,
-        help="V3-3 (mechanism B, fix_plan_v3.md §V3-3): 'sigma' = dual-masked "
-        "cross-attention to the V/T views of F + per-slot sigma routing over "
-        "[V, T, prior] with per-part prior bias tau_p (init derived from the "
-        "part assignment). Requires --pose-parts 9. Saved into the checkpoint.",
+        "joint-name lists) and train the hard pose head with it. The "
+        "partition is structural data for the V4B entry; other models reject "
+        "it. Saved into the checkpoint config so eval/infer reconstruct it.",
     )
     parser.add_argument(
         "--lambda-assign",
         type=float,
         default=None,
-        help="V3-3: weight of L_assign (assignment entropy + slot-load balance; "
-        "only active with --soft-parts). Default 0.05. V4A clustering passes "
-        "1.0 here and scales the three cluster terms with --lambda-assign-*.",
+        help="Weight of L_assign (assignment entropy + slot-load balance; "
+        "only active for soft-A models, i.e. V3_3A/B / V3_4b/c / V4A). "
+        "Default 0.05. V4A clustering passes 1.0 here and scales the three "
+        "cluster terms with --lambda-assign-*.",
     )
     parser.add_argument(
         "--assign-cluster",
         action="store_true",
-        help="V4A (方案 A, prove_partition design): learn the part grouping "
-        "from a near-uniform assignment. Requires --pose-parts 24 --soft-parts. "
-        "Replaces the V3-3 L_assign with annealed entropy + concentration "
-        "reward + dead-slot tax; A gets its own optimizer lr (--assign-lr-mult) "
-        "and is frozen after --assign-lock-frac of the run. Saved into the checkpoint.",
+        help="V4A only (its entry fixes 24 slots + soft A): learn the part "
+        "grouping from a near-uniform assignment. Replaces the V3-3 L_assign "
+        "with annealed entropy + concentration reward + dead-slot tax; A gets "
+        "its own optimizer lr (--assign-lr-mult) and is frozen after "
+        "--assign-lock-frac of the run. Saved into the checkpoint.",
     )
     parser.add_argument(
         "--lambda-assign-ent", type=float, default=0.05,
@@ -593,22 +510,23 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "effective config — model+contact+fields == the ckpt address (2026-09-22 naming). "
         "--out-dir remains an explicit override only.",
     )
-    parser.add_argument("--init-from", type=Path, default=None,
-                        help="Warm-start from an existing checkpoint.  INFERRED from the model "
-                             "registry when omitted (--model-name's parent, or the base model "
-                             "for a variant dir) — this flag is a manual override only. "
-                             "Only state-dict keys whose names AND shapes match the current "
-                             "model are copied (everything else keeps its fresh init), so "
-                             "e.g. an E3 anysolev1 ckpt can seed anysolev2 — the V1 pose-head "
-                             "diffusion projections (proj_*/timestep_token) have no V2 "
-                             "counterpart and are skipped automatically. --init-drop adds "
-                             "explicit prefixes to skip.")
     parser.add_argument(
-        "--from-scratch",
-        action="store_true",
-        help="Disable the inferred warm-start: train with fresh weights even when the "
-        "registry has a parent for --model-name. Conflicts with --init-from.",
+        "--variant",
+        type=str,
+        default=None,
+        help="Explicit variant dir name override (e.g. --variant tw20 puts a "
+        "default-hyperparameter run in <model>_<contact>/tw20/ instead of the "
+        "bare base dir, keeping the results tree uniform). When omitted, the "
+        "variant is auto-derived from the stacked non-default fields.",
     )
+    parser.add_argument("--init-from", type=Path, default=None,
+                        help="DEBUG OVERRIDE ONLY: warm-start from an existing "
+                             "checkpoint.  Independent-models rule (2026-09-24): "
+                             "every run starts from random init by default — no "
+                             "warm-start is ever inferred.  Only state-dict keys "
+                             "whose names AND shapes match the current model are "
+                             "copied (everything else keeps its fresh init). "
+                             "--init-drop adds explicit prefixes to skip.")
     parser.add_argument("--init-drop", type=str, default="",
                         help="Comma-separated state-dict key prefixes to skip in addition "
                              "to the automatic name/shape matching (e.g. 'pose_head.' to "
@@ -820,10 +738,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         if value is not None:
             config[key] = value
     # Registered experiment names identify the model branch; the architecture
-    # is no longer a user-facing CLI choice.  All current registered branches
-    # are AnySole V2/regression models.
+    # comes from the model's entry script (anysole/models/<module>.py), which
+    # fixes the structure — structure flags are not a CLI choice (2026-09-24
+    # independence restructure).  Every run starts from random init: model +
+    # hyperparameters is the full identity of a run.
+    entry = None
     if args.model_name is not None:
         config["modal"] = MODEL_ANYSOLEV2
+        entry = get_builder(args.model_name)
+        config["model_name"] = args.model_name
+        config.update(entry.STRUCTURE)
+        config.update(getattr(entry, "CONFIG_EXTRA", {}))
     if config.get("modal", MODEL_ANYSOLEV1) not in MODEL_NAMES:
         raise ValueError("Unknown modal %r; expected one of %s" % (config.get("modal"), MODEL_NAMES))
     if config.get("modal") == MODEL_ANYSOLEV2 and (
@@ -867,21 +792,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not 1 <= args.stride <= int(config["tw"]):
             raise ValueError("--stride must be in [1, tw]")
         config["stride"] = int(args.stride)
-    if args.tactile_input is not None:
-        config["tactile_input"] = args.tactile_input
-    if args.t_encoder is not None:
-        config["t_encoder"] = args.t_encoder
-    if args.v_input is not None:
-        config["v_input"] = args.v_input
-    if args.f2_repr:
-        config["f2_repr"] = True
-    if args.pose_parts is not None:
-        config["pose_parts"] = int(args.pose_parts)
     if args.part_json is not None:
-        # V3-4b / 方案 B: learned hard partition (probe_part_cluster_b.py
-        # output or a plain list of joint-index lists).
+        # V4B: learned hard partition (probe_part_cluster_b.py output or a
+        # plain list of joint-index lists).  The partition is structural data
+        # for the V4B entry; every other model rejects it.
+        if args.model_name != "V4B":
+            raise ValueError("--part-json is only valid for --model-name V4B")
         import json as _json
-        doc = _json.loads(Path(args.part_json).read_text())
+        part_json_path = Path(args.part_json)
+        if not part_json_path.is_file():
+            raise FileNotFoundError(
+                "V4B partition file missing: %s\n"
+                "Re-derive it (data-only, no trained model needed):\n"
+                "  python z_note/probes/probe_part_cluster_b_data.py\n"
+                "  -> results/AnySole/partitions/partitions_kinematic_b_K*.json\n"
+                "then pass one of the exported candidates here."
+                % part_json_path
+            )
+        doc = _json.loads(part_json_path.read_text())
         groups = doc["partition"] if isinstance(doc, dict) and "partition" in doc else doc
         if isinstance(groups, dict):
             # probe format: {"slot_xx": ["joint_name", ...]} -> index lists
@@ -889,15 +817,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             name_to_idx = {n: i for i, n in enumerate(_JN)}
             groups = [[name_to_idx[n] for n in names] for names in groups.values()]
         part_joints = tuple(tuple(int(j) for j in g) for g in groups)
-        if int(config.get("pose_parts", 3)) != len(part_joints):
-            raise ValueError("--pose-parts (%d) must equal len(partition) (%d)"
-                             % (int(config.get("pose_parts", 3)), len(part_joints)))
+        config["pose_parts"] = len(part_joints)
         config["part_joints"] = [list(g) for g in part_joints]
         print("part-json: %d groups %s" % (len(part_joints), [list(g) for g in part_joints]))
-    if args.soft_parts:
-        config["soft_parts"] = True
-    if args.gate is not None:
-        config["gate"] = str(args.gate)
     if args.lambda_assign is not None:
         config["lambda_assign"] = float(args.lambda_assign)
     if args.lambda_sigma is not None:
@@ -905,32 +827,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.sigma_freeze_frac is not None:
         config["sigma_freeze_frac"] = float(args.sigma_freeze_frac)
     if args.assign_cluster:
-        config["assign_cluster"] = True
+        # assign_cluster is part of the V4A entry's identity (its STRUCTURE
+        # already carries it); the CLI flag stays only to pass the runtime
+        # annealing/loss hyperparameters.
+        if args.model_name != "V4A":
+            raise ValueError("--assign-cluster is only valid for --model-name V4A "
+                             "(its entry fixes 24 slots + soft A)")
         for key in ("lambda_assign_ent", "lambda_assign_conc", "lambda_assign_dead",
                     "assign_dead_beta", "assign_temp_init", "assign_temp_final",
                     "assign_anneal_frac", "assign_lock_frac", "assign_lr_mult"):
             config[key] = float(getattr(args, key))
-        if int(config.get("pose_parts", 3)) != 24 or not bool(config.get("soft_parts", False)):
-            raise ValueError("--assign-cluster requires --pose-parts 24 --soft-parts (V4A)")
         if float(config["lambda_assign"]) != 1.0:
             print("NOTE: V4A clustering expects --lambda-assign 1.0 (the cluster "
                   "terms carry their own --lambda-assign-* weights); got %s"
                   % config["lambda_assign"])
-    if bool(config.get("soft_parts", False)) and int(config.get("pose_parts", 3)) not in (9, 24):
-        raise ValueError("--soft-parts requires --pose-parts 9 (V3-3) or 24 (V4A)")
-    if str(config.get("gate", "none")) != "none" and int(config.get("pose_parts", 3)) != 9:
-        raise ValueError("--gate requires --pose-parts 9 (V3-3)")
     # V4A: the anneal progress consumed by the cluster L_assign each step;
     # defaults to fully-annealed (1.0) for every non-cluster run.
     config.setdefault("assign_anneal", 1.0)
     if args.lr_warmup_frac is not None:
         config["lr_warmup_frac"] = float(args.lr_warmup_frac)
-    if args.tactile_direct:
-        config["tactile_direct"] = True
-    if args.no_imu:
-        if str(config.get("tactile_input", "raw108")) != "s2m50":
-            raise ValueError("--no-imu requires --tactile-input s2m50 (raw108 has no IMU channels)")
-        config["no_imu"] = True
     for key in ("lambda_pose", "lambda_kp", "lambda_traj", "lambda_trec", "lambda_vrec",
                 "lambda_con", "lambda_pose_vel", "lambda_bone"):
         value = getattr(args, key)
@@ -1019,29 +934,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Keep model variants independent in the centralized results tree. An
     # explicit --out-dir remains authoritative for custom experiments.
     # Otherwise the dir is INFERRED (2026-09-22): model-name + contact-method
-    # + stacked hyperparameter fields built from the effective config; the
-    # warm-start source is inferred from the model registry the same way
-    # (--from-scratch disables it, --init-from overrides it manually).
+    # + stacked hyperparameter fields built from the effective config (or
+    # pinned by --variant); every run trains from random init — no warm-start
+    # source is ever inferred (--init-from = debug override only).
     if args.model_name is not None:
         contact_method = str(config.get("contact_method", "tactile_abs"))
-        variant = stacked_variant_name(
-            tw=int(config["tw"]),
-            stride=config.get("stride"),
-            lr=float(config["lr"]),
-            lambda_pose=float(config.get("lambda_pose", 3.0)),
-            lambda_traj=float(config.get("lambda_traj", 1.0)),
-            lambda_kp=float(config.get("lambda_kp", 1.0)),
-        )
+        # Uniform hierarchy + complete hyperparameter record (2026-09-24):
+        # the variant name = the full stacked fields of the effective config
+        # (fixed order, no default omission) — every run gets its own dir,
+        # including all-default ones; --variant pins it explicitly instead.
+        variant = args.variant
+        if variant is None:
+            variant = variant_from_config(config)
+        if variant is not None:
+            config["variant"] = str(variant)
         inferred = infer_anysole_paths(args.model_name, variant=variant, contact=contact_method)
         if args.out_dir is None:
             config["out_dir"] = str(inferred["model_dir"] / "checkpoints")
-        if args.init_from is None and not args.from_scratch:
-            if inferred["init_from"] is None:
-                raise ValueError(
-                    "--model-name %r has no registered parent and --init-from was not given; "
-                    "pass --init-from <ckpt> or --from-scratch." % args.model_name
-                )
-            args.init_from = Path(inferred["init_from"])
+        # Independence (2026-09-24): no warm-start is ever inferred — every
+        # run starts from random init; --init-from remains a debug override.
     else:
         if args.out_dir is None:
             raise ValueError(
@@ -1049,32 +960,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "output dir is inferred as <model-name>_<contact>[/<stacked fields>]/checkpoints, "
                 "or pass --out-dir explicitly for a custom experiment."
             )
-        if args.from_scratch:
-            raise ValueError("--from-scratch requires --model-name")
-    if args.init_from is not None and args.from_scratch:
-        raise ValueError("--from-scratch conflicts with --init-from")
     if modal == MODEL_ANYSOLEV2:
-        # F0b: regression model (model_v2.py) — V1 structure, regress pose
-        # head, no diffusion pair in forward.
+        # Registered models are built from their entry script — the structure
+        # is fixed by the model name (anysole/models/<module>.py), and the
+        # entry's STRUCTURE/CONFIG_EXTRA were recorded into config above.
+        # Regression pose head, no diffusion pair in forward.
+        if entry is None:
+            raise ValueError("anysolev2 requires --model-name (entry script defines the structure)")
         if bool(config.get("use_insole_drift", False)):
             raise ValueError("anysolev2 does not support insole drift compensation")
-        model = AnySoleModelV2(
-            d=int(config["d_model"]),
-            tw=int(config["tw"]),
-            dropout=float(config.get("dropout", 0.1)),
-            pose_layers=int(config.get("pose_layers", 6)),
-            tactile_input=str(config.get("tactile_input", "raw108")),
-            tactile_direct=bool(config.get("tactile_direct", False)),
-            no_imu=bool(config.get("no_imu", False)),
-            v_input=str(config.get("v_input", "hrnet")),
-            t_encoder=str(config.get("t_encoder", "linear")),
-            f2_repr=bool(config.get("f2_repr", False)),
-            pose_parts=int(config.get("pose_parts", 3)),
-            soft_parts=bool(config.get("soft_parts", False)),
-            gate=str(config.get("gate", "none")),
-            part_joints=tuple(tuple(int(j) for j in g) for g in config["part_joints"])
-            if config.get("part_joints") else None,
-        ).to(device)
+        part_joints = tuple(tuple(int(j) for j in g) for g in config["part_joints"]) \
+            if config.get("part_joints") else None
+        model = entry.build(config, part_joints=part_joints).to(device)
     else:
         if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):
             templates, subject_map = load_template_bank(config["template_path"])
@@ -1095,9 +992,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             **model_kw,
         ).to(device)
     if args.init_from is not None:
-        # F0b fast track: warm-start before fitting pose stats, so the
-        # normalization buffers are refit on the current dataset regardless
-        # of what the source checkpoint carried.
+        # Debug-only warm-start (independent-models rule: never inferred).
+        # Loaded before fitting pose stats, so the normalization buffers are
+        # refit on the current dataset regardless of what the source
+        # checkpoint carried.
         init_from_checkpoint(
             model, args.init_from,
             drop_prefixes=tuple(p for p in args.init_drop.split(",") if p),

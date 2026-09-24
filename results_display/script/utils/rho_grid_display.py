@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""R_Test10 / B3: continuous rho-grid missingness display."""
+"""B3: continuous rho-grid missingness display."""
 from __future__ import annotations
 
 import argparse
@@ -28,7 +28,7 @@ ORANGE = "#eb6834"
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="R_Test10 / B3 rho-grid display")
+    p = argparse.ArgumentParser(description="B3 rho-grid display")
     p.add_argument("--metrics", type=Path, required=True)
     p.add_argument("--metric", default="pa_mpjpe_mm")
     p.add_argument("--out-dir", type=Path, default=None)
