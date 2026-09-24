@@ -11,7 +11,7 @@ Usage (run from the repository root):
     python results_display/script/r_test1_visualize_motionpro.py --session S14103
     python results_display/script/r_test1_visualize_motionpro.py --session S12011 --mesh --max-frames 40
     python results_display/script/r_test1_visualize_motionpro.py \
-        --checkpoint results://MotionPRO/checkpoints/imagepressure2smpl/init/5e-05/imagepressure2smpl_best.pth
+        --checkpoint results://baselines/MotionPRO/checkpoints/imagepressure2smpl/init/5e-05/imagepressure2smpl_best.pth
 
 Outputs are written below ``results_display/r_test1_visualize/MotionPRO`` (or the
 ``ANYSOLE_RESULTSDISPLAY`` override).
@@ -472,7 +472,7 @@ def run_session(model, smpl, seq_dir, device, window_length, mesh=False):
 def discover_checkpoints(checkpoint_arg, orig_cwd):
     items = cli_common.split_csv_arg(checkpoint_arg)
     if not items:
-        root = cli_common.RESULTS_ROOT / "MotionPRO/checkpoints"
+        root = cli_common.RESULTS_ROOT / "baselines/MotionPRO/checkpoints"
         found = sorted(p for p in root.rglob("*.pth") if p.is_file())
         if not found:
             raise FileNotFoundError(f"No checkpoints under {root}")
@@ -500,7 +500,7 @@ def discover_checkpoints(checkpoint_arg, orig_cwd):
 
 def checkpoint_tag(ckpt_path, orig_cwd):
     ckpt_path = Path(ckpt_path).resolve()
-    root = (cli_common.RESULTS_ROOT / "MotionPRO/checkpoints").resolve()
+    root = (cli_common.RESULTS_ROOT / "baselines/MotionPRO/checkpoints").resolve()
     try:
         return str(ckpt_path.relative_to(root).with_suffix(""))
     except ValueError:
@@ -521,7 +521,7 @@ def load_model(checkpoint, device):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualize tactile vs predicted SMPL vs GT BVH.")
-    cli_common.add_common_args(parser, seq_root=True, out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test1_visualize" / "MotionPRO")
+    cli_common.add_common_args(parser, seq_root=True, out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R1Test_visualize" / "MotionPRO")
     parser.add_argument("--smpl-model", type=str, default=str(cli_common.WORKSPACE_ROOT / "dependencies/smpl/SMPL_NEUTRAL.pkl"))
     parser.add_argument(
         "--checkpoint",

@@ -1,13 +1,15 @@
 # 跨模型比较的模式注册表（R_Test1/2/3 唯一模式声明点）。
 #
-# 每个条目声明：该模型产物属于哪个生成模式（VT2M / V2M / T2M）。
+# 每个条目声明：该模型产物属于哪个生成模式（VT2M / V2M / T2M / V2T）。
 # 不同模式的模型永远不进入同一比较块 —— 模式是行级属性，不是表级属性。
 #
 #   VT2M = 真 V + 真 T 条件      （AnySole VT2M / MotionPRO / MMVP pressure_toolkit）
 #   V2M  = 真 V + 零 T 条件      （AnySole V2M  / MMVP VP-MoCap 串行线）
 #   T2M  = 零 V + 真 T 条件      （AnySole T2M  / Step2Motion）
+#   V2T  = 真 V + 预测 T        （AnySole V2T  / MMVP FPP-Net）
 #
-# AnySole 行不需要在此声明：其模式 = config_id（VT2M/V2M/T2M 无歧义），
+# AnySole 行由 R_Test2 按配置展开，包含 V2T 独立压力导出。
+# AnySole Motion 行的模式 = config_id（VT2M/V2M/T2M 无歧义），
 # 由脚本从 <model-name>_<contact_method>/predictions/eval_motion/<session>_<config>.npz 展开。
 # 无法解析出模式的基线行会被比较层拒绝并写入 evaluation.log，绝不猜测。
 #
@@ -17,26 +19,33 @@
 VT2M:
   - name: MotionPRO
     family: baseline
-    prediction_root: results://MotionPRO/predictions/eval_motion
+    prediction_root: results://baselines/MotionPRO/predictions/eval_motion
     pattern: "{session_id}.npz"
     color: "#8a5ce6"
 
   - name: MMVP_pressure_toolkit
     family: baseline
-    prediction_root: results://pressure_tookit/predictions/eval_motion
+    prediction_root: results://baselines/pressure_tookit/predictions/eval_motion
     pattern: "{session_id}.npz"
     color: "#1f9d8a"
 
 V2M:
   - name: MMVP_FPP-Net
     family: baseline
-    prediction_root: results://VP-MoCap/predictions/eval_motion
+    prediction_root: results://baselines/VP-MoCap/predictions/eval_motion
     pattern: "{session_id}.npz"
     color: "#c25b1f"
 
 T2M:
   - name: Step2Motion
     family: baseline
-    prediction_root: results://Step2Motion/predictions
+    prediction_root: results://baselines/Step2Motion/predictions
     pattern: "{session_id}_gen.bvh"
     color: "#5b7ac2"
+
+V2T:
+  - name: MMVP_FPP-Net
+    family: baseline
+    prediction_root: results://baselines/VP-MoCap/predictions/eval_motion
+    pattern: "{session_id}_V2T.npz"
+    color: "#c25b1f"

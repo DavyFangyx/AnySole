@@ -220,7 +220,7 @@ CUDA_VISIBLE_DEVICES=3 python -m app.train_frappe task.contact_method=bvh_h
 
 MotionPRO 的 test 指标（MPJPE/PVE/WBCE）不使用接触标签，只有训练期损失与 IoU 受影响。
 
-输出：`results/MotionPRO/checkpoints/`
+输出：`results/baselines/MotionPRO/checkpoints/`
 
 #### Step2Motion
 
@@ -232,7 +232,7 @@ python src/train.py --config configs/config_gait.json --no-imu
 --config configs/config_gait.json
 ```
 
-输出：`results/Step2Motion/checkpoints/gait_model/`
+输出：`results/baselines/Step2Motion/checkpoints/gait_model/`
 
 #### pressure toolkit
 
@@ -244,7 +244,7 @@ python Baselines/pressure_tookit/main_singleview.py \
   --config Baselines/pressure_tookit/configs/fit_smpl_rgbd.yaml
 ```
 
-输出：`results/pressure_tookit/`
+输出：`results/baselines/pressure_tookit/`
 
 ## 4. 评估、推理与可视化
 
@@ -320,7 +320,7 @@ python -m app.test_frappe
 python ../../results_display/script/r_test1_visualize_motionpro.py
 ```
 
-指标写入 `results/MotionPRO/metrics/`，可视化写入 `results_display/r_test1_visualize_motionpro/`（P1-4 改名前的旧文称 Test1_visualization/MotionPRO）。
+指标写入 `results/baselines/MotionPRO/metrics/`，可视化写入 `results_display/ResultTest/R1Test_visualize/MotionPRO/`（P1-4 改名前的旧文称 Test1_visualization/MotionPRO）。
 
 ### 4.3 Step2Motion
 
@@ -357,7 +357,7 @@ python Baselines/pressure_tookit/main_singleview.py \
 ```
 
 按 `init_shape → init_pose → tracking` 执行；结果写入
-`results/pressure_tookit/`。缺少真实 essential、标定或 floor 文件时停止执行。
+`results/baselines/pressure_tookit/`。缺少真实 essential、标定或 floor 文件时停止执行。
 
 ### 4.5 统一评估格式
 
@@ -386,16 +386,15 @@ RTM-pose 观测。
 
 ## 6. 后台训练队列
 
-`configs/` 提供退出终端后仍继续运行的串行队列（单一共享队列，对齐 SurvPGC）。
-一个 conf = 一个模型任务。生成 R_Test 任务（见 `configs/README.md`）：
+`configs/` 提供退出终端后仍继续运行的串行队列（单一共享队列）。
+一个 conf = 一个模型任务。当前只有两组数据生产实验：
 
 ```bash
 cd /data/fangyuxuan/projects/gait
-python configs/z_exp_gen/generate_r_test_configs.py            # 任务 conf 落到 configs/generated/tasks/
-python configs/z_exp_gen/generate_r_test_configs.py --queue    # 或直接入队
-# 整体/单任务执行（--dry-run 只打印命令）：
-python configs/tools/runner.py run --experiment R_Test5_rho_grid
-python configs/tools/runner.py task configs/generated/tasks/R_Test5_rho_grid/001__R_Test5_rho_grid__V4B.conf --dry-run
+python configs/z_gen/singlemodal_eval.py
+python configs/z_gen/rho_grid_eval.py
+# 单任务执行（--dry-run 只打印命令）：
+python configs/tools/runner.py task configs/queue/<task>.conf --dry-run
 ```
 
 baseline 任务（anysole/motionpro/step2motion/pressure_toolkit）由
@@ -420,7 +419,7 @@ CUDA_VISIBLE_DEVICES=1 bash configs/bg.sh
 python configs/tools/status.py
 ```
 
-任务日志位于 `configs/logs/`，成功和失败任务分别移动到 `configs/done/`、
+任务日志位于 `configs/` 根目录，成功和失败任务分别移动到 `configs/done/`、
 `configs/failed/`。每次运行的 checkpoint 和配置快照位于
-`results/offline/<run_name>/`；pressure toolkit 的三个阶段依赖顺序，请在只开
+`results/logs/task_staging/<run_name>/`；pressure toolkit 的三个阶段依赖顺序，请在只开
 一个 worker 时整批入队。

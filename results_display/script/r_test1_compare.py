@@ -15,7 +15,7 @@ footer shows its own per-frame MPJPE.  A model without an exported
 prediction gets a grey placeholder panel naming the missing path (never
 silently skipped).
 
-Outputs land in ``results_display/result/r_test1_visualize/compare/<mode>/``
+Outputs land in ``results_display/ResultTest/R1Test_visualize/compare/<mode>/``
 and do not touch the per-model visualization directories.
 
 Usage (run from the repository root):
@@ -43,14 +43,14 @@ from utils.compare_core import (  # noqa: E402
     GT_COLOR,
     MAIN_COLOR,
     MISSING_COLOR,
-    MODES,
+    MOTION_MODES as MODES,
     array_from_file,
     common_edges_for,
     frame_mpjpe_mm,
     load_mode_registry,
     select_common_joints,
 )
-from utils.motion_io import load_motion, load_session_gt  # noqa: E402
+from utils.motion_io import load_session_gt  # noqa: E402
 from utils.render_common import (  # noqa: E402
     CANVAS_H,
     FOOT_W,
@@ -135,10 +135,13 @@ def load_anysole_pred(model_dir: str, session_id: str, config_id: str):
         pred_root / "eval_bvh" / f"{session_id}_{config_id}.bvh",
     ):
         if cand.is_file():
-            loaded = load_motion(cand)
-            protocol = protocol_of(loaded["format"])
-            joints = select_common_joints(loaded["joints"], tuple(loaded["names"]), protocol)
-            return joints, str(cand)
+            try:
+                joints, mask, names, protocol = array_from_file(cand)
+            except Exception as exc:
+                return None, f"{cand}: {exc}"
+            if mask is None:
+                return None, f"legacy motion archive without valid_mask: {cand}"
+            return select_common_joints(joints, names, protocol), str(cand)
     return None, str(pred_root / "eval_motion" / f"{session_id}_{config_id}.npz")
 
 
@@ -149,8 +152,11 @@ def load_baseline_pred(entry: dict, session_id: str):
     path = find_prediction(root, session_id, entry.get("pattern") or None)
     if path is None:
         return None, f"{root}/{session_id}"
-    joints, _, names, protocol = array_from_file(path)
-    return select_common_joints(joints, names, protocol), str(path)
+    try:
+        joints, _, names, protocol = array_from_file(path)
+        return select_common_joints(joints, names, protocol), str(path)
+    except Exception as exc:
+        return None, f"{path}: {exc}"
 
 
 def render_session(mode: str, session_id: str, model_dir: str, baselines: list[dict], args: argparse.Namespace, out_mode: Path, seq_root: Path):
@@ -218,7 +224,7 @@ def render_session(mode: str, session_id: str, model_dir: str, baselines: list[d
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Side-by-side main-vs-baseline comparison animation, one row per mode.")
     cli_common.add_common_args(parser, seq_root=True, gen=True, fps=True, stride=True, max_frames=True, force=True,
-                               out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test1_visualize" / "compare")
+                               out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R1Test_visualize" / "compare")
     parser.add_argument("--mode", default="all", help="Generation mode(s): VT2M,V2M,T2M or 'all'.")
     parser.add_argument("--model-name", "--modal", dest="modal", metavar="MODEL_NAME", default="V4B", help="AnySole model name(s), comma-separated; legacy alias: --modal.")
     parser.add_argument("--contact-method", default="joint_and", help="Contact-label scheme(s), comma-separated.")
@@ -241,7 +247,7 @@ def main() -> int:
     unknown = sorted(set(modes) - set(MODES))
     if unknown:
         raise SystemExit(f"Unknown --mode: {unknown}; choices={list(MODES)} or 'all'")
-    session_ids = cli_common.load_test_sessions(args.session, split_csv, args.split)
+    session_ids = cli_common.load_evaluable_sessions(args.session, split_csv, args.split)
     log.info(f"Sessions ({len(session_ids)}): {session_ids}")
     log.info(f"Modes: {modes}")
 

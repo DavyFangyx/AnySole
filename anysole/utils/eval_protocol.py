@@ -10,12 +10,11 @@ with the F-series protocol numbers, which every step F0..F9 reports:
   ankle-feet and hands aggregates.  PA-MPJPE uses one per-frame
   similarity Procrustes alignment over all 24 joints (the eval.py 口径) and
   reads the part errors from the aligned points.
-- 全局: W-MPJPE (160-frame = 4 s segments, first-frame aligned), RTE_norm
+- 全局: metrics.py 的 100-frame W-MPJPE/WA-MPJPE、root ATE/RTE
   (root trajectory error normalized by the mean GT per-frame displacement
   length), yaw_abs_deg / yaw_drift_deg (root heading error / accumulated
   drift; native SMPL local +Z is the fixed forward axis).
-- 时序: jitter (probe_jitter 口径: per-joint frame-to-frame displacement,
-  mm/帧 @40Hz), accel_err_ms2 (second difference * FPS^2), seam_jump_mm at
+- 时序: metrics.py 的 acceleration error / jerk，另保留 seam_jump_mm at
   window boundaries (GT frame-to-frame at the same seams as reference).
 - 接触: contact F1 (soft_contact_from_keypoints > 0.5 vs contact_gt) and
   contact-period foot slide in mm/帧, both on predicted-contact frames
@@ -49,9 +48,25 @@ import torch
 import torch.nn.functional as F
 
 from anysole.data.dataset import collate_windows
+from anysole.data.smpl_io import (
+    pelvis_to_smpl_trans,
+    smpl24_pose6d_to_poses,
+    smpl_vertices_from_archive_params,
+)
 from anysole.eval import _sample_x_t_init, _session_window_groups, _tactile_corr
 from anysole.utils.geometry import f2_to_world, fk_pose6d, rot6d_to_rotmat
 from anysole.utils.losses import soft_contact_from_keypoints
+from anysole.utils.metrics import (
+    matrix_rotation_error_degrees,
+    mean_point_error,
+    pa_mpjpe,
+    pelvis_align,
+    foot_sliding,
+    root_trajectory_metrics,
+    shape_vertex_std,
+    temporal_metrics,
+    windowed_world_mpjpe,
+)
 from anysole.train import condition_inputs, move_batch
 from anysole.types import (
     ANKLE_FOOT_JOINTS,
@@ -72,7 +87,6 @@ from anysole.types import (
 
 # The imported groups remain re-exported for existing probe scripts.  Their
 # single source of truth is the named SMPL-24 protocol in anysole.types.
-W_SEGMENT = 160  # W-MPJPE segment: 4 s at 40 Hz
 JOINT_LIMIT_RAD = math.radians(15.0)  # bone angle below this is anatomically impossible
 
 
@@ -172,9 +186,53 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
         seq["pred_pose"][None], seq["pred_trans"][None], seq["offsets"], seq["parents"]
     )[0]
 
-    # ---- local pose: MPJPE / PA-MPJPE, per part + aggregates ----
+    # ---- canonical metrics.py definitions ----
+    pred_np = pred_kp.detach().cpu().numpy()
+    gt_np = kp_gt.detach().cpu().numpy()
+    times_np = np.arange(T, dtype=np.float64) / float(FPS)
+    pred_aligned, _ = pelvis_align(pred_np)
+    gt_aligned, _ = pelvis_align(gt_np)
+    accum.add_scalar("mpjpe_mm", float(mean_point_error(pred_aligned, gt_aligned, scale=1000.0).mean()), T)
+    accum.add_scalar("pa_mpjpe_mm", float(pa_mpjpe(pred_np, gt_np).mean()), T)
+    w_mpjpe, wa_mpjpe = windowed_world_mpjpe(pred_np, gt_np, window=100)
+    accum.add_scalar("w_mpjpe100_mm", w_mpjpe, T)
+    accum.add_scalar("wa_mpjpe100_mm", wa_mpjpe, T)
+    root = root_trajectory_metrics(pred_np[:, 0], gt_np[:, 0])
+    accum.add_scalar("root_ate_mm", root["root_ate_mm"], T)
+    accum.add_scalar("root_rte_percent", root["root_rte_percent"], T)
+    temporal = temporal_metrics(pred_np, gt_np, times_np)
+    for key in ("accel_error_m_s2", "jitter_pred_m_s3", "jitter_gt_m_s3"):
+        accum.add_scalar(key, float(temporal[key]), T)
+    pred_rot = rot6d_to_rotmat(seq["pred_pose"].reshape(T, N_JOINTS, 6)).detach().cpu().numpy()
+    gt_rot = rot6d_to_rotmat(seq["gt_pose"].reshape(T, N_JOINTS, 6)).detach().cpu().numpy()
+    accum.add_scalar("mpjae_deg", float(matrix_rotation_error_degrees(pred_rot, gt_rot).mean()), T)
+    betas_np = seq["betas"].detach().cpu().numpy()
+    pred_pose6d = seq["pred_pose"].detach().cpu().numpy()
+    gt_pose6d = seq["gt_pose"].detach().cpu().numpy()
+    pred_poses = smpl24_pose6d_to_poses(pred_pose6d)
+    gt_poses = smpl24_pose6d_to_poses(gt_pose6d)
+    pred_model_trans = pelvis_to_smpl_trans(
+        pred_pose6d, seq["pred_trans"].detach().cpu().numpy(), betas_np
+    )
+    gt_model_trans = pelvis_to_smpl_trans(
+        gt_pose6d, seq["gt_trans"].detach().cpu().numpy(), betas_np
+    )
+    pred_vertices = smpl_vertices_from_archive_params(pred_poses, pred_model_trans, betas_np)
+    gt_vertices = smpl_vertices_from_archive_params(gt_poses, gt_model_trans, betas_np)
+    _, pred_vertices_aligned = pelvis_align(pred_np, pred_vertices)
+    _, gt_vertices_aligned = pelvis_align(gt_np, gt_vertices)
+    accum.add_scalar(
+        "pve_mm",
+        float(mean_point_error(pred_vertices_aligned, gt_vertices_aligned, scale=1000.0).mean()),
+        T,
+    )
+    accum.add_scalar("shape_vertex_std_mm", shape_vertex_std(pred_vertices), T)
+    foot_value, foot_count = foot_sliding(pred_vertices, gt_vertices, times_np)
+    if foot_count:
+        accum.add_scalar("foot_sliding_mm", foot_value, foot_count)
+
+    # ---- retained AnySole part diagnostics ----
     err = torch.linalg.vector_norm(pred_kp - kp_gt, dim=-1)  # (T, 24)
-    accum.add("MPJPE", err.mean(dim=-1), 1000.0)
     for pname, joints in zip(PART_NAMES, PART_JOINTS):
         accum.add("MPJPE_part_%s" % pname, err[:, joints].mean(dim=-1), 1000.0)
     accum.add("MPJPE_upper", err[:, UPPER_JOINTS].mean(dim=-1), 1000.0)
@@ -184,7 +242,6 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
 
     aligned = _pa_align(pred_kp, kp_gt)
     pa_err = torch.linalg.vector_norm(aligned - kp_gt, dim=-1)
-    accum.add("PA-MPJPE", pa_err.mean(dim=-1), 1000.0)
     for pname, joints in zip(PART_NAMES, PART_JOINTS):
         accum.add("PA-MPJPE_part_%s" % pname, pa_err[:, joints].mean(dim=-1), 1000.0)
     accum.add("PA-MPJPE_upper", pa_err[:, UPPER_JOINTS].mean(dim=-1), 1000.0)
@@ -192,21 +249,7 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     accum.add("PA-MPJPE_anklefoot", pa_err[:, ANKLE_FOOT_JOINTS].mean(dim=-1), 1000.0)
     accum.add("PA-MPJPE_hands", pa_err[:, HAND_JOINTS].mean(dim=-1), 1000.0)
 
-    # ---- global ----
-    if T >= W_SEGMENT:
-        n_seg = T // W_SEGMENT
-        seg_p = pred_kp[: n_seg * W_SEGMENT].reshape(n_seg, W_SEGMENT, N_JOINTS, 3)
-        seg_g = kp_gt[: n_seg * W_SEGMENT].reshape(n_seg, W_SEGMENT, N_JOINTS, 3)
-        w_err = torch.linalg.vector_norm(
-            (seg_p - seg_p[:, :1]) - (seg_g - seg_g[:, :1]), dim=-1
-        )
-        accum.add("W-MPJPE", w_err, 1000.0)
-    pred_rel = seq["pred_trans"] - seq["pred_trans"][:1]
-    gt_rel = seq["gt_trans"] - seq["gt_trans"][:1]
-    step = torch.linalg.vector_norm(seq["gt_trans"][1:] - seq["gt_trans"][:-1], dim=-1)
-    if step.numel() > 0:
-        rte = torch.linalg.vector_norm(pred_rel - gt_rel, dim=-1).mean() / step.mean().clamp_min(1e-3)
-        accum.add_scalar("RTE_norm", float(rte.item()), float(T))
+    # ---- retained AnySole orientation diagnostics ----
     R_p = _root_rotmats(seq["pred_pose"])
     R_g = _root_rotmats(seq["gt_pose"])
     yaw_p = torch.atan2(R_p[:, :, forward_axis][:, 0], R_p[:, :, forward_axis][:, 2])
@@ -217,15 +260,10 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
         _circ_diff(yaw_p - yaw_p[0], yaw_g - yaw_g[0]).abs() * 180.0 / math.pi,
     )
 
-    # ---- temporal ----
-    d_pred = torch.linalg.vector_norm(pred_kp[1:] - pred_kp[:-1], dim=-1).mean(dim=-1)
-    d_gt = torch.linalg.vector_norm(kp_gt[1:] - kp_gt[:-1], dim=-1).mean(dim=-1)
-    accum.add("jitter_mm", d_pred, 1000.0)
-    accum.add("jitter_gt_mm", d_gt, 1000.0)
+    # ---- retained AnySole temporal diagnostics ----
     if T >= 3:
         a_pred = (pred_kp[2:] - 2.0 * pred_kp[1:-1] + pred_kp[:-2]) * FPS**2
         a_gt = (kp_gt[2:] - 2.0 * kp_gt[1:-1] + kp_gt[:-2]) * FPS**2
-        accum.add("accel_err_ms2", torch.linalg.vector_norm(a_pred - a_gt, dim=-1))
         accum.add("accel_mag_ms2", torch.linalg.vector_norm(a_pred, dim=-1))
         accum.add("accel_mag_gt_ms2", torch.linalg.vector_norm(a_gt, dim=-1))
         accum.add("accel_mag_upper_ms2", torch.linalg.vector_norm(a_pred[:, UPPER_JOINTS], dim=-1))
@@ -244,15 +282,6 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     contact["fp"] += int((pred_contact & ~gt_contact).sum().item())
     contact["fn"] += int((~pred_contact & gt_contact).sum().item())
     contact["tn"] += int((~pred_contact & ~gt_contact).sum().item())
-    foot = pred_kp[:, FOOT_JOINTS][..., [0, 2]]  # native Y-up horizontal XZ
-    speed = torch.linalg.vector_norm(foot[1:] - foot[:-1], dim=-1) * 1000.0  # (T-1,2), mm/帧
-    pred_stance = pred_contact[1:]
-    gt_stance = gt_contact[1:]
-    if bool(pred_stance.any()):
-        accum.add("foot_slide_mm", speed[pred_stance])
-    if bool(gt_stance.any()):
-        accum.add("foot_slide_gt_mm", speed[gt_stance])
-
     # ---- joint limits (elbow/knee bone angle on the PREDICTED pose: the
     # plausibility check is that generated upper bodies don't fold joints
     # past what anatomy allows) ----
@@ -277,17 +306,30 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     # measure vision-to-tactile generation).  F5 part9 drops the aux heads
     # and skips these rows. ----
     if config_value == CONFIG_V and seq.get("pressure_pred") is not None:
-        f_pred = seq["pressure_pred"].sum(dim=-1)
-        f_gt = seq["pressure_gt"].sum(dim=-1)
+        pressure_pred = seq["pressure_pred"]
+        pressure_gt = seq["pressure_gt"]
+        diff = pressure_pred - pressure_gt
+        accum.add("T_mae", diff.abs())
+        accum.add("T_mse", diff.square())
+        f_pred_foot = pressure_pred.reshape(-1, 2, 48).sum(dim=-1)
+        f_gt_foot = pressure_gt.reshape(-1, 2, 48).sum(dim=-1)
+        force_diff = f_pred_foot - f_gt_foot
+        accum.add("pressure_force_mae", force_diff.abs())
+        accum.add("pressure_force_mse", force_diff.square())
+        f_pred = f_pred_foot.sum(dim=-1)
+        f_gt = f_gt_foot.sum(dim=-1)
         ss_res = float(((f_pred - f_gt) ** 2).sum().item())
         ss_tot = float(((f_gt - f_gt.mean()) ** 2).sum().item())
         accum.add_scalar("pressure_force_r2", 1.0 - ss_res / max(ss_tot, 1e-12), float(T))
-        cop_p = _cop_grid(seq["pressure_pred"])
-        cop_g = _cop_grid(seq["pressure_gt"])
-        accum.add("pressure_cop_err", torch.linalg.vector_norm(cop_p - cop_g, dim=-1))
-        corr, corr_valid = _tactile_corr(seq["pressure_pred"], seq["pressure_gt"])
+        cop_p = _cop_grid(pressure_pred)
+        cop_g = _cop_grid(pressure_gt)
+        cop_err = torch.linalg.vector_norm(cop_p - cop_g, dim=-1)
+        accum.add("pressure_cop_error_left", cop_err[:, 0])
+        accum.add("pressure_cop_error_right", cop_err[:, 1])
+        accum.add("pressure_cop_error_mean", cop_err)
+        corr, corr_valid = _tactile_corr(pressure_pred, pressure_gt)
         if bool(corr_valid.any()):
-            accum.add("pressure_pearson", corr[corr_valid])
+            accum.add("T_corr", corr[corr_valid])
 
 
 def _degrade_inputs(v_feat, t_raw, t_phys, t_s2m, tw: int, kind: str, rng: np.random.RandomState):
@@ -314,6 +356,7 @@ def _evaluate_config(
     dataset, model, device, config_value: int, regress_mode: bool, diffusion,
     sample_steps: int, warm_start: bool, tw: int, forward_axis: int,
     degrade: Optional[str] = None, seed: int = 0,
+    v2t_out_dir: Optional[Path] = None,
 ) -> Dict[str, float]:
     """Full-session inference for one conditioning config, then all protocol
     metrics.  ``degrade`` in ("v", "t") adds the robustness span dropout."""
@@ -324,6 +367,7 @@ def _evaluate_config(
     accum = _Accum()
     contact = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
     groups = _session_window_groups(dataset)
+    session_by_id = {s["session_id"]: s for s in dataset.sessions}
     with torch.inference_mode():
         for session_id, idxs in groups.items():
             raw = [dataset[i] for i in idxs]
@@ -378,6 +422,7 @@ def _evaluate_config(
                                       if out.get("pressure_hat") is not None else None),
                     "offsets": batch["offsets"][0],
                     "parents": batch["parents"][0],
+                    "betas": batch["betas"][0],
                 }
             else:
                 seq = {
@@ -393,8 +438,56 @@ def _evaluate_config(
                                       if out.get("pressure_hat") is not None else None),
                     "offsets": batch["offsets"][0],
                     "parents": batch["parents"][0],
+                    "betas": batch["betas"][0],
                 }
             _session_metrics(seq, tw, forward_axis, config_value, accum, contact)
+            if (config_value == CONFIG_V and v2t_out_dir is not None
+                    and seq.get("pressure_pred") is not None):
+                pred_kp = fk_pose6d(
+                    seq["pred_pose"][None], seq["pred_trans"][None],
+                    seq["offsets"], seq["parents"],
+                )[0]
+                pred_contact = soft_contact_from_keypoints(
+                    pred_kp[None], seq["floor_y"].reshape(1)
+                )[0].detach().cpu().numpy() > 0.5
+                gt_contact = (seq["contact_gt"].detach().cpu().numpy() > 0.5)
+                session = session_by_id[session_id]
+                n_frames = int(np.asarray(session["V_feat"]).shape[0])
+                pressure_pred = np.zeros((n_frames, seq["pressure_pred"].shape[-1]), dtype=np.float32)
+                pressure_gt = np.zeros_like(pressure_pred)
+                contact_pred_full = np.zeros((n_frames, 2), dtype=np.uint8)
+                contact_gt_full = np.zeros_like(contact_pred_full)
+                seen = np.zeros((n_frames,), dtype=bool)
+                cursor = 0
+                for sample in raw:
+                    start = int(sample["frame_start"])
+                    length = min(tw, n_frames - start)
+                    if length <= 0:
+                        cursor += tw
+                        continue
+                    end = start + length
+                    pressure_pred[start:end] = seq["pressure_pred"][cursor:cursor + length].detach().cpu().numpy()
+                    pressure_gt[start:end] = seq["pressure_gt"][cursor:cursor + length].detach().cpu().numpy()
+                    contact_pred_full[start:end] = pred_contact[cursor:cursor + length].astype(np.uint8)
+                    contact_gt_full[start:end] = gt_contact[cursor:cursor + length].astype(np.uint8)
+                    seen[start:end] = True
+                    cursor += tw
+                fake_mask = np.asarray(session.get("fake_mask", np.zeros(n_frames, dtype=np.uint8))).reshape(-1)
+                valid = seen & ((fake_mask == 0) if len(fake_mask) == n_frames else True)
+                v2t_out_dir.mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(
+                    v2t_out_dir / ("%s_V2T.npz" % session_id),
+                    pressure_pred=pressure_pred,
+                    pressure_gt=pressure_gt,
+                    contact_pred=contact_pred_full,
+                    contact_gt=contact_gt_full,
+                    frame_indices=np.arange(n_frames, dtype=np.int64),
+                    valid_mask=valid.astype(np.uint8),
+                    target_fps=np.asarray(FPS, dtype=np.float32),
+                    mode=np.asarray("V2T"),
+                    pressure_source_grid=np.asarray("4x12_per_foot"),
+                    comparison_pressure_grid=np.asarray("31x11_per_foot_linear_resample"),
+                )
     result = accum.means()
     p = contact["tp"] / max(contact["tp"] + contact["fp"], 1)
     r = contact["tp"] / max(contact["tp"] + contact["fn"], 1)
@@ -407,6 +500,10 @@ def _evaluate_config(
     result["contact_balanced_acc"] = 0.5 * (
         result["contact_recall"] + result["air_recall"]
     )
+    if "T_mse" in result:
+        result["T_rmse"] = math.sqrt(result.pop("T_mse"))
+    if "pressure_force_mse" in result:
+        result["pressure_force_rmse"] = math.sqrt(result.pop("pressure_force_mse"))
     if "accel_mag_upper_ms2" in result:
         result["accel_dist_err_upper_ms2"] = abs(
             result["accel_mag_upper_ms2"] - result["accel_mag_upper_gt_ms2"]
@@ -433,12 +530,13 @@ def run_protocol(
     contact_method: str,
     tw: int,
     out_path: Path,
-) -> None:
+    v2t_out_dir: Optional[Path] = None,
+) -> Dict[str, Dict[str, float]]:
     """Run the full F0a protocol and write metrics/<split>_fseries.json."""
     if dataset.stride != dataset.window_length:
         print("protocol skipped: dataset stride %d != window %d (E6.4 continuation eval)"
               % (dataset.stride, dataset.window_length))
-        return
+        return {}
     forward_axis = _pick_forward_axis(dataset, device)
     metrics: Dict[str, Dict[str, float]] = {}
     # Deterministic protocol runs.  Sigma-seed for diffusion models comes from
@@ -453,13 +551,13 @@ def run_protocol(
             metrics[name] = _evaluate_config(
                 dataset, model, device, config_value, regress_mode, diffusion,
                 sample_steps, warm_start, tw, forward_axis,
+                v2t_out_dir=v2t_out_dir,
             )
-            print("protocol %s: MPJPE=%.3fmm PA-MPJPE=%.3fmm W-MPJPE=%.3fmm "
-                  "contact_f1=%.4f foot_slide=%.2fmm/帧"
-                  % (name, metrics[name]["MPJPE"], metrics[name]["PA-MPJPE"],
-                     metrics[name].get("W-MPJPE", float("nan")),
-                     metrics[name].get("contact_f1", float("nan")),
-                     metrics[name].get("foot_slide_mm", float("nan"))))
+            print("protocol %s: mpjpe=%.3fmm pa_mpjpe=%.3fmm w_mpjpe100=%.3fmm "
+                  "contact_f1=%.4f"
+                  % (name, metrics[name]["mpjpe_mm"], metrics[name]["pa_mpjpe_mm"],
+                     metrics[name].get("w_mpjpe100_mm", float("nan")),
+                     metrics[name].get("contact_f1", float("nan"))))
         if robustness and CONFIG_VT in config_values:
             metrics["robust_vdrop"] = _evaluate_config(
                 dataset, model, device, CONFIG_VT, regress_mode, diffusion,
@@ -469,11 +567,11 @@ def run_protocol(
                 dataset, model, device, CONFIG_VT, regress_mode, diffusion,
                 sample_steps, warm_start, tw, forward_axis, degrade="t", seed=seed,
             )
-            print("protocol robust_vdrop: MPJPE=%.3fmm PA-MPJPE=%.3fmm contact_f1=%.4f"
-                  % (metrics["robust_vdrop"]["MPJPE"], metrics["robust_vdrop"]["PA-MPJPE"],
+            print("protocol robust_vdrop: mpjpe=%.3fmm pa_mpjpe=%.3fmm contact_f1=%.4f"
+                  % (metrics["robust_vdrop"]["mpjpe_mm"], metrics["robust_vdrop"]["pa_mpjpe_mm"],
                      metrics["robust_vdrop"]["contact_f1"]))
-            print("protocol robust_tdrop: MPJPE=%.3fmm PA-MPJPE=%.3fmm contact_f1=%.4f"
-                  % (metrics["robust_tdrop"]["MPJPE"], metrics["robust_tdrop"]["PA-MPJPE"],
+            print("protocol robust_tdrop: mpjpe=%.3fmm pa_mpjpe=%.3fmm contact_f1=%.4f"
+                  % (metrics["robust_tdrop"]["mpjpe_mm"], metrics["robust_tdrop"]["pa_mpjpe_mm"],
                      metrics["robust_tdrop"]["contact_f1"]))
     finally:
         torch.set_rng_state(prev_cpu)
@@ -499,3 +597,4 @@ def run_protocol(
     seed_path = out_path.with_name("%s_seed%d.json" % (out_path.stem, seed))
     seed_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print("wrote %s (+ %s)" % (out_path, seed_path.name))
+    return metrics

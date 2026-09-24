@@ -150,17 +150,17 @@ std 下限 1e-2）；时间 PE；分组嵌入；6 层 pre-LN TransformerDecoder
 ## 8. 训练（`train.py`）
 
 - 配置采样 `config_probs=[0.5 VT, 0.25 V, 0.25 T]`，无全空样本。
-- 默认：Adam lr **1e-4**（yaml，`--lr` 不是 CLI）、batch 256、800 epoch、stride 20。
+- 默认：Adam lr **1e-4**（yaml，CLI 可用 `--lr` 覆盖）、batch 256、800 epoch、stride 20。
 - 基建：`--init-from <ckpt>` warm-start（同结构同名参数复用、新结构按名字自动跳过
   保持新初始化）；`--grad-clip 5.0`（爆炸保险，F0 教训）；`--loss-cap`（wandb y 轴
   压制）；`--lr-warmup-frac`（V3 结构步前 5% 线性 warmup）；NaN-grad 守卫（非有限
   梯度跳步并降 lr）。
-- 主要开关：`--modal`、`--contact-method`、`--tactile-input`、`--t-encoder`、
+- 主要开关：`--model-name`、`--contact-method`、`--tactile-input`、`--t-encoder`、
   `--tactile-direct`、`--no-imu`、`--v-input`、`--f2-repr`、`--pose-parts 9`、
   `--lambda-*`、`--epochs`、`--tw/--stride`、`--config-probs`、wandb 组
   （`--wandb_experiment_tag` 由 Wandb_Analyzer 分组）。CLI 覆盖值随 ckpt 保存，
   eval/infer 从 ckpt 读配置。
-- 训练末尾自动跑一次 test eval（`--no-protocol` 关协议、`--no-write-motion` 不导出）。
+- 训练末尾自动跑一次 test eval（canonical session metrics 强制执行；`--no-write-motion` 可关闭动作导出）。
 
 ---
 
@@ -171,14 +171,14 @@ std 下限 1e-2）；时间 PE；分组嵌入；6 层 pre-LN TransformerDecoder
   E6.5 `warm_start`＝起点用姿态均值而非纯噪声）。窗口间 carry 前一窗预测的世界
   位置拼接；f2 时按 heading anchor 拼接。导出 **SMPL NPZ**（`--write-motion <dir>`，
   默认 `predictions/eval_motion`；`--no-write-motion` 关）。
-- **评估指标**（`eval_protocol.py`，`--protocol-seed 0` 默认跑 1 次协议，
-  `--no-robustness` 关鲁棒集）：
-  - 局部：MPJPE / PA-MPJPE，按 9 个 SMPL-24 语义部位 + upper/lower/anklefoot/hands；
-  - 全局：W-MPJPE（160 帧=4s 段首帧对齐）、RTE_norm（按位移长度归一化）、
-    yaw_abs_deg / yaw_drift_deg（根朝向误差/累积漂移）；
-  - 时序：jitter（mm/帧 @40Hz）、accel_err_ms2、seam_jump_mm（窗边界，附 GT 同缝）；
-  - 接触与滑步：contact_f1、foot_slide_mm；V2M 压力重建：pressure_force_r2 /
-    pressure_cop_err / pressure_pearson；T2M 上半身：accel_dist_err_upper_ms2、
+- **评估指标**（canonical definitions in `anysole/utils/metrics.py`，`--protocol-seed 0`，
+  `--no-robustness` 关闭鲁棒集）：
+  - motion: `mpjpe_mm` / `pa_mpjpe_mm` / `mpjae_deg` / `pve_mm` /
+    `shape_vertex_std_mm` / `foot_sliding_mm`；
+  - trajectory: `root_ate_mm` / `root_rte_percent` / `w_mpjpe100_mm` / `wa_mpjpe100_mm`；
+  - temporal: `accel_error_m_s2` / `jitter_pred_m_s3` / `jitter_gt_m_s3`；
+  - contact diagnostics: contact_f1；V2M/V2T pressure reconstruction: `T_mae` / `T_rmse` /
+    `T_corr` / `pressure_force_r2` / `pressure_cop_error_*`；T2M 上半身：accel_dist_err_upper_ms2、
     joint_limit_viol_elbow/knee；
   - 鲁棒集 robust_vdrop / robust_tdrop（VT2M 连续 20–40% 帧置零）；
   - 读出天花板：`results_display/script/ridge_probe.py` 的 ridge-on-F 表（每步必跑）。

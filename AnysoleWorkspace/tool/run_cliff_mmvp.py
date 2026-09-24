@@ -190,7 +190,7 @@ def run_one(session: str, row: dict, args: argparse.Namespace) -> dict:
     if args.max_frames > 0:
         return {"session": session, "smoke": str(output), "frames": args.max_frames}
     shutil.copy2(output, fpp_session / "CLIFF_results.npz")
-    toolkit_root = ROOT / "results/offline/pressure_toolkit" / session / date / subject / session
+    toolkit_root = ROOT / "results/baselines/pressure_toolkit" / session / date / subject / session
     toolkit_root.mkdir(parents=True, exist_ok=True)
     shutil.copy2(output, toolkit_root / f"{session}_cliff_{args.backbone}.npz")
     return {"session": session, "cliff": str(output), "fpp": str(fpp_session / "CLIFF_results.npz"), "toolkit": str(toolkit_root)}

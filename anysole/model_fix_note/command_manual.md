@@ -74,11 +74,11 @@
   （`results_display/script/r_test1_visualize_anysole.py`）与 R_Test3
   （`results_display/script/r_test3_traj.py`）。历史编号对照见
   `results_display/README.md`。
-- **产物目录规范（2026-09-21 已落地）**：两级结构 `results_display/data/d_testN/`
-  与 `results_display/result/r_testN/`（每个 Test 一个文件夹）；`ridge_probe.py`
+- **产物目录规范（2026-09-24 改组）**：四组两级结构 `results_display/{DataTest,ResultTest,ATest,BTest}/`
+  （每组下按 `{编号Test}_{具体实验}/` 每 Test 一个文件夹，如 `ResultTest/R1Test_visualize/`）；`ridge_probe.py`
   与 `z_note/probes/smoke_*.py` 保持原地；D_Test4 已撤销（SMPL 协议探针回
   `z_note/probes/`）。
-- 评估默认自动跑协议 1 次（`--protocol-seed 0`）；`--no-protocol` 只出 metrics；
+- 评估统一执行 canonical session metrics（`--protocol-seed 0`）；
   `--no-robustness` 关鲁棒集。每步验收读 `metrics/<split>_fseries.json` +
   `metrics/ridge_probe_<split>.json`（ridge 探针每步必跑：
   `results_display/script/ridge_probe.py --model-name <名称> [--variant <变体>]
@@ -116,12 +116,12 @@ from-scratch 400ep 是筛选预算，显著弱于 BVH 时代 warm-start 的 F0b_
   --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
-# ③ 可视化 R_Test1（骨架动画 → results_display/result/r_test1_visualize/AnySole/F0b/）
+# ③ 可视化 R_Test1（骨架动画 → results_display/ResultTest/R1Test_visualize/AnySole/F0b/）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test1_visualize_anysole.py \
   --model-name F0b --contact-method joint_and --split val \
   --config-id VT2M,V2M,T2M --gen gif --force
 
-# ④ 可视化 R_Test3（轨迹对比 → results_display/result/r_test3_traj/AnySole/F0b/）
+# ④ 可视化 R_Test3（轨迹对比 → results_display/ResultTest/R3Test_traj/AnySole/F0b/）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test3_traj.py \
   --model-name F0b --contact-method joint_and --split val \
   --config-id VT2M,V2M,T2M --gen gif --force
@@ -341,12 +341,12 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
-# ③ 可视化 R_Test1（骨架动画 → results_display/result/r_test1_visualize/AnySole/V3_3A/）
+# ③ 可视化 R_Test1（骨架动画 → results_display/ResultTest/R1Test_visualize/AnySole/V3_3A/）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test1_visualize_anysole.py \
   --model-name V3_3B --contact-method joint_and --split val \
   --config-id VT2M,V2M,T2M --gen gif --force
 
-# ④ 可视化 R_Test3（轨迹对比 → results_display/result/r_test3_traj/AnySole/V3_3A/）
+# ④ 可视化 R_Test3（轨迹对比 → results_display/ResultTest/R3Test_traj/AnySole/V3_3A/）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test3_traj.py \
   --model-name V3_3B --contact-method joint_and --split val \
   --config-id VT2M,V2M,T2M --gen gif --force
@@ -367,7 +367,7 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --model-name V3_3B \
   --contact-method joint_and \
   --split val \
-  --protocol-seed 0 --no-robustness --device cuda:4
+  --protocol-seed 0 --no-robustness --device cuda:7
 
 # ③ 可视化 R_Test1（--model-name V3_3B） / ④ 可视化 R_Test3（--model-name V3_3B）：同上换名
 
@@ -416,12 +416,12 @@ V2M 66.7 / 34.5**；contact_f1 VT 0.76（链内最优）。晚期仍有噪声漂
   --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
-# ③ 可视化 R_Test1（骨架动画 → results_display/result/r_test1_visualize/AnySole/V3_4a/）
+# ③ 可视化 R_Test1（骨架动画 → results_display/ResultTest/R1Test_visualize/AnySole/V3_4a/）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test1_visualize_anysole.py \
   --model-name V3_4c --contact-method joint_and --split val \
   --config-id VT2M,V2M,T2M --gen gif --force
 
-# ④ 可视化 R_Test3（轨迹对比 → results_display/result/r_test3_traj/AnySole/V3_4a/）
+# ④ 可视化 R_Test3（轨迹对比 → results_display/ResultTest/R3Test_traj/AnySole/V3_4a/）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test3_traj.py \
   --model-name V3_4c --contact-method joint_and --split val \
   --config-id VT2M,V2M,T2M --gen gif --force

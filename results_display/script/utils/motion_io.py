@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from scipy.spatial.transform import Rotation, Slerp
 
 # ``motion_io`` is shared by scripts that are commonly launched as files, for
 # example ``python results_display/script/r_test1_visualize_anysole.py``.  In that
@@ -25,7 +26,7 @@ for entry in (REPO_ROOT, SCRIPT_DIR):
     if str(entry) not in sys.path:
         sys.path.insert(0, str(entry))
 
-from anysole.data.smpl_io import load_smpl, resolve_smpl_path
+from anysole.data.smpl_io import load_smpl, resolve_smpl_path, smpl_vertices_from_archive_params
 from anysole.utils.geometry import fk_pose6d_np
 from anysole.types import JOINT_NAMES, SMPL_ROOTS
 try:  # direct script execution
@@ -91,6 +92,7 @@ def load_motion(path: Path, query_t: Optional[np.ndarray] = None) -> dict:
             joints = joints_to_meters(interp_joints(parsed["joints"], parsed["frame_time"], query_t))
         return {
             "joints": joints,
+            "rotations": np.asarray(parsed["rotations"], dtype=np.float32),
             "parents": np.asarray(parsed["parents"], dtype=np.int64),
             "names": tuple(parsed["names"]),
             "format": fmt,
@@ -103,11 +105,79 @@ def load_motion(path: Path, query_t: Optional[np.ndarray] = None) -> dict:
         )
         return {
             "joints": smpl_yup_to_display(joints),
+            "rotations": Rotation.from_rotvec(
+                np.asarray(motion["poses_aa"], dtype=np.float64).reshape(-1, 24, 3).reshape(-1, 3)
+            ).as_matrix().reshape(-1, 24, 3, 3).astype(np.float32),
             "parents": motion["parents"],
             "names": tuple(JOINT_NAMES),
             "format": fmt,
         }
     raise AssertionError(f"unhandled motion format: {fmt}")
+
+
+def load_rotations(path: Path, query_t: Optional[np.ndarray] = None) -> dict:
+    """Load global rotation matrices and semantic names on the requested grid."""
+    path = Path(path)
+    if path.suffix.lower() == ".bvh":
+        parsed = parse_bvh_aligner(path, trim_leading_seconds=0.0)
+        rotations = np.asarray(parsed["local_rotations"], dtype=np.float64)
+        if query_t is not None:
+            source_t = np.arange(len(rotations), dtype=np.float64) * float(parsed["frame_time"])
+            query = np.clip(np.asarray(query_t, dtype=np.float64), source_t[0], source_t[-1])
+            sampled = np.empty((len(query),) + rotations.shape[1:], dtype=np.float64)
+            for j in range(rotations.shape[1]):
+                sampled[:, j] = Slerp(source_t, Rotation.from_matrix(rotations[:, j]))(query).as_matrix()
+            rotations = sampled
+        return {"rotations": rotations.astype(np.float32), "names": tuple(parsed["names"]), "format": "bvh"}
+    with np.load(path, allow_pickle=True) as data:
+        if "poses" in data and "vertices_world" in data:
+            poses = np.asarray(data["poses"], dtype=np.float64).reshape(-1, 24, 3)
+            rotations = Rotation.from_rotvec(poses.reshape(-1, 3)).as_matrix().reshape(-1, 24, 3, 3)
+            if "joint_names" in data:
+                names = tuple(
+                    value.decode("utf-8") if isinstance(value, bytes) else str(value)
+                    for value in np.asarray(data["joint_names"]).reshape(-1)
+                )
+            else:
+                names = tuple(JOINT_NAMES)
+            return {"rotations": rotations.astype(np.float32), "names": names, "format": "smpl"}
+    motion = load_smpl(path, query_t=query_t)
+    rotations = Rotation.from_rotvec(
+        np.asarray(motion["poses_aa"], dtype=np.float64).reshape(-1, 24, 3).reshape(-1, 3)
+    ).as_matrix().reshape(-1, 24, 3, 3)
+    return {"rotations": rotations.astype(np.float32), "names": tuple(motion["joint_names"]), "format": "smpl"}
+
+
+def _smpl_vertices(motion: dict) -> np.ndarray:
+    """Run the canonical neutral SMPL surface model for one loaded archive."""
+    return smpl_vertices_from_archive_params(
+        motion["poses_aa"], motion["model_trans_m"], motion["betas"]
+    )
+
+
+def load_surface(path: Path, query_t: Optional[np.ndarray] = None) -> dict | None:
+    """Load vertices and rotations when the prediction has an SMPL surface contract.
+
+    BVH-only outputs return ``None``: surface-only metrics are then explicitly
+    unsupported rather than approximated from joints.
+    """
+    path = Path(path)
+    if path.suffix.lower() != ".npz":
+        return None
+    with np.load(path, allow_pickle=True) as data:
+        if "vertices_world" in data:
+            vertices = np.asarray(data["vertices_world"], dtype=np.float32)
+            rotations = np.asarray(data["poses"], dtype=np.float32).reshape(-1, 24, 3) if "poses" in data else None
+            return {"vertices": vertices, "rotations": rotations}
+        keys = set(data.files)
+        is_smpl = {"poses", "trans"}.issubset(keys) or {"root_orient", "pose_body", "trans"}.issubset(keys)
+    if not is_smpl:
+        return None
+    motion = load_smpl(path, query_t=query_t)
+    return {
+        "vertices": smpl_yup_to_display(_smpl_vertices(motion)),
+        "rotations": np.asarray(motion["poses_aa"], dtype=np.float32).reshape(-1, 24, 3),
+    }
 
 
 def load_session_gt(seq_dir: Path, n_frames: int, fps: float = 40.0) -> dict:

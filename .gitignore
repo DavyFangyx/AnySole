@@ -49,7 +49,6 @@ __pycache__/
 
 # Offline configs scheduler runtime logs/locks
 /configs/*.log
-/configs/locks/
 
 # Offline scheduler task state. Keep the four directories via .gitkeep, but
 # never commit generated per-model task confs or old staging artifacts.

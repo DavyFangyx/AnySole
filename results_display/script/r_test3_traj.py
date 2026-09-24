@@ -40,7 +40,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from utils import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
-from utils.compare_core import MODES, find_prediction, load_mode_registry  # noqa: E402
+from utils.compare_core import MOTION_MODES as MODES, find_prediction, load_mode_registry  # noqa: E402
 from utils.motion_io import load_motion, load_session_gt  # noqa: E402
 from utils.render_common import (  # noqa: E402
     INFO_FONT,
@@ -82,6 +82,21 @@ def load_traj(path: Path, seq_dir: Path | None = None, fps: float = 40.0) -> tup
     path = Path(path)
     if path.suffix.lower() == ".npz":
         data = np.load(path)
+        if "AnySole" in path.as_posix() and "joint_xyz_world" not in data:
+            raise ValueError(
+                f"legacy AnySole motion archive lacks unified joint_xyz_world/valid_mask: {path}"
+            )
+        if "joint_xyz_world" in data:
+            pred = np.asarray(data["joint_xyz_world"], dtype=np.float64)[:, 0]
+            if "gt_pelvis_trans" in data:
+                gt = to_display(np.asarray(data["gt_pelvis_trans"], dtype=np.float64))
+            elif seq_dir is not None:
+                meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
+                gt = load_session_gt(seq_dir, int(meta["n_frames"]), fps)["joints"][:, 0]
+            else:
+                raise ValueError(f"unified archive has no embedded GT trajectory: {path}")
+            n = min(pred.shape[0], gt.shape[0])
+            return pred[:n], gt[:n]
         pred_key = "pred_pelvis_trans" if "pred_pelvis_trans" in data else (
             "pred_trans_world" if "pred_trans_world" in data else "trans"
         )
@@ -432,7 +447,7 @@ def render_session(traj_path: Path, session_id: str, config_id: str, seq_dir: Pa
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize root trajectories (pred vs GT) as Test3 outputs, SMPL/BVH auto-detected.")
-    cli_common.add_common_args(parser, seq_root=True, modal=True, variant=True, contact_method=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test3_traj" / "AnySole")
+    cli_common.add_common_args(parser, seq_root=True, modal=True, variant=True, contact_method=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R3Test_traj" / "AnySole")
     parser.add_argument("--no-png", action="store_true", help="Skip the static per-session figure (not controlled by --gen).")
     parser.add_argument(
         "--auto",
@@ -471,6 +486,8 @@ def compare_load_pred(path: Path) -> np.ndarray:
     if path.suffix.lower() == ".bvh":
         return load_motion(path)["joints"][:, 0]
     data = np.load(path)
+    if "AnySole" in path.as_posix() and "joint_xyz_world" not in data:
+        raise ValueError(f"legacy AnySole motion archive lacks unified contract: {path}")
     if "pred_pelvis_trans" in data:
         return to_display(np.asarray(data["pred_pelvis_trans"], dtype=np.float64))
     if "joint_xyz_world" in data:
@@ -538,7 +555,7 @@ def run_compare(args: argparse.Namespace) -> int:
     split_csv = Path(cli_common.resolve_path(args.split_csv, orig_cwd))
     out_dir = Path(cli_common.resolve_path(args.out_dir, orig_cwd)).parent / "compare"
     out_dir.mkdir(parents=True, exist_ok=True)
-    session_ids = cli_common.load_test_sessions(args.session, split_csv, split)
+    session_ids = cli_common.load_evaluable_sessions(args.session, split_csv, split)
     log.info(f"compare sessions ({split}, {len(session_ids)}): {session_ids}")
 
     model_dirs = [
@@ -637,7 +654,7 @@ def main() -> int:
     out_dir = Path(cli_common.resolve_path(args.out_dir, orig_cwd))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    session_ids = cli_common.load_test_sessions(args.session, split_csv, args.split)
+    session_ids = cli_common.load_evaluable_sessions(args.session, split_csv, args.split)
     if args.session:
         log.info(f"Sessions from --session: {session_ids}")
     else:
@@ -664,13 +681,13 @@ def main() -> int:
             if traj_path is None:
                 log.warning(f"Skip {session_out.parent.name}/{session_out.name}/{session_id}: no SMPL/BVH motion file (re-run eval or the baseline)")
                 continue
-            seq_dir = None
-            if traj_path.suffix.lower() == ".bvh":
-                try:
-                    seq_dir = session_dir(seq_root, session_id)
-                except FileNotFoundError as exc:
+            try:
+                seq_dir = session_dir(seq_root, session_id)
+            except FileNotFoundError as exc:
+                if traj_path.suffix.lower() == ".bvh":
                     log.warning(str(exc))
                     continue
+                seq_dir = None
             try:
                 render_session(traj_path, session_id, config_id, seq_dir, args, session_out)
             except Exception as exc:  # one bad session must not stop the sweep

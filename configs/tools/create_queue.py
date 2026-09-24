@@ -66,7 +66,7 @@ def main():
             session = row['session_id']
             base = f'workspace://derived/VP-MoCap/{date}/{row["subject_id"]}/{session}'
             text = (f'MODEL=posetransopt\nRUN_NAME=posetransopt_{session}\nCONDA_ENV=mmvp\n'
-                    f'RUN_DIR=results/VP-MoCap/posetransopt/{session}\n'
+                    f'RUN_DIR=results/baselines/VP-MoCap/posetransopt/{session}\n'
                     f'INPUT_PATH_BASE={base}\nSCENE_RGBD={base}/template_scene_rgbd.npy\n')
             put(f'{index:05d}_posetransopt_{session}', text)
 
@@ -77,8 +77,8 @@ def main():
         if not subject or not session: continue
         for stage in ('init_shape', 'init_pose', 'tracking'):
             index += 1
-            text = (f'MODEL=pressure_toolkit\nRUN_NAME=pressure_{session}_{stage}\nRUN_DIR=results/offline/pressure_toolkit/{session}\n'
-                    f'INIT_DATA_DIR={REPO}/results/offline/pressure_toolkit/{session}\nCONDA_ENV=mmvp\n'
+            text = (f'MODEL=pressure_toolkit\nRUN_NAME=pressure_{session}_{stage}\nRUN_DIR=results/baselines/pressure_toolkit/{session}\n'
+                    f'INIT_DATA_DIR={REPO}/results/baselines/pressure_toolkit/{session}\nCONDA_ENV=mmvp\n'
                     'CONFIG_FILE=Baselines/pressure_tookit/configs/fit_smpl_rgbd.yaml\n'
                     f'DATASET={date_from_row(row)}\nSUB_IDS={subject}\nSEQ_NAME={session}\n'
                     f'FITTING_STAGE={stage}\nSTART_IDX=0\nEND_IDX=-1\n'

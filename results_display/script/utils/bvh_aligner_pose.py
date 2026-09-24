@@ -84,6 +84,9 @@ def parse_bvh_aligner(path: str | Path, trim_leading_seconds: float = 0.40) -> d
     raw_frames = raw_frames[trim_frames:]
 
     all_positions = np.zeros((len(raw_frames), len(names), 3), dtype=np.float64)
+    all_rotations = np.zeros((len(raw_frames), len(names), 3, 3), dtype=np.float64)
+    all_local_rotations = np.zeros_like(all_rotations)
+    display_rotation = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
     for frame_index, frame in enumerate(raw_frames):
         positions = np.zeros((len(names), 3), dtype=np.float64)
         global_rotations = []
@@ -105,6 +108,8 @@ def parse_bvh_aligner(path: str | Path, trim_leading_seconds: float = 0.40) -> d
                 global_pos = positions[parent] + global_rotations[parent] @ translation
             positions[joint_index] = global_pos
             global_rotations.append(global_rot)
+            all_rotations[frame_index, joint_index] = display_rotation @ global_rot @ display_rotation.T
+            all_local_rotations[frame_index, joint_index] = display_rotation @ local_rotation @ display_rotation.T
         # Exact MocapVideoAligner default z-up display conversion.
         all_positions[frame_index] = np.column_stack(
             (positions[:, 0], -positions[:, 2], positions[:, 1])
@@ -112,6 +117,8 @@ def parse_bvh_aligner(path: str | Path, trim_leading_seconds: float = 0.40) -> d
 
     return {
         "joints": all_positions.astype(np.float32),
+        "rotations": all_rotations.astype(np.float32),
+        "local_rotations": all_local_rotations.astype(np.float32),
         "parents": np.asarray(parents, dtype=np.int64),
         "names": names,
         "fps": 1.0 / frame_time if frame_time > 0 else 40.0,

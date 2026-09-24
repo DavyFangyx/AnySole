@@ -14,6 +14,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
 
+from utils.mpl_fonts import setup_cjk_fonts
+
+setup_cjk_fonts()
+
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
 MUTED = "#898781"
@@ -26,7 +30,7 @@ ORANGE = "#eb6834"
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="R_Test10 / B3 rho-grid display")
     p.add_argument("--metrics", type=Path, required=True)
-    p.add_argument("--metric", default="PA-MPJPE")
+    p.add_argument("--metric", default="pa_mpjpe_mm")
     p.add_argument("--out-dir", type=Path, default=None)
     return p.parse_args(argv)
 

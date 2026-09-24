@@ -988,8 +988,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if str(config.get("wandb_mode", "disabled")) != "disabled":
         try:
             import wandb
-            # Local run data lives under results/wandb (not a repo-root wandb/).
-            os.environ.setdefault("WANDB_DIR", str(Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results"))) / "wandb"))
+            # Local run data lives under results/logs/wandb (not a repo-root wandb/).
+            os.environ.setdefault("WANDB_DIR", str(Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results"))) / "logs" / "wandb"))
             # Identity fields consumed by Wandb_Analyzer: experiment_tag groups a
             # training batch, run_kind/model/stage/fold decide the raw/ directory
             # tree. Single-stage, non-cross-validation runs use stage=single,
@@ -1453,8 +1453,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Training-time auto-eval stays lean: metrics only and no protocol pass.
         eval_main(["--config", str(args.config), "--ckpt", str(out_dir / "ckpt_last.pt"),
                    "--split", "test", "--device", str(device),
-                   "--contact-method", str(config["contact_method"]), "--no-write-motion",
-                   "--no-protocol"])
+                   "--contact-method", str(config["contact_method"]), "--no-write-motion"])
     except Exception as exc:
         print("automatic test evaluation failed: %s" % exc)
     return 0

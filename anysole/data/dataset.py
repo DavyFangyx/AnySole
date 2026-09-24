@@ -424,6 +424,7 @@ class AnySoleDataset(Dataset):
             "floor_y": torch.tensor(session["floor_y"], dtype=torch.float32),
             "offsets": torch.from_numpy(session["offsets"]).float(),
             "parents": torch.from_numpy(session["parents"]).long(),
+            "betas": torch.from_numpy(session["betas"]).float(),
             "root_rot_init": torch.from_numpy(session["root_rot_init"]).float(),
             "session_id": session["session_id"],
             "frame_start": torch.tensor(left, dtype=torch.long),
@@ -442,7 +443,10 @@ class AnySoleDataset(Dataset):
         item["trans_anchor"] = torch.from_numpy(
             np.ascontiguousarray(session["trans_global"][anchor_index])
         ).float()
-        banned = [key for key in item if key.lower() in ("smpl", "theta", "betas") or "smpl" in key.lower()]
+        # ``betas`` is session metadata used by eval_protocol/SMPL export; it
+        # is not passed as a model input.  Keep the guard for actual SMPL or
+        # theta tensors, but do not reject the metadata required by evaluation.
+        banned = [key for key in item if key.lower() in ("smpl", "theta") or "smpl" in key.lower()]
         if banned:
             raise RuntimeError("SMPL fields leaked into batch: %s" % banned)
         return item

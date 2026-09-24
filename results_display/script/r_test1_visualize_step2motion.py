@@ -3,7 +3,7 @@
 Usage (run from the repository root):
     python results_display/script/r_test1_visualize_step2motion.py
     python results_display/script/r_test1_visualize_step2motion.py \
-        results://Step2Motion/predictions/gait_model/S7063_gen.bvh
+        results://baselines/Step2Motion/predictions/gait_model/S7063_gen.bvh
     python results_display/script/r_test1_visualize_step2motion.py --self-test
     python results_display/script/r_test1_visualize_step2motion.py --mesh --max-frames 40
 
@@ -13,7 +13,7 @@ no ``--raw`` override; otherwise the GT panel keeps the BVH skeleton.  The
 generated panel stays a BVH skeleton (Step2Motion has no SMPL params).  The
 default (and ``--only-bone``) renders skeleton panels only.
 
-Outputs are written below ``results_display/r_test1_visualize/Step2Motion/gait_model`` (or the
+Outputs are written below ``results_display/ResultTest/R1Test_visualize/Step2Motion/gait_model`` (or the
 ``ANYSOLE_RESULTSDISPLAY`` override).
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ HIGHLIGHT_JOINTS = (0, 3, 4, 7, 8, 13, 17, 21)
 
 GAIT_ROOT = REPO_ROOT
 SEQ_ROOT = cli_common.WORKSPACE_ROOT / "derived/MotionPRO/sequences/cam3"
-DEFAULT_VIZ_DIR = cli_common.DISPLAY_ROOT / "r_test1_visualize/Step2Motion/gait_model"
+DEFAULT_VIZ_DIR = cli_common.DISPLAY_ROOT / "ResultTest/R1Test_visualize/Step2Motion/gait_model"
 MIN_FRAMES = 101
 TARGET_HZ = 40.0
 DEFAULT_PRED_DIR = cli_common.RESULTS_ROOT / "Step2Motion/predictions/gait_model"
@@ -483,7 +483,7 @@ def discover_pred_files(pred_bvh):
         "Default visualizes every test-set export:\n"
         "  python results_display/script/r_test1_visualize_step2motion.py\n"
         "One clip:\n"
-        "  python results_display/script/r_test1_visualize_step2motion.py results://Step2Motion/predictions/gait_model/S7063_gen.bvh"
+        "  python results_display/script/r_test1_visualize_step2motion.py results://baselines/Step2Motion/predictions/gait_model/S7063_gen.bvh"
     ) % pred_bvh
     raise SystemExit(hint)
 

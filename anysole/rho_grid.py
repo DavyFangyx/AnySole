@@ -6,7 +6,7 @@ mask 叠在 config 级替换之后 → 四角（100/100、100/0、0/100、0/0）
 VT2M/V2M/T2M/纯先验严格同机制；ρ=100%/0% 角与 fseries 的对应配置行一致 =
 实现自检项（grid_metrics.json 的 corner_check）。
 
-每格 × 每种子 × 每 session 落盘（默认 results_display/result/r_test5_rho_grid/）：
+每格 × 每种子 × 每 session 落盘（默认 results_display/BTest/B3Test_rho_grid/）：
   - grid_metrics.json：全格协议指标（与 fseries 同构；复用
     eval_protocol._session_metrics，逐字节同源）
   - npz/<session>_rhoV<rV>_rhoT<rT>[_s<seed>].npz：eval_motion 同格式 SMPL npz
@@ -26,6 +26,7 @@ Usage (touch_gait env, 仓库根执行):
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import zlib
 from pathlib import Path
@@ -63,8 +64,12 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="逗号分隔的 mask 种子（val 用 0,1,2 估方差；test 单种子 0）")
     parser.add_argument("--rhos", type=str, default="0,20,40,60,80,100",
                         help="保留率网格（百分比，升序）")
+    parser.add_argument("--rho-v", type=int, default=None,
+                        help="只运行一个 V 保留率配置；与 --rho-t 一起使用")
+    parser.add_argument("--rho-t", type=int, default=None,
+                        help="只运行一个 T 保留率配置；与 --rho-v 一起使用")
     parser.add_argument("--out-dir", type=Path,
-                        default=REPO / "results_display" / "result" / "r_test5_rho_grid",
+                        default=REPO / "results_display" / "BTest" / "B3Test_rho_grid",
                         help="产物目录（grid_metrics.json + npz/ + repr/）")
     parser.add_argument("--limit-sessions", type=int, default=None)
     parser.add_argument("--device", default="cuda")
@@ -120,6 +125,10 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     seeds = parse_int_csv(args.seeds)
     rhos = parse_int_csv(args.rhos)
+    if (args.rho_v is None) != (args.rho_t is None):
+        raise SystemExit("--rho-v 和 --rho-t 必须同时提供")
+    rho_vs = [args.rho_v] if args.rho_v is not None else rhos
+    rho_ts = [args.rho_t] if args.rho_t is not None else rhos
     device = resolve_device(args.device)
     config = load_config(args.config)
     checkpoint = torch.load(args.ckpt, map_location="cpu")
@@ -181,16 +190,18 @@ def main(argv=None) -> int:
             prev = {}
     cells: Dict[str, dict] = prev.get("cells", {}) if isinstance(prev, dict) else {}
 
-    n_cells = len(rhos) ** 2 * len(seeds)
+    n_cells = len(rho_vs) * len(rho_ts) * len(seeds)
     done = 0
-    for rV in rhos:
-        for rT in rhos:
+    for rV in rho_vs:
+        for rT in rho_ts:
             ck = cell_key(rV, rT)
             for seed in seeds:
                 cell_seed = (seed * 1000003) ^ zlib.crc32(ck.encode())
                 seed_key = "s%d" % seed
-                if args.reuse and _cell_products_ok(npz_dir, repr_dir, groups,
-                                                    rV, rT, seed, args):
+                if (args.reuse
+                        and cells.get(seed_key, {}).get(ck) is not None
+                        and _cell_products_ok(npz_dir, repr_dir, groups,
+                                              rV, rT, seed, args)):
                     done += 1
                     print("[%d/%d] reuse %s s%d" % (done, n_cells, ck, seed))
                     continue
@@ -200,10 +211,10 @@ def main(argv=None) -> int:
                 )
                 cells.setdefault(seed_key, {})[ck] = metrics
                 done += 1
-                print("[%d/%d] %s s%d PA-MPJPE=%.2f MPJPE=%.2f contact_f1=%.4f"
+                print("[%d/%d] %s s%d pa_mpjpe=%.2f mpjpe=%.2f contact_f1=%.4f"
                       % (done, n_cells, ck, seed,
-                         metrics.get("PA-MPJPE", float("nan")),
-                         metrics.get("MPJPE", float("nan")),
+                         metrics.get("pa_mpjpe_mm", float("nan")),
+                         metrics.get("mpjpe_mm", float("nan")),
                          metrics.get("contact_f1", float("nan"))))
 
     payload = {
@@ -211,23 +222,51 @@ def main(argv=None) -> int:
         "modal": str(saved.get("modal")),
         "contact_method": contact_method,
         "split": args.split,
-        "seeds": seeds,
-        "rhos": rhos,
+        "seeds": list(seeds),
+        "rhos": sorted(set(rho_vs + rho_ts)),
         "tw": tw,
         "forward_axis": "+Z" if forward_axis == 2 else "+X",
-        "corner_check": _corner_check(cells, seeds, args),
         "cells": cells,
     }
-    metrics_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
-                            encoding="utf-8")
-    # 规范文件 = 最近一次 val run（前端默认读它）；train/test 只写分 split 副本
-    if args.split == "val":
-        (out_dir / "grid_metrics.json").write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print("wrote %s (+ grid_metrics.json)" % metrics_path)
-    else:
-        print("wrote %s" % metrics_path)
+    _locked_merge_write(metrics_path, payload, args,
+                        canonical=(out_dir / "grid_metrics.json")
+                        if args.split == "val" else None)
+    print("wrote %s" % metrics_path)
     return 0
+
+
+def _locked_merge_write(metrics_path: Path, payload: dict, args,
+                        canonical: Optional[Path] = None) -> None:
+    """加锁合并写 grid_metrics：并发 cell conf 各自 merge 自己的 cell，不互相覆盖。
+
+    锁在 <metrics_path>.lock 上；写前重读盘上最新文件并合并 cells/seeds/rhos，
+    再用合并后的 cells 重算 corner_check（保证自检反映最终网格而非本次运行）。
+    """
+    lock_path = metrics_path.with_suffix(metrics_path.suffix + ".lock")
+    with open(lock_path, "a") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        prev = {}
+        if metrics_path.is_file():
+            try:
+                prev = json.loads(metrics_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                prev = {}
+        prev = prev if isinstance(prev, dict) else {}
+        prev_cells = prev.get("cells", {}) if isinstance(prev.get("cells"), dict) else {}
+        merged_cells: Dict[str, dict] = {key: dict(value)
+                                         for key, value in prev_cells.items()}
+        for seed_key, cell_metrics in payload["cells"].items():
+            merged_cells.setdefault(seed_key, {}).update(cell_metrics)
+        merged = dict(payload)
+        merged["cells"] = merged_cells
+        merged["seeds"] = sorted(set(prev.get("seeds") or []) | set(payload.get("seeds") or []))
+        merged["rhos"] = sorted(set(prev.get("rhos") or []) | set(payload.get("rhos") or []))
+        merged["corner_check"] = _corner_check(merged_cells, merged["seeds"], args)
+        metrics_path.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n",
+                                encoding="utf-8")
+        if canonical is not None:
+            canonical.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n",
+                                 encoding="utf-8")
 
 
 def _cell_products_ok(npz_dir, repr_dir, groups, rV, rT, seed, args) -> bool:
@@ -256,12 +295,13 @@ def _corner_check(cells: dict, seeds: List[int], args) -> dict:
     check = {}
     if args.limit_sessions is not None:
         check["note"] = "--limit-sessions=%d 冒烟口径：diff 非 0 属预期" % args.limit_sessions
+    seed_cells = cells.get("s%d" % seeds[0], {})
     for rV, rT, cfg in ((100, 0, "V2M"), (0, 100, "T2M"), (100, 100, "VT2M")):
         row = {}
-        for metric in ("PA-MPJPE", "MPJPE", "contact_f1", "yaw_abs_deg", "RTE_norm"):
+        for metric in ("pa_mpjpe_mm", "mpjpe_mm", "contact_f1", "yaw_abs_deg", "root_rte_percent"):
             if metric not in fseries[cfg]:
                 continue
-            grid_val = cells["s%d" % seeds[0]].get(cell_key(rV, rT), {}).get(metric)
+            grid_val = seed_cells.get(cell_key(rV, rT), {}).get(metric)
             if grid_val is None:
                 continue
             row[metric] = {"grid": round(grid_val, 4),
@@ -322,6 +362,7 @@ def _run_cell_inference(model, dataset, groups, device, tw, forward_axis,
                                   if out.get("pressure_hat") is not None else None),
                 "offsets": batch["offsets"][0],
                 "parents": batch["parents"][0],
+                "betas": batch["betas"][0],
             }
             _session_metrics(seq, tw, forward_axis, metric_config, accum, contact)
             _write_session_artifacts(npz_dir, repr_dir, session_id, rV, rT,

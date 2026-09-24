@@ -3,7 +3,7 @@
 Pattern adapted from SurvPGC's utils/optuna_utils.py: TPE/random sampler,
 median/none pruner, sqlite study storage under ``results/AnySole/optuna/``,
 per-trial SUBPROCESS training (``python -m anysole.train``) + val evaluation
-(``python -m anysole.eval --no-write-motion --no-protocol``), objective =
+(``python -m anysole.eval --no-write-motion``), objective =
 weighted mean of the three configs' val MPJPE (minimize), plus an analysis
 log and study artifacts (optuna_trials.csv / best_trial.txt).
 
@@ -50,7 +50,6 @@ BASE_EVAL_FLAGS = (
     "--contact-method", "joint_and",
     "--split", "val",
     "--no-write-motion",
-    "--no-protocol",
 )
 DEFAULT_BASE_MODEL = "V3_4a"  # registry identifier (infer_anysole_paths resolves the ckpt)
 CONFIGS = ("VT2M", "V2M", "T2M")
@@ -149,11 +148,11 @@ def eval_command(args, out_dir: Path) -> list:
 
 def parse_val_metrics(out_dir: Path) -> dict:
     """{'VT2M': mpjpe, ...} from the eval output metrics/<split>.json."""
-    path = out_dir / "metrics" / "val.json"
+    path = out_dir / "metrics" / "val_fseries.json"
     if not path.is_file():
         raise FileNotFoundError("trial eval wrote no metrics: %s" % path)
     metrics = json.loads(path.read_text())["metrics"]
-    return {config: float(metrics[config]["MPJPE"]) for config in CONFIGS}
+    return {config: float(metrics[config]["mpjpe_mm"]) for config in CONFIGS}
 
 
 def run_trial(args, study_name: str, trial_number: int, params: dict) -> dict:

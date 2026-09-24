@@ -4,7 +4,7 @@ Predictions are read from standard SMPL NPZ files written by ``anysole.eval``;
 legacy BVH files are detected automatically for Step2Motion results. Panel rendering uses the shared
 ``render_common`` helpers so every Test1 output keeps the same visual style.
 
-Outputs are written below ``results_display/r_test1_visualize/AnySole/<modal>/<config>``
+Outputs are written below ``results_display/ResultTest/R1Test_visualize/AnySole/<modal>/<config>``
 (or the ``ANYSOLE_RESULTSDISPLAY`` override).
 
 ``--render bone,mesh`` controls the panel rendering kind: ``bone`` draws the
@@ -69,7 +69,22 @@ def load_gt(seq_dir: Path, n_frames: int, fps: float = 40.0) -> dict:
 
 
 def load_pred(pred_path: Path) -> dict:
-    return load_motion(pred_path)
+    loaded = load_motion(pred_path)
+    if pred_path.suffix.lower() == ".npz":
+        with np.load(pred_path, allow_pickle=False) as data:
+            if "joint_xyz_world" not in data or "valid_mask" not in data:
+                raise ValueError(
+                    f"legacy AnySole archive lacks joint_xyz_world/valid_mask: {pred_path}"
+                )
+            joints = np.asarray(data["joint_xyz_world"], dtype=np.float32)
+            names = tuple(
+                value.decode("utf-8") if isinstance(value, bytes) else str(value)
+                for value in np.asarray(data["joint_names"]).reshape(-1)
+            )
+            loaded["joints"] = joints
+            loaded["names"] = names
+            loaded["valid_mask"] = np.asarray(data["valid_mask"], dtype=bool).reshape(-1)
+    return loaded
 
 
 def render_mesh_panel(verts: np.ndarray, faces: np.ndarray, joints: np.ndarray,
@@ -167,7 +182,7 @@ def render_session(seq_dir: Path, pred_path: Path, session_id: str, config_id: s
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize AnySole motion vs tactile input and SMPL GT.")
-    cli_common.add_common_args(parser, seq_root=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test1_visualize" / "AnySole")
+    cli_common.add_common_args(parser, seq_root=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R1Test_visualize" / "AnySole")
     parser.add_argument(
         "--model-name", "--modal",
         dest="modal",
@@ -212,7 +227,7 @@ def main() -> int:
     out_dir = Path(cli_common.resolve_path(args.out_dir, orig_cwd))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    session_ids = cli_common.load_test_sessions(args.session, split_csv, args.split)
+    session_ids = cli_common.load_evaluable_sessions(args.session, split_csv, args.split)
     if args.session:
         log.info(f"Sessions from --session: {session_ids}")
     else:
@@ -258,7 +273,10 @@ def main() -> int:
                 except FileNotFoundError as exc:
                     log.warning(str(exc))
                     continue
-                render_session(seq_dir, pred_path, session_id, config_id, args, session_out)
+                try:
+                    render_session(seq_dir, pred_path, session_id, config_id, args, session_out)
+                except Exception as exc:
+                    log.warning(f"Skip {model_dir}/{config_id}/{session_id}: {exc}")
     return 0
 
 

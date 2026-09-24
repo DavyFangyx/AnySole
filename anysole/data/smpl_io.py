@@ -250,6 +250,7 @@ def load_smpl(path: Path, query_t: Optional[np.ndarray] = None) -> dict:
     # dependent offset must be added without R_root.
     pelvis_world = model_trans + rest_joints[0]
     return {
+        "poses_aa": poses.reshape(len(poses), N_JOINTS * 3).astype(np.float32),
         "pose_6d": _rotmat_to_6d_np(rotmats).reshape(len(poses), N_JOINTS * 6),
         "trans_m": pelvis_world.astype(np.float32),
         "model_trans_m": model_trans.astype(np.float32),
@@ -308,3 +309,26 @@ def pelvis_to_smpl_trans(pose_6d: np.ndarray, pelvis_trans: np.ndarray, betas=No
         raise ValueError("pose and pelvis translation frame counts differ")
     rest = _rest_joints({"betas": np.zeros(10) if betas is None else betas})[0]
     return (pelvis - rest).astype(np.float32)
+
+
+def smpl_vertices_from_archive_params(poses: np.ndarray, trans: np.ndarray,
+                                      betas: np.ndarray) -> np.ndarray:
+    """Return canonical neutral-SMPL vertices for archive-format parameters."""
+    import smplx
+    import torch
+
+    pose = np.asarray(poses, dtype=np.float32).reshape(-1, N_JOINTS, 3)
+    translation = np.asarray(trans, dtype=np.float32).reshape(-1, 3)
+    beta = np.asarray(betas, dtype=np.float32).reshape(-1)[:10]
+    model_path = Path(os.environ.get("ANYSOLE_SMPL_MODEL", str(SMPL_MODEL_PATH)))
+    model = smplx.create(
+        str(model_path), "smpl", gender="neutral", batch_size=len(pose), num_betas=10
+    )
+    with torch.no_grad():
+        result = model(
+            betas=torch.from_numpy(np.repeat(beta[None], len(pose), axis=0)),
+            body_pose=torch.from_numpy(pose[:, 1:]),
+            global_orient=torch.from_numpy(pose[:, :1]),
+            transl=torch.from_numpy(translation),
+        )
+    return result.vertices.detach().cpu().numpy().astype(np.float32)

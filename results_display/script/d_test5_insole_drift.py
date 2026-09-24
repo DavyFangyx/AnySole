@@ -14,7 +14,7 @@ raw values -> clip to [0, 1023] / 1023 -> non-overlapping 20-frame windows
 (same windowing as the eval dataset).  The compensated output is stitched
 back into a full-session sequence.
 
-Outputs land under ``results_display/data/d_test5_insole_drift/``:
+Outputs land under ``results_display/DataTest/D5Test_insole_drift/``:
     gif/ or mp4/ directory                left panel = original tactile,
       <session>_drift_compare.gif / .mp4  right panel = compensated tactile
     theta_summary.csv                    per-session drift statistics
@@ -203,7 +203,7 @@ def run_compensator(comp: InsoleDriftCompensator, t_raw: np.ndarray, subject_id:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="D_Test5: standalone insole-drift compensator (tactile in -> tactile out).")
-    cli_common.add_common_args(parser, seq_root=True, contact_method=True, out_dir_default=cli_common.DISPLAY_ROOT / "data/d_test5_insole_drift")
+    cli_common.add_common_args(parser, seq_root=True, contact_method=True, out_dir_default=cli_common.DISPLAY_ROOT / "DataTest/D5Test_insole_drift")
     parser.add_argument(
         "--checkpoint",
         type=str,

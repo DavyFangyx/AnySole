@@ -52,7 +52,7 @@
 - [ ] **B2 D1 GT 重导**：新脚本（`AnysoleWorkspace/tool/`，旧 data_prep 已出 index）从 manifest `smpl_path`（`motion_neutral_smpl.npz`）重导出 `smpl.npy / keypoints.npy`：40Hz 统一网格重采样（实测 T 不变）、**63 维 pose_body → 69 维映射**（不得沿用 `BVH_TO_SMPL_BODY`）、betas 真实化、**numpy2 pickle 坑**（训练端走 `load_smpl_npy()` 或 numpy1 写入）
 - [ ] **B3 触觉切换**：`image_pressure.py` 改读 `derived/MotionPRO/pressure_96/<sid>.npz` 落盘（去掉每 epoch 内存 bilinear；0 偏差已核验，切换无风险；保留内存 resize 作 fallback 或直接删并加存在性检测）
 - [ ] **B4 标签与沿用**：contact 标签用 `AnysoleWorkspace/tool/contact_labels.py`（bvh_h/bvh_soft）与 D1 同批重生成；`bbox.npy / feature_hrnet.pth / fake_mask.npy` 沿用现有
-- [ ] **B5 训练与出口**：队列 `MODEL=motionpro`、`RUN_DIR=results/MotionPRO`、EPOCHS=1000/BATCH=16 → `test_frappe.py` 评估 → 补导出步骤写 `results/MotionPRO/predictions/eval_motion/<sid>.npz`（SMPL-24 joint_xyz_world + joint_names + valid_mask）→ `r_test2_compare.py` → `r_test1_visualize_motionpro.py`
+- [ ] **B5 训练与出口**：队列 `MODEL=motionpro`、`RUN_DIR=results/baselines/MotionPRO`、EPOCHS=1000/BATCH=16 → `test_frappe.py` 评估 → 补导出步骤写 `results/baselines/MotionPRO/predictions/eval_motion/<sid>.npz`（SMPL-24 joint_xyz_world + joint_names + valid_mask）→ `r_test2_compare.py` → `r_test1_visualize_motionpro.py`
 
 ### C. Step2Motion（BVH 派）
 
@@ -65,7 +65,7 @@
 
 - [ ] **D1 合并备份集成**：`Baselines_backup/pressure_tookit` 的 `lib/utils/workspace.py`、`data_prep/rgb2depth.py`、`main_singleview.py` resolve_path、config workspace:// 化合入当前干净副本；修 3 处 bug：`data_loader.py:220` keypoint 相对路径（改相对 basdir）、`:244` `'init_shape '` 尾随空格、根目录 `run.sh` 指向不存在的 smpl_fitting.py
 - [ ] **D2 三阶段拟合**：`init_shape → init_pose → tracking`（create_queue 已生成任务；CONDA_ENV=mmvp；test split 36 session，先单序列 smoke 测单帧耗时再全量）；insole 输入直接指向已落盘的 `images/<date>/<sub>/<sid>/insole/`
-- [ ] **D3 导出与评估**：逐帧 `smpl_<idx>.npz`（body_pose 69 + global_rot + transl 地面系米 + betas + scale）→ FK（含 model_scale_opt/betas[:,0] 尺度）→ 地面系→世界系（标定变换）→ `results/pressure_tookit/predictions/eval_motion/<sid>.npz` → Test2 + 可视化
+- [ ] **D3 导出与评估**：逐帧 `smpl_<idx>.npz`（body_pose 69 + global_rot + transl 地面系米 + betas + scale）→ FK（含 model_scale_opt/betas[:,0] 尺度）→ 地面系→世界系（标定变换）→ `results/baselines/pressure_tookit/predictions/eval_motion/<sid>.npz` → Test2 + 可视化
 
 ### E. MMVP 方法线 B：FPP-Net
 

@@ -44,6 +44,9 @@ from utils.missing_rate_analysis import (
     load_grid_prior,
     write_rows,
 )
+from utils.mpl_fonts import setup_cjk_fonts
+
+setup_cjk_fonts()
 
 SURFACE = "#fcfcfb"
 INK = "#0b0b0b"
@@ -76,11 +79,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--fs-tspecialist", type=Path, default=None,
                         help="T 专才 fseries；A1/B2 必需")
     parser.add_argument("--prior-grid", type=Path,
-                        default=REPO / "results_display" / "result" / "r_test5_rho_grid" / "grid_metrics.json",
+                        default=REPO / "results" / "rho_grid_eval" / "V3_3B" / "grid_metrics.json",
                         help="主线 rhoV0_rhoT0 先验单元，B1/B2 必需")
     parser.add_argument("--prior-cell", default="rhoV0_rhoT0")
     parser.add_argument("--out", type=Path,
-                        default=REPO / "results_display" / "result" / "r_test6_complement")
+                        default=REPO / "results_display" / "ATest" / "A1Test_complement")
     parser.add_argument("--tol", type=float, default=0.0,
                         help="误差差值分类容差；混合单位时默认 0，只按方向分类")
     return parser.parse_args(argv)
@@ -104,14 +107,20 @@ def load_inputs(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def style_ax(ax) -> None:
+    """Minimal academic axis: only the bottom spine, dashed x grid."""
     ax.set_facecolor(SURFACE)
-    for spine in ("top", "right"):
+    for spine in ("top", "right", "left"):
         ax.spines[spine].set_visible(False)
-    for spine in ("left", "bottom"):
-        ax.spines[spine].set_color(AXIS)
-    ax.tick_params(colors=MUTED, labelsize=8)
-    ax.xaxis.grid(True, color=GRID, linewidth=0.8)
+    ax.spines["bottom"].set_color(AXIS)
+    ax.tick_params(colors=INK2, labelsize=9.5, length=0)
+    ax.xaxis.grid(True, color=GRID, linewidth=0.8, linestyle="--")
     ax.set_axisbelow(True)
+
+
+def _forest_color(value: float, positive_is_better: bool) -> str:
+    good = value > 0 if positive_is_better else value < 0
+    bad = value < 0 if positive_is_better else value > 0
+    return GOOD if good else BAD if bad else FLAT
 
 
 def forest(path: Path, rows: list[dict[str, Any]], value_key: str, title: str,
@@ -119,28 +128,29 @@ def forest(path: Path, rows: list[dict[str, Any]], value_key: str, title: str,
     if not rows:
         return
     rows = list(reversed(rows))
-    fig, ax = plt.subplots(figsize=(9.0, max(3.6, 0.42 * len(rows) + 1.3)), dpi=140)
+    fig, ax = plt.subplots(figsize=(7.6, max(2.9, 0.44 * len(rows) + 1.4)), dpi=220)
     fig.patch.set_facecolor(SURFACE)
     style_ax(ax)
     y = np.arange(len(rows))
-    vals = [float(row[value_key]) for row in rows]
-    colors = []
-    for value in vals:
-        good = value > 0 if positive_is_better else value < 0
-        bad = value < 0 if positive_is_better else value > 0
-        colors.append(GOOD if good else BAD if bad else FLAT)
-    ax.axvline(0, color=AXIS, linewidth=1.0)
-    ax.scatter(vals, y, s=38, c=colors, zorder=3)
-    for yi, row, value in zip(y, rows, vals):
-        ax.text(value + (0.02 if value >= 0 else -0.02), yi, "%+.3g" % value,
-                ha="left" if value >= 0 else "right", va="center", fontsize=7, color=INK2)
+    vals = np.array([float(row[value_key]) for row in rows])
+    colors = [_forest_color(value, positive_is_better) for value in vals]
+    ax.axvline(0, color=AXIS, linewidth=1.0, zorder=2)
+    ax.hlines(y, 0, vals, colors=colors, linewidth=2.6, zorder=3)
+    ax.scatter(vals, y, s=26, c=colors, edgecolors="white", linewidths=0.6, zorder=4)
+    span = float(np.max(np.abs(vals))) if len(vals) else 0.0
+    dx = max(span * 0.035, 0.01)
+    for yi, value in zip(y, vals):
+        ax.text(value + (dx if value >= 0 else -dx), yi, "%+.3g" % value,
+                ha="left" if value >= 0 else "right", va="center",
+                fontsize=8.5, color=INK2)
     ax.set_yticks(y)
-    ax.set_yticklabels([row["component"] for row in rows], fontsize=8)
+    ax.set_yticklabels([row["component"] for row in rows], fontsize=9.5)
     direction = "positive" if positive_is_better else "negative"
-    ax.set_xlabel("error difference (%s = favorable direction)" % direction, color=INK2, fontsize=9)
-    ax.set_title(title, color=INK, fontsize=11, loc="left", pad=12)
-    ax.text(0.99, -0.12, zero_text, transform=ax.transAxes, ha="right", va="top",
-            fontsize=7.5, color=MUTED)
+    ax.set_xlabel("Error difference (%s = favorable direction)" % direction,
+                  color=INK2, fontsize=10, labelpad=8)
+    ax.set_title(title, color=INK, fontsize=12, loc="left", pad=14)
+    ax.text(0.99, -0.14, zero_text, transform=ax.transAxes, ha="right", va="top",
+            fontsize=8, color=MUTED)
     fig.tight_layout()
     fig.savefig(path, facecolor=SURFACE)
     plt.close(fig)
@@ -162,15 +172,15 @@ def run_a0(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
             "metric": v_key if v_key == t_key else "%s / %s" % (v_key, t_key),
             "V_specialist": round(v_raw, 6), "T_specialist": round(t_raw, 6),
             "delta_error_T_minus_V": round(delta, 6),
-            "winner": "V专才" if delta > args.tol else "T专才" if delta < -args.tol else "不确定",
+            "winner": "V specialist" if delta > args.tol else "T specialist" if delta < -args.tol else "tie",
         })
     out = args.out
     write_rows(out / "a0_specialist_table.csv", rows)
     forest(out / "a0_specialist_forest.png", rows, "delta_error_T_minus_V",
            "A0 specialist division: T error minus V error",
            positive_is_better=True)
-    summary = {"V_wins": [r["component_id"] for r in rows if r["winner"] == "V专才"],
-               "T_wins": [r["component_id"] for r in rows if r["winner"] == "T专才"]}
+    summary = {"V_wins": [r["component_id"] for r in rows if r["winner"] == "V specialist"],
+               "T_wins": [r["component_id"] for r in rows if r["winner"] == "T specialist"]}
     (out / "a0_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"rows": rows, "summary": summary}
 
@@ -189,7 +199,7 @@ def run_a1(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
         best = min(v_err, t_err)
         best_raw = v_raw if v_err <= t_err else t_raw
         delta = main_err - best
-        category = "协同" if delta < -args.tol else "干扰" if delta > args.tol else "保留/选择"
+        category = "synergy" if delta < -args.tol else "interference" if delta > args.tol else "keep or select"
         rows.append({
             "component_id": component, "component": component_label(component),
             "owner": "V" if component in V_COMPONENTS else "T", "metric": main_key,
@@ -201,9 +211,9 @@ def run_a1(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
     write_rows(out / "a1_fusion_table.csv", rows)
     forest(out / "a1_fusion_forest.png", rows, "delta_error_VT_minus_best",
            "A1 fusion: main VT minus best specialist")
-    summary = {"synergy": sum(r["category"] == "协同" for r in rows),
-               "selection": sum(r["category"] == "保留/选择" for r in rows),
-               "interference": sum(r["category"] == "干扰" for r in rows)}
+    summary = {"synergy": sum(r["category"] == "synergy" for r in rows),
+               "selection": sum(r["category"] == "keep or select" for r in rows),
+               "interference": sum(r["category"] == "interference" for r in rows)}
     (out / "a1_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"rows": rows, "summary": summary}
 
@@ -216,7 +226,7 @@ def run_a2(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
         v_key, v_raw, v_err = error_value(v, component)
         t_key, t_raw, t_err = error_value(t, component)
         delta = t_err - v_err
-        winner = "V-only" if delta > args.tol else "T-only" if delta < -args.tol else "不确定"
+        winner = "V-only" if delta > args.tol else "T-only" if delta < -args.tol else "tie"
         rows.append({
             "component_id": component, "component": component_label(component),
             "owner": "V" if component in V_COMPONENTS else "T", "metric": v_key if v_key == t_key else "%s / %s" % (v_key, t_key),
@@ -261,33 +271,38 @@ def branch_table(args: argparse.Namespace, inputs: dict[str, Any], branch: str) 
             "delta_error_main_minus_prior": round(d_prior, 6),
             "beats_specialist": d_spec < -args.tol,
             "beats_prior": d_prior < -args.tol,
-            "成立": d_spec < -args.tol and d_prior < -args.tol,
+            "holds": d_spec < -args.tol and d_prior < -args.tol,
         })
     out = args.out
     write_rows(out / (branch + "_branch_table.csv"), rows)
     _dual_forest(out / (branch + "_branch_forest.png"), rows, title)
-    summary = {"成立分量": [r["component_id"] for r in rows if r["成立"]],
-               "总分量": len(rows)}
+    summary = {"holds": [r["component_id"] for r in rows if r["holds"]],
+               "total": len(rows)}
     (out / (branch + "_summary.json")).write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"rows": rows, "summary": summary}
 
 
 def _dual_forest(path: Path, rows: list[dict[str, Any]], title: str) -> None:
     rows = list(reversed(rows))
-    fig, ax = plt.subplots(figsize=(9.0, max(3.6, 0.48 * len(rows) + 1.3)), dpi=140)
+    fig, ax = plt.subplots(figsize=(7.6, max(2.9, 0.5 * len(rows) + 1.5)), dpi=220)
     fig.patch.set_facecolor(SURFACE)
     style_ax(ax)
     y = np.arange(len(rows))
     d1 = np.array([r["delta_error_main_minus_specialist"] for r in rows])
     d2 = np.array([r["delta_error_main_minus_prior"] for r in rows])
-    ax.axvline(0, color=AXIS, linewidth=1.0)
-    ax.scatter(d1, y + 0.08, color=V_COLOR, s=38, label="main − specialist", zorder=3)
-    ax.scatter(d2, y - 0.08, color=T_COLOR, s=38, label="main − prior", zorder=3)
+    ax.axvline(0, color=AXIS, linewidth=1.0, zorder=2)
+    ax.hlines(y + 0.1, 0, d1, colors=V_COLOR, linewidth=2.2, zorder=3)
+    ax.hlines(y - 0.1, 0, d2, colors=T_COLOR, linewidth=2.2, zorder=3)
+    ax.scatter(d1, y + 0.1, s=22, color=V_COLOR, edgecolors="white", linewidths=0.5,
+               label="main − specialist", zorder=4)
+    ax.scatter(d2, y - 0.1, s=22, color=T_COLOR, edgecolors="white", linewidths=0.5,
+               label="main − prior", zorder=4)
     ax.set_yticks(y)
-    ax.set_yticklabels([r["component"] for r in rows], fontsize=8)
-    ax.set_xlabel("error difference (negative = main is better)", color=INK2, fontsize=9)
-    ax.set_title(title, color=INK, fontsize=11, loc="left", pad=12)
-    ax.legend(frameon=False, fontsize=8, loc="best")
+    ax.set_yticklabels([r["component"] for r in rows], fontsize=9.5)
+    ax.set_xlabel("Error difference (negative = main is better)", color=INK2,
+                  fontsize=10, labelpad=8)
+    ax.set_title(title, color=INK, fontsize=12, loc="left", pad=14)
+    ax.legend(frameon=False, fontsize=9, loc="best")
     fig.tight_layout()
     fig.savefig(path, facecolor=SURFACE)
     plt.close(fig)

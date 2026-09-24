@@ -1,11 +1,4 @@
-"""Evaluate AnySole V1 under VT, V-only, and T-only conditioning.
-
-Besides the motion metrics, every mode also reports tactile aux-head
-reconstruction quality (T_mae / T_rmse / T_corr over the 96 cells).  Under
-V-only conditioning the tactile input is zeroed, so that row measures V2T
-(vision-to-tactile) generation and is mirrored by the top-level "v2t"
-field of the metrics JSON.
-"""
+"""Evaluate AnySole with the canonical session-level metric protocol."""
 
 from __future__ import annotations
 
@@ -23,7 +16,6 @@ from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.data.smpl_io import pelvis_to_smpl_trans, smpl24_pose6d_to_poses, smpl_archive_metadata
 from anysole.utils.diffusion import GaussianDiffusion
 from anysole.utils.geometry import f2_to_world, fk_pose6d, positions_to_6d_np, rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np
-from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.models import AnySoleModel, AnySoleModelV2, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device
 from anysole.ablations.insole_drift.templates import load_template_bank
@@ -38,6 +30,7 @@ from anysole.types import (
     FPS,
     GAIT_ROOT,
     JOINT_PROTOCOL_CHECKSUM,
+    JOINT_NAMES,
     MOTION_PROTOCOL,
     N_JOINTS,
     POSE_DIM,
@@ -53,28 +46,93 @@ _MISSING_OK = frozenset({
 })
 
 
-def _pa_error(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Per-joint errors after per-frame similarity Procrustes alignment."""
-    n_joints = pred.shape[-2]
-    x = pred.reshape(-1, n_joints, 3)
-    y = target.reshape(-1, n_joints, 3)
-    x_mean = x.mean(dim=1, keepdim=True)
-    y_mean = y.mean(dim=1, keepdim=True)
-    x0 = x - x_mean
-    y0 = y - y_mean
-    covariance = x0.transpose(1, 2) @ y0
-    u, singular, vh = torch.linalg.svd(covariance)
-    correction = torch.ones_like(singular)
-    correction[:, -1] = torch.where(
-        torch.det(u @ vh) < 0,
-        correction.new_tensor(-1.0),
-        correction.new_tensor(1.0),
+def _smpl_yup_to_display(points: np.ndarray) -> np.ndarray:
+    """Convert native SMPL (+Y up) joints to the display/world (+Z up) frame."""
+    points = np.asarray(points, dtype=np.float32)
+    return np.stack((points[..., 0], -points[..., 2], points[..., 1]), axis=-1)
+
+
+def _pack_motion_export(session: dict, windows: list[tuple], pos_mode: bool) -> dict:
+    """Place window predictions back on the original session frame grid.
+
+    Dataset windows are intentionally skipped when they contain fake frames.
+    Concatenating those windows would silently shift every later prediction in
+    time.  The unified archive therefore always has the original ``n_frames``
+    length and carries ``valid_mask``/``frame_indices`` explicitly.
+    """
+    n_frames = int(np.asarray(session["V_feat"]).shape[0])
+    pose_dim = int(windows[0][1].shape[-1]) if windows else POSE_DIM
+    identity = np.tile(
+        np.asarray([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32),
+        N_JOINTS,
     )
-    rotation = u @ torch.diag_embed(correction) @ vh
-    variance = x0.square().sum(dim=(1, 2)).clamp_min(1.0e-8)
-    scale = (singular * correction).sum(dim=1) / variance
-    aligned = scale[:, None, None] * (x0 @ rotation) + y_mean
-    return torch.linalg.vector_norm(aligned - y, dim=-1)
+    pose = np.repeat(identity[None], n_frames, axis=0)
+    if pose_dim != pose.shape[1]:
+        pose = np.zeros((n_frames, pose_dim), dtype=np.float32)
+    trans = np.zeros((n_frames, 3), dtype=np.float32)
+    seen = np.zeros((n_frames,), dtype=bool)
+    ordered = sorted(windows, key=lambda item: int(item[0]))
+
+    # Preserve the historical crossfade only across genuinely adjacent
+    # prediction ranges.  Never crossfade over a skipped/fake-frame gap.
+    fade = 0 if pos_mode else 4
+    if fade > 0:
+        for previous, current in zip(ordered, ordered[1:]):
+            previous_start = int(previous[0])
+            current_start = int(current[0])
+            previous_len = int(np.asarray(previous[1]).shape[0])
+            current_len = int(np.asarray(current[1]).shape[0])
+            if current_start != previous_start + previous_len:
+                continue
+            if previous_len < fade or current_len < fade:
+                continue
+            previous_pose = np.asarray(previous[1])
+            current_pose = np.asarray(current[1])
+            previous_trans = np.asarray(previous[2])
+            current_trans = np.asarray(current[2])
+            for j in range(fade):
+                alpha = (j + 1) / (fade + 1)
+                a = previous_len - fade + j
+                b = j
+                old_a, old_b = previous_pose[a].copy(), current_pose[b].copy()
+                previous_pose[a] = (1 - alpha) * old_a + alpha * old_b
+                current_pose[b] = (1 - alpha) * old_b + alpha * old_a
+                old_a, old_b = previous_trans[a].copy(), current_trans[b].copy()
+                previous_trans[a] = (1 - alpha) * old_a + alpha * old_b
+                current_trans[b] = (1 - alpha) * old_b + alpha * old_a
+
+    for start, window_pose, window_trans, _window_gt_trans in ordered:
+        start = int(start)
+        window_pose = np.asarray(window_pose, dtype=np.float32)
+        window_trans = np.asarray(window_trans, dtype=np.float32)
+        if start >= n_frames:
+            continue
+        length = min(len(window_pose), len(window_trans), n_frames - start)
+        if length <= 0:
+            continue
+        pose[start:start + length] = window_pose[:length]
+        trans[start:start + length] = window_trans[:length]
+        seen[start:start + length] = True
+
+    fake_mask = np.asarray(
+        session.get("fake_mask", np.zeros(n_frames, dtype=np.uint8))
+    ).reshape(-1)
+    valid = seen.copy()
+    if len(fake_mask) == n_frames:
+        valid &= fake_mask == 0
+
+    pose_tensor = torch.from_numpy(pose).float().unsqueeze(0)
+    trans_tensor = torch.from_numpy(trans).float().unsqueeze(0)
+    offsets = torch.from_numpy(np.asarray(session["offsets"])).float()
+    parents = torch.from_numpy(np.asarray(session["parents"])).long()
+    joints_native = fk_pose6d(pose_tensor, trans_tensor, offsets, parents)[0].numpy()
+    return {
+        "pose": pose,
+        "trans": trans,
+        "gt_trans": np.asarray(session["trans_global"], dtype=np.float32),
+        "valid": valid,
+        "joint_xyz_world": _smpl_yup_to_display(joints_native),
+    }
 
 
 def _tactile_corr(pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -89,34 +147,6 @@ def _tactile_corr(pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tenso
     denom = (pred_c.square().sum(dim=-1) * target_c.square().sum(dim=-1)).sqrt()
     corr = (pred_c * target_c).sum(dim=-1) / denom.clamp_min(1.0e-8)
     return corr, denom > 1.0e-8
-
-
-def _rotation_error_deg(pred_pose: torch.Tensor, gt_pose: torch.Tensor) -> torch.Tensor:
-    pred_rot = rot6d_to_rotmat(pred_pose.reshape(*pred_pose.shape[:2], N_JOINTS, 6))
-    gt_rot = rot6d_to_rotmat(gt_pose.reshape(*gt_pose.shape[:2], N_JOINTS, 6))
-    relative = pred_rot.transpose(-1, -2) @ gt_rot
-    cosine = ((relative.diagonal(dim1=-2, dim2=-1).sum(dim=-1) - 1.0) * 0.5).clamp(-1.0, 1.0)
-    return torch.rad2deg(torch.acos(cosine))
-
-
-class MetricSums:
-    def __init__(self) -> None:
-        self.sums: Dict[str, float] = {
-            name: 0.0
-            for name in ("MPJPE", "PA-MPJPE", "MPJRE", "traj_ATE", "contact_acc",
-                         "contact_recall", "air_recall", "T_mae", "T_mse", "T_corr")
-        }
-        self.counts: Dict[str, int] = {name: 0 for name in self.sums}
-
-    def add(self, name: str, values: torch.Tensor, scale: float = 1.0) -> None:
-        self.sums[name] += float(values.double().sum().item()) * scale
-        self.counts[name] += values.numel()
-
-    def means(self) -> Dict[str, float]:
-        out = {name: self.sums[name] / max(self.counts[name], 1) for name in self.sums}
-        out["contact_balanced_acc"] = 0.5 * (out["contact_recall"] + out["air_recall"])
-        out["T_rmse"] = float(out.pop("T_mse") ** 0.5)
-        return out
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -186,12 +216,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         metavar="FILE",
         help="Write extended protocol metrics to this JSON path. Defaults to the checkpoint model directory.",
-    )
-    parser.add_argument(
-        "--no-protocol",
-        action="store_true",
-        help="F0a: skip the extended protocol pass (eval_protocol.py, "
-        "metrics/<split>_fseries.json).",
     )
     parser.add_argument(
         "--protocol-seed",
@@ -516,6 +540,16 @@ def _evaluate_one(
     )
     if len(dataset) == 0:
         raise RuntimeError("Evaluation dataset contains no valid windows")
+    window_session_ids = {
+        dataset.sessions[file_index]["session_id"]
+        for file_index, _left, _right in dataset.valid_windows
+    }
+    skipped_no_window = [sid for sid in session_ids if sid not in window_session_ids]
+    if skipped_no_window:
+        print(
+            "skip sessions with no valid evaluation windows: "
+            + ", ".join(skipped_no_window)
+        )
     loader = DataLoader(
         dataset,
         batch_size=int(args.batch_size or config["batch_size"]),
@@ -525,9 +559,7 @@ def _evaluate_one(
         pin_memory=device.type == "cuda",
     )
 
-    all_values = {}
     for config_value in config_values:
-        metrics = MetricSums()
         exports = {}
         with torch.inference_mode():
             if pos_mode:
@@ -561,8 +593,6 @@ def _evaluate_one(
                         pred_trans = out["trans_hat"] + anchor
                         gt_trans = batch["trans_gt"] + anchor
                         pred6d = _positions_to_6d_batch(pred_pose, batch, device)
-                        t_ae = (out["pressure_hat"] - batch["T_raw"]).abs()
-                        corr, corr_valid = _tactile_corr(out["pressure_hat"], batch["T_raw"])
                         for w in range(bsz):
                             sl = slice(0, tw) if w == 0 else slice(half, tw)
                             p6 = pred6d[w : w + 1, sl]
@@ -570,21 +600,6 @@ def _evaluate_one(
                             gtt = gt_trans[w : w + 1, sl]
                             kp = fk_pose6d(p6, pt, batch["offsets"][w : w + 1], batch["parents"][w : w + 1])
                             kp_gt = batch["kp_gt"][w : w + 1, sl]
-                            metrics.add("MPJPE", torch.linalg.vector_norm(kp - kp_gt, dim=-1), 1000.0)
-                            metrics.add("PA-MPJPE", _pa_error(kp, kp_gt), 1000.0)
-                            metrics.add("MPJRE", _rotation_error_deg(p6, batch["pose_gt"][w : w + 1, sl]))
-                            metrics.add("traj_ATE", torch.linalg.vector_norm(pt - gtt, dim=-1), 1000.0)
-                            pred_contact = soft_contact_from_keypoints(
-                                kp, batch["floor_y"][w : w + 1]
-                            ) > 0.5
-                            gt_contact = batch["contact_gt"][w : w + 1, sl] > 0.5
-                            metrics.add("contact_acc", (pred_contact == gt_contact).float())
-                            metrics.add("contact_recall", pred_contact[gt_contact].float())
-                            metrics.add("air_recall", (~pred_contact[~gt_contact]).float())
-                            metrics.add("T_mae", t_ae[w : w + 1, sl])
-                            metrics.add("T_mse", t_ae[w : w + 1, sl].square())
-                            if bool(corr_valid[w : w + 1, sl].any()):
-                                metrics.add("T_corr", corr[w : w + 1, sl][corr_valid[w : w + 1, sl]])
                             if motion_out is not None:
                                 exports.setdefault(session_id, []).append(
                                     (
@@ -620,23 +635,6 @@ def _evaluate_one(
                         gt_trans = batch["trans_gt"] + anchor
                         pred6d = _positions_to_6d_batch(pred_pose, batch, device)
                         pred_kp = fk_pose6d(pred6d, pred_trans, batch["offsets"], batch["parents"])
-                        metrics.add("MPJPE", torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1), 1000.0)
-                        metrics.add("PA-MPJPE", _pa_error(pred_kp, batch["kp_gt"]), 1000.0)
-                        metrics.add("MPJRE", _rotation_error_deg(pred6d, batch["pose_gt"]))
-                        metrics.add("traj_ATE", torch.linalg.vector_norm(pred_trans - gt_trans, dim=-1), 1000.0)
-                        pred_contact = soft_contact_from_keypoints(
-                            pred_kp, batch["floor_y"]
-                        ) > 0.5
-                        gt_contact = batch["contact_gt"] > 0.5
-                        metrics.add("contact_acc", (pred_contact == gt_contact).float())
-                        metrics.add("contact_recall", pred_contact[gt_contact].float())
-                        metrics.add("air_recall", (~pred_contact[~gt_contact]).float())
-                        t_ae = (out["pressure_hat"] - batch["T_raw"]).abs()
-                        metrics.add("T_mae", t_ae)
-                        metrics.add("T_mse", t_ae.square())
-                        corr, corr_valid = _tactile_corr(out["pressure_hat"], batch["T_raw"])
-                        if bool(corr_valid.any()):
-                            metrics.add("T_corr", corr[corr_valid])
                         if motion_out is not None:
                             for idx, session_id in enumerate(raw_batch["session_id"]):
                                 exports.setdefault(session_id, []).append(
@@ -707,29 +705,6 @@ def _evaluate_one(
                     gt_trans_world = batch["trans_gt"] + anchor
                     pred_kp = fk_pose6d(pred_pose_w, pred_trans_world, batch["offsets"], batch["parents"])
 
-                    metrics.add("MPJPE", torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1), 1000.0)
-                    metrics.add("PA-MPJPE", _pa_error(pred_kp, batch["kp_gt"]), 1000.0)
-                    metrics.add("MPJRE", _rotation_error_deg(pred_pose_w, gt_pose_w))
-                    metrics.add("traj_ATE", torch.linalg.vector_norm(pred_trans_world - gt_trans_world, dim=-1), 1000.0)
-                    pred_contact = soft_contact_from_keypoints(
-                        pred_kp, batch["floor_y"]
-                    ) > 0.5
-                    gt_contact = batch["contact_gt"] > 0.5
-                    metrics.add("contact_acc", (pred_contact == gt_contact).float())
-                    metrics.add("contact_recall", pred_contact[gt_contact].float())
-                    metrics.add("air_recall", (~pred_contact[~gt_contact]).float())
-
-                    # Tactile aux-head metrics (normalized 0-1 units).  Under
-                    # V-only conditioning the T input is zeroed, so these numbers
-                    # measure V2T generation quality (the V2M row in the report).
-                    # F5 part9 drops the aux heads — those rows are skipped.
-                    if out.get("pressure_hat") is not None:
-                        t_ae = (out["pressure_hat"] - batch["T_raw"]).abs()
-                        metrics.add("T_mae", t_ae)
-                        metrics.add("T_mse", t_ae.square())
-                        corr, corr_valid = _tactile_corr(out["pressure_hat"], batch["T_raw"])
-                        if bool(corr_valid.any()):
-                            metrics.add("T_corr", corr[corr_valid])
 
                     if motion_out is not None:
                         for idx, session_id in enumerate(raw_batch["session_id"]):
@@ -742,59 +717,31 @@ def _evaluate_one(
                                 )
                             )
 
-        values = metrics.means()
-        all_values[CONFIG_MODE_NAMES[config_value]] = values
-        print(
-            "%s MPJPE=%.3fmm PA-MPJPE=%.3fmm MPJRE=%.3fdeg traj_ATE=%.3fmm contact_acc=%.4f contact_bal=%.4f air_recall=%.4f T_mae=%.3f T_rmse=%.3f T_corr=%.3f"
-            % (
-                CONFIG_MODE_NAMES[config_value],
-                values["MPJPE"],
-                values["PA-MPJPE"],
-                values["MPJRE"],
-                values["traj_ATE"],
-                values["contact_acc"],
-                values["contact_balanced_acc"],
-                values["air_recall"],
-                values["T_mae"],
-                values["T_rmse"],
-                values["T_corr"],
-            )
-        )
         if motion_out is not None:
             beta_by_session = {
                 s["session_id"]: np.asarray(s.get("betas", np.zeros(10)), dtype=np.float32)
                 for s in loader.dataset.sessions
             }
+            session_by_id = {
+                s["session_id"]: s for s in loader.dataset.sessions
+            }
             for session_id, windows in exports.items():
-                windows.sort(key=lambda item: item[0])
-                pose = np.concatenate([item[1] for item in windows], axis=0)
-                trans = np.concatenate([item[2] for item in windows], axis=0)
-                gt_trans = np.concatenate([item[3] for item in windows], axis=0)
-                # E4: windows are non-overlapping (stride = window_length), so
-                # the seam between consecutive windows is a hard cut between
-                # two independent predictions (measured 213mm jump vs 8.8mm
-                # GT frame-to-frame).  Crossfade F frames on both sides of
-                # every seam; 6D poses are re-orthonormalized after blending.
-                FADE = 0 if pos_mode else 4
-                n_windows = len(windows)
-                if n_windows > 1 and FADE > 0:
-                    for w in range(1, n_windows):
-                        seam = w * tw
-                        if seam + FADE > pose.shape[0]:
-                            break
-                        for j in range(FADE):
-                            alpha = (j + 1) / (FADE + 1)
-                            a, b = seam - FADE + j, seam + j
-                            old_a, old_b = pose[a].copy(), pose[b].copy()
-                            pose[a] = (1 - alpha) * old_a + alpha * old_b
-                            pose[b] = (1 - alpha) * old_b + alpha * old_a
-                            old_ta, old_tb = trans[a].copy(), trans[b].copy()
-                            trans[a] = (1 - alpha) * old_ta + alpha * old_tb
-                            trans[b] = (1 - alpha) * old_tb + alpha * old_ta
+                session = session_by_id[session_id]
+                packed = _pack_motion_export(session, windows, pos_mode)
+                pose = packed["pose"]
+                trans = packed["trans"]
+                gt_trans = packed["gt_trans"]
                 # Re-orthonormalize blended 6D vectors before writing the
                 # Standard SMPL motion archive.
                 R = rot6d_to_rotmat(torch.from_numpy(pose.reshape(-1, N_JOINTS, 6)).float())
                 pose = rotmat_to_6d(R).reshape(-1, POSE_DIM).numpy()
+                joints_native = fk_pose6d(
+                    torch.from_numpy(pose).float().unsqueeze(0),
+                    torch.from_numpy(trans).float().unsqueeze(0),
+                    torch.from_numpy(np.asarray(session["offsets"])).float(),
+                    torch.from_numpy(np.asarray(session["parents"])).long(),
+                )[0].numpy()
+                packed["joint_xyz_world"] = _smpl_yup_to_display(joints_native)
                 output_path = motion_out / ("%s_%s.npz" % (session_id, CONFIG_MODE_NAMES[config_value]))
                 motion_out.mkdir(parents=True, exist_ok=True)
                 smpl_poses = smpl24_pose6d_to_poses(pose)
@@ -811,6 +758,12 @@ def _evaluate_one(
                     gt_trans=gt_trans.astype(np.float32),  # legacy alias
                     betas=beta_by_session.get(session_id, np.zeros((10,), dtype=np.float32)),
                     betas_source=np.asarray("ground_truth_session"),
+                    joint_xyz_world=packed["joint_xyz_world"].astype(np.float32),
+                    joint_names=np.asarray(JOINT_NAMES),
+                    valid_mask=packed["valid"].astype(bool),
+                    frame_indices=np.arange(len(pose), dtype=np.int64),
+                    joint_coordinate_system=np.asarray("world_z_up"),
+                    session_id=np.asarray(session_id),
                     root_orient=smpl_poses[:, :3],
                     pose_body=smpl_poses[:, 3:],
                     mocap_frame_rate=np.asarray(FPS, dtype=np.float32),
@@ -822,42 +775,50 @@ def _evaluate_one(
     if metrics_out is None:
         metrics_out = model_root / "metrics" / ("%s.json" % args.split)
     metrics_out.parent.mkdir(parents=True, exist_ok=True)
+    from anysole.utils.eval_protocol import run_protocol
+    protocol_out = args.protocol_out
+    if protocol_out is None:
+        protocol_out = model_root / "metrics" / ("%s_fseries.json" % args.split)
+    final_metrics = run_protocol(
+        checkpoint=checkpoint,
+        config=config,
+        model=model,
+        dataset=dataset,
+        device=device,
+        checkpoint_path=str(ckpt),
+        split=args.split,
+        config_values=config_values,
+        regress_mode=regress_mode,
+        diffusion=diffusion,
+        sample_steps=sample_steps,
+        warm_start=warm_start,
+        seed=args.protocol_seed,
+        robustness=not args.no_robustness,
+        contact_method=contact_method,
+        tw=tw,
+        out_path=protocol_out,
+        v2t_out_dir=motion_out,
+    )
+    if not final_metrics:
+        raise RuntimeError(
+            "canonical session evaluation requires non-overlapping windows; "
+            "this checkpoint/config uses an unsupported continuation stride"
+        )
     payload = {"checkpoint": str(ckpt), "modal": str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1)),
                "contact_method": contact_method,
-               "split": args.split, "sample_steps": sample_steps, "metrics": all_values}
-    if "V2M" in all_values:
-        payload["v2t"] = {name: all_values["V2M"][name] for name in ("T_mae", "T_rmse", "T_corr")}
+               "split": args.split, "sample_steps": sample_steps, "metrics": final_metrics}
+    if "V2M" in final_metrics:
+        v2t_names = (
+            "T_mae", "T_rmse", "T_corr", "pressure_force_mae",
+            "pressure_force_rmse", "pressure_force_r2",
+            "pressure_cop_error_left", "pressure_cop_error_right",
+            "pressure_cop_error_mean", "contact_f1", "contact_acc",
+            "contact_recall", "air_recall",
+        )
+        payload["v2t"] = {name: final_metrics["V2M"][name]
+                          for name in v2t_names if name in final_metrics["V2M"]}
     metrics_out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print("wrote %s" % metrics_out)
-    # F0a: extended protocol (per-part aggregation, W-MPJPE/RTE/yaw,
-    # jitter/accel/seam, contact F1 + foot slide, V2M pressure quality, T2M
-    # upper-body plausibility, robustness rows) -> metrics/<split>_fseries.json.
-    # Runs after the frozen per-window metrics so the classic JSON stays the
-    # single source for the pre-F0 numbers.
-    if not args.no_protocol:
-        from anysole.utils.eval_protocol import run_protocol
-        protocol_out = args.protocol_out
-        if protocol_out is None:
-            protocol_out = model_root / "metrics" / ("%s_fseries.json" % args.split)
-        run_protocol(
-            checkpoint=checkpoint,
-            config=config,
-            model=model,
-            dataset=dataset,
-            device=device,
-            checkpoint_path=str(ckpt),
-            split=args.split,
-            config_values=config_values,
-            regress_mode=regress_mode,
-            diffusion=diffusion,
-            sample_steps=sample_steps,
-            warm_start=warm_start,
-            seed=args.protocol_seed,
-            robustness=not args.no_robustness,
-            contact_method=contact_method,
-            tw=tw,
-            out_path=protocol_out,
-        )
     return 0
 
 

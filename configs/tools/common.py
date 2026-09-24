@@ -15,10 +15,6 @@ from anysole.registry import infer_anysole_paths
 
 REPO = Path(__file__).resolve().parents[2]
 CONFIG_DIR = Path(__file__).resolve().parents[1]
-# Kept as a compatibility constant for older callers.  New generators write
-# directly to queue/ and do not create a generated task staging tree.
-GENERATED_DIR = CONFIG_DIR / "generated"
-
 # Training knobs (snake_case model-spec keys -> anysole.train CLI flags).
 # The generator validates MODELS train_args against this map; runner.py
 # appends them to the train command.  The flag vocabulary mirrors the
@@ -123,7 +119,7 @@ def build_registry() -> dict[str, Any]:
     Analysis experiments are intentionally not registered here.  Their
     scripts under ``results_display/script`` consume these outputs directly.
     """
-    from configs.gen.common import COMMON, EXPERIMENTS, MODELS
+    from configs.z_gen.common import COMMON, EXPERIMENTS, MODELS
 
     defaults = {
         "config": COMMON.get("CONFIG", "anysole/configs/v1.yaml"),
@@ -198,7 +194,7 @@ def resolve_path(value: str | os.PathLike[str] | None) -> Path | None:
 def experiment_root(registry: dict[str, Any], experiment_id: str) -> Path:
     results_root = resolve_path(registry.get("defaults", {}).get("results_root", "results"))
     assert results_root is not None
-    return results_root / experiment_id
+    return results_root / "experiments" / experiment_id
 
 
 def display_root(registry: dict[str, Any], experiment_id: str) -> Path:
@@ -284,7 +280,7 @@ def resolved_model_spec(registry: dict[str, Any], model_id: str) -> dict[str, An
 def _lookup_model_spec(registry: dict[str, Any], model_id: str) -> dict[str, Any]:
     if model_id in registry.get("models", {}):
         return dict(model_spec(registry, model_id))
-    from configs.gen.common import MODELS as MASTER_MODELS
+    from configs.z_gen.common import MODELS as MASTER_MODELS
 
     if model_id in MASTER_MODELS:
         return dict(MASTER_MODELS[model_id])

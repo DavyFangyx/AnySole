@@ -15,7 +15,7 @@ tactile.py 的产物落盘（产物齐全则跳过生成，缺则调用生成脚
 映射口径（生成器与 meta 为准）：点对点按 SMPL 模板足底系欧氏最近点，厂商布局
 48 点对齐模板足底包围盒，--mirror-x 翻转内外侧（默认同向假定）。
 
-输出（results_display/data/d_test4_baseline_tactile/）：每 session 仅一个
+输出（results_display/DataTest/D4Test_baseline_tactile/）：每 session 仅一个
 `<sid>_adapted_tactile.{gif|mp4}`（四面板 1x4 横向同帧对齐动画），不写其他文件。
 
 用法（仓库根目录，touch_gait 环境）：
@@ -60,7 +60,7 @@ import generate_baseline_tactile as gen  # noqa: E402
 from utils import cli_common, render_common as rc  # noqa: E402
 
 GENERATOR = TOOL_DIR / "generate_baseline_tactile.py"
-DEFAULT_OUT = REPO_ROOT / "results_display" / "data" / "d_test4_baseline_tactile"
+DEFAULT_OUT = REPO_ROOT / "results_display" / "DataTest" / "D4Test_baseline_tactile"
 
 # 面板基线标注色（工作名标题同色，仅作身份标识）
 C_ANYSOLE = (120, 220, 150)

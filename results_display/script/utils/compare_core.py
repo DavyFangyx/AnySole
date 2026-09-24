@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.ndimage import zoom
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # script/ (for utils.*)
 from utils import cli_common  # noqa: E402
@@ -31,13 +32,40 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from anysole.types import JOINT_NAMES  # noqa: E402
-from utils.motion_io import LEGACY_BVH_NAMES, load_motion  # noqa: E402
+from anysole.utils.metrics import (  # noqa: E402
+    MOTION_METRIC_NAMES,
+    foot_sliding,
+    mean_point_error,
+    pa_mpjpe,
+    pelvis_align,
+    root_trajectory_metrics,
+    matrix_rotation_error_degrees,
+    rotation_error_degrees,
+    shape_vertex_std,
+    temporal_metrics,
+    windowed_world_mpjpe,
+)
+from utils.motion_io import LEGACY_BVH_NAMES, load_motion, load_rotations, load_surface  # noqa: E402
 
-METRICS = ("MPJPE_mm", "PA_MPJPE_mm", "WMPJPE_mm", "WAMPJPE_mm", "RTE_mm", "Accel_mps2", "Jitter_1e-3_mps2")
+CONTACT_METRICS = ("contact_f1", "contact_acc", "contact_recall", "air_recall")
+V2T_METRICS = (
+    "T_mae", "T_rmse", "T_corr", "pressure_force_mae", "pressure_force_rmse",
+    "pressure_force_r2", "pressure_cop_error_left", "pressure_cop_error_right",
+    "pressure_cop_error_mean",
+)
+PRESSURE_GRID_SHAPE = (31, 11)
+METRICS = MOTION_METRIC_NAMES + CONTACT_METRICS + V2T_METRICS
+MODE_METRICS = {
+    "VT2M": MOTION_METRIC_NAMES + CONTACT_METRICS,
+    "V2M": MOTION_METRIC_NAMES + CONTACT_METRICS,
+    "T2M": MOTION_METRIC_NAMES + CONTACT_METRICS,
+    "V2T": V2T_METRICS + CONTACT_METRICS,
+}
 
 # Generation modes.  Rows from different modes are never compared in one
 # table block: T2M vs V2M is a different task, not a different model.
-MODES = ("VT2M", "V2M", "T2M")
+MODES = ("VT2M", "V2M", "T2M", "V2T")
+MOTION_MODES = ("VT2M", "V2M", "T2M")
 DEFAULT_REGISTRY = Path(__file__).resolve().parents[1] / "models_modes.yaml"
 
 # Skeleton3 has one more intermediate spine joint and no SMPL terminal hand
@@ -106,12 +134,53 @@ def parse_list(value: Any) -> list[int]:
         return []
 
 
-def read_manifest(path: Path, split: str) -> list[dict[str, str]]:
+def load_split_ids(split_csv: Path, split: str) -> list[str]:
+    """Read the project-owned canonical split table in row order."""
+    ids: list[str] = []
+    with Path(split_csv).open(encoding="utf-8-sig", newline="") as handle:
+        rows = csv.DictReader(handle)
+        if rows.fieldnames is None or split not in rows.fieldnames:
+            raise ValueError(f"{split_csv} missing split column {split!r}")
+        for row in rows:
+            value = (row.get(split) or "").strip()
+            if value:
+                ids.append(value)
+    if not ids:
+        raise ValueError(f"canonical split {split!r} is empty in {split_csv}")
+    if len(ids) != len(set(ids)):
+        raise ValueError(f"canonical split {split!r} contains duplicate session ids")
+    return ids
+
+
+def read_manifest(path: Path, split: str, split_csv: Path | None = None,
+                  evaluable_only: bool = True) -> list[dict[str, str]]:
+    """Read manifest metadata using the canonical split table when supplied.
+
+    The manifest remains the source of per-session metadata, but it is not a
+    second authority for train/val/test membership.  This prevents a stale
+    ``split_iid``/``split_ood`` tag from silently changing a comparison set.
+    """
     opener = path.open(encoding="utf-8-sig")
     if path.suffix.lower() in (".jsonl", ".json"):
         rows = [json.loads(line) for line in opener if line.strip()]
     else:
         rows = list(csv.DictReader(opener))
+    by_id = {str(row["session_id"]): row for row in rows if row.get("session_id")}
+    if split_csv is not None:
+        ids = load_split_ids(split_csv, split)
+        missing = [sid for sid in ids if sid not in by_id]
+        if missing:
+            raise ValueError(
+                f"canonical split {split!r} contains sessions absent from {path}: {missing}"
+            )
+        selected = [by_id[sid] for sid in ids]
+        if evaluable_only:
+            selected = [
+                row for row in selected
+                if parse_list(row.get("valid_frame_indices"))
+                or not ("valid_frame_indices" in row)
+            ]
+        return selected
     selected = []
     for row in rows:
         tags = {x.strip() for x in str(row.get("split_iid", "")).split(",")}
@@ -198,22 +267,30 @@ def array_from_file(path: Path) -> tuple[np.ndarray, np.ndarray | None, tuple[st
     if path.suffix.lower() == ".bvh":
         return bvh_joints(path), None, tuple(LEGACY_BVH_NAMES), "bvh23"
     if path.suffix.lower() == ".npz":
-        with np.load(path, allow_pickle=True) as probe:
-            if ({"poses", "trans"}.issubset(probe.files)
-                    or {"root_orient", "pose_body", "trans"}.issubset(probe.files)):
+        with np.load(path, allow_pickle=False) as data:
+            # The explicit unified contract wins over native SMPL parameter
+            # fields that may be carried in the same archive for trajectory
+            # and mesh readers.  AnySole archives contain both forms.
+            if "joint_xyz_world" in data:
+                arr = np.asarray(data["joint_xyz_world"])
+                mask = np.asarray(data["valid_mask"]).reshape(-1) if "valid_mask" in data else None
+                names = _decode_names(data["joint_names"]) if "joint_names" in data else None
+                protocol, names = _infer_protocol(arr, names)
+                return arr, mask, names, protocol
+            if ({"poses", "trans"}.issubset(data.files)
+                    or {"root_orient", "pose_body", "trans"}.issubset(data.files)):
                 motion = load_motion(path)
                 return motion["joints"], None, tuple(motion["names"]), "smpl24"
-        data = np.load(path, allow_pickle=False)
-        keys = list(data.keys())
-        candidates = ("joint_xyz_world", "joints_world", "pred_joints", "joints", "xyz", "pose")
-        key = next((k for k in candidates if k in data), None)
-        if key is None:
-            raise ValueError(f"no joint array in {path}; keys={keys}")
-        arr = np.asarray(data[key])
-        mask = np.asarray(data["valid_mask"]).reshape(-1) if "valid_mask" in data else None
-        names = _decode_names(data["joint_names"]) if "joint_names" in data else None
-        protocol, names = _infer_protocol(arr, names)
-        return arr, mask, names, protocol
+            keys = list(data.keys())
+            candidates = ("joints_world", "pred_joints", "joints", "xyz", "pose")
+            key = next((k for k in candidates if k in data), None)
+            if key is None:
+                raise ValueError(f"no joint array in {path}; keys={keys}")
+            arr = np.asarray(data[key])
+            mask = np.asarray(data["valid_mask"]).reshape(-1) if "valid_mask" in data else None
+            names = _decode_names(data["joint_names"]) if "joint_names" in data else None
+            protocol, names = _infer_protocol(arr, names)
+            return arr, mask, names, protocol
     obj = np.load(path, allow_pickle=True)
     if isinstance(obj, np.ndarray):
         protocol, names = _infer_protocol(obj, None)
@@ -239,6 +316,12 @@ def select_common_joints(joints: np.ndarray, names: tuple[str, ...], protocol: s
     return np.asarray(joints)[:, [index[mapping[key]] for key in COMMON_JOINTS], :]
 
 
+def select_common_rotations(rotations: np.ndarray, names: tuple[str, ...], protocol: str) -> np.ndarray:
+    mapping = SMPL_COMMON_NAMES if protocol == "smpl24" else BVH_COMMON_NAMES
+    index = {name: i for i, name in enumerate(names)}
+    return np.asarray(rotations)[:, [index[mapping[key]] for key in COMMON_JOINTS]]
+
+
 def protocol_gt(row: dict[str, str], protocol: str) -> tuple[np.ndarray, tuple[str, ...]]:
     if protocol == "bvh23":
         path = resolve_repo_path(row["bvh_path"], ROOT)
@@ -253,6 +336,36 @@ def protocol_gt(row: dict[str, str], protocol: str) -> tuple[np.ndarray, tuple[s
         motion = load_motion(path, query_t=query_t)
         return motion["joints"], tuple(motion["names"])
     raise ValueError(f"unsupported protocol {protocol!r}")
+
+
+def protocol_gt_surface(row: dict[str, str], protocol: str) -> dict | None:
+    if protocol != "smpl24":
+        return None
+    path = resolve_repo_path(row["smpl_path"], ROOT)
+    n = int(float(row["n_frames"]))
+    fps = float(row.get("target_fps") or 40.0)
+    query_t = (float(row["visual_start_s"])
+               + np.arange(n, dtype=np.float64) / fps
+               - float(row["offset_s"]))
+    return load_surface(path, query_t=query_t)
+
+
+def protocol_gt_rotations(row: dict[str, str], protocol: str) -> dict:
+    if protocol == "bvh23":
+        path = resolve_repo_path(row["bvh_path"], ROOT)
+        n = int(float(row.get("n_frames") or 0))
+        fps = float(row.get("target_fps") or 40.0)
+        query_t = (float(row["visual_start_s"])
+                   + np.arange(n, dtype=np.float64) / fps
+                   - float(row["offset_s"]))
+        return load_rotations(path, query_t=query_t)
+    path = resolve_repo_path(row["smpl_path"], ROOT)
+    n = int(float(row["n_frames"]))
+    fps = float(row.get("target_fps") or 40.0)
+    query_t = (float(row["visual_start_s"])
+               + np.arange(n, dtype=np.float64) / fps
+               - float(row["offset_s"]))
+    return load_rotations(path, query_t=query_t)
 
 
 def find_prediction(root: Path, session_id: str, pattern: str | None = None, config_id: str | None = None) -> Path | None:
@@ -283,42 +396,235 @@ def valid_mask(row: dict[str, str], n: int) -> np.ndarray:
     return mask
 
 
-def procrustes(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
-    xs, ys = src.mean(0), dst.mean(0)
-    a, b = src - xs, dst - ys
-    u, s, vt = np.linalg.svd(a.T @ b)
-    r = u @ vt
-    if np.linalg.det(r) < 0:
-        u[:, -1] *= -1
-        r = u @ vt
-    scale = s.sum() / max((a * a).sum(), 1e-12)
-    return scale * (src - xs) @ r + ys
+def load_contact_gt(row: dict[str, str], n: int, method: str = "joint_and") -> np.ndarray | None:
+    pressure_path = resolve_repo_path(row["pressure_path"], ROOT)
+    path = pressure_path.parent / ("contact.npy" if method == "tactile_abs" else f"contact_{method}.npy")
+    if not path.is_file():
+        return None
+    values = np.asarray(np.load(path), dtype=np.float32)
+    if values.ndim != 2 or values.shape[1] < 8:
+        raise ValueError(f"invalid contact labels {values.shape}: {path}")
+    return values[:n, 6:8] > 0.5
 
 
-def metrics(pred: np.ndarray, gt: np.ndarray, keep: np.ndarray, fps: float) -> dict[str, float]:
-    n = min(len(pred), len(gt), len(keep)); pred, gt, keep = pred[:n], gt[:n], keep[:n]
-    out = {k: float("nan") for k in METRICS}; out["n_valid_frames"] = int(keep.sum())
-    if not keep.any(): return out
-    ppa, gpa = pred - pred[:, :1], gt - gt[:, :1]
-    out["MPJPE_mm"] = float(np.linalg.norm(ppa[keep] - gpa[keep], axis=-1).mean() * 1000)
-    pa = [np.linalg.norm(procrustes(pred[t], gt[t]) - gt[t], axis=-1).mean() for t in np.flatnonzero(keep)]
-    out["PA_MPJPE_mm"] = float(np.mean(pa) * 1000)
-    ids = np.flatnonzero(keep)
-    if len(ids) >= 2:
-        ref = ids[:2]; aligned = pred.copy(); aligned = pred - pred[ref].mean(0) + gt[ref].mean(0)
-        err = np.linalg.norm(aligned[keep] - gt[keep], axis=-1).mean()
-        out["WMPJPE_mm"] = float(err * 1000)
-    if len(ids) >= 1:
-        aligned = pred - pred[keep].mean((0, 1)) + gt[keep].mean((0, 1))
-        out["WAMPJPE_mm"] = float(np.linalg.norm(aligned[keep] - gt[keep], axis=-1).mean() * 1000)
-        out["RTE_mm"] = float(np.linalg.norm((aligned[ids[-1], 0] - gt[ids[-1], 0])) * 1000)
-    if n >= 3:
-        triple = keep[:-2] & keep[1:-1] & keep[2:]
-        ap = (pred[:-2] - 2 * pred[1:-1] + pred[2:]) * fps ** 2
-        ag = (gt[:-2] - 2 * gt[1:-1] + gt[2:]) * fps ** 2
-        if triple.any():
-            out["Accel_mps2"] = float(np.linalg.norm(ap[triple] - ag[triple], axis=-1).mean())
-            out["Jitter_1e-3_mps2"] = float(np.linalg.norm(ap[triple], axis=-1).mean() * 1000)
+def contact_from_joints(joints: np.ndarray, names: tuple[str, ...], floor: float,
+                        fps: float) -> np.ndarray:
+    """Current AnySole soft-contact definition in the shared z-up frame."""
+    index = {name: i for i, name in enumerate(names)}
+    candidates = (("left_foot", "LeftToeBase"), ("right_foot", "RightToeBase"))
+    ids = []
+    for choices in candidates:
+        found = next((index[name] for name in choices if name in index), None)
+        if found is None:
+            raise ValueError(f"cannot find foot joint in protocol names: {choices}")
+        ids.append(found)
+    foot = np.asarray(joints, dtype=np.float64)[:, ids]
+    height = foot[..., 2] - float(floor)
+    speed = np.zeros(height.shape, dtype=np.float64)
+    if len(foot) > 1:
+        delta = np.linalg.norm(np.diff(foot, axis=0), axis=-1) * float(fps)
+        speed[0] = delta[0]
+        speed[1:] = delta
+    with np.errstate(over="ignore", under="ignore"):
+        height_prob = 1.0 / (1.0 + np.exp(-(0.05 - height) / 0.02))
+        speed_prob = 1.0 / (1.0 + np.exp(-(0.20 - speed) / 0.05))
+    return height_prob * speed_prob > 0.5
+
+
+def canonical_pressure_feet(values: np.ndarray) -> np.ndarray:
+    """Return normalized pressure as ``(T,2,31,11)`` for V2T metrics."""
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim == 2 and values.shape[1] == 96:
+        grids = values.reshape(-1, 2, 4, 12)
+    elif values.ndim == 3 and values.shape[1:] == (31, 22):
+        grids = np.stack([values[:, :, :11], values[:, :, 11:]], axis=1)
+    elif values.ndim == 4 and values.shape[1] == 2:
+        grids = values
+    else:
+        raise ValueError(f"unsupported V2T pressure array shape {values.shape}")
+    if tuple(grids.shape[-2:]) == (4, 12):
+        grids = zoom(
+            grids,
+            (1, 1, PRESSURE_GRID_SHAPE[0] / 4, PRESSURE_GRID_SHAPE[1] / 12),
+            order=1,
+            mode="nearest",
+            prefilter=False,
+        )
+    if tuple(grids.shape[-2:]) != PRESSURE_GRID_SHAPE:
+        raise ValueError(
+            f"pressure grids must resample to {PRESSURE_GRID_SHAPE}, got {grids.shape[-2:]}"
+        )
+    return grids
+
+
+def pressure_metrics(pred: np.ndarray, target: np.ndarray,
+                     valid: np.ndarray | None = None) -> dict[str, float]:
+    """Pressure reconstruction measures on one common 31x11 foot grid.
+
+    AnySole stores 4x12 cells per foot while FPP-Net stores 31x11 cells per
+    foot.  Comparing the flattened native arrays would be dimensionally
+    invalid.  The former is bilinearly resampled to 31x11; force and CoP are
+    then computed from the same normalized grid for both methods.
+    """
+    pred = np.asarray(pred, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+
+    p = canonical_pressure_feet(pred)
+    g = canonical_pressure_feet(target)
+    n = min(len(p), len(g))
+    p, g = p[:n], g[:n]
+    keep = np.ones(n, dtype=bool) if valid is None else np.asarray(valid[:n], dtype=bool)
+    p, g = p[keep], g[keep]
+    if not len(p):
+        return {key: float("nan") for key in V2T_METRICS}
+    diff = p - g
+    frame_corr = []
+    for p_frame, g_frame in zip(p, g):
+        pv, gv = p_frame.reshape(-1), g_frame.reshape(-1)
+        if np.std(pv) > 1e-8 and np.std(gv) > 1e-8:
+            frame_corr.append(float(np.corrcoef(pv, gv)[0, 1]))
+    corr = float(np.mean(frame_corr)) if frame_corr else float("nan")
+    force_p, force_g = p.sum(axis=(-1, -2)), g.sum(axis=(-1, -2))
+    force_diff = force_p - force_g
+    total_p, total_g = force_p.sum(axis=-1), force_g.sum(axis=-1)
+    ss_res = float(np.square(total_p - total_g).sum())
+    ss_tot = float(np.square(total_g - total_g.mean()).sum())
+
+    def cop(grid):
+        # Both supported layouts are canonicalized to [T,foot,width,length].
+        width, length = grid.shape[-2:]
+        mass = np.clip(grid, 0.0, None)
+        force = mass.sum(axis=(-1, -2))
+        x = np.arange(width, dtype=np.float64).reshape(1, 1, width, 1)
+        y = np.arange(length, dtype=np.float64).reshape(1, 1, 1, length)
+        cx = (mass * x).sum(axis=(-1, -2)) / np.maximum(force, 1e-8) / max(width - 1, 1)
+        cy = 1.0 - (mass * y).sum(axis=(-1, -2)) / np.maximum(force, 1e-8) / max(length - 1, 1)
+        return np.stack([cx, cy], axis=-1)
+
+    cop_diff = np.linalg.norm(cop(p) - cop(g), axis=-1)
+    return {
+        "T_mae": float(np.abs(diff).mean()),
+        "T_rmse": float(np.sqrt(np.square(diff).mean())),
+        "T_corr": corr,
+        "pressure_force_mae": float(np.abs(force_diff).mean()),
+        "pressure_force_rmse": float(np.sqrt(np.square(force_diff).mean())),
+        "pressure_force_r2": 1.0 - ss_res / max(ss_tot, 1e-12),
+        "pressure_cop_error_left": float(cop_diff[:, 0].mean()),
+        "pressure_cop_error_right": float(cop_diff[:, 1].mean()),
+        "pressure_cop_error_mean": float(cop_diff.mean()),
+    }
+
+
+def v2t_metrics(pred_pressure: np.ndarray, gt_pressure: np.ndarray,
+                pred_contact: np.ndarray, gt_contact: np.ndarray,
+                valid: np.ndarray | None = None) -> dict[str, float]:
+    """Canonical V2T metrics.
+
+    The contact arguments are retained for archive compatibility, but the
+    cross-model contact score is derived from the same canonical pressure
+    grid (any cell > 0.5 means that foot is in contact).
+    """
+    out = {key: float("nan") for key in METRICS}
+    out.update(pressure_metrics(pred_pressure, gt_pressure, valid))
+    pc = canonical_pressure_feet(pred_pressure).max(axis=(-1, -2)) > 0.5
+    gc = canonical_pressure_feet(gt_pressure).max(axis=(-1, -2)) > 0.5
+    n = min(len(pc), len(gc))
+    keep = np.ones(n, dtype=bool) if valid is None else np.asarray(valid[:n], dtype=bool)
+    pc, gc = pc[:n][keep], gc[:n][keep]
+    tp = int((pc & gc).sum()); fp = int((pc & ~gc).sum())
+    fn = int((~pc & gc).sum()); tn = int((~pc & ~gc).sum())
+    precision = tp / max(tp + fp, 1)
+    recall = tp / max(tp + fn, 1)
+    out["contact_f1"] = 2.0 * precision * recall / max(precision + recall, 1e-8)
+    out["contact_acc"] = (tp + tn) / max(tp + fp + fn + tn, 1)
+    out["contact_recall"] = recall
+    out["air_recall"] = tn / max(tn + fp, 1)
+    out["n_valid_frames"] = int(keep.sum())
+    return out
+
+
+def load_v2t_archive(path: Path) -> dict[str, np.ndarray]:
+    with np.load(path, allow_pickle=False) as data:
+        required = {"pressure_pred", "pressure_gt", "contact_pred", "contact_gt", "valid_mask"}
+        missing = required - set(data.files)
+        if missing:
+            raise ValueError(f"V2T archive missing keys {sorted(missing)}: {path}")
+        return {key: np.asarray(data[key]) for key in required}
+
+
+def metrics(
+    pred: np.ndarray,
+    gt: np.ndarray,
+    keep: np.ndarray,
+    fps: float,
+    *,
+    pred_rotations: np.ndarray | None = None,
+    gt_rotations: np.ndarray | None = None,
+    pred_vertices: np.ndarray | None = None,
+    gt_vertices: np.ndarray | None = None,
+    times: np.ndarray | None = None,
+    pred_contact: np.ndarray | None = None,
+    gt_contact: np.ndarray | None = None,
+) -> dict[str, float]:
+    """Canonical metrics migrated from ``metrics.py``; no local redefinitions."""
+    n = min(len(pred), len(gt), len(keep))
+    pred = np.asarray(pred[:n], dtype=np.float64)
+    gt = np.asarray(gt[:n], dtype=np.float64)
+    keep = np.asarray(keep[:n], dtype=bool)
+    out = {key: float("nan") for key in METRICS}
+    out["n_valid_frames"] = int(keep.sum())
+    if not keep.any():
+        return out
+    if times is None:
+        times = np.arange(n, dtype=np.float64) / float(fps)
+    else:
+        times = np.asarray(times[:n], dtype=np.float64)
+    p, g, t = pred[keep], gt[keep], times[keep]
+    p_aligned, _ = pelvis_align(p)
+    g_aligned, _ = pelvis_align(g)
+    out["mpjpe_mm"] = float(mean_point_error(p_aligned, g_aligned, scale=1000.0).mean())
+    try:
+        out["pa_mpjpe_mm"] = float(pa_mpjpe(p, g).mean())
+    except ValueError:
+        pass
+    out.update(root_trajectory_metrics(p[:, 0], g[:, 0]))
+    out.pop("root_path_length_m", None)
+    try:
+        out["w_mpjpe100_mm"], out["wa_mpjpe100_mm"] = windowed_world_mpjpe(p, g, window=100)
+    except ValueError:
+        pass
+    temporal = temporal_metrics(p, g, t)
+    for key in ("accel_error_m_s2", "jitter_pred_m_s3", "jitter_gt_m_s3"):
+        out[key] = float(temporal[key])
+    if pred_rotations is not None and gt_rotations is not None:
+        pr = np.asarray(pred_rotations[:n])[keep]
+        gr = np.asarray(gt_rotations[:n])[keep]
+        if pr.shape[-2:] == (3, 3):
+            out["mpjae_deg"] = float(matrix_rotation_error_degrees(pr, gr).mean())
+        else:
+            out["mpjae_deg"] = float(rotation_error_degrees(pr, gr).mean())
+    if pred_vertices is not None and gt_vertices is not None:
+        pv = np.asarray(pred_vertices[:n])[keep]
+        gv = np.asarray(gt_vertices[:n])[keep]
+        _, pv_aligned = pelvis_align(p, pv)
+        _, gv_aligned = pelvis_align(g, gv)
+        out["pve_mm"] = float(mean_point_error(pv_aligned, gv_aligned, scale=1000.0).mean())
+        out["shape_vertex_std_mm"] = shape_vertex_std(pv)
+        if pv.shape[1] > 6787:
+            out["foot_sliding_mm"], _ = foot_sliding(pv, gv, t)
+    if pred_contact is not None and gt_contact is not None:
+        pc = np.asarray(pred_contact[:n], dtype=bool)[keep]
+        gc = np.asarray(gt_contact[:n], dtype=bool)[keep]
+        tp = int((pc & gc).sum())
+        fp = int((pc & ~gc).sum())
+        fn = int((~pc & gc).sum())
+        tn = int((~pc & ~gc).sum())
+        precision = tp / max(tp + fp, 1)
+        recall = tp / max(tp + fn, 1)
+        out["contact_f1"] = 2.0 * precision * recall / max(precision + recall, 1e-8)
+        out["contact_acc"] = (tp + tn) / max(tp + fp + fn + tn, 1)
+        out["contact_recall"] = recall
+        out["air_recall"] = tn / max(tn + fp, 1)
     return out
 
 
@@ -327,8 +633,6 @@ def aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     for k in METRICS:
         vals = [(float(r[k]), int(r["n_valid_frames"])) for r in rows if math.isfinite(float(r[k]))]
         if vals: out[k] = float(np.average([v for v, _ in vals], weights=[w for _, w in vals]))
-    vals = [float(r["RTE_mm"]) for r in rows if math.isfinite(float(r["RTE_mm"]))]
-    out["RTE_mm"] = float(np.mean(vals)) if vals else float("nan")
     return out
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import shutil
 import subprocess
@@ -29,6 +30,7 @@ DISPLAY_ROOT = Path(os.environ.get("ANYSOLE_RESULTSDISPLAY", REPO_ROOT / "result
 DEFAULT_FPS = 40.0
 DEFAULT_STRIDE = 2
 DEFAULT_SPLIT_CSV = WORKSPACE_ROOT / "splits/default/splits.csv"
+DEFAULT_MANIFEST = WORKSPACE_ROOT / "manifests/session_manifest.csv"
 DEFAULT_SEQ_ROOT = WORKSPACE_ROOT / "derived/MotionPRO/sequences/cam3"
 
 PREFIXES = {
@@ -117,6 +119,49 @@ def load_test_sessions(session_arg, split_csv, split="test") -> list:
     if not ids:
         raise RuntimeError(f"No {split} sessions in {split_csv}")
     return ids
+
+
+def load_evaluable_sessions(session_arg, split_csv, split="test", manifest_path=None) -> list:
+    """Select canonical split sessions with at least one usable frame.
+
+    ``splits.csv`` remains the sole split authority.  The manifest is used
+    only for the data-eligibility gate: sessions whose ``valid_frame_indices``
+    is explicitly empty (for example S12102) are reported as no-window
+    sessions and are not sent to downstream render/evaluation jobs.
+    """
+    requested = load_test_sessions(session_arg, split_csv, split)
+    manifest_path = Path(manifest_path or DEFAULT_MANIFEST)
+    if not manifest_path.is_file():
+        return requested
+    rows = {}
+    if manifest_path.suffix.lower() in (".jsonl", ".json"):
+        for line in manifest_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                row = json.loads(line)
+                rows[str(row["session_id"])] = row
+    else:
+        with manifest_path.open(encoding="utf-8-sig", newline="") as handle:
+            rows = {str(row["session_id"]): row for row in csv.DictReader(handle)}
+
+    selected = []
+    for session_id in requested:
+        row = rows.get(session_id)
+        if row is None:
+            selected.append(session_id)
+            continue
+        raw_valid = row.get("valid_frame_indices", None)
+        if raw_valid is not None:
+            if isinstance(raw_valid, str):
+                try:
+                    valid = json.loads(raw_valid) if raw_valid else []
+                except json.JSONDecodeError:
+                    valid = []
+            else:
+                valid = raw_valid
+            if not valid:
+                continue
+        selected.append(session_id)
+    return selected
 
 
 def add_common_args(

@@ -7,7 +7,7 @@ heatmaps, with a per-foot contact indicator driven by the method's labels
 strip.  Each method gets its own subfolder so variants can be compared side
 by side; labels come from ``contact_<method>.npy`` (see ``AnysoleWorkspace/tool/contact_labels.py``).
 
-Outputs land under ``results_display/d_test3_contact/<method>/``:
+Outputs land under ``results_display/DataTest/D3Test_contact/<method>/``:
 
     <method>/gif/ or mp4/           animation (tactile + contact badges | GT
       <session>_contact.gif / .mp4  skeleton with recolored feet | timeline)
@@ -55,6 +55,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 from loguru import logger as log  # noqa: E402
 from matplotlib import cm, font_manager  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont  # noqa: E402
+
+from utils.mpl_fonts import setup_cjk_fonts  # noqa: E402
+
+setup_cjk_fonts()
 
 from anysole.data.pressure import load_session_pressure  # noqa: E402
 from anysole.types import CONTACT_SUM_THRESH  # noqa: E402
@@ -541,7 +545,7 @@ def plot_threshold_analysis(out_dir: Path, rows: list[dict]):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Test5: auto-detected GT motion + tactile insoles + contact indicator animation and threshold analysis.")
-    cli_common.add_common_args(parser, seq_root=True, out_dir_default=cli_common.DISPLAY_ROOT / "data/d_test3_contact")
+    cli_common.add_common_args(parser, seq_root=True, out_dir_default=cli_common.DISPLAY_ROOT / "DataTest/D3Test_contact")
     parser.add_argument(
         "--methods",
         type=str,

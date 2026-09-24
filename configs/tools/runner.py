@@ -141,23 +141,6 @@ def _update_manifest(path: Path, **updates: Any) -> None:
     write_json(path, payload)
 
 
-def _write_experiment_manifest(registry: dict[str, Any], experiment_id: str, status: str) -> Path:
-    root = experiment_root(registry, experiment_id)
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / "experiment_manifest.json"
-    write_json(
-        path,
-        {
-            "version": 1,
-            "experiment_id": experiment_id,
-            "status": status,
-            "git_sha": git_sha(),
-            "experiment_spec": experiment_spec(registry, experiment_id),
-        },
-    )
-    return path
-
-
 def _train_command(registry: dict[str, Any], model_id: str) -> list[str]:
     spec = _merge_model_spec(registry, model_id)
     config = config_path(registry, model_id)
@@ -380,6 +363,29 @@ def _rho_grid(registry: dict[str, Any], experiment_id: str, model_id: str, root:
             raise RuntimeError("rho grid failed for %s/%s; see %s" % (model_id, split, log))
 
 
+def _rho_grid_cell(
+    registry: dict[str, Any], experiment_id: str, model_id: str,
+    split: str, seed: int, rho_v: int, rho_t: int, root: Path, log: Path,
+) -> None:
+    """Execute exactly one model + split + seed + rhoV/rhoT configuration."""
+    ckpt = checkpoint_path(registry, experiment_id, model_id)
+    config = config_path(registry, model_id)
+    device = str(effective_value(registry, model_id, "device", "cuda"))
+    command = [
+        PYTHON, "-m", "anysole.rho_grid",
+        "--ckpt", str(ckpt), "--config", str(config),
+        "--split", split, "--seeds", str(seed),
+        "--rho-v", str(rho_v), "--rho-t", str(rho_t),
+        "--out-dir", str(root), "--device", device, "--reuse",
+    ]
+    code = _command_log(command, log)
+    if code != 0:
+        raise RuntimeError(
+            "rho grid cell failed for %s/%s/%s/%s/%s (exit %d)"
+            % (model_id, split, seed, rho_v, rho_t, code)
+        )
+
+
 def _validate_model_capabilities(registry: dict[str, Any], experiment_id: str) -> None:
     """Generation-time gating re-checked at run time (defense against
     hand-edited confs): every main model must provide the capabilities the
@@ -442,6 +448,26 @@ def _run_task(
         root = _run_model(registry, experiment_id, model_id, force=force)
         if str(experiment_spec(registry, experiment_id).get("kind")) == "rho_grid":
             _rho_grid(registry, experiment_id, model_id, root, root / "run.log")
+    elif task == "rho_grid":
+        model_id = str(values.get("MODEL_ID", "")).strip()
+        split = str(values.get("GRID_SPLIT", "")).strip()
+        seed = int(values.get("GRID_SEED", 0))
+        rho_v = int(values.get("RHO_V", 0))
+        rho_t = int(values.get("RHO_T", 0))
+        if not model_id or split not in {"train", "val", "test"}:
+            raise ValueError("rho_grid task requires MODEL_ID and GRID_SPLIT")
+        root = model_root(registry, experiment_id, model_id)
+        root.mkdir(parents=True, exist_ok=True)
+        if dry_run:
+            print(
+                "# task rho_grid experiment=%s model=%s split=%s seed=%d rhoV=%d rhoT=%d"
+                % (experiment_id, model_id, split, seed, rho_v, rho_t)
+            )
+            return
+        _rho_grid_cell(
+            registry, experiment_id, model_id, split, seed, rho_v, rho_t,
+            root, root / "run.log",
+        )
     elif task == "display":
         raise ValueError(
             "display tasks are not queue tasks anymore; run the matching "
@@ -455,9 +481,7 @@ def run_experiment(
     registry: dict[str, Any],
     experiment_id: str,
     force: bool = False,
-    no_display: bool = False,
     dry_run: bool = False,
-    seen: set[str] | None = None,
 ) -> None:
     """Foreground compatibility runner for already queued data tasks.
 
@@ -468,7 +492,7 @@ def run_experiment(
     task_files = sorted((CONFIG_DIR / "queue").glob(f"*__{experiment_id}__*.conf"))
     if not task_files:
         raise FileNotFoundError(
-            f"No queued tasks for {experiment_id}; run configs/gen/{experiment_id}.py first"
+            f"No queued tasks for {experiment_id}; run configs/z_gen/{experiment_id}.py first"
         )
     for conf_path in task_files:
         values = load_conf(conf_path)
@@ -479,9 +503,9 @@ def list_registry(registry: dict[str, Any]) -> None:
     print("Registered models (from the generator's MODELS table):")
     for model_id in registry.get("models", {}):
         print("  %-16s %s" % (model_id, model_run_name(registry, model_id)))
-    from configs.gen.common import MODELS
+    from configs.z_gen.common import MODELS
 
-    print("Master model table (configs/gen/common.py):")
+    print("Master model table (configs/z_gen/common.py):")
     for model_id, spec in MODELS.items():
         provides = ",".join(spec.get("provides", ()))
         mode = "train" if spec.get("train") else "eval"
@@ -502,7 +526,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--experiment", default=None)
     parser.add_argument("task_conf", nargs="?", default=None, help="task conf path (action=task)")
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--no-display", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="print the commands without executing")
     return parser.parse_args(argv)
 
@@ -528,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if not args.experiment:
         raise SystemExit("--experiment is required for %s" % args.action)
-    run_experiment(registry, args.experiment, force=args.force, no_display=args.no_display, dry_run=args.dry_run)
+    run_experiment(registry, args.experiment, force=args.force, dry_run=args.dry_run)
     return 0
 
 

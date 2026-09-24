@@ -7,7 +7,7 @@ path (``--protocol bvh23`` forces it).  SMPL data is read through
 path uses the original MocapVideoAligner_0811 conversion.  This script does
 not touch either existing MotionPRO or Step2Motion renderer.
 
-Outputs are written below ``results_display/data/d_test1_data_viz/``:
+Outputs are written below ``results_display/DataTest/D1Test_data_viz/``:
     <session-or-stem>/<smp24|bvh23>/skeleton_zup.npz   data file (always written)
     <session-or-stem>/<smp24|bvh23>/{gif,mp4}/skeleton_zup.* animation (--gen)
     <session-or-stem>/smp24/mesh_zup.npz + {gif,mp4}/mesh_zup.* (--mesh)
@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
         seq_root=True,
         fps_default=0.0,
         stride_default=4,
-        out_dir_default=cli_common.DISPLAY_ROOT / "data/d_test1_data_viz",
+        out_dir_default=cli_common.DISPLAY_ROOT / "DataTest/D1Test_data_viz",
     )
     parser.add_argument("--bvh", default="", help="Optional single BVH path. Default processes all test samples.")
     parser.add_argument(

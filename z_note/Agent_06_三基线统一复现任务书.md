@@ -51,7 +51,7 @@ pressure_tookit 与 VP-MoCap **同属 MMVP 工作**（arXiv 2403.17610）的两�
   （`joint_xyz_world (T,J,3) + joint_names + valid_mask`，SMPL-24 或 BVH-23 协议自识别），
   由 `results_display/script/r_test2_compare.py` 做 19 关节语义交集对比，产出
   `results_display/Test2_comparison/comparison_{per_session,summary}.csv`。
-  当前 MotionPRO 行为全 NaN（`results/MotionPRO` 无预测）。
+  当前 MotionPRO 行为全 NaN（`results/baselines/MotionPRO` 无预测）。
 - **环境**：`touch_gait`（py3.8/torch2.4）、`depthpro`（py3.10/torch2.4）、
   `bbox_scan`、`vibe`、`wham` 均存在。
 
@@ -62,7 +62,7 @@ pressure_tookit 与 VP-MoCap **同属 MMVP 工作**（arXiv 2403.17610）的两�
   （提交 `2789889 框架`、`56f5187 contact-method-test`）与
   `Baselines_backup/MotionPRO/`（含 `lib/eval/`、`data_prep/`、`workspace.py`、
   已修的 FRAPPE MHA permute / footloss 除零、`workspace://` 配置等）。
-  `results/MotionPRO` 为空：**从未完成正式训练/评估**。
+  `results/baselines/MotionPRO` 为空：**从未完成正式训练/评估**。
 - **pressure_tookit**：当前副本 = 干净上游（`haolyuan/pressure_tookit@frame_refine`，
   MMVP 官方逐帧优化）。部分集成在 `Baselines_backup/pressure_tookit/`（`lib/utils/
   workspace.py`、`data_prep/rgb2depth.py`、`configs/fit_smpl_rgbd.yaml` 的
@@ -130,11 +130,11 @@ pressure_tookit 与 VP-MoCap **同属 MMVP 工作**（arXiv 2403.17610）的两�
 3. **数据侧补齐**：`bbox.npy / feature_hrnet.pth / pressure.npz / fake_mask.npy`
    沿用现有；`keypoints.npy / smpl.npy / contact*.npy` 按步骤 2 重生成
    （`gen_bbox` 走 bbox_scan 环境，其余走 touch_gait）。
-4. **训练**：队列任务 `MODEL=motionpro`、`RUN_DIR=results/MotionPRO`、
+4. **训练**：队列任务 `MODEL=motionpro`、`RUN_DIR=results/baselines/MotionPRO`、
    `EPOCHS=1000, BATCH_SIZE=16`（集成版默认）。GPU 按现有调度。
 5. **导出与评估**：`test_frappe.py` 已能产 `test_metrics.csv`；补一个导出步骤
    （SessionAccumulator 拼回整段 → FK SMPL-24 → `joint_xyz_world` 写
-   `results/MotionPRO/predictions/eval_motion/<session>.npz`）→
+   `results/baselines/MotionPRO/predictions/eval_motion/<session>.npz`）→
    `r_test2_compare.py` → Test2 行非 NaN。
 6. **可视化**：`results_display/script/r_test1_visualize_motionpro.py` 已存在，补跑。
 
@@ -262,7 +262,7 @@ pressure_tookit 与 VP-MoCap 同属 MMVP 工作的两条方法线，观测协议
    如需调参改 `fitting.py` 默认或修 pop——记录偏离。
 3. **导出**：逐帧 `smpl_{idx}.npz`（body_pose 69 轴角 + global_rot + transl 地面系米
    + betas + scale）→ FK SMPL（含 `model_scale_opt`/betas[:,0] 尺度）→ 地面系→
-   世界系（标定变换）→ `results/pressure_tookit/predictions/eval_motion/<session>.npz`。
+   世界系（标定变换）→ `results/baselines/pressure_tookit/predictions/eval_motion/<session>.npz`。
 4. **评估与可视化**：`r_test2_compare.py` → Test2；trimesh 渲染 →
    `results_display/Test1_visualization/pressure_tookit/`。
 

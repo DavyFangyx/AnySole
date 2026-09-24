@@ -18,7 +18,7 @@ AnysoleWorkspace/dependencies/MotionPRO/cliff_ckpt/hr48-PA43.0_MJE69.0_MVE81.2_3
 AnysoleWorkspace/dependencies/MotionPRO/mmdetection/checkpoints/yolox_x_8x8_300e_coco_20211126_140254-1ef88d67.pth
 ```
 
-结果统一写入 `results/MotionPRO/{checkpoints,metrics,logs,tensorboard}/`，动画写入 `results_display/Test1_visualization/MotionPRO/`。不要重新下载或复制已存在的权重；路径可由 `ANYSOLE_WORKSPACE`、`ANYSOLE_RESULTS`、`ANYSOLE_RESULTSDISPLAY` 覆盖，但回传时必须说明覆盖值。
+结果统一写入 `results/baselines/MotionPRO/{checkpoints,metrics,logs,tensorboard}/`，动画写入 `results_display/Test1_visualization/MotionPRO/`。不要重新下载或复制已存在的权重；路径可由 `ANYSOLE_WORKSPACE`、`ANYSOLE_RESULTS`、`ANYSOLE_RESULTSDISPLAY` 覆盖，但回传时必须说明覆盖值。
 
 ## 执行步骤
 
@@ -89,9 +89,9 @@ AnysoleWorkspace/dependencies/MotionPRO/mmdetection/checkpoints/yolox_x_8x8_300e
 
 至少提交以下相对根目录的文件/目录：
 
-- `results/MotionPRO/checkpoints/<task>/<loss>/<lr>/imagepressure2smpl_best.pth`
-- `results/MotionPRO/metrics/<task>/<loss>/<lr>/test_metrics.csv` 与 `test_metrics.log`
-- `results/MotionPRO/logs/` 下本次训练日志及配置快照
+- `results/baselines/MotionPRO/checkpoints/<task>/<loss>/<lr>/imagepressure2smpl_best.pth`
+- `results/baselines/MotionPRO/metrics/<task>/<loss>/<lr>/test_metrics.csv` 与 `test_metrics.log`
+- `results/baselines/MotionPRO/logs/` 下本次训练日志及配置快照
 - `results_display/Test1_visualization/MotionPRO/<task>/<loss>/<lr>/<ckpt_stem>/gif/`、`mp4/`（若执行可视化）
 - 使用的 `AnysoleWorkspace/splits/default/splits.csv` 的 hash、session 数量和 train/val/test 数量
 

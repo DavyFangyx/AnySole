@@ -343,40 +343,37 @@ B3 不再解释成“逐部位信任”，而是判断以下四点：
 
 | 实验 | 主要数据/现有资产 | 需要的调整 |
 |---|---|---|
-| A0 / R_Test5 | V-only/T-only 专才结果；`R_Test5_rho_grid.py`（→ `utils/component_analysis.py --a0`） | 按预设分量输出专才差值与赢家 |
+| A0 | V-only/T-only 专才结果；`singlemodal_analysis.py`（→ `utils/component_analysis.py --a0`） | 按预设分量输出专才差值与赢家 |
 | A1 / R_Test6 | 主线 VT 与专才结果；`R_Test6_complement.py`（→ `component_analysis.py --a1`） | 最佳单路参照与 VT 逐分量比较 |
 | A2 / R_Test7 | 主线 V-only/T-only 输出；`R_Test7_dropout_ablation.py`（→ `--a2`） | 主线 V/T 缺失分支差值 |
 | B1 / R_Test8 | 主线 V、V 专才、主线空输入；`R_Test8_t2m_upper.py`（→ `--b1`） | T 负责分量的三列对照 |
 | B2 / R_Test9 | 主线 T、T 专才、主线空输入；`R_Test9_trust.py`（→ `--b2`） | V 负责分量的三列对照 |
-| B3 / R_Test10 | `anysole/rho_grid.py` + `R_Test10_singlemodal_compare.py`（→ `utils/rho_grid_display.py`） | ρ 热力图、边界切片与判据摘要 |
+| B3 | `anysole/rho_grid.py` + `rho_grid_analysis.py`（→ `utils/rho_grid_display.py`） | ρ 热力图、边界切片与判据摘要 |
 
 旧的 dropout 消融、ridge 探针、T2M 上半身先验、注意力图和信任画像不再承担六个主命题的证明任务；如后续需要定位失败原因，可作为建模自查或附录使用。t-SNE、同/异时刻表征相似度和错位模态输入不再进入本实验组。
 
 ---
 
-## 七、注册式全流程
+## 七、数据生产与结果分析流程
 
-R_Test5–R_Test10 不只是 display 脚本编号，而是完整实验任务编号。执行顺序为：
+数据生产和结果分析解耦。只有两组数据生产实验进入离线队列：
 
 ```text
-configs/z_exp_gen/generate_r_test_configs.py
-        ↓ 生成每模型一个的任务 .conf（generated/tasks/ 或直接入 configs/queue/）
-configs/tools/runner.py run --experiment R_TestN   （或队列逐 conf 执行）
+configs/z_gen/singlemodal_eval.py
+configs/z_gen/rho_grid_eval.py
+        ↓ 生成每模型一个的任务 .conf，直接进入 configs/queue/
+configs/scheduler.sh
         ↓ 训练/加载 checkpoint → eval → 写入 results/
-configs/tools/runner.py display --experiment R_TestN
+results_display/script/*.py
         ↓ 读取 results/，写入 results_display/
 ```
 
 对应关系固定为：
 
-| 注册任务 | 命题 | 是否训练 | 依赖 |
-|---|---|---|---|
-| R_Test5 | A0 | 训练主线、V 专才、T 专才 | 无 |
-| R_Test6 | A1 | 不训练 | R_Test5 |
-| R_Test7 | A2 | 不训练 | R_Test5 |
-| R_Test8 | B1 | 不训练 | R_Test5、R_Test10 |
-| R_Test9 | B2 | 不训练 | R_Test5、R_Test10 |
-| R_Test10 | B3 | 主线 ρ 网格推理 | R_Test5 |
+| 数据生产组 | 产物 | 消费它的分析 |
+|---|---|---|
+| `singlemodal_eval` | 主模型、V-only、T-only 的 val/test 结果 | A0、A1、A2、B1、B2 |
+| `rho_grid_eval` | rho 网格 train/val/test 结果 | B3、B1、B2 |
 
 display 层只负责读取已经落盘的 `results/` 结果和生成图表，不再承担训练、评估或替代实验配置的职责。
 

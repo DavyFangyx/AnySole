@@ -100,7 +100,9 @@ def smpl_yup_to_display(points: np.ndarray) -> np.ndarray:
 
 
 def write_archive(path: Path, joints: np.ndarray, valid: np.ndarray,
-                  source: str, session: str, frame_indices: np.ndarray | None = None) -> None:
+                  source: str, session: str, frame_indices: np.ndarray | None = None,
+                  vertices: np.ndarray | None = None,
+                  poses: np.ndarray | None = None) -> None:
     joints = np.asarray(joints, dtype=np.float32)
     valid = np.asarray(valid, dtype=bool).reshape(-1)
     if joints.ndim != 3 or joints.shape[1:] != (24, 3):
@@ -116,10 +118,15 @@ def write_archive(path: Path, joints: np.ndarray, valid: np.ndarray,
         "motion_protocol": np.asarray("smpl24"),
         "model_units": np.asarray("m"),
         "coordinate_system": np.asarray("world_z_up"),
+        "joint_coordinate_system": np.asarray("world_z_up"),
         "session_id": np.asarray(session),
         "source_native_output": np.asarray(source),
         "target_fps": np.asarray(40.0, dtype=np.float32),
     }
+    if vertices is not None:
+        payload["vertices_world"] = np.asarray(vertices, dtype=np.float32)
+    if poses is not None:
+        payload["poses"] = np.asarray(poses, dtype=np.float32).reshape(len(joints), 72)
     np.savez_compressed(path, **payload)
     print(f"wrote {path}  joints={joints.shape} valid={int(valid.sum())}")
 
@@ -146,6 +153,8 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
     model = SMPL_MMVP(str(essential), gender=gender, stage="tracking").cpu()
     n = int(row["n_frames"])
     joints = np.zeros((n, 24, 3), dtype=np.float32)
+    vertices = np.zeros((n, 6890, 3), dtype=np.float32)
+    poses = np.zeros((n, 72), dtype=np.float32)
     available = np.zeros(n, dtype=bool)
     for path in frame_paths:
         frame = int(path.stem.split("_")[-1])
@@ -170,14 +179,19 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
         )
         model.update_shape()
         model.init_plane()
-        native = model.update_pose().smpl_joints[0].detach().cpu().numpy()
+        model_output = model.update_pose()
+        native = model_output.smpl_joints[0].detach().cpu().numpy()
         joints[frame] = smpl_yup_to_display(native)
+        vertices[frame] = smpl_yup_to_display(model_output.vertices[0].detach().cpu().numpy())
+        pose_aa = np.concatenate([global_rot.reshape(-1), body_pose.reshape(-1)])
+        poses[frame, :min(72, pose_aa.size)] = pose_aa[:72]
         available[frame] = True
     valid = valid_frames(row, n) & available
     if not np.all(available[valid_frames(row, n)]):
         missing = np.flatnonzero(valid_frames(row, n) & ~available)
         raise ValueError(f"{session}: missing pressure_toolkit frames: {missing[:20].tolist()}")
-    write_archive(output, joints, valid, str(frame_paths[0].parent), session)
+    write_archive(output, joints, valid, str(frame_paths[0].parent), session,
+                  vertices=vertices, poses=poses)
 
 
 def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
@@ -209,15 +223,71 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
             pose2rot=False,
         )
     native = result.joints[:, :24].detach().cpu().numpy()
+    native_vertices = result.vertices.detach().cpu().numpy()
+    from scipy.spatial.transform import Rotation
+    poses_aa = Rotation.from_matrix(pose.numpy().reshape(-1, 3, 3)).as_rotvec().reshape(len(pose), 72)
     n = int(row["n_frames"])
     full = np.zeros((n, 24, 3), dtype=np.float32)
+    full_vertices = np.zeros((n, 6890, 3), dtype=np.float32)
+    full_poses = np.zeros((n, 72), dtype=np.float32)
     start = 2  # Dataset.load_pose/load_2d_keypoints discard the first/last 2 frames.
     end = min(n, start + len(native))
     full[start:end] = smpl_yup_to_display(native[: end - start])
+    full_vertices[start:end] = smpl_yup_to_display(native_vertices[: end - start])
+    full_poses[start:end] = poses_aa[: end - start]
     available = np.zeros(n, dtype=bool)
     available[start:end] = True
     write_archive(output, full, valid_frames(row, n) & available, str(native_path), session,
-                  np.arange(n, dtype=np.int64))
+                  np.arange(n, dtype=np.int64), vertices=full_vertices, poses=full_poses)
+
+
+def export_fpp_v2t(row: dict, output: Path) -> None:
+    session = row["session_id"]
+    date, subject = session_parts(row)
+    source = WORKSPACE / "derived" / "VP-MoCap" / date / subject / session / "pred_contact_smpl"
+    n = int(row["n_frames"])
+    pressure_pred = np.zeros((n, 31, 22), dtype=np.float32)
+    pressure_gt = np.zeros_like(pressure_pred)
+    contact_pred = np.zeros((n, 2), dtype=np.uint8)
+    contact_gt = np.zeros_like(contact_pred)
+    available = np.zeros(n, dtype=bool)
+    for frame in range(n):
+        path = source / f"{frame:03d}.npy"
+        if not path.is_file():
+            continue
+        payload = np.load(path, allow_pickle=True).item()
+        if "pressure" not in payload or "contact_smpl" not in payload:
+            raise ValueError(f"{path}: FPP-Net V2T sidecar lacks pressure/contact_smpl")
+        p_pred = np.asarray(payload["pressure"]["pred"], dtype=np.float32)
+        p_gt = np.asarray(payload["pressure"]["gt"], dtype=np.float32)
+        if p_pred.shape != (31, 22) or p_gt.shape != (31, 22):
+            raise ValueError(f"{path}: expected pressure maps (31,22), got {p_pred.shape}/{p_gt.shape}")
+        pressure_pred[frame] = p_pred
+        pressure_gt[frame] = p_gt
+        cp = np.asarray(payload["contact_smpl"]["pred"], dtype=np.float32).reshape(2, -1)
+        cg = np.asarray(payload["contact_smpl"]["gt"], dtype=np.float32).reshape(2, -1)
+        contact_pred[frame] = cp.mean(axis=1) > 0.5
+        contact_gt[frame] = cg.mean(axis=1) > 0.5
+        available[frame] = True
+    valid = valid_frames(row, n) & available
+    if not valid.any():
+        raise FileNotFoundError(f"no FPP-Net V2T frames found for {session}: {source}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        output,
+        pressure_pred=pressure_pred,
+        pressure_gt=pressure_gt,
+        contact_pred=contact_pred,
+        contact_gt=contact_gt,
+        valid_mask=valid,
+        frame_indices=np.arange(n, dtype=np.int64),
+        target_fps=np.asarray(float(row.get("target_fps") or 40.0), dtype=np.float32),
+        mode=np.asarray("V2T"),
+        pressure_source_grid=np.asarray("31x11_per_foot"),
+        comparison_pressure_grid=np.asarray("31x11_per_foot"),
+        source_native_output=np.asarray(str(source)),
+    )
+    print(f"wrote {output} V2T frames={int(valid.sum())}/{n}")
 
 
 def choose_sessions(args: argparse.Namespace, manifest: dict[str, dict]) -> list[str]:
@@ -240,24 +310,31 @@ def split_sessions(split: str) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=("motionpro", "pressure_toolkit", "vp_mocap", "all"), default="all")
+    parser.add_argument("--model", choices=("motionpro", "pressure_toolkit", "vp_mocap", "fpp_v2t", "all"), default="all")
     parser.add_argument("--split", choices=("train", "val", "test", "all"), default="all")
     parser.add_argument("--session", default="", help="comma-separated session IDs")
-    parser.add_argument("--pressure-root", default=str(RESULTS / "offline" / "pressure_toolkit"))
+    parser.add_argument("--pressure-root", default=str(RESULTS / "baselines" / "pressure_toolkit"))
     parser.add_argument("--female", "--famale", dest="female", default="S14")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     manifest = rows()
     selected = choose_sessions(args, manifest)
-    models = ("motionpro", "pressure_toolkit", "vp_mocap") if args.model == "all" else (args.model,)
+    models = ("motionpro", "pressure_toolkit", "vp_mocap", "fpp_v2t") if args.model == "all" else (args.model,)
     for model in models:
         for session in selected:
             if session not in manifest:
                 raise KeyError(f"session not in manifest: {session}")
+            if model == "fpp_v2t":
+                output = RESULTS / "VP-MoCap" / "predictions" / "eval_motion" / f"{session}_V2T.npz"
+                if output.is_file() and not args.force:
+                    print(f"skip existing {output}")
+                else:
+                    export_fpp_v2t(manifest[session], output)
+                continue
             model_dir = {
-                "motionpro": "MotionPRO",
-                "pressure_toolkit": "pressure_tookit",
-                "vp_mocap": "VP-MoCap",
+                "motionpro": "baselines/MotionPRO",
+                "pressure_toolkit": "baselines/pressure_tookit",
+                "vp_mocap": "baselines/VP-MoCap",
             }[model]
             output = RESULTS / model_dir / "predictions" / "eval_motion" / f"{session}.npz"
             if output.is_file() and not args.force:

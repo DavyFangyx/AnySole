@@ -1,11 +1,8 @@
-"""R_Test4: V2T tactile generation — generated vs GT insole heatmaps.
+"""R_Test4: V2T archive evaluation and generated-vs-GT insole heatmaps.
 
-Runs the trained AnySole model in V-only conditioning (tactile inputs zeroed)
-so the aux head ``pressure_hat`` becomes a vision-to-tactile (V2T) generator:
-the model must produce the 96-cell pressure signal purely from HRNet vision
-features.  The tactile head does not depend on the diffusion pose sample, so
-a single tau=0 forward per window yields the deterministic generated tactile
-signal.
+The default path consumes session-level standardized V2T archives written by
+the upstream evaluators.  It never reruns a model.  ``--source infer`` keeps
+the former AnySole on-the-fly diagnostic for debugging only.
 
 Three conditioning arms (same names as eval.py ``--config-id``):
 
@@ -13,7 +10,7 @@ Three conditioning arms (same names as eval.py ``--config-id``):
     V2M    real V + zero T   the V2T generation itself (headline)
     T2M    zero V + real T   tactile self-reconstruction (input-side sanity)
 
-Outputs under results_display/result/r_test4_v2t/:
+Outputs under results_display/ResultTest/R4Test_v2t/:
 
     gif/ or mp4/<session>_<mode>_tgen.{gif,mp4}  GT | generated | |GT-Gen| animation
     cells/<session>_<mode>_cells.{npz,png}      96-cell MAE + static error map
@@ -30,6 +27,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -66,6 +64,12 @@ from anysole.types import (  # noqa: E402
     T_RAW_DIM,
     V_FEAT_DIM,
 )
+from utils.compare_core import (  # noqa: E402
+    find_prediction,
+    load_mode_registry,
+    load_v2t_archive,
+    v2t_metrics,
+)
 from d_test3_contact import (  # noqa: E402
     INFO_FONT,
     INSOLE_H,
@@ -101,9 +105,28 @@ def _parse_modes(value: str) -> list[str]:
     return list(dict.fromkeys(modes))
 
 
-def cells48_to_heatmap(cells48: np.ndarray, vmax: float) -> Image.Image:
-    """48-cell vector -> insole heatmap, same orientation as test5's panels."""
-    cells = np.asarray(cells48, dtype=np.float32).reshape(SENSOR_ROWS, SENSOR_COLS)
+def canonical_pressure_map(values: np.ndarray) -> np.ndarray:
+    """Return one display grid of shape (31,22), two 31x11 feet."""
+    values = np.asarray(values, dtype=np.float32)
+    if values.ndim == 1 and values.size == 96:
+        values = values.reshape(2, 4, 12)
+    elif values.ndim == 1 and values.size == 31 * 22:
+        values = values.reshape(31, 22)
+    if values.ndim == 2 and values.shape == (31, 22):
+        return values
+    if values.ndim == 3 and values.shape == (2, 31, 11):
+        return np.concatenate([values[0], values[1]], axis=1)
+    if values.ndim == 3 and values.shape == (2, 4, 12):
+        from scipy.ndimage import zoom
+        values = zoom(values, (1, 31 / 4, 11 / 12), order=1,
+                      mode="nearest", prefilter=False)
+        return np.concatenate([values[0], values[1]], axis=1)
+    raise ValueError(f"unsupported V2T display grid: {values.shape}")
+
+
+def cells_to_heatmap(cells: np.ndarray, vmax: float) -> Image.Image:
+    """Canonical 31x11-per-foot map -> insole heatmap."""
+    cells = np.asarray(cells, dtype=np.float32)
     return Image.fromarray(pressure_to_heatmap(np.rot90(cells, k=1), vmax=vmax))
 
 
@@ -207,19 +230,17 @@ def render_frame(gt_cells, gen_cells, session_id, mode, frame_idx, n_frames, fps
         fill=(180, 180, 190),
         anchor="mt",
     )
-    left_gt = gt_cells[:48]
-    right_gt = gt_cells[48:]
-    left_gen = gen_cells[:48]
-    right_gen = gen_cells[48:]
+    gt_map = canonical_pressure_map(gt_cells)
+    gen_map = canonical_pressure_map(gen_cells)
     panels = (
-        (left_gt, left_gen, np.abs(left_gen - left_gt), "Left"),
-        (right_gt, right_gen, np.abs(right_gen - right_gt), "Right"),
+        (gt_map[:, :11], gen_map[:, :11], np.abs(gen_map[:, :11] - gt_map[:, :11]), "Left"),
+        (gt_map[:, 11:], gen_map[:, 11:], np.abs(gen_map[:, 11:] - gt_map[:, 11:]), "Right"),
     )
     for row, (gt48, gen48, err48, label) in enumerate(panels):
         y0 = HEADER_H + row * (INSOLE_H + GAP)
         draw_text(draw, (ROW_LABEL_W // 2, y0 + INSOLE_H // 2), label, TITLE_FONT, fill=(150, 150, 170), anchor="mm")
         for col, cells in enumerate((gt48, gen48, err48)):
-            img = cells48_to_heatmap(cells * PRESSURE_CLIP, vmax=PRESSURE_CLIP)
+            img = cells_to_heatmap(cells * PRESSURE_CLIP, vmax=PRESSURE_CLIP)
             x0 = ROW_LABEL_W + GAP + col * (INSOLE_W + GAP)
             canvas.paste(img, (x0, y0))
     return np.asarray(canvas)
@@ -256,11 +277,17 @@ def parse_args() -> argparse.Namespace:
         max_frames=True,
         force=True,
         out_dir=True,
-        out_dir_default=cli_common.DISPLAY_ROOT / "result/r_test4_v2t",
+        out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R4Test_v2t",
     )
     parser.add_argument("--config", type=str, default=str(REPO_ROOT / "anysole" / "configs" / "v1.yaml"))
     parser.add_argument("--ckpt", type=str, default=str(DEFAULT_CKPT))
-    parser.add_argument("--config-id", type=str, default="VT2M,V2M,T2M", help="Conditioning arms, comma-separated.")
+    parser.add_argument("--source", choices=("archives", "infer"), default="archives",
+                        help="archives reads standardized V2T outputs; infer is the legacy on-the-fly diagnostic.")
+    parser.add_argument("--model-name", "--modal", dest="modal", default="V4B")
+    parser.add_argument("--contact-method", default="joint_and")
+    parser.add_argument("--modes-config", type=Path, default=SCRIPT_DIR / "models_modes.yaml")
+    parser.add_argument("--config-id", type=str, default="V2T",
+                        help="archives mode; infer accepts the legacy VT2M,V2M,T2M arms.")
     parser.add_argument("--limit-sessions", type=int, default=0, help="Cap the number of sessions (0 = all).")
     parser.add_argument("--export-sessions", type=int, default=4, help="First N sessions get animations (0 = all).")
     parser.add_argument("--batch-size", type=int, default=None)
@@ -268,8 +295,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
+def main_infer(args: argparse.Namespace) -> int:
+    if args.config_id.upper() == "V2T":
+        args.config_id = "VT2M,V2M,T2M"
     config = load_config(Path(args.config))
     device = resolve_device(args.device)
     checkpoint = torch.load(Path(args.ckpt), map_location="cpu")
@@ -279,7 +307,7 @@ def main() -> int:
     tw = int(config["tw"])
     batch_size = int(args.batch_size or config["batch_size"])
     modes = _parse_modes(args.config_id)
-    sessions = cli_common.load_test_sessions(args.session, args.split_csv, args.split)
+    sessions = cli_common.load_evaluable_sessions(args.session, args.split_csv, args.split)
     if args.limit_sessions > 0:
         sessions = sessions[: args.limit_sessions]
     export_n = args.export_sessions if args.export_sessions > 0 else len(sessions)
@@ -367,6 +395,143 @@ def main() -> int:
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     log.info(f"Wrote {report_path}")
     return 0
+
+
+def plot_archive_error(cells_mae: np.ndarray, out_png: Path, session_id: str, model: str) -> None:
+    """Render the canonical 31x11-per-foot absolute error map."""
+    values = canonical_pressure_map(cells_mae)
+    vmax = max(float(values.max()), 1.0)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    for ax, data, title in ((axes[0], values[:, :11], "Left foot"), (axes[1], values[:, 11:], "Right foot")):
+        im = ax.imshow(data, cmap="inferno", vmin=0.0, vmax=vmax)
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.suptitle(f"{session_id} {model} V2T MAE (canonical 31x11 grid)")
+    fig.colorbar(im, ax=axes, fraction=0.046, pad=0.04)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, dpi=120)
+    plt.close(fig)
+
+
+def archive_entries(args: argparse.Namespace) -> list[dict[str, str]]:
+    registry = load_mode_registry(args.modes_config)
+    entries = []
+    for modal in cli_common.split_csv_arg(args.modal):
+        for contact_method in cli_common.split_csv_arg(args.contact_method):
+            model_dir = cli_common.anysole_model_dir(modal, contact_method)
+            entries.append({
+                "name": f"AnySole/{model_dir}/V2T",
+                "prediction_root": str(cli_common.RESULTS_ROOT / "AnySole" / model_dir / "predictions" / "eval_motion"),
+                "pattern": "{session_id}_V2T.npz",
+                "color": "#50c8ff",
+            })
+    entries.extend(dict(entry) for entry in registry.get("V2T", []))
+    return entries
+
+
+def main_archives(args: argparse.Namespace) -> int:
+    if args.config_id.upper() not in ("V2T", "ALL"):
+        raise SystemExit("archive R_Test4 only accepts --config-id V2T")
+    sessions = cli_common.load_evaluable_sessions(args.session, args.split_csv, args.split)
+    if cli_common.DEFAULT_MANIFEST.suffix.lower() in (".jsonl", ".json"):
+        manifest_rows = {
+            row["session_id"]: row
+            for row in (json.loads(line) for line in cli_common.DEFAULT_MANIFEST.read_text(encoding="utf-8").splitlines() if line.strip())
+        }
+    else:
+        with cli_common.DEFAULT_MANIFEST.open(encoding="utf-8-sig", newline="") as handle:
+            manifest_rows = {row["session_id"]: row for row in csv.DictReader(handle)}
+    entries = archive_entries(args)
+    out_dir = Path(cli_common.resolve_path(args.out_dir, os.getcwd()))
+    cells_dir = out_dir / "cells"
+    cells_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    per_model: dict[str, list[dict]] = {}
+    export_count = 0
+    for session_id in sessions:
+        for entry in entries:
+            root = cli_common.resolve_path(entry.get("prediction_root", ""))
+            path = find_prediction(root, session_id, entry.get("pattern") or None)
+            if path is None:
+                rows.append({"model": entry["name"], "session": session_id, "status": "missing"})
+                continue
+            try:
+                archive = load_v2t_archive(path)
+                expected_frames = int(float(manifest_rows[session_id]["n_frames"]))
+                if len(archive["valid_mask"]) != expected_frames:
+                    raise ValueError(
+                        f"standard V2T archive length={len(archive['valid_mask'])}; "
+                        f"canonical session={expected_frames}"
+                    )
+                values = v2t_metrics(
+                    archive["pressure_pred"], archive["pressure_gt"],
+                    archive["contact_pred"], archive["contact_gt"],
+                    archive["valid_mask"],
+                )
+                row = {
+                    "model": entry["name"], "session": session_id, "status": "ok",
+                    "n_valid_frames": int(values.get("n_valid_frames", 0)),
+                    **{key: values.get(key) for key in ("T_mae", "T_rmse", "T_corr", "pressure_force_mae", "pressure_force_rmse", "pressure_force_r2", "pressure_cop_error_left", "pressure_cop_error_right", "pressure_cop_error_mean", "contact_f1", "contact_acc", "contact_recall", "air_recall")},
+                }
+                # Store canonical cell errors for downstream inspection.  The
+                # archive itself remains in its native grid.
+                pred_all = archive["pressure_pred"]
+                gt_all = archive["pressure_gt"]
+                pred_maps = np.stack([canonical_pressure_map(x) for x in pred_all], axis=0)
+                gt_maps = np.stack([canonical_pressure_map(x) for x in gt_all], axis=0)
+                valid = np.asarray(archive["valid_mask"], dtype=bool)
+                cell_error = np.abs(pred_maps - gt_maps)
+                if valid.any():
+                    cell_error = cell_error[valid].mean(axis=0)
+                else:
+                    cell_error = np.zeros_like(pred_maps[0])
+                safe_model = entry["name"].replace("/", "_")
+                np.savez_compressed(
+                    cells_dir / f"{session_id}_{safe_model}_cells.npz",
+                    cells_mae=cell_error,
+                    pressure_pred=pred_maps,
+                    pressure_gt=gt_maps,
+                    valid_mask=valid,
+                )
+                plot_archive_error(cell_error, cells_dir / f"{session_id}_{safe_model}_cells.png", session_id, entry["name"])
+                if export_count < (args.export_sessions if args.export_sessions > 0 else len(sessions)):
+                    n = min(len(pred_maps), args.max_frames) if args.max_frames > 0 else len(pred_maps)
+                    frames = [
+                        render_frame(archive["pressure_gt"][t], archive["pressure_pred"][t], session_id, "V2T", t, len(pred_maps), args.fps)
+                        for t in range(0, n, max(args.stride, 1))
+                    ]
+                    media = cli_common.media_path(out_dir, f"{session_id}_{safe_model}_V2T", args.gen)
+                    media.parent.mkdir(parents=True, exist_ok=True)
+                    if args.gen == "gif":
+                        cli_common.write_gif(frames, media, cli_common.viz_fps(args.fps, args.stride))
+                    else:
+                        cli_common.write_mp4(frames, media, cli_common.viz_fps(args.fps, args.stride))
+                per_model.setdefault(entry["name"], []).append(row)
+                rows.append(row)
+            except Exception as exc:
+                rows.append({"model": entry["name"], "session": session_id, "status": "invalid", "reason": str(exc)})
+        export_count += 1
+
+    fieldnames = ["model", "session", "status", "reason", "n_valid_frames", "T_mae", "T_rmse", "T_corr", "pressure_force_mae", "pressure_force_rmse", "pressure_force_r2", "pressure_cop_error_left", "pressure_cop_error_right", "pressure_cop_error_mean", "contact_f1", "contact_acc", "contact_recall", "air_recall"]
+    with (out_dir / "tgen_summary.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows({key: row.get(key, "") for key in fieldnames} for row in rows)
+    aggregate = {}
+    for model, model_rows in per_model.items():
+        ok = [row for row in model_rows if row.get("status") == "ok"]
+        aggregate[model] = {
+            "sessions": len(ok),
+            **{key: float(np.average([row[key] for row in ok], weights=[row["n_valid_frames"] for row in ok])) if ok else None for key in ("T_mae", "T_rmse", "T_corr", "pressure_force_mae", "pressure_force_rmse", "pressure_force_r2", "pressure_cop_error_mean", "contact_f1")},
+        }
+    (out_dir / "tgen_report.json").write_text(json.dumps({"source": "standardized_v2t_archives", "split": args.split, "models": aggregate}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return 0
+
+
+def main() -> int:
+    args = parse_args()
+    return main_archives(args) if args.source == "archives" else main_infer(args)
 
 
 if __name__ == "__main__":

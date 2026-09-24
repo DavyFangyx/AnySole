@@ -16,13 +16,13 @@ import numpy as np
 
 # component, display label, metric aliases, higher_is_better
 COMPONENTS = {
-    "upper": ("上肢", ("PA-MPJPE_upper",), False),
-    "hands": ("手", ("PA-MPJPE_hands",), False),
-    "global_yaw": ("全局朝向", ("yaw_abs_deg",), False),
-    "root_traj": ("根轨迹", ("RTE_norm",), False),
-    "contact": ("接触时序", ("contact_mcc", "contact_f1", "contact_acc"), True),
-    "support": ("支撑脚稳定", ("foot_slide_mm",), False),
-    "foot_ground": ("足-地关系", ("seam_jump_mm", "foot_slide_mm"), False),
+    "upper": ("Upper body", ("PA-MPJPE_upper",), False),
+    "hands": ("Hands", ("PA-MPJPE_hands",), False),
+    "global_yaw": ("Global yaw", ("yaw_abs_deg",), False),
+    "root_traj": ("Root trajectory", ("root_rte_percent",), False),
+    "contact": ("Contact timing", ("contact_mcc", "contact_f1", "contact_acc"), True),
+    "support": ("Support foot stability", ("foot_sliding_mm",), False),
+    "foot_ground": ("Foot-ground relation", ("seam_jump_mm", "foot_sliding_mm"), False),
 }
 
 V_COMPONENTS = ("upper", "hands", "global_yaw", "root_traj")
@@ -84,4 +84,3 @@ def write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
-

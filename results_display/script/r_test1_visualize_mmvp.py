@@ -24,7 +24,7 @@ from utils.motion_io import load_session_gt  # noqa: E402
 from r_test2_compare import array_from_file  # noqa: E402
 
 MANIFEST = ROOT / "AnysoleWorkspace/manifests/session_manifest.jsonl"
-DISPLAY = ROOT / "results_display/result/r_test1_visualize"
+DISPLAY = ROOT / "results_display/ResultTest/R1Test_visualize"
 INFERNO = np.asarray([
     [0, 0, 4], [31, 12, 72], [85, 15, 109], [136, 34, 106],
     [186, 54, 85], [227, 89, 51], [249, 140, 10], [252, 194, 39],
@@ -62,9 +62,9 @@ def prediction_path(model: str, session: str, explicit: str) -> Path:
     if explicit:
         return Path(explicit).expanduser()
     if model == "MMVP_pressure_toolkit":
-        root = ROOT / "results/pressure_tookit/predictions/eval_motion"
+        root = ROOT / "results/baselines/pressure_tookit/predictions/eval_motion"
     elif model in {"MMVP_FPP-Net", "MMVP_VP-MoCap"}:
-        root = ROOT / "results/VP-MoCap/predictions/eval_motion"
+        root = ROOT / "results/baselines/VP-MoCap/predictions/eval_motion"
     else:
         raise ValueError(f"unsupported MMVP model label: {model}")
     return root / f"{session}.npz"
@@ -96,7 +96,12 @@ def render(args: argparse.Namespace) -> Path:
     pred_path = prediction_path(args.model, args.session, args.prediction)
     if not pred_path.is_file():
         raise FileNotFoundError(f"unified prediction missing: {pred_path}")
-    pred, _, pred_names, _ = array_from_file(pred_path)
+    pred, pred_mask, pred_names, _ = array_from_file(pred_path)
+    expected = int(row["n_frames"])
+    if pred_mask is None or len(pred) != expected or len(pred_mask) != expected:
+        raise ValueError(
+            f"unified prediction must have {expected} frames and valid_mask: {pred_path}"
+        )
     gt = load_session_gt(seq_dir(row), int(row["n_frames"]), float(row.get("target_fps") or 40.0))
     n = min(len(pred), len(gt["joints"]))
     pred, gt_points = np.asarray(pred[:n]), np.asarray(gt["joints"][:n])
