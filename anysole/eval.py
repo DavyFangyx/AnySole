@@ -126,17 +126,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--ckpt",
         type=Path,
         default=None,
-        help="Checkpoint .pt. Omitted when --modal and --contact-method name a model dir "
+        help="Checkpoint .pt. Omitted when --model-name and --contact-method name a model dir "
         "under results/AnySole (checkpoints/ckpt_last.pt is used).",
     )
-    parser.add_argument("--modal", choices=MODEL_NAMES, default=None)
+    parser.add_argument("--modal", choices=MODEL_NAMES, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--model-name",
-        default=None,
-        help="Model DIRECTORY identifier (e.g. V3_4a / F0b; distinct from --modal, "
-        "which is the model class). With --ckpt omitted, the checkpoint is inferred "
-        "as <model-name>_<contact>[/<variant>]/checkpoints/ckpt_last.pt. Required "
-        "when --variant is given.",
+        "--model-name", default=None,
+        help="Registered model identifier (e.g. V4A / V3_4a). The checkpoint "
+        "architecture is read from the checkpoint config.",
     )
     parser.add_argument(
         "--variant",
@@ -183,6 +180,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--no-write-motion", action="store_true", help="Disable SMPL motion export.")
     parser.add_argument("--metrics-out", type=Path, default=None, metavar="FILE",
                         help="Write VT2M/V2M/T2M metrics as JSON (default: model results metrics directory).")
+    parser.add_argument(
+        "--protocol-out",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="Write extended protocol metrics to this JSON path. Defaults to the checkpoint model directory.",
+    )
     parser.add_argument(
         "--no-protocol",
         action="store_true",
@@ -359,13 +363,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         targets: List[tuple[Optional[str], Optional[str], Path]] = [
             (args.modal, args.contact_method, args.ckpt)
         ]
-    elif args.modal is not None and args.contact_method is not None:
+    elif args.model_name is not None and args.contact_method is not None:
         if args.variant and args.model_name is None:
             raise ValueError("--variant requires --model-name (the dir identifier, e.g. V3_4a)")
-        dir_name = args.model_name or args.modal
+        dir_name = args.model_name
         targets = [
             (
-                args.modal,
+                None,
                 args.contact_method,
                 infer_anysole_paths(dir_name, variant=args.variant,
                                     contact=args.contact_method, which=args.which)["ckpt"],
@@ -386,6 +390,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         raise ValueError(
             "--metrics-out is per-model; omit it when evaluating several models "
             "(each model's metrics go to its own metrics/test.json)"
+        )
+    if multi and args.protocol_out is not None:
+        raise ValueError(
+            "--protocol-out is per-model; omit it when evaluating several models"
         )
     device = resolve_device(args.device)
     for modal, contact_method, ckpt in targets:
@@ -460,7 +468,7 @@ def _evaluate_one(
         raise ValueError("Checkpoint must contain a 'model' state dict: %s" % ckpt)
     checkpoint_modal = str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1))
     if modal is not None and modal != checkpoint_modal:
-        raise ValueError("--modal %s does not match checkpoint modal %s" % (modal, checkpoint_modal))
+        raise ValueError("legacy architecture override %s does not match checkpoint architecture %s" % (modal, checkpoint_modal))
     ckpt_contact = str(checkpoint.get("config", {}).get("contact_method") or "")
     contact_method = contact_method or ckpt_contact or str(config.get("contact_method", "tactile_abs"))
     model = _load_model(checkpoint, config, device)
@@ -828,6 +836,9 @@ def _evaluate_one(
     # single source for the pre-F0 numbers.
     if not args.no_protocol:
         from anysole.utils.eval_protocol import run_protocol
+        protocol_out = args.protocol_out
+        if protocol_out is None:
+            protocol_out = model_root / "metrics" / ("%s_fseries.json" % args.split)
         run_protocol(
             checkpoint=checkpoint,
             config=config,
@@ -845,7 +856,7 @@ def _evaluate_one(
             robustness=not args.no_robustness,
             contact_method=contact_method,
             tw=tw,
-            out_path=model_root / "metrics" / ("%s_fseries.json" % args.split),
+            out_path=protocol_out,
         )
     return 0
 

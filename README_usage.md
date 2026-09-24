@@ -386,28 +386,41 @@ RTM-pose 观测。
 
 ## 6. 后台训练队列
 
-`offline_train/` 提供退出终端后仍继续运行的串行队列。先生成任务（已有任务文件不会覆盖）：
+`configs/` 提供退出终端后仍继续运行的串行队列（单一共享队列，对齐 SurvPGC）。
+一个 conf = 一个模型任务。生成 R_Test 任务（见 `configs/README.md`）：
 
 ```bash
 cd /data/fangyuxuan/projects/gait
-python offline_train/create_queue.py \
-  --models anysole,anysole_insole_drift,motionpro,step2motion,pressure_toolkit \
-  --gpu-list 0,1,2,3
+python configs/z_exp_gen/generate_r_test_configs.py            # 任务 conf 落到 configs/generated/tasks/
+python configs/z_exp_gen/generate_r_test_configs.py --queue    # 或直接入队
+# 整体/单任务执行（--dry-run 只打印命令）：
+python configs/tools/runner.py run --experiment R_Test5_rho_grid
+python configs/tools/runner.py task configs/generated/tasks/R_Test5_rho_grid/001__R_Test5_rho_grid__V4B.conf --dry-run
 ```
 
-每张 GPU 启动一个 scheduler；同卡串行，不同卡并行：
+baseline 任务（anysole/motionpro/step2motion/pressure_toolkit）由
+`configs/tools/create_queue.py` 生成（已有任务文件不会覆盖；GPU 不再在入队时
+指定，由 worker 的 CUDA_VISIBLE_DEVICES 决定）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash offline_train/bg.sh
-CUDA_VISIBLE_DEVICES=1 bash offline_train/bg.sh
+python configs/tools/create_queue.py \
+  --models anysole,anysole_insole_drift,motionpro,step2motion,pressure_toolkit
+```
+
+每张 GPU 启动一个 worker；同卡互斥（flock），不同卡并行抢任务：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 bash configs/bg.sh
+CUDA_VISIBLE_DEVICES=1 bash configs/bg.sh
 ```
 
 查看队列状态：
 
 ```bash
-python offline_train/status.py
+python configs/tools/status.py
 ```
 
-任务日志位于 `offline_train/queues/GPU<N>/logs/`，成功和失败任务分别移动到
-`done/`、`failed/`。每次运行的 checkpoint 和配置快照位于
-`results/offline/<run_name>/`；pressure toolkit 的三个阶段固定在同一张 GPU 上按顺序执行。
+任务日志位于 `configs/logs/`，成功和失败任务分别移动到 `configs/done/`、
+`configs/failed/`。每次运行的 checkpoint 和配置快照位于
+`results/offline/<run_name>/`；pressure toolkit 的三个阶段依赖顺序，请在只开
+一个 worker 时整批入队。

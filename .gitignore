@@ -47,6 +47,23 @@ __pycache__/
 /data/hrnet_cache/
 /offline_train/queues/
 
+# Offline configs scheduler runtime logs/locks
+/configs/*.log
+/configs/locks/
+
+# Offline scheduler task state. Keep the four directories via .gitkeep, but
+# never commit generated per-model task confs or old staging artifacts.
+/configs/queue/*
+!/configs/queue/.gitkeep
+/configs/running/*
+!/configs/running/.gitkeep
+/configs/done/*
+!/configs/done/.gitkeep
+/configs/failed/*
+!/configs/failed/.gitkeep
+/configs/logs/
+/configs/generated/
+
 # Wandb Analyser Thirdparty
 /Wandb_Analyzer/
 

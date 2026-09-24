@@ -63,7 +63,7 @@ def prediction_path(model: str, session: str, explicit: str) -> Path:
         return Path(explicit).expanduser()
     if model == "MMVP_pressure_toolkit":
         root = ROOT / "results/pressure_tookit/predictions/eval_motion"
-    elif model == "MMVP_FPP-Net":
+    elif model in {"MMVP_FPP-Net", "MMVP_VP-MoCap"}:
         root = ROOT / "results/VP-MoCap/predictions/eval_motion"
     else:
         raise ValueError(f"unsupported MMVP model label: {model}")
@@ -136,7 +136,11 @@ def render(args: argparse.Namespace) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=("MMVP_pressure_toolkit", "MMVP_FPP-Net"), required=True)
+    parser.add_argument(
+        "--model",
+        choices=("MMVP_pressure_toolkit", "MMVP_FPP-Net", "MMVP_VP-MoCap"),
+        required=True,
+    )
     parser.add_argument("--session", required=True)
     parser.add_argument("--prediction", default="")
     parser.add_argument("--max-frames", type=int, default=0)

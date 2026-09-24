@@ -70,15 +70,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--ckpt",
         type=Path,
         default=None,
-        help="Checkpoint .pt. Omitted when --modal and --contact-method name a model dir "
+        help="Checkpoint .pt. Omitted when --model-name and --contact-method name a model dir "
         "under results/AnySole (checkpoints/ckpt_last.pt is used).",
     )
-    parser.add_argument("--modal", choices=MODEL_NAMES, default=None)
+    parser.add_argument("--modal", choices=MODEL_NAMES, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--model-name",
         default=None,
-        help="Model DIRECTORY identifier (e.g. V3_4a; distinct from --modal, the model "
-        "class). With --ckpt omitted, the checkpoint is inferred via the registry.",
+        help="Registered model identifier (e.g. V4A / V3_4a). The checkpoint "
+        "architecture is read from the checkpoint config.",
     )
     parser.add_argument(
         "--variant",
@@ -206,7 +206,7 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
         raise RuntimeError("checkpoint config is missing or is not a mapping")
     checkpoint_modal = str(saved_config.get("modal", MODEL_ANYSOLEV1))
     if args.modal is not None and args.modal != checkpoint_modal:
-        raise ValueError("--modal %s does not match checkpoint modal %s" % (args.modal, checkpoint_modal))
+        raise ValueError("legacy architecture override %s does not match checkpoint architecture %s" % (args.modal, checkpoint_modal))
     state_pose_dim = getattr(checkpoint.get("model", {}).get("pose_head.pose_mean"), "shape", (POSE_DIM,))[0]
     saved_joints = int(saved_config.get("motion_n_joints", state_pose_dim // 6 if state_pose_dim else N_JOINTS))
     saved_protocol = str(saved_config.get("motion_protocol", ""))
@@ -494,14 +494,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     requested_modes = _parse_modes(args.config_id)
 
     if args.ckpt is None:
-        if args.modal is None or args.contact_method is None:
+        if args.model_name is None or args.contact_method is None:
             raise ValueError(
-                "--ckpt is required unless --modal and --contact-method (plus optional "
-                "--model-name/--variant) name a model dir under results/AnySole"
+                "--ckpt is required unless --model-name and --contact-method "
+                "(plus optional --variant) name a model dir under results/AnySole"
             )
         if args.variant and args.model_name is None:
             raise ValueError("--variant requires --model-name (the dir identifier, e.g. V3_4a)")
-        dir_name = args.model_name or args.modal
+        dir_name = args.model_name
         args.ckpt = infer_anysole_paths(dir_name, variant=args.variant,
                                         contact=args.contact_method, which=args.which)["ckpt"]
 

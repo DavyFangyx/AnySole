@@ -2,7 +2,15 @@
 set -euo pipefail
 [[ $# -eq 1 && -f "$1" ]] || exit 2
 cfg="$1"; root="$(cd "$(dirname "$0")" && pwd)"; repo="$(cd "$root/.." && pwd)"
-source "$cfg"; : "${MODEL:?}"; : "${RUN_NAME:?}"
+# 任务 conf（带 TASK/EXPERIMENT_ID）继承 defaults.conf；baseline 型
+# conf（只带 MODEL=）不受影响。
+if grep -qE '^(TASK|EXPERIMENT_ID)=' "$cfg"; then
+  source "$root/defaults.conf"
+fi
+source "$cfg"
+# 任务 conf 只要求 TASK；baseline conf 必须带 MODEL。
+[[ -n "${TASK:-}" ]] || : "${MODEL:?}"
+: "${RUN_NAME:=task_${EXPERIMENT_ID:-unknown}}"
 cd "$repo"
 run_dir="${RUN_DIR:-$repo/results/offline/$RUN_NAME}"
 [[ "$run_dir" = /* ]] || run_dir="$repo/$run_dir"
@@ -13,10 +21,19 @@ if [[ "${CONDA_ENV:-touch_gait}" != none && "${CONDA_ENV:-touch_gait}" != 无 ]]
   command -v conda >/dev/null || { echo 'conda is required' >&2; exit 2; }
   eval "$(conda shell.bash hook)"; conda activate "${CONDA_ENV:-touch_gait}"
 fi
+# 任务 conf（一个 conf = 一个模型任务 / 一次 display）→ runner task；
+# DRY_RUN=1 只打印命令，供验证与排查。
+if [[ -n "${TASK:-}" ]]; then
+  dry_flag=""; [[ "${DRY_RUN:-0}" = 1 ]] && dry_flag="--dry-run"
+  if "$py" configs/tools/runner.py task "$cfg" $dry_flag; then
+    date -Is > "$run_dir/finished_at"; touch "$run_dir/.done"
+    exit 0
+  fi
+  exit 1
+fi
 case "$MODEL" in
   anysole|anysole_insole_drift)
-    modal="${MODAL:-anysolev1}"; [[ "$MODEL" == anysole_insole_drift ]] && modal=anysolev1_insole_drift
-    "$py" -m anysole.train --config "${CONFIG_FILE:-anysole/configs/v1.yaml}" --modal "$modal" --device cuda --out-dir "$run_dir/checkpoints" --epochs "${EPOCHS:-200}" --batch-size "${BATCH_SIZE:-256}" ;;
+    "$py" -m anysole.train --config "${CONFIG_FILE:-anysole/configs/v1.yaml}" --device cuda --out-dir "$run_dir/checkpoints" --epochs "${EPOCHS:-200}" --batch-size "${BATCH_SIZE:-256}" ;;
   motionpro)
     cd Baselines/MotionPRO
     "$py" -m app.train_frappe task.gpu="$CUDA_VISIBLE_DEVICES" task.checkpoint_dir="$run_dir/checkpoints" task.result_dir="$run_dir/metrics" task.output_dir="$run_dir/debug" task.epochs="${EPOCHS:-1000}" task.batch_size="${BATCH_SIZE:-16}" wandb_mode=disabled ;;

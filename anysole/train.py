@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -85,6 +87,7 @@ DEFAULT_CONFIG = {
     "traj_delta_weight_power": 1.0,
     "traj_deltas": [2, 4, 8, 19],
     "config_probs": list(CONFIG_PROBS),
+    "seed": 1,
     "cam_id": 3,
     # 路径一律引用 anysole/types.py 的集中常量，避免与配置文件的字面量双重维护。
     "seq_root": str(SEQ_ROOT),
@@ -317,6 +320,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Training RNG seed. Saved into the checkpoint config for registered experiments.",
+    )
     parser.add_argument(
         "--tw",
         type=int,
@@ -565,7 +574,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--lambda-bone", type=float, default=None, metavar="W",
                         help="E6.7: override yaml loss weight lambda_bone (E6.2, pos mode).")
     parser.add_argument("--device", default="auto", help="Device such as cuda, cuda:0, or cpu.")
-    parser.add_argument("--modal", choices=MODEL_NAMES, default=None, help="Model variant to train.")
+    parser.add_argument("--modal", choices=MODEL_NAMES, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--contact-method",
         default=None,
@@ -772,6 +781,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["epochs"] = args.epochs
     if args.batch_size is not None:
         config["batch_size"] = args.batch_size
+    if args.seed is not None:
+        config["seed"] = int(args.seed)
+    seed = int(config.get("seed", 1))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    print("training seed: %d" % seed)
     if args.tw is not None:
         if args.tw < 1:
             raise ValueError("--tw must be positive")
@@ -799,6 +819,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         value = getattr(args, key)
         if value is not None:
             config[key] = value
+    # Registered experiment names identify the model branch; the architecture
+    # is no longer a user-facing CLI choice.  All current registered branches
+    # are AnySole V2/regression models.
+    if args.model_name is not None:
+        config["modal"] = MODEL_ANYSOLEV2
     if config.get("modal", MODEL_ANYSOLEV1) not in MODEL_NAMES:
         raise ValueError("Unknown modal %r; expected one of %s" % (config.get("modal"), MODEL_NAMES))
     if config.get("modal") == MODEL_ANYSOLEV2 and (
@@ -1427,7 +1452,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         from anysole.eval import main as eval_main
         # Training-time auto-eval stays lean: metrics only and no protocol pass.
         eval_main(["--config", str(args.config), "--ckpt", str(out_dir / "ckpt_last.pt"),
-                   "--modal", modal, "--split", "test", "--device", str(device),
+                   "--split", "test", "--device", str(device),
                    "--contact-method", str(config["contact_method"]), "--no-write-motion",
                    "--no-protocol"])
     except Exception as exc:

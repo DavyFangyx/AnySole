@@ -88,11 +88,11 @@ def split_csv_arg(value) -> list:
     return out
 
 
-def anysole_model_dir(modal: str, contact_method: str, variant: str | None = None) -> str:
-    """Results dir name: anysole_{version/ablation}_{contact_method}, plus the
+def anysole_model_dir(model_name: str, contact_method: str, variant: str | None = None) -> str:
+    """Results dir name: <model_name>_<contact_method>, plus the
     optional stacked-hyperparameter subdir (2026-09-22 naming: tw40 / tw40_st20 /
     t0003_tw40_lr3e4 — model+contact+variant == the ckpt address)."""
-    base = f"{modal}_{contact_method}"
+    base = f"{model_name}_{contact_method}"
     return f"{base}/{variant}" if variant else base
 
 
@@ -153,11 +153,14 @@ def add_common_args(
     if seq_root:
         parser.add_argument("--seq-root", type=str, default=str(DEFAULT_SEQ_ROOT), help="Centralized sequence root.")
     if modal:
-        parser.add_argument("--modal", type=str, default=modal_default, help="Modal(s), comma-separated.")
+        parser.add_argument(
+            "--model-name", "--modal", dest="modal", metavar="MODEL_NAME", type=str, default=modal_default,
+            help="AnySole model name(s), comma-separated (legacy alias: --modal).",
+        )
     if variant:
         parser.add_argument("--variant", type=str, default=None, help="Stacked hyperparameter subdir under the model dir (e.g. tw40); model+contact+variant == the ckpt address.")
     if contact_method:
-        parser.add_argument("--contact-method", type=str, default=contact_method_default, help="Contact-label scheme(s), comma-separated; model dir is <modal>_<contact-method>.")
+        parser.add_argument("--contact-method", type=str, default=contact_method_default, help="Contact-label scheme(s), comma-separated; model dir is <model-name>_<contact-method>.")
     if config_id:
         parser.add_argument("--config-id", type=str, default=config_default, help="Generation configuration(s), comma-separated.")
     if gen:

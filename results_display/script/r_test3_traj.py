@@ -20,7 +20,7 @@ folders.
 
 Usage (run from the repository root):
     python results_display/script/r_test3_traj.py
-    python results_display/script/r_test3_traj.py --modal anysolev1 --config-id VT2M
+    python results_display/script/r_test3_traj.py --model-name V4A --contact-method joint_and --config-id VT2M
     python results_display/script/r_test3_traj.py --auto
     python results_display/script/r_test3_traj.py --session S7013
 """
@@ -40,6 +40,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from utils import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
+from utils.compare_core import MODES, find_prediction, load_mode_registry  # noqa: E402
 from utils.motion_io import load_motion, load_session_gt  # noqa: E402
 from utils.render_common import (  # noqa: E402
     INFO_FONT,
@@ -126,7 +127,7 @@ def discover_baseline_dirs(results_root: Path) -> list[Path]:
     """Self-contained non-AnySole model dirs under results/ (Test2 口径).
 
     Archived ``*_backup*`` trees are excluded; AnySole models are addressed
-    through ``--modal``.
+    through ``--model-name`` (legacy alias: ``--modal``).
     """
     found = []
     for root in sorted(p for p in results_root.rglob("*") if p.is_dir()):
@@ -216,8 +217,14 @@ def render_traj_panel(
     n_frames: int,
     fps: float,
     ate_mean_mm: float,
+    color=PRED_COLOR,
+    legend="Pred",
 ) -> np.ndarray:
-    """One animation frame: GT path (full) + predicted path growing to frame_idx."""
+    """One animation frame: GT path (full) + predicted path growing to frame_idx.
+
+    ``color``/``legend`` let the R_Test3 ``--compare`` row draw each model in
+    its own hue while keeping every panel on the same shared projector.
+    """
     from PIL import Image, ImageDraw
 
     canvas = Image.new("RGB", (PANEL, PANEL), (10, 12, 16))
@@ -239,7 +246,7 @@ def render_traj_panel(
     # Predicted path: grows with the animation.
     pred_uv = projector.uv(pred[: frame_idx + 1])
     if len(pred_uv) >= 2:
-        draw.line([tuple(p) for p in pred_uv], fill=PRED_COLOR, width=3)
+        draw.line([tuple(p) for p in pred_uv], fill=color, width=3)
     # Window-boundary ticks on the predicted path (re-anchored every window).
     for w in range(WINDOW_LENGTH, frame_idx + 1, WINDOW_LENGTH):
         u, v = pred_uv[w]
@@ -264,14 +271,14 @@ def render_traj_panel(
     u, v = gt_uv[frame_idx]
     draw.ellipse([u - 4, v - 4, u + 4, v + 4], fill=GT_COLOR)
     u, v = pred_uv[frame_idx]
-    draw.ellipse([u - 6, v - 6, u + 6, v + 6], fill=PRED_COLOR, outline=(235, 235, 235), width=2)
+    draw.ellipse([u - 6, v - 6, u + 6, v + 6], fill=color, outline=(235, 235, 235), width=2)
 
     # Legend.
     lx, ly = PANEL - 118, 46
     draw.line([(lx, ly), (lx + 22, ly)], fill=GT_COLOR, width=3)
     draw_text(draw, (lx + 28, ly), "GT", INFO_FONT, fill=(230, 230, 235), anchor="lm")
-    draw.line([(lx, ly + 24), (lx + 22, ly + 24)], fill=PRED_COLOR, width=3)
-    draw_text(draw, (lx + 28, ly + 24), "Pred", INFO_FONT, fill=(230, 230, 235), anchor="lm")
+    draw.line([(lx, ly + 24), (lx + 22, ly + 24)], fill=color, width=3)
+    draw_text(draw, (lx + 28, ly + 24), legend, INFO_FONT, fill=(230, 230, 235), anchor="lm")
 
     ate_t_mm = float(np.linalg.norm(pred[frame_idx] - gt[frame_idx])) * 1000.0
     footer = "t=%.2fs  frame %d/%d  ATE@t %5.0f mm  ATE %5.0f mm" % (
@@ -433,11 +440,197 @@ def parse_args() -> argparse.Namespace:
         help="Also scan results/ for self-contained non-AnySole model dirs "
         "(e.g. Step2Motion predictions/<run>/<session>_gen.bvh); *_backup* trees are excluded.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Mode-aligned side-by-side comparison view: one shared projector per session, "
+        "one panel per same-mode model (AnySole + registry baselines). Output under "
+        "r_test3_traj/compare/<mode>/; per-model visualization is unaffected.",
+    )
+    parser.add_argument("--mode", default="all", help="Generation mode(s) for --compare: VT2M,V2M,T2M or 'all'.")
+    parser.add_argument("--modes-config", type=Path, default=Path(__file__).resolve().parent / "models_modes.yaml",
+                        help="Mode registry (--compare only).")
+    args = parser.parse_args()
+    return args
+
+
+def hex_to_rgb(value: str) -> tuple[int, int, int]:
+    value = str(value or "").strip().lstrip("#")
+    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4)) if len(value) == 6 else (120, 120, 128)
+
+
+def compare_load_pred(path: Path) -> np.ndarray:
+    """Root trajectory in the z-up display frame, for any prediction layout.
+
+    - ``*.bvh``: root joint of the parsed skeleton (already display meters).
+    - eval NPZ (AnySole): embedded ``pred_pelvis_trans`` in y-up mocap world.
+    - unified ``eval_motion`` NPZ (baselines): ``joint_xyz_world`` root joint,
+      already written in the display frame by ``export_baseline_motion.py``.
+    """
+    path = Path(path)
+    if path.suffix.lower() == ".bvh":
+        return load_motion(path)["joints"][:, 0]
+    data = np.load(path)
+    if "pred_pelvis_trans" in data:
+        return to_display(np.asarray(data["pred_pelvis_trans"], dtype=np.float64))
+    if "joint_xyz_world" in data:
+        return np.asarray(data["joint_xyz_world"], dtype=np.float64)[:, 0]
+    if "pred_trans_world" in data or "trans" in data:
+        return to_display(np.asarray(data.get("pred_trans_world", data["trans"]), dtype=np.float64))
+    raise ValueError(f"no trajectory in {path}; keys={list(data.keys())}")
+
+
+def render_compare_figure(models: list[dict], gt: np.ndarray, session_id: str, mode: str, png_path: Path, fps: float) -> None:
+    """Static overlay figure: top-down view + height-vs-time, all models in one axes."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    t = np.arange(gt.shape[0], dtype=np.float64) / float(fps)
+    fig, axes = plt.subplots(1, 2, figsize=(15.0, 6.0), dpi=100)
+    fig.suptitle(f"{session_id}  {mode}  trajectory compare", fontsize=13, color=INK, y=0.99)
+
+    def style_2d(ax):
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        ax.grid(color="#c8c8c4", linewidth=0.6, alpha=0.4)
+        ax.tick_params(colors=INK_SECONDARY, labelsize=8)
+        for spine in ("left", "bottom"):
+            ax.spines[spine].set_color("#c8c8c4")
+
+    for ax, title in zip(axes, ("Top-down (x-y)", "Height vs time")):
+        ax.plot(gt[:, 0], gt[:, 1] if title.startswith("Top") else gt[:, 2], color=GT_HEX, lw=2.4, label="GT")
+        for m in models:
+            pred = m["pred"]
+            color = tuple(v / 255.0 for v in m["color"]) if isinstance(m["color"], tuple) else m["color"]
+            label = f"{m['label']}  ATE {m['ate_mm']:.0f}mm"
+            ax.plot(pred[:, 0], pred[:, 1] if title.startswith("Top") else pred[:, 2], color=color, lw=1.8, label=label)
+        if title.startswith("Top"):
+            ax.set_aspect("equal")
+            ax.set_xlabel("x (m)", fontsize=9, color=INK_SECONDARY)
+            ax.set_ylabel("y (m)", fontsize=9, color=INK_SECONDARY)
+        else:
+            ax.set_xlabel("t (s)", fontsize=9, color=INK_SECONDARY)
+            ax.set_ylabel("z (m)", fontsize=9, color=INK_SECONDARY)
+        ax.set_title(title, fontsize=10, color=INK)
+        ax.legend(loc="best", frameon=False, fontsize=8.5, handlelength=1.8)
+        style_2d(ax)
+
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(png_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
+def run_compare(args: argparse.Namespace) -> int:
+    """Mode-aligned side-by-side trajectory rows (R_Test3 --compare)."""
+    registry = load_mode_registry(args.modes_config)
+    modes = list(MODES) if args.mode == "all" else cli_common.split_csv_arg(args.mode)
+    unknown = sorted(set(modes) - set(MODES))
+    if unknown:
+        raise SystemExit(f"Unknown --mode: {unknown}; choices={list(MODES)} or 'all'")
+    # Compare runs default to the val split (fast iteration); --split test opts
+    # into the formal 36-session set.  The single-model path keeps its default.
+    split = "val" if "--split" not in sys.argv else args.split
+    orig_cwd = os.getcwd()
+    seq_root = Path(cli_common.resolve_path(args.seq_root, orig_cwd))
+    split_csv = Path(cli_common.resolve_path(args.split_csv, orig_cwd))
+    out_dir = Path(cli_common.resolve_path(args.out_dir, orig_cwd)).parent / "compare"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    session_ids = cli_common.load_test_sessions(args.session, split_csv, split)
+    log.info(f"compare sessions ({split}, {len(session_ids)}): {session_ids}")
+
+    model_dirs = [
+        cli_common.anysole_model_dir(modal, contact_method, getattr(args, "variant", None))
+        for modal in cli_common.split_csv_arg(args.modal)
+        for contact_method in cli_common.split_csv_arg(args.contact_method)
+    ]
+    for mode in modes:
+        out_mode = out_dir / mode
+        baselines = list(registry.get(mode, []))
+        log.info(f"compare mode {mode}: baselines={[b.get('name') for b in baselines]}")
+        for session_id in session_ids:
+            try:
+                seq_dir = session_dir(seq_root, session_id)
+            except FileNotFoundError as exc:
+                log.warning(f"{session_id}_{mode}: {exc}")
+                continue
+            stem = f"{session_id}_{mode}_traj_compare"
+            paths = {args.gen: cli_common.media_path(out_mode, stem, args.gen)}
+            if not args.no_png:
+                paths["png"] = out_mode / "png" / f"{stem}.png"
+            if cli_common.outputs_ready(paths.values()) and not args.force:
+                log.info(f"Skip {stem}: already exists")
+                continue
+
+            # Gather same-mode models: main AnySole config + registry baselines.
+            models: list[dict] = []
+            for model_dir in model_dirs:
+                traj_path = find_traj_file(PRED_ROOT / model_dir / "predictions", session_id, mode)
+                if traj_path is None:
+                    log.warning(f"{session_id}_{mode}: AnySole {model_dir} missing, panel skipped")
+                    continue
+                models.append({"label": f"AnySole {mode}", "color": PRED_COLOR, "path": traj_path})
+            for entry in baselines:
+                root = cli_common.resolve_path(entry.get("prediction_root", ""))
+                traj_path = find_prediction(root, session_id, entry.get("pattern") or None)
+                if traj_path is None:
+                    log.warning(f"{session_id}_{mode}: {entry.get('name')} missing, panel skipped")
+                    continue
+                models.append({"label": str(entry.get("name", "")), "color": hex_to_rgb(entry.get("color", "")), "path": traj_path})
+            if not models:
+                log.warning(f"{session_id}_{mode}: no predictions at all, skipped")
+                continue
+
+            loaded = []
+            for m in models:
+                try:
+                    loaded.append({**m, "pred": compare_load_pred(m["path"])})
+                except Exception as exc:
+                    log.warning(f"{session_id}_{mode}: {m['label']}: {exc}")
+            if not loaded:
+                continue
+            n = min(m["pred"].shape[0] for m in loaded)
+            gt = load_session_gt(seq_dir, n, args.fps)["joints"][:, 0]
+            for m in loaded:
+                m["pred"] = m["pred"][:n]
+                m["ate_mm"] = float(np.linalg.norm(m["pred"] - gt, axis=1).mean() * 1000.0)
+
+            # One shared projector over every model + GT: same camera, directly comparable.
+            projector = TrajProjector([gt] + [m["pred"] for m in loaded])
+            frame_ids = list(range(0, n, max(args.stride, 1)))
+            if args.max_frames > 0:
+                frame_ids = frame_ids[: args.max_frames]
+            gen_path = paths[args.gen]
+            frames = [
+                np.concatenate([
+                    render_traj_panel(projector, m["pred"], gt, t, session_id, m["label"], n, args.fps,
+                                      m["ate_mm"], color=m["color"], legend=m["label"])
+                    for m in loaded
+                ], axis=1)
+                for t in frame_ids
+            ]
+            gen_path.parent.mkdir(parents=True, exist_ok=True)
+            frame_fps = cli_common.viz_fps(args.fps, args.stride)
+            if args.gen == "gif":
+                cli_common.write_gif(frames, gen_path, frame_fps)
+            else:
+                cli_common.write_mp4(frames, gen_path, frame_fps)
+            log.info(f"Wrote {gen_path}")
+            if not args.no_png:
+                png_path = paths["png"]
+                render_compare_figure(loaded, gt, session_id, mode, png_path, args.fps)
+                log.info(f"Wrote {png_path}")
+            ates = ", ".join(f"{m['label']}={m['ate_mm']:.0f}mm" for m in loaded)
+            log.info(f"{session_id}_{mode}: frames={n} ATE [{ates}]")
+    return 0
 
 
 def main() -> int:
     args = parse_args()
+    if args.compare:
+        return run_compare(args)
     orig_cwd = os.getcwd()
     seq_root = Path(cli_common.resolve_path(args.seq_root, orig_cwd))
     split_csv = Path(cli_common.resolve_path(args.split_csv, orig_cwd))
