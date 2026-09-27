@@ -42,7 +42,9 @@ case "$MODEL" in
     "$py" src/train.py --config "${CONFIG_FILE:-configs/config_gait.json}" ;;
   pressure_toolkit)
     cd Baselines/pressure_tookit
-    "$py" main_singleview.py -c "$repo/$CONFIG_FILE" --dataset "$DATASET" --sub_ids "$SUB_IDS" --seq_name "$SEQ_NAME" --fitting_stage "$FITTING_STAGE" --start_idx "$START_IDX" --end_idx "$END_IDX" --output_dir "$run_dir" --basdir "$BASDIR" --essential_root "$ESSENTIAL_ROOT" --model_gender "${MODEL_GENDER:-male}" ;;
+    # 评估整改任务 02：过程产物写入 workspace fitting 根（conf 提供
+    # OUTPUT_DIR/INIT_DATA_DIR；直接手写 conf 时退回 canonical 默认值）。
+    "$py" main_singleview.py -c "$repo/$CONFIG_FILE" --dataset "$DATASET" --sub_ids "$SUB_IDS" --seq_name "$SEQ_NAME" --fitting_stage "$FITTING_STAGE" --start_idx "$START_IDX" --end_idx "$END_IDX" --output_dir "${OUTPUT_DIR:-workspace://derived/pressure_toolkit/fitting}" --init_data_dir "${INIT_DATA_DIR:-workspace://derived/pressure_toolkit}" --basdir "${BASDIR:-workspace://derived/pressure_toolkit}" --essential_root "${ESSENTIAL_ROOT:-workspace://dependencies/pressure_toolkit/essential}" --model_gender "${MODEL_GENDER:-male}" ;;
   fpp_train)
     cd Baselines/VP-MoCap/FPP-Net
     fpp_cfg="${CONFIG_FILE:-configs/temporalKPSMPLCont_series5_mlp.yaml}"; [[ "$fpp_cfg" = /* ]] || fpp_cfg="$repo/$fpp_cfg"

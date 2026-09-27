@@ -3,7 +3,8 @@
 
 The native baseline outputs remain untouched.  This adapter writes only:
 
-    results/<Model>/predictions/eval_motion/<session>.npz
+    results/baselines/<Model>/predictions/eval_motion/<session>.npz   (V2M motion)
+    results/baselines/FPP-Net/predictions/v2t/<session>.npz           (V2T pressure)
 
 Each archive contains ``joint_xyz_world``, ``joint_names`` and ``valid_mask``
 plus provenance fields.  Coordinates are converted from the SMPL/floor
@@ -99,10 +100,25 @@ def smpl_yup_to_display(points: np.ndarray) -> np.ndarray:
     return np.stack((points[..., 0], -points[..., 2], points[..., 1]), axis=-1)
 
 
+def resolve_uri(value: str) -> Path:
+    text = str(value)
+    prefixes = {
+        "workspace://": WORKSPACE,
+        "results://": RESULTS,
+    }
+    for prefix, root in prefixes.items():
+        if text.startswith(prefix):
+            return root / text[len(prefix):]
+    path = Path(text).expanduser()
+    return path if path.is_absolute() else ROOT / path
+
+
 def write_archive(path: Path, joints: np.ndarray, valid: np.ndarray,
                   source: str, session: str, frame_indices: np.ndarray | None = None,
                   vertices: np.ndarray | None = None,
-                  poses: np.ndarray | None = None) -> None:
+                  poses: np.ndarray | None = None,
+                  source_type: str = "model_prediction",
+                  extra_meta: dict | None = None) -> None:
     joints = np.asarray(joints, dtype=np.float32)
     valid = np.asarray(valid, dtype=bool).reshape(-1)
     if joints.ndim != 3 or joints.shape[1:] != (24, 3):
@@ -121,8 +137,13 @@ def write_archive(path: Path, joints: np.ndarray, valid: np.ndarray,
         "joint_coordinate_system": np.asarray("world_z_up"),
         "session_id": np.asarray(session),
         "source_native_output": np.asarray(source),
+        # 评估整改任务 01/02：输出来源类型进入导出元数据，
+        # 只有 model_prediction / method_optimization 及其确定性派生可进入公共指标。
+        "provenance_source_type": np.asarray(source_type),
         "target_fps": np.asarray(40.0, dtype=np.float32),
     }
+    for key, value in (extra_meta or {}).items():
+        payload[key] = np.asarray(value)
     if vertices is not None:
         payload["vertices_world"] = np.asarray(vertices, dtype=np.float32)
     if poses is not None:
@@ -143,13 +164,13 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
     date, subject = session_parts(row)
     session = row["session_id"]
     gender = "female" if session in split_ids(args.female) or subject in split_ids(args.female) else "male"
-    frame_paths = pressure_frame_paths(Path(args.pressure_root), date, subject, session)
+    frame_paths = pressure_frame_paths(resolve_uri(args.pressure_root), date, subject, session)
     if str(ROOT / "Baselines" / "pressure_tookit") not in sys.path:
         sys.path.insert(0, str(ROOT / "Baselines" / "pressure_tookit"))
     from lib.core.smpl_mmvp import SMPL_MMVP
     import torch
 
-    essential = WORKSPACE / "dependencies" / "pressure_tookit" / "essential"
+    essential = WORKSPACE / "dependencies" / "pressure_toolkit" / "essential"
     model = SMPL_MMVP(str(essential), gender=gender, stage="tracking").cpu()
     n = int(row["n_frames"])
     joints = np.zeros((n, 24, 3), dtype=np.float32)
@@ -190,8 +211,16 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
     if not np.all(available[valid_frames(row, n)]):
         missing = np.flatnonzero(valid_frames(row, n) & ~available)
         raise ValueError(f"{session}: missing pressure_toolkit frames: {missing[:20].tolist()}")
+    # 2026-09-27 生成清单裁定：pressure_toolkit 的 shape/表面是其拟合
+    # pipeline 原生生成，PVE 可评估（表面对 GT 表面比较）。
     write_archive(output, joints, valid, str(frame_paths[0].parent), session,
-                  vertices=vertices, poses=poses)
+                  vertices=vertices, poses=poses,
+                  source_type="method_optimization",
+                  extra_meta={
+                      "surface_source": "method_optimization",
+                      "shape_source": "method_optimization",
+                      "public_surface_metrics": "true",
+                  })
 
 
 def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
@@ -238,7 +267,8 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
     available = np.zeros(n, dtype=bool)
     available[start:end] = True
     write_archive(output, full, valid_frames(row, n) & available, str(native_path), session,
-                  np.arange(n, dtype=np.int64), vertices=full_vertices, poses=full_poses)
+                  np.arange(n, dtype=np.int64), vertices=full_vertices, poses=full_poses,
+                  source_type="method_optimization")
 
 
 def export_fpp_v2t(row: dict, output: Path) -> None:
@@ -250,6 +280,13 @@ def export_fpp_v2t(row: dict, output: Path) -> None:
     pressure_gt = np.zeros_like(pressure_pred)
     contact_pred = np.zeros((n, 2), dtype=np.uint8)
     contact_gt = np.zeros_like(contact_pred)
+    # Continuous per-vertex SMPL contact maps (contact level of the V2T
+    # hierarchy, 2026-09-27): pred is the network's contact head output,
+    # gt is the f6_soft per-foot soft label broadcast to vertices.  float16
+    # halves the archive size; values live in {0.05, 0.30, 0.70, 0.95}
+    # (pred is continuous in [0, 1]) so precision is not a concern.
+    contact_smpl_pred = None
+    contact_smpl_gt = None
     available = np.zeros(n, dtype=bool)
     for frame in range(n):
         path = source / f"{frame:03d}.npy"
@@ -266,6 +303,11 @@ def export_fpp_v2t(row: dict, output: Path) -> None:
         pressure_gt[frame] = p_gt
         cp = np.asarray(payload["contact_smpl"]["pred"], dtype=np.float32).reshape(2, -1)
         cg = np.asarray(payload["contact_smpl"]["gt"], dtype=np.float32).reshape(2, -1)
+        if contact_smpl_pred is None:
+            contact_smpl_pred = np.zeros((n, 2, cp.shape[1]), dtype=np.float16)
+            contact_smpl_gt = np.zeros_like(contact_smpl_pred)
+        contact_smpl_pred[frame] = cp
+        contact_smpl_gt[frame] = cg
         contact_pred[frame] = cp.mean(axis=1) > 0.5
         contact_gt[frame] = cg.mean(axis=1) > 0.5
         available[frame] = True
@@ -277,6 +319,8 @@ def export_fpp_v2t(row: dict, output: Path) -> None:
         output,
         pressure_pred=pressure_pred,
         pressure_gt=pressure_gt,
+        contact_smpl_pred=contact_smpl_pred,
+        contact_smpl_gt=contact_smpl_gt,
         contact_pred=contact_pred,
         contact_gt=contact_gt,
         valid_mask=valid,
@@ -286,6 +330,12 @@ def export_fpp_v2t(row: dict, output: Path) -> None:
         pressure_source_grid=np.asarray("31x11_per_foot"),
         comparison_pressure_grid=np.asarray("31x11_per_foot"),
         source_native_output=np.asarray(str(source)),
+        # contact_smpl_* 是 V2T 接触级的正式输入：pred 来自 FPP-Net 接触
+        # 头（model_prediction），gt 来自 f6_soft 软标签；二值
+        # contact_pred/contact_gt 仅作诊断/旧兼容保留。
+        provenance_source_type=np.asarray("model_prediction"),
+        contact_gt_source=np.asarray("f6_soft"),
+        formal_contact_metrics=np.asarray("contact_smpl_mse/contact_smpl_bce"),
     )
     print(f"wrote {output} V2T frames={int(valid.sum())}/{n}")
 
@@ -313,7 +363,9 @@ def main() -> None:
     parser.add_argument("--model", choices=("motionpro", "pressure_toolkit", "vp_mocap", "fpp_v2t", "all"), default="all")
     parser.add_argument("--split", choices=("train", "val", "test", "all"), default="all")
     parser.add_argument("--session", default="", help="comma-separated session IDs")
-    parser.add_argument("--pressure-root", default=str(RESULTS / "baselines" / "pressure_toolkit"))
+    # 评估整改任务 02：pressure 输入默认读 workspace fitting 根；
+    # 迁移期旧树可通过 --pressure-root results://baselines/pressure_toolkit 显式传入。
+    parser.add_argument("--pressure-root", default="workspace://derived/pressure_toolkit/fitting")
     parser.add_argument("--female", "--famale", dest="female", default="S14")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -325,7 +377,9 @@ def main() -> None:
             if session not in manifest:
                 raise KeyError(f"session not in manifest: {session}")
             if model == "fpp_v2t":
-                output = RESULTS / "VP-MoCap" / "predictions" / "eval_motion" / f"{session}_V2T.npz"
+                # 评估整改任务 02：FPP-Net V2T 与 VP-MoCap V2M 分离，
+                # V2T 写入 results/baselines/FPP-Net/predictions/v2t/。
+                output = RESULTS / "baselines" / "FPP-Net" / "predictions" / "v2t" / f"{session}.npz"
                 if output.is_file() and not args.force:
                     print(f"skip existing {output}")
                 else:
@@ -333,7 +387,7 @@ def main() -> None:
                 continue
             model_dir = {
                 "motionpro": "baselines/MotionPRO",
-                "pressure_toolkit": "baselines/pressure_tookit",
+                "pressure_toolkit": "baselines/pressure_toolkit",
                 "vp_mocap": "baselines/VP-MoCap",
             }[model]
             output = RESULTS / model_dir / "predictions" / "eval_motion" / f"{session}.npz"

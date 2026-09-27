@@ -23,7 +23,7 @@ def main(argv=None) -> int:
         out = out_root / model_run_name(registry, model_id)
         return component_main([
             "--a2", "--split", args.split,
-            "--fs-main", str(root / "metrics" / (args.split + "_fseries.json")),
+            "--fs-main", str(root / "metrics" / (args.split + ".json")),
             "--out", str(out),
         ])
     return 0

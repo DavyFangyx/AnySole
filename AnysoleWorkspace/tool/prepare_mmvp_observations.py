@@ -3,7 +3,7 @@
 
 This adapter only links the canonical RGB frames and derives calibration/floor
 files from the date-level calibration summary.  The existing 31x11 insole
-files under ``derived/pressure_tookit`` and ``derived/VP-MoCap`` are treated as
+files under ``derived/pressure_toolkit`` and ``derived/VP-MoCap`` are treated as
 read-only inputs.  Depth, RTMPose and CLIFF remain explicit front-end stages;
 the generated report records their presence and never substitutes GT data.
 """
@@ -23,7 +23,7 @@ WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 MANIFEST = WORKSPACE / "manifests/session_manifest.jsonl"
 SPLITS = WORKSPACE / "splits/default/splits.csv"
 SEQ_ROOT = WORKSPACE / "derived/MotionPRO/sequences/cam3"
-TOOLKIT_ROOT = WORKSPACE / "derived/pressure_tookit"
+TOOLKIT_ROOT = WORKSPACE / "derived/pressure_toolkit"
 FPP_ROOT = WORKSPACE / "derived/VP-MoCap"
 
 

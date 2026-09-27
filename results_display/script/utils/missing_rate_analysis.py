@@ -18,7 +18,7 @@ import numpy as np
 COMPONENTS = {
     "upper": ("Upper body", ("PA-MPJPE_upper",), False),
     "hands": ("Hands", ("PA-MPJPE_hands",), False),
-    "global_yaw": ("Global yaw", ("yaw_abs_deg",), False),
+    "global_yaw": ("Global yaw", ("root_orientation_deg",), False),
     "root_traj": ("Root trajectory", ("root_rte_percent",), False),
     "contact": ("Contact timing", ("contact_mcc", "contact_f1", "contact_acc"), True),
     "support": ("Support foot stability", ("foot_sliding_mm",), False),
@@ -29,12 +29,12 @@ V_COMPONENTS = ("upper", "hands", "global_yaw", "root_traj")
 T_COMPONENTS = ("contact", "support", "foot_ground")
 
 
-def load_fseries(path: Path) -> dict[str, Any]:
+def load_fseries(path: Path) -> dict[str, Any]:  # noqa: N802 — 读明细文件 metrics/<split>.json（旧称 fseries）
     if not path.is_file():
-        raise FileNotFoundError("fseries 缺失：%s" % path)
+        raise FileNotFoundError("明细文件缺失：%s" % path)
     data = json.loads(path.read_text(encoding="utf-8"))
     if "metrics" not in data:
-        raise ValueError("不是 fseries 文件（缺 metrics）：%s" % path)
+        raise ValueError("不是明细文件（缺 metrics）：%s" % path)
     return data
 
 

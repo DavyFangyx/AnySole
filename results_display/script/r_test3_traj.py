@@ -1,22 +1,22 @@
-"""Render predicted vs GT root trajectories (Test3), protocol-agnostic.
+"""Render predicted vs GT root trajectories (Test3), native-protocol paired.
+
+评估整改任务 03：每个模型的轨迹只和它自己的配对 GT 比较——SMPL 模型配
+SMPL root GT（pelvis），BVH 模型配 BVH/Hips root GT，不再对所有模型共用
+一条 ``load_session_gt`` 根轨迹。``--compare`` 只纳入 ``root_translation=true``
+（且来源不是 ground_truth_fallback/template_reconstruction）的正式模型；
+检出 GT 回填轨迹时拒绝进入正式轨迹比较并记录原因。
 
 SMPL-protocol models (AnySole) provide the standard ``<session>_<config>.npz``
 files written by ``anysole.eval`` (``predictions/eval_motion/``); they contain
 the exact ``pred_pelvis_trans`` / ``gt_pelvis_trans`` arrays used by
-``traj_ATE``.  BVH-protocol models (e.g. Step2Motion) provide ``*.bvh`` motion
-files whose root-joint path is the trajectory; their GT is loaded from the
-session's SMPL/BVH motion.  The file format is detected automatically, no
-protocol flag is needed.  No model inference happens here.
-
-The npz arrays are in the raw mocap world frame (y-up, meters).  They are
-converted to the same z-up display frame used by the Test1 skeleton panels:
-display ``(x, -z, y)``, i.e. z is vertical and x/y form the ground plane.
+``traj_ATE``.  Unified baseline archives carry ``joint_xyz_world`` whose root
+joint is the trajectory.  BVH-protocol models (Step2Motion) provide ``*.bvh``
+motion files whose Hips path is the trajectory; both pred and BVH GT are
+resampled onto the canonical session grid.  No model inference happens here.
 
 Outputs are written below ``results_display/r_test3_traj/AnySole/<modal>/
 <config>/`` for AnySole models, and below ``r_test3_traj/<model>/gen/``
-for baseline models discovered with ``--auto`` (or the
-``ANYSOLE_RESULTSDISPLAY`` override), with gif/mp4/png kept in separate
-folders.
+for baseline models, with gif/mp4/png kept in separate folders.
 
 Usage (run from the repository root):
     python results_display/script/r_test3_traj.py
@@ -40,14 +40,25 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from utils import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
-from utils.compare_core import MOTION_MODES as MODES, find_prediction, load_mode_registry  # noqa: E402
-from utils.motion_io import load_motion, load_session_gt  # noqa: E402
+from utils.compare_core import (  # noqa: E402
+    MOTION_MODES as MODES,
+    PROTOCOL_LABELS,
+    bvh_joints,
+    find_prediction,
+    load_mode_registry,
+    normalize_protocol,
+    protocol_gt,
+    read_capabilities,
+    read_manifest,
+)
+from utils.motion_io import load_motion  # noqa: E402
 from utils.render_common import (  # noqa: E402
     INFO_FONT,
     TITLE_FONT,
     draw_text,
     session_dir,
 )
+from r_test2_compare import ANYSOLE_MOTION_CAPS, archive_meta, denied_capabilities  # noqa: E402
 
 PRED_ROOT = cli_common.RESULTS_ROOT / "AnySole"
 
@@ -64,6 +75,11 @@ GT_HEX = "#eb6834"
 INK = "#0b0b0b"
 INK_SECONDARY = "#52514e"
 
+# Translation-capability sources that disqualify a model from the formal
+# trajectory comparison (task 03 §5.4): GT 回填 / 模板重建 / 可视化占位。
+TRAJ_DENIED_SOURCES = ("ground_truth_fallback", "template_reconstruction",
+                       "derived_for_visualization")
+
 
 def to_display(trans: np.ndarray) -> np.ndarray:
     """Convert motion y-up meters to the z-up display frame (x, -z, y)."""
@@ -71,51 +87,48 @@ def to_display(trans: np.ndarray) -> np.ndarray:
     return np.stack((t[:, 0], -t[:, 2], t[:, 1]), axis=1)
 
 
-def load_traj(path: Path, seq_dir: Path | None = None, fps: float = 40.0) -> tuple[np.ndarray, np.ndarray]:
-    """Load pred/GT trajectories, auto-detecting the motion format.
+def load_traj(path: Path, row: dict, seq_dir: Path | None = None, fps: float = 40.0) -> tuple[np.ndarray, np.ndarray]:
+    """Load pred/GT trajectories, each prediction paired with its protocol GT.
 
-    SMPL NPZ keeps the eval-embedded pelvis trajectories (the exact source of
-    the traj_ATE metric).  BVH-protocol models carry no embedded trajectory:
-    the root-joint path is used as the prediction, and the GT comes from the
-    session's SMPL (BVH fallback) motion.
+    - BVH: root joint of the parsed skeleton, resampled onto the session grid;
+      GT is the same session's BVH Hips path (native protocol pairing).
+    - AnySole NPZ: eval-embedded pelvis trajectories (the exact source of the
+      traj_ATE metric).
+    - unified ``eval_motion`` NPZ (baselines): ``joint_xyz_world`` root joint
+      paired with the SMPL GT pelvis.
     """
     path = Path(path)
-    if path.suffix.lower() == ".npz":
-        data = np.load(path)
-        if "AnySole" in path.as_posix() and "joint_xyz_world" not in data:
-            raise ValueError(
-                f"legacy AnySole motion archive lacks unified joint_xyz_world/valid_mask: {path}"
-            )
-        if "joint_xyz_world" in data:
-            pred = np.asarray(data["joint_xyz_world"], dtype=np.float64)[:, 0]
-            if "gt_pelvis_trans" in data:
-                gt = to_display(np.asarray(data["gt_pelvis_trans"], dtype=np.float64))
-            elif seq_dir is not None:
-                meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
-                gt = load_session_gt(seq_dir, int(meta["n_frames"]), fps)["joints"][:, 0]
-            else:
-                raise ValueError(f"unified archive has no embedded GT trajectory: {path}")
-            n = min(pred.shape[0], gt.shape[0])
-            return pred[:n], gt[:n]
-        pred_key = "pred_pelvis_trans" if "pred_pelvis_trans" in data else (
-            "pred_trans_world" if "pred_trans_world" in data else "trans"
-        )
-        gt_key = "gt_pelvis_trans" if "gt_pelvis_trans" in data else (
-            "gt_trans_world" if "gt_trans_world" in data else "gt_trans"
-        )
-        pred = to_display(data[pred_key])
-        gt = to_display(data[gt_key])
+    if path.suffix.lower() == ".bvh":
+        joints, _names, _parents = bvh_joints(path, row)
+        pred = joints[:, 0]
+        gt = protocol_gt(row, "bvh23")[0][:, 0]
         n = min(pred.shape[0], gt.shape[0])
-        if pred.shape[0] != gt.shape[0]:
-            log.warning(f"{path.name}: pred {pred.shape[0]} frames vs gt {gt.shape[0]}, using first {n}")
         return pred[:n], gt[:n]
-    # BVH: load_motion returns z-up display meters for both protocols.
-    pred = load_motion(path)["joints"][:, 0]
-    if seq_dir is None:
-        raise ValueError(f"BVH trajectory rendering needs the session dir for GT: {path}")
-    meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
-    gt = load_session_gt(seq_dir, min(pred.shape[0], int(meta["n_frames"])), fps)["joints"][:, 0]
+    data = np.load(path)
+    if "AnySole" in path.as_posix() and "joint_xyz_world" not in data:
+        raise ValueError(
+            f"legacy AnySole motion archive lacks unified joint_xyz_world/valid_mask: {path}"
+        )
+    if "joint_xyz_world" in data:
+        pred = np.asarray(data["joint_xyz_world"], dtype=np.float64)[:, 0]
+        if "gt_pelvis_trans" in data:
+            gt = to_display(np.asarray(data["gt_pelvis_trans"], dtype=np.float64))
+        else:
+            # Unified baseline archive: pair with the SMPL GT pelvis.
+            gt = protocol_gt(row, "smpl24")[0][:, 0]
+        n = min(pred.shape[0], gt.shape[0])
+        return pred[:n], gt[:n]
+    pred_key = "pred_pelvis_trans" if "pred_pelvis_trans" in data else (
+        "pred_trans_world" if "pred_trans_world" in data else "trans"
+    )
+    gt_key = "gt_pelvis_trans" if "gt_pelvis_trans" in data else (
+        "gt_trans_world" if "gt_trans_world" in data else "gt_trans"
+    )
+    pred = to_display(data[pred_key])
+    gt = to_display(data[gt_key])
     n = min(pred.shape[0], gt.shape[0])
+    if pred.shape[0] != gt.shape[0]:
+        log.warning(f"{path.name}: pred {pred.shape[0]} frames vs gt {gt.shape[0]}, using first {n}")
     return pred[:n], gt[:n]
 
 
@@ -235,7 +248,7 @@ def render_traj_panel(
     color=PRED_COLOR,
     legend="Pred",
 ) -> np.ndarray:
-    """One animation frame: GT path (full) + predicted path growing to frame_idx.
+    """One animation frame: paired GT path (full) + predicted path growing to frame_idx.
 
     ``color``/``legend`` let the R_Test3 ``--compare`` row draw each model in
     its own hue while keeping every panel on the same shared projector.
@@ -255,7 +268,7 @@ def render_traj_panel(
     draw.line([(30, PANEL - 30), (30 + bar_len_px, PANEL - 30)], fill=(120, 126, 138), width=3)
     draw_text(draw, (34 + bar_len_px, PANEL - 42), "%.1f m" % projector.bar_len, INFO_FONT, fill=(150, 154, 166))
 
-    # GT path: full sequence.
+    # GT path: full sequence (this model's paired protocol GT).
     gt_uv = projector.uv(gt)
     draw.line([tuple(p) for p in gt_uv], fill=GT_COLOR, width=3)
     # Predicted path: grows with the animation.
@@ -405,7 +418,8 @@ def render_traj_figure(
     plt.close(fig)
 
 
-def render_session(traj_path: Path, session_id: str, config_id: str, seq_dir: Path | None, args: argparse.Namespace, session_out: Path):
+def render_session(traj_path: Path, session_id: str, config_id: str, row: dict,
+                   seq_dir: Path | None, args: argparse.Namespace, session_out: Path):
     stem = f"{session_id}_{config_id}" if config_id else session_id
     paths = {args.gen: cli_common.media_path(session_out, f"{stem}_traj", args.gen)}
     if not args.no_png:
@@ -414,7 +428,7 @@ def render_session(traj_path: Path, session_id: str, config_id: str, seq_dir: Pa
         log.info(f"Skip {session_id}_{config_id}: already exists under {session_out}")
         return "skip"
 
-    pred, gt = load_traj(traj_path, seq_dir, args.fps)
+    pred, gt = load_traj(traj_path, row, seq_dir, args.fps)
     n = pred.shape[0]
     ate_mm = np.linalg.norm(pred - gt, axis=1) * 1000.0
     ate_mean_mm = float(ate_mm.mean())
@@ -459,11 +473,12 @@ def parse_args() -> argparse.Namespace:
         "--compare",
         action="store_true",
         help="Mode-aligned side-by-side comparison view: one shared projector per session, "
-        "one panel per same-mode model (AnySole + registry baselines). Output under "
+        "one panel per same-mode model with real predicted root translation "
+        "(AnySole + registry baselines). Output under "
         "r_test3_traj/compare/<mode>/; per-model visualization is unaffected.",
     )
     parser.add_argument("--mode", default="all", help="Generation mode(s) for --compare: VT2M,V2M,T2M or 'all'.")
-    parser.add_argument("--modes-config", type=Path, default=Path(__file__).resolve().parent / "models_modes.yaml",
+    parser.add_argument("--modes-config", type=Path, default=Path(__file__).resolve().parent.parent / "models_modes.yaml",
                         help="Mode registry (--compare only).")
     args = parser.parse_args()
     return args
@@ -474,17 +489,18 @@ def hex_to_rgb(value: str) -> tuple[int, int, int]:
     return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4)) if len(value) == 6 else (120, 120, 128)
 
 
-def compare_load_pred(path: Path) -> np.ndarray:
+def compare_load_pred(path: Path, row: dict, protocol: str) -> np.ndarray:
     """Root trajectory in the z-up display frame, for any prediction layout.
 
-    - ``*.bvh``: root joint of the parsed skeleton (already display meters).
+    - ``*.bvh``: Hips path of the parsed skeleton, resampled to the session
+      grid (display meters).
     - eval NPZ (AnySole): embedded ``pred_pelvis_trans`` in y-up mocap world.
     - unified ``eval_motion`` NPZ (baselines): ``joint_xyz_world`` root joint,
       already written in the display frame by ``export_baseline_motion.py``.
     """
     path = Path(path)
     if path.suffix.lower() == ".bvh":
-        return load_motion(path)["joints"][:, 0]
+        return bvh_joints(path, row)[0][:, 0]
     data = np.load(path)
     if "AnySole" in path.as_posix() and "joint_xyz_world" not in data:
         raise ValueError(f"legacy AnySole motion archive lacks unified contract: {path}")
@@ -497,16 +513,33 @@ def compare_load_pred(path: Path) -> np.ndarray:
     raise ValueError(f"no trajectory in {path}; keys={list(data.keys())}")
 
 
-def render_compare_figure(models: list[dict], gt: np.ndarray, session_id: str, mode: str, png_path: Path, fps: float) -> None:
-    """Static overlay figure: top-down view + height-vs-time, all models in one axes."""
+def translation_allowed(entry: dict, path: Path | None) -> tuple[bool, str]:
+    """Formal-trajectory gate (task 03 §5.4): real predicted root translation only.
+
+    ``root_translation=true`` in the registry AND the archive must not be a GT
+    fallback / template reconstruction.  Returns (allowed, reason).
+    """
+    caps = read_capabilities(entry.get("capabilities") or {})
+    if not caps.get("root_translation", False):
+        return False, "not_applicable: root_translation=false"
+    denied = denied_capabilities(entry, archive_meta(path) if path is not None else None)
+    if "root_translation" in denied:
+        return False, "refused: root_translation source denied (%s)" % ",".join(sorted(denied))
+    meta = archive_meta(path) if path is not None else {}
+    for field in ("root_translation_source", "provenance_source_type"):
+        if str(meta.get(field, "")).strip() in TRAJ_DENIED_SOURCES:
+            return False, f"refused: {field}={meta[field]}"
+    return True, ""
+
+
+def render_compare_figure(models: list[dict], gt_columns: dict[str, np.ndarray],
+                          session_id: str, mode: str, png_path: Path, fps: float) -> None:
+    """Static overlay figure: top-down view + height-vs-time, models grouped by
+    their paired protocol GT (each model only in its own protocol's axes)."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-
-    t = np.arange(gt.shape[0], dtype=np.float64) / float(fps)
-    fig, axes = plt.subplots(1, 2, figsize=(15.0, 6.0), dpi=100)
-    fig.suptitle(f"{session_id}  {mode}  trajectory compare", fontsize=13, color=INK, y=0.99)
 
     def style_2d(ax):
         for side in ("top", "right"):
@@ -516,23 +549,35 @@ def render_compare_figure(models: list[dict], gt: np.ndarray, session_id: str, m
         for spine in ("left", "bottom"):
             ax.spines[spine].set_color("#c8c8c4")
 
-    for ax, title in zip(axes, ("Top-down (x-y)", "Height vs time")):
-        ax.plot(gt[:, 0], gt[:, 1] if title.startswith("Top") else gt[:, 2], color=GT_HEX, lw=2.4, label="GT")
-        for m in models:
-            pred = m["pred"]
-            color = tuple(v / 255.0 for v in m["color"]) if isinstance(m["color"], tuple) else m["color"]
-            label = f"{m['label']}  ATE {m['ate_mm']:.0f}mm"
-            ax.plot(pred[:, 0], pred[:, 1] if title.startswith("Top") else pred[:, 2], color=color, lw=1.8, label=label)
-        if title.startswith("Top"):
-            ax.set_aspect("equal")
-            ax.set_xlabel("x (m)", fontsize=9, color=INK_SECONDARY)
-            ax.set_ylabel("y (m)", fontsize=9, color=INK_SECONDARY)
-        else:
-            ax.set_xlabel("t (s)", fontsize=9, color=INK_SECONDARY)
-            ax.set_ylabel("z (m)", fontsize=9, color=INK_SECONDARY)
-        ax.set_title(title, fontsize=10, color=INK)
-        ax.legend(loc="best", frameon=False, fontsize=8.5, handlelength=1.8)
-        style_2d(ax)
+    protocols = sorted(gt_columns)
+    fig, axes = plt.subplots(1, 2 * len(protocols), figsize=(15.0 * len(protocols), 6.0), dpi=100)
+    axes = list(np.atleast_1d(axes))  # 1 row -> 1-D array of axes
+    fig.suptitle(f"{session_id}  {mode}  trajectory compare (paired protocol GT)", fontsize=13, color=INK, y=0.99)
+    for pi, protocol in enumerate(protocols):
+        gt = gt_columns[protocol]
+        t = np.arange(gt.shape[0], dtype=np.float64) / float(fps)
+        label = PROTOCOL_LABELS.get(protocol, protocol)
+        for ax, title in zip((axes[2 * pi], axes[2 * pi + 1]), ("Top-down (x-y)", "Height vs time")):
+            ax.plot(gt[:, 0], gt[:, 1] if title.startswith("Top") else gt[:, 2],
+                    color=GT_HEX, lw=2.4, label=f"GT ({label})")
+            for m in models:
+                if m.get("protocol") != protocol:
+                    continue
+                pred = m["pred"]
+                color = tuple(v / 255.0 for v in m["color"]) if isinstance(m["color"], tuple) else m["color"]
+                model_label = f"{m['label']}  ATE {m['ate_mm']:.0f}mm"
+                ax.plot(pred[:, 0], pred[:, 1] if title.startswith("Top") else pred[:, 2],
+                        color=color, lw=1.8, label=model_label)
+            if title.startswith("Top"):
+                ax.set_aspect("equal")
+                ax.set_xlabel("x (m)", fontsize=9, color=INK_SECONDARY)
+                ax.set_ylabel("y (m)", fontsize=9, color=INK_SECONDARY)
+            else:
+                ax.set_xlabel("t (s)", fontsize=9, color=INK_SECONDARY)
+                ax.set_ylabel("z (m)", fontsize=9, color=INK_SECONDARY)
+            ax.set_title(f"{label} — {title}", fontsize=10, color=INK)
+            ax.legend(loc="best", frameon=False, fontsize=8.5, handlelength=1.8)
+            style_2d(ax)
 
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     png_path.parent.mkdir(parents=True, exist_ok=True)
@@ -541,7 +586,11 @@ def render_compare_figure(models: list[dict], gt: np.ndarray, session_id: str, m
 
 
 def run_compare(args: argparse.Namespace) -> int:
-    """Mode-aligned side-by-side trajectory rows (R_Test3 --compare)."""
+    """Mode-aligned side-by-side trajectory rows (R_Test3 --compare).
+
+    Only models with real predicted root translation enter (task 03 §5.4);
+    each panel draws the model's paired protocol GT.
+    """
     registry = load_mode_registry(args.modes_config)
     modes = list(MODES) if args.mode == "all" else cli_common.split_csv_arg(args.mode)
     unknown = sorted(set(modes) - set(MODES))
@@ -557,6 +606,11 @@ def run_compare(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     session_ids = cli_common.load_evaluable_sessions(args.session, split_csv, split)
     log.info(f"compare sessions ({split}, {len(session_ids)}): {session_ids}")
+    manifest_rows = {
+        row["session_id"]: row
+        for row in read_manifest(cli_common.DEFAULT_MANIFEST, split,
+                                 split_csv=split_csv, evaluable_only=True)
+    }
 
     model_dirs = [
         cli_common.anysole_model_dir(modal, contact_method, getattr(args, "variant", None))
@@ -568,6 +622,9 @@ def run_compare(args: argparse.Namespace) -> int:
         baselines = list(registry.get(mode, []))
         log.info(f"compare mode {mode}: baselines={[b.get('name') for b in baselines]}")
         for session_id in session_ids:
+            if session_id not in manifest_rows:
+                continue
+            row = manifest_rows[session_id]
             try:
                 seq_dir = session_dir(seq_root, session_id)
             except FileNotFoundError as exc:
@@ -581,49 +638,80 @@ def run_compare(args: argparse.Namespace) -> int:
                 log.info(f"Skip {stem}: already exists")
                 continue
 
-            # Gather same-mode models: main AnySole config + registry baselines.
+            # Gather same-mode models with real predicted root translation:
+            # main AnySole config + registry baselines.
             models: list[dict] = []
             for model_dir in model_dirs:
                 traj_path = find_traj_file(PRED_ROOT / model_dir / "predictions", session_id, mode)
                 if traj_path is None:
                     log.warning(f"{session_id}_{mode}: AnySole {model_dir} missing, panel skipped")
                     continue
-                models.append({"label": f"AnySole {mode}", "color": PRED_COLOR, "path": traj_path})
+                models.append({
+                    "label": f"AnySole {mode}", "color": PRED_COLOR, "path": traj_path,
+                    "protocol": "smpl24",
+                    "entry": {"capabilities": ANYSOLE_MOTION_CAPS, "sources": {}},
+                })
             for entry in baselines:
+                name = str(entry.get("display_name") or entry.get("name") or "")
+                protocol = normalize_protocol(str(entry.get("protocol") or ""))
+                if protocol == "pressure":
+                    continue
                 root = cli_common.resolve_path(entry.get("prediction_root", ""))
                 traj_path = find_prediction(root, session_id, entry.get("pattern") or None)
                 if traj_path is None:
-                    log.warning(f"{session_id}_{mode}: {entry.get('name')} missing, panel skipped")
+                    log.warning(f"{session_id}_{mode}: {name} missing, panel skipped")
                     continue
-                models.append({"label": str(entry.get("name", "")), "color": hex_to_rgb(entry.get("color", "")), "path": traj_path})
+                allowed, reason = translation_allowed(entry, traj_path)
+                if not allowed:
+                    log.warning(f"{session_id}_{mode}: {name} excluded from trajectory compare: {reason}")
+                    continue
+                models.append({
+                    "label": name, "color": hex_to_rgb(entry.get("color", "")),
+                    "path": traj_path, "protocol": protocol, "entry": entry,
+                })
             if not models:
                 log.warning(f"{session_id}_{mode}: no predictions at all, skipped")
                 continue
 
             loaded = []
+            gt_columns: dict[str, np.ndarray] = {}
             for m in models:
                 try:
-                    loaded.append({**m, "pred": compare_load_pred(m["path"])})
+                    protocol = m["protocol"]
+                    pred = compare_load_pred(m["path"], row, protocol)
+                    if protocol not in gt_columns:
+                        gt_columns[protocol] = protocol_gt(row, protocol)[0][:, 0]
+                    gt = gt_columns[protocol]
+                    n = min(pred.shape[0], gt.shape[0])
+                    loaded.append({**m, "pred": pred[:n], "gt": gt[:n]})
+                    log.info(
+                        f"{session_id}_{mode}: {m['label']} protocol="
+                        f"{PROTOCOL_LABELS.get(protocol, protocol)} "
+                        f"gt_source={row['bvh_path' if protocol == 'bvh23' else 'smpl_path']}"
+                    )
                 except Exception as exc:
                     log.warning(f"{session_id}_{mode}: {m['label']}: {exc}")
             if not loaded:
                 continue
             n = min(m["pred"].shape[0] for m in loaded)
-            gt = load_session_gt(seq_dir, n, args.fps)["joints"][:, 0]
             for m in loaded:
                 m["pred"] = m["pred"][:n]
-                m["ate_mm"] = float(np.linalg.norm(m["pred"] - gt, axis=1).mean() * 1000.0)
+                m["ate_mm"] = float(np.linalg.norm(m["pred"] - m["gt"][:n], axis=1).mean() * 1000.0)
+            gt_columns = {p: g[:n] for p, g in gt_columns.items()}
 
             # One shared projector over every model + GT: same camera, directly comparable.
-            projector = TrajProjector([gt] + [m["pred"] for m in loaded])
+            projector = TrajProjector(list(gt_columns.values()) + [m["pred"] for m in loaded])
             frame_ids = list(range(0, n, max(args.stride, 1)))
             if args.max_frames > 0:
                 frame_ids = frame_ids[: args.max_frames]
             gen_path = paths[args.gen]
             frames = [
                 np.concatenate([
-                    render_traj_panel(projector, m["pred"], gt, t, session_id, m["label"], n, args.fps,
-                                      m["ate_mm"], color=m["color"], legend=m["label"])
+                    render_traj_panel(
+                        projector, m["pred"], m["gt"][:n], t, session_id,
+                        f"{m['label']} — {PROTOCOL_LABELS.get(m['protocol'], m['protocol'])}",
+                        n, args.fps, m["ate_mm"], color=m["color"], legend=m["label"],
+                    )
                     for m in loaded
                 ], axis=1)
                 for t in frame_ids
@@ -637,7 +725,7 @@ def run_compare(args: argparse.Namespace) -> int:
             log.info(f"Wrote {gen_path}")
             if not args.no_png:
                 png_path = paths["png"]
-                render_compare_figure(loaded, gt, session_id, mode, png_path, args.fps)
+                render_compare_figure(loaded, gt_columns, session_id, mode, png_path, args.fps)
                 log.info(f"Wrote {png_path}")
             ates = ", ".join(f"{m['label']}={m['ate_mm']:.0f}mm" for m in loaded)
             log.info(f"{session_id}_{mode}: frames={n} ATE [{ates}]")
@@ -659,6 +747,11 @@ def main() -> int:
         log.info(f"Sessions from --session: {session_ids}")
     else:
         log.info(f"Sessions from {args.split} split ({len(session_ids)}): {session_ids}")
+    manifest_rows = {
+        row["session_id"]: row
+        for row in read_manifest(cli_common.DEFAULT_MANIFEST, args.split,
+                                 split_csv=split_csv, evaluable_only=True)
+    }
 
     # Jobs: (pred_root, session_out_root, config_id); config_id "" = baseline.
     jobs: list[tuple[Path, Path, str]] = []
@@ -677,6 +770,9 @@ def main() -> int:
             log.warning(f"No prediction directory: {pred_root}")
             continue
         for session_id in session_ids:
+            if session_id not in manifest_rows:
+                log.warning(f"Skip {session_id}: no manifest row")
+                continue
             traj_path = find_traj_file(pred_root, session_id, config_id)
             if traj_path is None:
                 log.warning(f"Skip {session_out.parent.name}/{session_out.name}/{session_id}: no SMPL/BVH motion file (re-run eval or the baseline)")
@@ -689,7 +785,8 @@ def main() -> int:
                     continue
                 seq_dir = None
             try:
-                render_session(traj_path, session_id, config_id, seq_dir, args, session_out)
+                render_session(traj_path, session_id, config_id, manifest_rows[session_id],
+                               seq_dir, args, session_out)
             except Exception as exc:  # one bad session must not stop the sweep
                 log.error(f"{session_id}_{config_id}: {exc}")
     return 0

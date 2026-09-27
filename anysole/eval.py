@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -210,13 +209,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--no-write-motion", action="store_true", help="Disable SMPL motion export.")
     parser.add_argument("--metrics-out", type=Path, default=None, metavar="FILE",
-                        help="Write VT2M/V2M/T2M metrics as JSON (default: model results metrics directory).")
+                        help="Write the whole-body brief metrics (T2M/V2M/VT2M/V2T) to this JSON "
+                        "path (default: <model>/metrics/<split>_brief.json).")
     parser.add_argument(
         "--protocol-out",
         type=Path,
         default=None,
         metavar="FILE",
-        help="Write extended protocol metrics to this JSON path. Defaults to the checkpoint model directory.",
+        help="Write the full protocol detail metrics (per-part + robustness) to this JSON "
+        "path. Default: <model>/metrics/<split>.json.",
     )
     parser.add_argument(
         "--protocol-seed",
@@ -435,7 +436,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if multi and args.metrics_out is not None:
         raise ValueError(
             "--metrics-out is per-model; omit it when evaluating several models "
-            "(each model's metrics go to its own metrics/test.json)"
+            "(each model's metrics go to its own metrics/test_brief.json)"
         )
     if multi and args.protocol_out is not None:
         raise ValueError(
@@ -795,12 +796,11 @@ def _evaluate_one(
                 print("wrote %s" % output_path)
     metrics_out = args.metrics_out
     if metrics_out is None:
-        metrics_out = model_root / "metrics" / ("%s.json" % args.split)
-    metrics_out.parent.mkdir(parents=True, exist_ok=True)
+        metrics_out = model_root / "metrics" / ("%s_brief.json" % args.split)
     from anysole.utils.eval_protocol import run_protocol
     protocol_out = args.protocol_out
     if protocol_out is None:
-        protocol_out = model_root / "metrics" / ("%s_fseries.json" % args.split)
+        protocol_out = model_root / "metrics" / ("%s.json" % args.split)
     final_metrics = run_protocol(
         checkpoint=checkpoint,
         config=config,
@@ -819,6 +819,7 @@ def _evaluate_one(
         contact_method=contact_method,
         tw=tw,
         out_path=protocol_out,
+        brief_out=metrics_out,
         v2t_out_dir=motion_out,
     )
     if not final_metrics:
@@ -826,21 +827,6 @@ def _evaluate_one(
             "canonical session evaluation requires non-overlapping windows; "
             "this checkpoint/config uses an unsupported continuation stride"
         )
-    payload = {"checkpoint": str(ckpt), "modal": str(checkpoint.get("config", {}).get("modal", MODEL_ANYSOLEV1)),
-               "contact_method": contact_method,
-               "split": args.split, "sample_steps": sample_steps, "metrics": final_metrics}
-    if "V2M" in final_metrics:
-        v2t_names = (
-            "T_mae", "T_rmse", "T_corr", "pressure_force_mae",
-            "pressure_force_rmse", "pressure_force_r2",
-            "pressure_cop_error_left", "pressure_cop_error_right",
-            "pressure_cop_error_mean", "contact_f1", "contact_acc",
-            "contact_recall", "air_recall",
-        )
-        payload["v2t"] = {name: final_metrics["V2M"][name]
-                          for name in v2t_names if name in final_metrics["V2M"]}
-    metrics_out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print("wrote %s" % metrics_out)
     return 0
 
 

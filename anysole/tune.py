@@ -149,8 +149,8 @@ def eval_command(args, out_dir: Path) -> list:
 
 
 def parse_val_metrics(out_dir: Path) -> dict:
-    """{'VT2M': mpjpe, ...} from the eval output metrics/<split>.json."""
-    path = out_dir / "metrics" / "val_fseries.json"
+    """{'VT2M': mpjpe, ...} from the eval output metrics/<split>.json (detail)."""
+    path = out_dir / "metrics" / "val.json"
     if not path.is_file():
         raise FileNotFoundError("trial eval wrote no metrics: %s" % path)
     metrics = json.loads(path.read_text())["metrics"]

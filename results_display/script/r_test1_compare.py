@@ -1,19 +1,24 @@
 """R_Test1 comparison view: one row of panels per generation mode.
 
+评估整改任务 03：删除 common19 裁剪与公共骨架边。每个模型画自己的原生
+骨架（SMPL-24 用 SMPL 树、BVH-23 用解析出的 Skeleton3 层级），逐帧 MPJPE
+只在模型与其**配对同协议 GT** 之间计算。混合协议的一行不再用一个
+``GT Motion`` 面板代表所有模型：每个出现过的协议各给一栏 GT
+（``GT Motion — SMPL-24 native`` / ``GT Motion — BVH-23 native``）。
+
 Row layout is mode-locked by ``models_modes.yaml`` (rows of different modes
 never share one animation):
 
-    VT2M: [Tactile] [AnySole VT2M] [MotionPRO] [MMVP_pressure_toolkit] [GT]
-    V2M:  [Video]   [AnySole V2M]  [MMVP_FPP-Net]                    [GT]
-    T2M:  [Tactile] [AnySole T2M]  [Step2Motion]                     [GT]
+    VT2M: [Tactile] [AnySole VT2M] [MotionPRO] [MMVP pressure_toolkit] [GT SMPL-24]
+    V2M:  [Video]   [AnySole V2M]  [MMVP_VP-MoCap]                   [GT SMPL-24]
+    T2M:  [Tactile] [AnySole T2M]  [Step2Motion]         [GT SMPL-24] [GT BVH-23]
 
 The input panel follows the mode's real input: tactile heatmap for
-VT2M/T2M, the actual RGB camera frame for V2M.  Every skeleton panel draws
-the same common19 semantic joint set with the shared ``render_common``
-renderer, so poses are directly comparable at a glance; each model panel's
-footer shows its own per-frame MPJPE.  A model without an exported
-prediction gets a grey placeholder panel naming the missing path (never
-silently skipped).
+VT2M/T2M, the actual RGB camera frame for V2M.  Every model panel title
+carries its ``SMPL-24 native`` / ``BVH-23 native`` protocol marker.  A model
+without an exported prediction gets a grey placeholder panel naming the
+missing path (never silently skipped, never substituted by another model's
+GT).
 
 Outputs land in ``results_display/ResultTest/R1Test_visualize/compare/<mode>/``
 and do not touch the per-model visualization directories.
@@ -39,16 +44,20 @@ if str(SCRIPT_DIR) not in sys.path:
 from utils import cli_common  # noqa: E402
 from loguru import logger as log  # noqa: E402
 from utils.compare_core import (  # noqa: E402
-    COMMON_JOINTS,
     GT_COLOR,
     MAIN_COLOR,
     MISSING_COLOR,
     MOTION_MODES as MODES,
+    PROTOCOL_LABELS,
     array_from_file,
-    common_edges_for,
-    frame_mpjpe_mm,
+    bvh_joints,
+    find_prediction,
     load_mode_registry,
-    select_common_joints,
+    native_edges,
+    native_frame_mpjpe_mm,
+    normalize_protocol,
+    protocol_gt,
+    read_manifest,
 )
 from utils.motion_io import load_session_gt  # noqa: E402
 from utils.render_common import (  # noqa: E402
@@ -75,10 +84,6 @@ def hex_to_rgb(value: str) -> tuple[int, int, int]:
     return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def protocol_of(fmt: str) -> str:
-    return {"smpl": "smpl24", "bvh": "bvh23"}.get(fmt, fmt)
-
-
 def load_pressure(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     pressure = np.load(seq_dir / "pressure.npz")["pressure"].astype(np.float32)
     fake_path = seq_dir / "fake_mask.npy"
@@ -88,7 +93,7 @@ def load_pressure(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
 
 def video_frames(session_id: str) -> list[Path]:
     """RGB camera frames for the V2M input panel (0..N-1 aligned to the grid)."""
-    images = cli_common.WORKSPACE_ROOT / "derived/pressure_tookit/images"
+    images = cli_common.WORKSPACE_ROOT / "derived/pressure_toolkit/images"
     for d in sorted(images.glob(f"*/*/{session_id}")):
         color = d / "color"
         if color.is_dir():
@@ -127,9 +132,22 @@ def render_missing_panel(label: str, reason: str) -> np.ndarray:
     return np.asarray(canvas)
 
 
-def load_anysole_pred(model_dir: str, session_id: str, config_id: str):
-    """Load the main model's common19 joints for one config; None when missing."""
-    pred_root = PRED_ROOT / model_dir / "predictions"
+def anysole_prediction_roots(model_dir: Path, variant: str | None) -> list[tuple[str, Path]]:
+    """AnySole run subdirs (stacked-hyperparameter naming) or the flat layout."""
+    if variant:
+        return [(variant, model_dir / variant)]
+    if not model_dir.is_dir():
+        return []
+    runs = sorted(
+        p for p in model_dir.iterdir()
+        if p.is_dir() and ((p / "checkpoints").is_dir() or (p / "predictions").is_dir())
+    )
+    return [(p.name, p) for p in runs] or [("", model_dir)]
+
+
+def load_anysole_pred(model_dir: Path, run_name: str, session_id: str, config_id: str, row: dict):
+    """Load the main model's native SMPL-24 joints (+ names + protocol); None when missing."""
+    pred_root = (model_dir / run_name if run_name else model_dir) / "predictions"
     for cand in (
         pred_root / "eval_motion" / f"{session_id}_{config_id}.npz",
         pred_root / "eval_bvh" / f"{session_id}_{config_id}.bvh",
@@ -141,49 +159,108 @@ def load_anysole_pred(model_dir: str, session_id: str, config_id: str):
                 return None, f"{cand}: {exc}"
             if mask is None:
                 return None, f"legacy motion archive without valid_mask: {cand}"
-            return select_common_joints(joints, names, protocol), str(cand)
+            return {"joints": joints, "names": names, "protocol": protocol}, str(cand)
     return None, str(pred_root / "eval_motion" / f"{session_id}_{config_id}.npz")
 
 
-def load_baseline_pred(entry: dict, session_id: str):
-    """Load one registry baseline's common19 joints; None when missing."""
+def load_baseline_pred(entry: dict, session_id: str, row: dict):
+    """Load one registry baseline's native joints; None when missing."""
     root = cli_common.resolve_path(entry.get("prediction_root", ""))
-    from utils.compare_core import find_prediction
     path = find_prediction(root, session_id, entry.get("pattern") or None)
     if path is None:
         return None, f"{root}/{session_id}"
     try:
-        joints, _, names, protocol = array_from_file(path)
-        return select_common_joints(joints, names, protocol), str(path)
+        protocol = normalize_protocol(str(entry.get("protocol") or ""))
+        if path.suffix.lower() == ".bvh":
+            # Resample the BVH onto the canonical session grid (exact frame
+            # pairing with the GT, same rule as R_Test2).
+            joints, names, _parents = bvh_joints(path, row)
+            return {"joints": joints, "names": names,
+                    "protocol": PROTOCOL_LABELS[protocol]}, str(path)
+        joints, mask, names, protocol_label = array_from_file(path)
+        return {"joints": joints, "names": names, "protocol": protocol_label}, str(path)
     except Exception as exc:
         return None, f"{path}: {exc}"
 
 
-def render_session(mode: str, session_id: str, model_dir: str, baselines: list[dict], args: argparse.Namespace, out_mode: Path, seq_root: Path):
-    stem = f"{session_id}_{mode}_compare"
+def render_session(mode: str, session_id: str, model_dir: Path, run_name: str,
+                   baselines: list[dict], args: argparse.Namespace, out_mode: Path,
+                   seq_root: Path, manifest_rows: dict[str, dict]):
+    stem = f"{session_id}_{mode}_{run_name}_compare" if run_name else f"{session_id}_{mode}_compare"
     gen_path = cli_common.media_path(out_mode, stem, args.gen)
     if cli_common.outputs_ready([gen_path]) and not args.force:
         log.info(f"Skip {session_id}_{mode}: already exists")
         return "skip"
 
+    row = manifest_rows[session_id]
     seq_dir = session_dir(seq_root, session_id)
     pressure, fake = load_pressure(seq_dir)
     n_ref = pressure.shape[0]
-    gt_loaded = load_session_gt(seq_dir, n_ref, args.fps)
-    gt = select_common_joints(gt_loaded["joints"], tuple(gt_loaded["names"]), protocol_of(gt_loaded["format"]))
-    gt_edges = common_edges_for(tuple(COMMON_JOINTS))
 
-    main_joints, main_path = load_anysole_pred(model_dir, session_id, mode)
-    models: list[dict] = [{
-        "label": f"AnySole {mode}", "color": MAIN_COLOR, "joints": main_joints, "reason": main_path,
-    }]
+    # Main model: native SMPL-24 with its paired SMPL GT.
+    main, main_path = load_anysole_pred(model_dir, run_name, session_id, mode, row)
+    models: list[dict] = []
+    if main is not None:
+        main_protocol = normalize_protocol(main["protocol"])
+        gt_joints, gt_names = protocol_gt(row, main_protocol)
+        models.append({
+            "label": f"AnySole {mode}", "color": MAIN_COLOR,
+            "joints": main["joints"], "names": main["names"], "protocol": main_protocol,
+            "edges": native_edges(main["names"]),
+            "gt": gt_joints, "gt_names": gt_names,
+            "gt_edges": native_edges(gt_names),
+            "reason": main_path,
+        })
+    else:
+        models.append({
+            "label": f"AnySole {mode}", "color": MAIN_COLOR,
+            "joints": None, "names": (), "protocol": "smpl24",
+            "edges": [], "gt": None, "gt_names": (), "gt_edges": [],
+            "reason": main_path,
+        })
     for entry in baselines:
-        joints, path = load_baseline_pred(entry, session_id)
         color = hex_to_rgb(entry.get("color", "#787880"))
-        models.append({"label": str(entry.get("name", "")), "color": color, "joints": joints, "reason": path})
+        label = str(entry.get("display_name") or entry.get("name") or "")
+        pred, path = load_baseline_pred(entry, session_id, row)
+        if pred is None:
+            models.append({
+                "label": label, "color": color,
+                "joints": None, "names": (), "protocol": "",
+                "edges": [], "gt": None, "gt_names": (), "gt_edges": [],
+                "reason": path,
+            })
+            continue
+        protocol = normalize_protocol(pred["protocol"])
+        gt_joints, gt_names = protocol_gt(row, protocol)
+        models.append({
+            "label": label, "color": color,
+            "joints": pred["joints"], "names": pred["names"], "protocol": protocol,
+            "edges": native_edges(pred["names"]),
+            "gt": gt_joints, "gt_names": gt_names,
+            "gt_edges": native_edges(gt_names),
+            "reason": path,
+        })
 
-    n = min([n_ref, gt.shape[0], fake.shape[0]] + [m["joints"].shape[0] for m in models if m["joints"] is not None])
+    lengths = [n_ref, fake.shape[0]]
+    for m in models:
+        if m["joints"] is not None:
+            lengths.append(m["joints"].shape[0])
+        if m["gt"] is not None:
+            lengths.append(m["gt"].shape[0])
+    n = min(lengths)
     frames_path = video_frames(session_id)
+
+    # One GT column per protocol present in this row (never a single shared
+    # GT panel standing for mixed SMPL/BVH predictions).
+    gt_columns: list[dict] = []
+    seen = set()
+    for m in models:
+        if m["gt"] is not None and m["protocol"] and m["protocol"] not in seen:
+            seen.add(m["protocol"])
+            gt_columns.append({
+                "label": f"GT Motion — {PROTOCOL_LABELS[m['protocol']]}",
+                "joints": m["gt"][:n], "edges": m["gt_edges"],
+            })
 
     frame_ids = list(range(0, n, max(args.stride, 1)))
     if args.max_frames > 0:
@@ -203,9 +280,17 @@ def render_session(mode: str, session_id: str, model_dir: str, baselines: list[d
             if m["joints"] is None:
                 panels.append(render_missing_panel(m["label"], m["reason"]))
                 continue
-            mpjpe = frame_mpjpe_mm(m["joints"][:n], gt[:n])
-            panels.append(render_skeleton_panel(m["joints"][t], m["label"], m["color"], t, n, edges=gt_edges, mpjpe_mm=float(mpjpe[t])))
-        panels.append(render_skeleton_panel(gt[t], "GT Motion", GT_COLOR, t, n, edges=gt_edges))
+            marker = PROTOCOL_LABELS.get(m["protocol"], m["protocol"])
+            mpjpe = native_frame_mpjpe_mm(m["joints"][:n], m["gt"][:n], protocol=m["protocol"])
+            panels.append(render_skeleton_panel(
+                m["joints"][t], f"{m['label']} — {marker}", m["color"], t, n,
+                edges=m["edges"], mpjpe_mm=float(mpjpe[t]),
+            ))
+        for gt_col in gt_columns:
+            panels.append(render_skeleton_panel(
+                gt_col["joints"][t], gt_col["label"], GT_COLOR, t, n,
+                edges=gt_col["edges"],
+            ))
         out_frames.append(np.concatenate(panels, axis=1))
     if not out_frames:
         raise RuntimeError(f"No frames rendered for {session_id}_{mode}")
@@ -217,7 +302,8 @@ def render_session(mode: str, session_id: str, model_dir: str, baselines: list[d
     else:
         cli_common.write_mp4(out_frames, gen_path, frame_fps)
     log.info(f"Wrote {gen_path}")
-    log.info(f"{session_id}_{mode}: row_width={out_frames[0].shape[1]}px frames={len(out_frames)}")
+    protocols = ", ".join(m["protocol"] for m in models if m["joints"] is not None)
+    log.info(f"{session_id}_{mode}: row_width={out_frames[0].shape[1]}px frames={len(out_frames)} protocols=[{protocols}]")
     return "write"
 
 
@@ -228,7 +314,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", default="all", help="Generation mode(s): VT2M,V2M,T2M or 'all'.")
     parser.add_argument("--model-name", "--modal", dest="modal", metavar="MODEL_NAME", default="V4B", help="AnySole model name(s), comma-separated; legacy alias: --modal.")
     parser.add_argument("--contact-method", default="joint_and", help="Contact-label scheme(s), comma-separated.")
-    parser.add_argument("--modes-config", type=Path, default=SCRIPT_DIR / "models_modes.yaml", help="Mode registry.")
+    parser.add_argument("--variant", default=None, help="AnySole stacked-hyperparameter run subdir (omit to scan all runs).")
+    parser.add_argument("--modes-config", type=Path, default=SCRIPT_DIR.parent / "models_modes.yaml", help="Mode registry.")
     parser.set_defaults(split="val")  # iteration split by default; pass --split test for the formal 36-session set
     args = parser.parse_args()
     return args
@@ -250,6 +337,15 @@ def main() -> int:
     session_ids = cli_common.load_evaluable_sessions(args.session, split_csv, args.split)
     log.info(f"Sessions ({len(session_ids)}): {session_ids}")
     log.info(f"Modes: {modes}")
+    # Paired native GT per session comes from the canonical manifest row.
+    manifest_rows = {
+        row["session_id"]: row
+        for row in read_manifest(cli_common.DEFAULT_MANIFEST, args.split,
+                                 split_csv=split_csv, evaluable_only=True)
+    }
+    missing_manifest = [sid for sid in session_ids if sid not in manifest_rows]
+    if missing_manifest:
+        log.warning(f"Sessions without manifest row (skipped): {missing_manifest}")
 
     model_dirs = [
         cli_common.anysole_model_dir(modal, contact_method)
@@ -257,21 +353,25 @@ def main() -> int:
         for contact_method in cli_common.split_csv_arg(args.contact_method)
     ]
     for model_dir in model_dirs:
-        if not (PRED_ROOT / model_dir / "predictions").is_dir():
-            log.warning(f"No prediction directory for {model_dir}: {PRED_ROOT / model_dir / 'predictions'}")
+        if not (PRED_ROOT / model_dir).is_dir():
+            log.warning(f"No model directory for {model_dir}: {PRED_ROOT / model_dir}")
     for mode in modes:
         baselines = list(registry.get(mode, []))
         log.info(f"mode {mode}: main=AnySole {mode}, baselines={[b.get('name') for b in baselines]}")
         out_mode = out_dir / mode
         for session_id in session_ids:
+            if session_id not in manifest_rows:
+                continue
             for model_dir in model_dirs:
-                try:
-                    render_session(mode, session_id, model_dir, baselines, args, out_mode, seq_root)
-                except FileNotFoundError as exc:
-                    log.warning(f"{session_id}_{mode}: {exc}")
-                    continue
-                except Exception as exc:  # one bad session must not stop the sweep
-                    log.error(f"{session_id}_{mode}: {exc}")
+                for run_name, run_dir in anysole_prediction_roots(PRED_ROOT / model_dir, args.variant):
+                    try:
+                        render_session(mode, session_id, PRED_ROOT / model_dir, run_name,
+                                       baselines, args, out_mode, seq_root, manifest_rows)
+                    except FileNotFoundError as exc:
+                        log.warning(f"{session_id}_{mode}: {exc}")
+                        continue
+                    except Exception as exc:  # one bad session must not stop the sweep
+                        log.error(f"{session_id}_{mode}: {exc}")
     return 0
 
 

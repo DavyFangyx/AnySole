@@ -40,7 +40,7 @@ def check_mmvp_artifacts(session: str) -> dict:
     cam = parts.index("cam3")
     date, subject = parts[cam + 1], parts[cam + 2]
     n = int(row["n_frames"])
-    toolkit = WORKSPACE / "derived/pressure_tookit/images" / date / subject / session
+    toolkit = WORKSPACE / "derived/pressure_toolkit/images" / date / subject / session
     fpp = WORKSPACE / "derived/VP-MoCap" / date / subject / session
     tool_files = sorted((toolkit / "insole").glob("*.npy"))
     fpp_files = sorted((fpp / "insole").glob("*.npy"))
@@ -52,7 +52,7 @@ def check_mmvp_artifacts(session: str) -> dict:
     assert np.asarray(first_tool["insole"][0]).shape == (31, 11)
     assert np.asarray(first_tool["insole"][1]).shape == (31, 11)
     assert (toolkit / "calibration.npy").is_file()
-    floor = WORKSPACE / "derived/pressure_tookit/annotations" / date / "floor_info" / f"floor_{subject}.npy"
+    floor = WORKSPACE / "derived/pressure_toolkit/annotations" / date / "floor_info" / f"floor_{subject}.npy"
     assert floor.is_file()
     floor_data = np.load(floor, allow_pickle=True).item()
     transform = np.asarray(floor_data["depth2floor"])

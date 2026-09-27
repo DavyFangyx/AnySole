@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Initialize, migrate, and validate the centralized baseline workspace."""
+"""Initialize and validate the centralized baseline workspace."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 
@@ -26,6 +25,8 @@ SOURCE_LINKS = {
 # PressureWasher runtime data is kept with the other source-side datasets.
 PRESSURE_SOURCE_DIR = WORKSPACE / "sources/PressureWasher"
 
+# 结构重组（2026-09-24）的历史迁移映射，仅保留供 doctor 体检「旧路径是否残留」；
+# migrate 子命令已随迁移完成移除。
 # Order matters where a child is separated from its former parent.
 MIGRATIONS = (
     (REPO_ROOT / "Baselines/Step2Motion/models/gait_model/predictions", RESULTS / "Step2Motion/predictions/gait_model"),
@@ -55,15 +56,21 @@ MIGRATIONS = (
 
 LOCAL_DIRS = (
     PRESSURE_SOURCE_DIR,
-    WORKSPACE / "derived/pressure_tookit",
-    WORKSPACE / "dependencies/pressure_tookit",
+    WORKSPACE / "derived/pressure_toolkit",
+    WORKSPACE / "dependencies/pressure_toolkit",
     RESULTS / "Step2Motion/checkpoints",
     RESULTS / "Step2Motion/predictions",
     RESULTS / "Step2Motion/metrics",
     RESULTS / "Step2Motion/logs",
-    RESULTS / "pressure_tookit",
+    # 评估整改任务 02：正式结果只允许 predictions/ 与 metrics/（学习模型另有 checkpoints/）。
+    RESULTS / "baselines/pressure_toolkit/predictions/eval_motion",
+    RESULTS / "baselines/pressure_toolkit/metrics",
+    RESULTS / "baselines/FPP-Net/predictions/v2t",
+    RESULTS / "baselines/FPP-Net/metrics",
+    RESULTS / "baselines/VP-MoCap/predictions/eval_motion",
+    RESULTS / "baselines/VP-MoCap/metrics",
     DISPLAY / "Test1_visualization/Step2Motion",
-    DISPLAY / "Test1_visualization/pressure_tookit",
+    DISPLAY / "Test1_visualization/pressure_toolkit",
 )
 
 
@@ -93,22 +100,6 @@ def initialize(dry_run: bool = False) -> None:
         link = WORKSPACE / "calibration" / source.name
         target = Path("../sources/published") / source.parent.name / source.name
         ensure_link(link, target, dry_run)
-
-
-def migrate(dry_run: bool = False) -> None:
-    initialize(dry_run=dry_run)
-    for source, target in MIGRATIONS:
-        if not source.exists() and not source.is_symlink():
-            print(f"skip missing {source.relative_to(REPO_ROOT)}")
-            continue
-        if target.exists() or target.is_symlink():
-            raise RuntimeError(
-                f"Refusing to overwrite migration target {target.relative_to(REPO_ROOT)}"
-            )
-        print(f"move {source.relative_to(REPO_ROOT)} -> {target.relative_to(REPO_ROOT)}")
-        if not dry_run:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(source), str(target))
 
 
 def relink_color_frames(dry_run: bool = False) -> int:
@@ -198,16 +189,26 @@ def doctor() -> int:
         WORKSPACE / "dependencies/smpl/SMPL_NEUTRAL.pkl",
         WORKSPACE / "dependencies/MotionPRO/cliff_ckpt/hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt",
         WORKSPACE / "dependencies/MotionPRO/mmdetection/checkpoints/yolox_x_8x8_300e_coco_20211126_140254-1ef88d67.pth",
-        WORKSPACE / "dependencies/pressure_tookit/depthpro/config.json",
-        WORKSPACE / "dependencies/pressure_tookit/depthpro/model.safetensors",
-        WORKSPACE / "dependencies/pressure_tookit/depthpro/preprocessor_config.json",
+        WORKSPACE / "dependencies/pressure_toolkit/depthpro/config.json",
+        WORKSPACE / "dependencies/pressure_toolkit/depthpro/model.safetensors",
+        WORKSPACE / "dependencies/pressure_toolkit/depthpro/preprocessor_config.json",
         WORKSPACE / "dependencies/Step2Motion/normalizers/normalizer_gait.pth",
         WORKSPACE / "derived/MotionPRO/sequences/cam3",
         WORKSPACE / "derived/Step2Motion/gait/gait_test.pt",
-        RESULTS / "MotionPRO/checkpoints",
-        RESULTS / "Step2Motion/checkpoints/gait_model",
-        DISPLAY / "Test1_visualization/MotionPRO",
-        DISPLAY / "Test1_visualization/Step2Motion/gait_model",
+        # 评估整改任务 02：正式结果统一位于 results/baselines/<baseline>/。
+        RESULTS / "baselines/MotionPRO/checkpoints",
+        RESULTS / "baselines/MotionPRO/predictions",
+        RESULTS / "baselines/MotionPRO/metrics",
+        RESULTS / "baselines/Step2Motion/checkpoints/gait_model",
+        RESULTS / "baselines/Step2Motion/predictions",
+        RESULTS / "baselines/Step2Motion/metrics",
+        RESULTS / "baselines/pressure_toolkit/predictions",
+        RESULTS / "baselines/pressure_toolkit/metrics",
+        RESULTS / "baselines/FPP-Net/predictions",
+        RESULTS / "baselines/FPP-Net/metrics",
+        RESULTS / "baselines/VP-MoCap/predictions",
+        RESULTS / "baselines/VP-MoCap/metrics",
+        # 展示目录是 R_Test1 的输出产物，不是 workspace 前置条件，不作硬性要求。
     ):
         if not path.exists():
             errors.append(f"missing required path: {path}")
@@ -230,17 +231,15 @@ def doctor() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("init", "migrate", "relink", "doctor"))
+    parser.add_argument("command", choices=("init", "relink", "doctor"))
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.command == "doctor":
         return doctor()
     if args.command == "init":
         initialize(dry_run=args.dry_run)
-    elif args.command == "relink":
-        relink_color_frames(dry_run=args.dry_run)
     else:
-        migrate(dry_run=args.dry_run)
+        relink_color_frames(dry_run=args.dry_run)
     return 0
 
 

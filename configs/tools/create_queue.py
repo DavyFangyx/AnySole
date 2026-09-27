@@ -65,8 +65,9 @@ def main():
             date = date_from_row(row)
             session = row['session_id']
             base = f'workspace://derived/VP-MoCap/{date}/{row["subject_id"]}/{session}'
+            # 评估整改任务 02：staging（task.conf/日志）落在 results/logs，
+            # results/baselines/VP-MoCap/ 只保留 predictions/ 与 metrics/。
             text = (f'MODEL=posetransopt\nRUN_NAME=posetransopt_{session}\nCONDA_ENV=mmvp\n'
-                    f'RUN_DIR=results/baselines/VP-MoCap/posetransopt/{session}\n'
                     f'INPUT_PATH_BASE={base}\nSCENE_RGBD={base}/template_scene_rgbd.npy\n')
             put(f'{index:05d}_posetransopt_{session}', text)
 
@@ -77,13 +78,17 @@ def main():
         if not subject or not session: continue
         for stage in ('init_shape', 'init_pose', 'tracking'):
             index += 1
-            text = (f'MODEL=pressure_toolkit\nRUN_NAME=pressure_{session}_{stage}\nRUN_DIR=results/baselines/pressure_toolkit/{session}\n'
-                    f'INIT_DATA_DIR={REPO}/results/baselines/pressure_toolkit/{session}\nCONDA_ENV=mmvp\n'
+            # 评估整改任务 02：过程产物全部进 workspace（fitting/initialization），
+            # 不再写入 results/baselines/pressure_toolkit/；staging 用默认
+            # results/logs/task_staging/<RUN_NAME>。
+            text = (f'MODEL=pressure_toolkit\nRUN_NAME=pressure_{session}_{stage}\nCONDA_ENV=mmvp\n'
                     'CONFIG_FILE=Baselines/pressure_tookit/configs/fit_smpl_rgbd.yaml\n'
                     f'DATASET={date_from_row(row)}\nSUB_IDS={subject}\nSEQ_NAME={session}\n'
                     f'FITTING_STAGE={stage}\nSTART_IDX=0\nEND_IDX=-1\n'
-                    'BASDIR=workspace://derived/pressure_tookit\n'
-                    'ESSENTIAL_ROOT=workspace://dependencies/pressure_tookit/essential\n')
+                    'OUTPUT_DIR=workspace://derived/pressure_toolkit/fitting\n'
+                    'INIT_DATA_DIR=workspace://derived/pressure_toolkit\n'
+                    'BASDIR=workspace://derived/pressure_toolkit\n'
+                    'ESSENTIAL_ROOT=workspace://dependencies/pressure_toolkit/essential\n')
             put(f'{index:05d}_pressure_{session}_{stage}', text)
 
 if __name__ == '__main__': main()

@@ -192,10 +192,11 @@ def load_gt(seq_dir: Path, n_frames: int, fps: float = 40.0):
 def foot_joint_indices(names: list[str]) -> dict[str, list[int]]:
     """Map foot joints by name (skeletons are Skeleton0/1/5 with different
     joint counts, so indices must not be hardcoded).  Captures ``LeftFoot``,
-    ``LeftToeBase`` and the ``..._EndSite`` variants automatically."""
+    ``LeftToeBase`` and the ``..._EndSite`` variants automatically, and is
+    separator-insensitive so SMPL ``left_foot`` matches like BVH ``LeftFoot``."""
     out: dict[str, list[int]] = {"left": [], "right": []}
     for idx, name in enumerate(names):
-        lower = name.lower()
+        lower = name.lower().replace("_", "")
         for side in ("left", "right"):
             if lower.startswith(f"{side}foot") or lower.startswith(f"{side}toe"):
                 out[side].append(idx)

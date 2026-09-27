@@ -19,6 +19,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate AnySole HRNet feature cache.")
     parser.add_argument("--cam-id", type=int, required=True, help="Camera id, for example 3.")
     parser.add_argument("--session", help="Process only one session.")
+    parser.add_argument("--split", type=str, default="all", choices=["all", "train", "val", "test"],
+                        help="Split column scope when --session is empty ('all' = every session under the seq root).")
+    parser.add_argument("--split-csv", type=str, default=None, help="splits.csv path used by --split.")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", default=None, help="cuda, cuda:0, or cpu.")
     mode = parser.add_mutually_exclusive_group()
@@ -45,6 +48,10 @@ def main() -> int:
     ]
     if args.session:
         command += ["--session", args.session]
+    if args.split != "all":
+        command += ["--split", args.split]
+    if args.split_csv is not None:
+        command += ["--split-csv", args.split_csv]
     if args.device:
         command += ["--device", args.device]
     command.append("--force" if args.force else "--skip-existing")

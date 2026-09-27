@@ -73,11 +73,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     mode.add_argument("--bar", action="store_true", help="deprecated alias for --a1")
     parser.add_argument("--split", choices=("val", "test"), default="val")
     parser.add_argument("--fs-main", type=Path,
-                        default=REPO / "results" / "AnySole" / "V4B_joint_and" / "metrics" / "val_fseries.json")
+                        default=REPO / "results" / "AnySole" / "V4B_joint_and" / "metrics" / "val.json")
     parser.add_argument("--fs-vspecialist", type=Path, default=None,
-                        help="V 专才 fseries；A1/B1 必需")
+                        help="V 专才明细文件 (metrics/<split>.json)；A1/B1 必需")
     parser.add_argument("--fs-tspecialist", type=Path, default=None,
-                        help="T 专才 fseries；A1/B2 必需")
+                        help="T 专才明细文件 (metrics/<split>.json)；A1/B2 必需")
     parser.add_argument("--prior-grid", type=Path,
                         default=REPO / "results" / "experiments" / "rho_grid_eval" / "V3_3B" / "grid_metrics.json",
                         help="主线 rhoV0_rhoT0 先验单元，B1/B2 必需")
@@ -92,7 +92,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 def metric_block(data: dict[str, Any], config: str) -> dict[str, Any]:
     metrics = data.get("metrics", {})
     if config not in metrics:
-        raise ValueError("fseries 缺配置 %s；已有：%s" % (config, ", ".join(metrics)))
+        raise ValueError("明细文件缺配置 %s；已有：%s" % (config, ", ".join(metrics)))
     return metrics[config]
 
 
@@ -253,7 +253,7 @@ def branch_table(args: argparse.Namespace, inputs: dict[str, Any], branch: str) 
         specialist_name, specialist_cfg, main_cfg, components = "t_specialist", "T2M", "T2M", V_COMPONENTS
         title = "B2: main T on V-owned components"
     if specialist_name not in inputs:
-        raise SystemExit("%s 需要对应专才 fseries" % branch.upper())
+        raise SystemExit("%s 需要对应专才明细文件" % branch.upper())
     main = metric_block(inputs["main"], main_cfg)
     specialist = metric_block(inputs[specialist_name], specialist_cfg)
     prior = load_grid_prior(args.prior_grid, args.prior_cell)

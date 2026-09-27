@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from anysole.types import (
     HRNET_CACHE_ROOT,
     SEQ_ROOT,
     V_FEAT_DIM,
+    WORKSPACE_ROOT,
 )
 
 HRNET_FEAT_DIM = 2048
@@ -36,6 +38,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--cam-id", type=int, required=True)
     parser.add_argument("--session", type=str, default=None, help="Only extract this session id.")
+    parser.add_argument("--split", type=str, default="all", choices=["all", "train", "val", "test"],
+                        help="Split column scope when --session is empty ('all' = every session under the seq root).")
+    parser.add_argument("--split-csv", type=str, default=str(WORKSPACE_ROOT / "splits/default/splits.csv"),
+                        help="splits.csv path used by --split.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--skip-existing", action="store_true", help="Skip sessions whose cache exists.")
     mode.add_argument("--force", "--overwrite", dest="force", action="store_true", help="Recompute and overwrite existing caches.")
@@ -63,6 +69,23 @@ def list_session_dirs(seq_root: Path, session_id: Optional[str]) -> List[Path]:
     dirs = sorted(path for path in seq_root.glob("*/*/*") if path.is_dir())
     if not dirs:
         raise FileNotFoundError("No sequence dirs under %s" % seq_root)
+    return dirs
+
+
+def split_session_ids(split_csv: Path, split: str) -> set:
+    """Session ids of one splits.csv column (train/val/test)."""
+    with Path(split_csv).open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    return {row[split].strip() for row in rows if row[split].strip()}
+
+
+def select_session_dirs(seq_root: Path, args: argparse.Namespace) -> List[Path]:
+    """Session dirs for the requested scope: explicit ``--session`` wins,
+    else the ``--split`` column filters (default 'all' = every session)."""
+    dirs = list_session_dirs(seq_root, args.session)
+    if not args.session and args.split != "all":
+        wanted = split_session_ids(Path(args.split_csv), args.split)
+        dirs = [d for d in dirs if d.name in wanted]
     return dirs
 
 
@@ -186,11 +209,13 @@ def extract_session(
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     seq_root, cache_root = resolve_roots(args.cam_id, args.cache_root, args.seq_root)
-    session_dirs = list_session_dirs(seq_root, args.session)
+    session_dirs = select_session_dirs(seq_root, args)
     if args.limit_sessions is not None:
         if args.limit_sessions <= 0:
             raise ValueError("--limit-sessions must be positive")
         session_dirs = session_dirs[: args.limit_sessions]
+    if not session_dirs:
+        raise FileNotFoundError("No session dirs match split=%s under %s" % (args.split, seq_root))
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA requested but no CUDA device is available")

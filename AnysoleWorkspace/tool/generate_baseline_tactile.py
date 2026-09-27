@@ -6,7 +6,7 @@
                 bilinear / align_corners=False，0-255）
     Step2Motion 16 通道/脚（process_gait 冻结池化口径：heel[0-7] + toe[8-15]；
                 展示/审计产物，不替代原始协议）
-    MMVP        pressure_tookit 与 VP-MoCap 共用同一套 31x11 insole/脚
+    MMVP        pressure_toolkit 与 VP-MoCap 共用同一套 31x11 insole/脚
                 （点对点按 SMPL 模板足底系欧氏最近点映射，0-255）；
                 toolkit 的 load_contact 与 FPP-Net 的 PED_tempKPCont
                 读同一份 {'insole': [left, right]} 文件，故写两棵树
@@ -18,7 +18,7 @@
 每 session 产物：
     AnysoleWorkspace/derived/MotionPRO/pressure_96/<sid>.npz                      {'pressure': (T,96,96)}
     AnysoleWorkspace/derived/Step2Motion/pressure_16ch/<sid>.npz                  {'left16','right16': (T,16)}
-    AnysoleWorkspace/derived/pressure_tookit/images/<date>/<sub>/<sid>/insole/%03d.npy
+    AnysoleWorkspace/derived/pressure_toolkit/images/<date>/<sub>/<sid>/insole/%03d.npy
     AnysoleWorkspace/derived/VP-MoCap/<date>/<sub>/<sid>/insole/%03d.npy          （同上，共用）
     AnysoleWorkspace/derived/baseline_tactile/<sid>/meta.json                     映射统计 + 产物路径
 
@@ -51,7 +51,7 @@ ESSENTIALS = REPO_ROOT / "Baselines" / "VP-MoCap" / "FPP-Net" / "essentials" / "
 
 OUT_MOTIONPRO = REPO_ROOT / "AnysoleWorkspace" / "derived" / "MotionPRO" / "pressure_96"
 OUT_S2M = REPO_ROOT / "AnysoleWorkspace" / "derived" / "Step2Motion" / "pressure_16ch"
-OUT_TOOLKIT = REPO_ROOT / "AnysoleWorkspace" / "derived" / "pressure_tookit" / "images"
+OUT_TOOLKIT = REPO_ROOT / "AnysoleWorkspace" / "derived" / "pressure_toolkit" / "images"
 OUT_FPP = REPO_ROOT / "AnysoleWorkspace" / "derived" / "VP-MoCap"
 OUT_META = REPO_ROOT / "AnysoleWorkspace" / "derived" / "baseline_tactile"
 

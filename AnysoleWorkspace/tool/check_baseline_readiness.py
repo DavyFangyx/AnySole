@@ -41,15 +41,15 @@ def session_paths(row: dict, sid: str) -> tuple[str, str, int, dict[str, Path]]:
         "motion_smpl": seq / "smpl.npy",
         "motion_feature": seq / "feature_hrnet.pth",
         "motion_bbox": seq / "bbox.npy",
-        "insole_tool": WORKSPACE / "derived/pressure_tookit/images" / date / subject / sid / "insole",
+        "insole_tool": WORKSPACE / "derived/pressure_toolkit/images" / date / subject / sid / "insole",
         "insole_fpp": WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "insole",
-        "mmvp_color_tool": WORKSPACE / "derived/pressure_tookit/images" / date / subject / sid / "color",
+        "mmvp_color_tool": WORKSPACE / "derived/pressure_toolkit/images" / date / subject / sid / "color",
         "mmvp_color_fpp": WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "color",
-        "calibration": WORKSPACE / "derived/pressure_tookit/images" / date / subject / sid / "calibration.npy",
-        "floor": WORKSPACE / "derived/pressure_tookit/annotations" / date / "floor_info" / f"floor_{subject}.npy",
-        "depth": WORKSPACE / "derived/pressure_tookit/images" / date / subject / sid / "depth",
-        "depth_mask": WORKSPACE / "derived/pressure_tookit/images" / date / subject / sid / "depth_mask",
-        "keypoints_tool": WORKSPACE / "derived/pressure_tookit/input" / subject / sid / "keypoints",
+        "calibration": WORKSPACE / "derived/pressure_toolkit/images" / date / subject / sid / "calibration.npy",
+        "floor": WORKSPACE / "derived/pressure_toolkit/annotations" / date / "floor_info" / f"floor_{subject}.npy",
+        "depth": WORKSPACE / "derived/pressure_toolkit/images" / date / subject / sid / "depth",
+        "depth_mask": WORKSPACE / "derived/pressure_toolkit/images" / date / subject / sid / "depth_mask",
+        "keypoints_tool": WORKSPACE / "derived/pressure_toolkit/input" / subject / sid / "keypoints",
         "keypoints_fpp": WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "keypoints",
         "cliff": WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "CLIFF_results.npz",
         "scene": WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "template_scene_rgbd.npy",
@@ -129,7 +129,7 @@ def main() -> None:
 
     report["dependencies"] = {
         "smpl_neutral": (WORKSPACE / "dependencies/smpl/SMPL_NEUTRAL.pkl").is_file(),
-        "depthpro": (WORKSPACE / "dependencies/pressure_tookit/depthpro/model.safetensors").is_file(),
+        "depthpro": (WORKSPACE / "dependencies/pressure_toolkit/depthpro/model.safetensors").is_file(),
         "rtmpose_checkpoint": (WORKSPACE / "dependencies/rtmpose/rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.pth").is_file(),
         "cliff_checkpoint": (WORKSPACE / "dependencies/MotionPRO/cliff_ckpt/hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt").is_file(),
         "yolov3_code": (WORKSPACE / "dependencies/CLIFF/lib/pytorch_yolo_v3_master/darknet.py").is_file(),
@@ -147,11 +147,19 @@ def main() -> None:
         "unified_motionpro": [],
         "unified_pressure_toolkit": [],
         "unified_vp_mocap": [],
+        "unified_fpp_v2t": [],
     }
     fpp_expected = fpp_expected_counts(args.split)
     report["fpp_temporal_windows"] = {
         sid: int(fpp_expected.get(sid, 0)) for sid in all_ids
     }
+    # 评估整改任务 02：原生拟合结果按 canonical workspace fitting 根检查；
+    # 迁移期保留旧 results 树作为回退位置。
+    pressure_roots = [
+        WORKSPACE / "derived/pressure_toolkit/fitting/results",
+        RESULTS / "baselines/pressure_toolkit/results",
+        RESULTS / "offline/pressure_toolkit/results",
+    ]
     for sid in all_ids:
         date, subject, n, _ = session_paths(manifest[sid], sid)
         fpp_dir = WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "pred_contact_smpl"
@@ -160,8 +168,12 @@ def main() -> None:
         if expected_fpp > 0 and fpp_count == expected_fpp:
             artifact_checks["fpp_contact"].append(sid)
 
-        pressure_dir = RESULTS / "offline/pressure_toolkit/results" / date / subject / sid
-        pressure_count = len(list(pressure_dir.glob("smpl_*.npz"))) if pressure_dir.is_dir() else 0
+        pressure_dir = next(
+            (root / date / subject / sid
+             for root in pressure_roots if (root / date / subject / sid).is_dir()),
+            None,
+        )
+        pressure_count = len(list(pressure_dir.glob("smpl_*.npz"))) if pressure_dir else 0
         artifact_checks["pressure_native_fit"].append(sid) if pressure_count == n else None
 
         pose_path = WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "opt_results/opt_result.pth"
@@ -169,12 +181,14 @@ def main() -> None:
             artifact_checks["posetransopt_native_fit"].append(sid)
 
         for label, model_dir in (
-            ("unified_motionpro", "MotionPRO"),
-            ("unified_pressure_toolkit", "pressure_tookit"),
-            ("unified_vp_mocap", "VP-MoCap"),
+            ("unified_motionpro", "baselines/MotionPRO"),
+            ("unified_pressure_toolkit", "baselines/pressure_toolkit"),
+            ("unified_vp_mocap", "baselines/VP-MoCap"),
         ):
             if (RESULTS / model_dir / "predictions/eval_motion" / f"{sid}.npz").is_file():
                 artifact_checks[label].append(sid)
+        if (RESULTS / "baselines/FPP-Net/predictions/v2t" / f"{sid}.npz").is_file():
+            artifact_checks["unified_fpp_v2t"].append(sid)
     report["artifacts"] = {
         label: {"ready": len(ids), "total": len(all_ids), "missing": sorted(set(all_ids) - set(ids))}
         for label, ids in artifact_checks.items()

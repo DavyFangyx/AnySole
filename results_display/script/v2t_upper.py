@@ -25,8 +25,8 @@ def main(argv=None) -> int:
         out = out_root / model_run_name(registry, model_id)
         return component_main([
             "--b1", "--split", args.split,
-            "--fs-main", str(main_root / "metrics" / (args.split + "_fseries.json")),
-            "--fs-vspecialist", str(v_root / "metrics" / (args.split + "_fseries.json")),
+            "--fs-main", str(main_root / "metrics" / (args.split + ".json")),
+            "--fs-vspecialist", str(v_root / "metrics" / (args.split + ".json")),
             "--prior-grid", str(grid_root / ("grid_metrics_%s.json" % args.split if args.split != "val" else "grid_metrics.json")),
             "--out", str(out),
         ])

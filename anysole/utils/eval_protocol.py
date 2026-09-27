@@ -1,9 +1,12 @@
 """F0a evaluation protocol (fix_plan_v2.md §2): session-level, per-part, global,
 temporal, contact, pressure, and robustness metrics.
 
-Complements eval.py: eval.py keeps the frozen per-window metrics JSON
-(``metrics/<split>.json``); this module adds ``metrics/<split>_fseries.json``
-with the F-series protocol numbers, which every step F0..F9 reports:
+eval.py drives this protocol; one run writes two same-source files per split:
+``metrics/<split>.json`` (detail: per-part diagnostics plus robustness rows)
+and ``metrics/<split>_brief.json`` (whole-body view: every group of the detail
+file filtered to whole-body scalars, plus a ``V2T`` group in fourth position
+whenever V2M carries tactile rows).  The F-series protocol numbers are what
+every step F0..F9 reports:
 
 - 局部姿态: MPJPE / PA-MPJPE per 9 native SMPL-24 parts
   (root/torso/headneck/l_arm/r_arm/l_leg/r_leg/l_foot/r_foot), plus upper/lower,
@@ -12,13 +15,18 @@ with the F-series protocol numbers, which every step F0..F9 reports:
   reads the part errors from the aligned points.
 - 全局: metrics.py 的 100-frame W-MPJPE/WA-MPJPE、root ATE/RTE
   (root trajectory error normalized by the mean GT per-frame displacement
-  length), yaw_abs_deg / yaw_drift_deg (root heading error / accumulated
-  drift; native SMPL local +Z is the fixed forward axis).
+  length), root_orientation_deg / root_orientation_drift_deg (root heading
+  error / accumulated drift, computed by the single implementation in
+  metrics.py; native SMPL local +Z is the fixed forward axis).
 - 时序: metrics.py 的 acceleration error / jerk，另保留 seam_jump_mm at
   window boundaries (GT frame-to-frame at the same seams as reference).
-- 接触: contact F1 (soft_contact_from_keypoints > 0.5 vs contact_gt) and
-  contact-period foot slide in mm/帧, both on predicted-contact frames
-  (train._evaluate 口径) and GT-contact frames.
+- 接触 (diagnostic only, never a formal metric): contact F1
+  (soft_contact_from_keypoints > 0.5 vs contact_gt) on predicted-contact
+  frames (train._evaluate 口径) and GT-contact frames.  No trained,
+  explicitly exported contact prediction exists, so contact never enters the
+  brief or cross-model tables (评估整改任务 01 §4.4).
+- 足部滑动: 公共 foot_sliding_mm 为关节版 (SMPL ankle/foot 关节、GT 接触帧),
+  由 metrics.py 的唯一实现计算; 顶点版保留为诊断 foot_sliding_vertex_mm。
 - 压力输出 (V2M only): total-force R², per-foot CoP error (grid units,
   cop_from_grid 口径), per-frame 96-cell Pearson correlation.
 - T2M 上半身: upper-body acceleration-magnitude distribution error (|mean
@@ -57,11 +65,14 @@ from anysole.eval import _sample_x_t_init, _session_window_groups, _tactile_corr
 from anysole.utils.geometry import f2_to_world, fk_pose6d, rot6d_to_rotmat
 from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.utils.metrics import (
+    foot_sliding_joints,
+    foot_sliding_vertices,
     matrix_rotation_error_degrees,
     mean_point_error,
     pa_mpjpe,
     pelvis_align,
-    foot_sliding,
+    root_orientation_drift_deg,
+    root_orientation_error_deg,
     root_trajectory_metrics,
     shape_vertex_std,
     temporal_metrics,
@@ -89,6 +100,79 @@ from anysole.types import (
 # single source of truth is the named SMPL-24 protocol in anysole.types.
 JOINT_LIMIT_RAD = math.radians(15.0)  # bone angle below this is anatomically impossible
 
+# Whole-body brief (metrics/<split>_brief.json 口径): the detail file's groups
+# filtered to the approved whole-body candidates.  Contact metrics are
+# training/regularization diagnostics only (no trained, explicitly exported
+# contact prediction exists) and never enter the brief; the V2T group is
+# hierarchical (2026-09-27): brief keys are one representative per level,
+# leaf keys are computed and stored in the detail row but excluded from the
+# brief.  AnySole's own detail stays pressure-only (grid/force/CoP); the
+# contact level (contact_smpl_mse/contact_smpl_bce) exists only in the
+# cross-model solver (Baselines/utils/solver.py) for FPP-Net, whose contact
+# head output and f6_soft GT support it.
+V2T_LEVELS = {
+    "grid": ("T_corr", "T_rmse", "T_mse", "T_mae"),
+    "force": ("pressure_force_rmse", "pressure_force_r2", "pressure_force_mae"),
+    "cop": ("pressure_cop_error_left", "pressure_cop_error_right",
+            "pressure_cop_error_mean"),
+}
+V2T_BRIEF_NAMES = (
+    "T_corr", "T_rmse",
+    "pressure_force_rmse", "pressure_force_r2",
+    "pressure_cop_error_left", "pressure_cop_error_right",
+)
+V2T_LEAF_NAMES = ("T_mse", "T_mae", "pressure_force_mae", "pressure_cop_error_mean")
+V2T_NAMES = V2T_BRIEF_NAMES + V2T_LEAF_NAMES
+# Whole-body candidates per motion group (one representative per metric
+# family).  AnySole does not generate shape/surface (生成清单裁定 2026-09-27):
+# the GT-beta pose-only PVE is a detail diagnostic, not a brief key, so
+# pve_mm is absent here.  foot_sliding_mm is the public joint-based
+# definition; the vertex-based variant is a detail-file diagnostic
+# (foot_sliding_vertex_mm).
+BRIEF_MOTION_KEYS = (
+    "mpjpe_mm", "pa_mpjpe_mm", "w_mpjpe100_mm", "mpjae_deg",
+    "root_ate_mm", "root_orientation_drift_deg",
+    "jitter_pred_m_s3", "jitter_gt_m_s3", "foot_sliding_mm",
+)
+# Keys the detail file reports but that are diagnostics, not formal metrics
+# (kept for training monitoring and history; excluded from brief by the
+# whitelist above and declared here explicitly).
+DIAGNOSTIC_KEYS = (
+    "contact_f1", "contact_acc", "contact_recall", "air_recall",
+    "contact_balanced_acc", "foot_sliding_vertex_mm", "shape_vertex_std_mm",
+    # GT-beta pose-only PVE: AnySole 不生成 shape，此值仅诊断，不进 brief、
+    # 不进正式表。
+    "pve_mm",
+)
+# Fixed group order of the brief file (json.dump sort_keys=False keeps it);
+# V2T is always fourth, absent groups are skipped rather than invented.
+BRIEF_GROUP_ORDER = ("T2M", "V2M", "VT2M", "V2T", "robust_vdrop", "robust_tdrop")
+
+
+def summary_metrics(metrics: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    """Derive the brief (whole-body) view from the detail metric blocks.
+
+    Groups are copied in BRIEF_GROUP_ORDER; each motion group keeps only
+    BRIEF_MOTION_KEYS; V2T is built from the V2M tactile row and contains
+    exactly the brief keys (one representative per level; leaf keys stay
+    detail-only) whenever V2M is present.
+    """
+    groups: Dict[str, Dict[str, float]] = {}
+    for name in BRIEF_GROUP_ORDER:
+        if name == "V2T":
+            if "V2M" in metrics:
+                v2t = {key: metrics["V2M"][key] for key in V2T_BRIEF_NAMES if key in metrics["V2M"]}
+                if v2t:
+                    groups[name] = v2t
+            continue
+        if name in metrics:
+            groups[name] = {
+                key: value
+                for key, value in sorted(metrics[name].items())
+                if key in BRIEF_MOTION_KEYS
+            }
+    return groups
+
 
 def _pa_align(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """Per-frame similarity Procrustes alignment over the native 24 joints."""
@@ -112,10 +196,6 @@ def _pa_align(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     scale = (singular * correction).sum(dim=1) / variance
     aligned = scale[:, None, None] * (x0 @ rotation) + y_mean
     return aligned.view_as(pred)
-
-
-def _circ_diff(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return (a - b + math.pi) % (2.0 * math.pi) - math.pi
 
 
 def _root_rotmats(pose: torch.Tensor) -> torch.Tensor:
@@ -227,9 +307,19 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
         T,
     )
     accum.add_scalar("shape_vertex_std_mm", shape_vertex_std(pred_vertices), T)
-    foot_value, foot_count = foot_sliding(pred_vertices, gt_vertices, times_np)
-    if foot_count:
-        accum.add_scalar("foot_sliding_mm", foot_value, foot_count)
+    # Public joint-based foot sliding (SMPL ankle/foot joints, GT-contact
+    # frames); the vertex-based variant is a SMPL-only diagnostic and carries
+    # a distinct name so the two definitions can never collide.
+    foot_joint_value, foot_joint_count = foot_sliding_joints(
+        pred_np[:, ANKLE_FOOT_JOINTS], gt_np[:, ANKLE_FOOT_JOINTS], times_np
+    )
+    if foot_joint_count:
+        accum.add_scalar("foot_sliding_mm", foot_joint_value, foot_joint_count)
+    foot_vert_value, foot_vert_count = foot_sliding_vertices(
+        pred_vertices, gt_vertices, times_np
+    )
+    if foot_vert_count:
+        accum.add_scalar("foot_sliding_vertex_mm", foot_vert_value, foot_vert_count)
 
     # ---- retained AnySole part diagnostics ----
     err = torch.linalg.vector_norm(pred_kp - kp_gt, dim=-1)  # (T, 24)
@@ -249,15 +339,21 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     accum.add("PA-MPJPE_anklefoot", pa_err[:, ANKLE_FOOT_JOINTS].mean(dim=-1), 1000.0)
     accum.add("PA-MPJPE_hands", pa_err[:, HAND_JOINTS].mean(dim=-1), 1000.0)
 
-    # ---- retained AnySole orientation diagnostics ----
-    R_p = _root_rotmats(seq["pred_pose"])
-    R_g = _root_rotmats(seq["gt_pose"])
-    yaw_p = torch.atan2(R_p[:, :, forward_axis][:, 0], R_p[:, :, forward_axis][:, 2])
-    yaw_g = torch.atan2(R_g[:, :, forward_axis][:, 0], R_g[:, :, forward_axis][:, 2])
-    accum.add("yaw_abs_deg", _circ_diff(yaw_p, yaw_g).abs() * 180.0 / math.pi)
+    # ---- root orientation (the only implementation lives in metrics.py;
+    # keys are the formal root_orientation_* names) ----
+    R_p_np = _root_rotmats(seq["pred_pose"]).detach().cpu().numpy()
+    R_g_np = _root_rotmats(seq["gt_pose"]).detach().cpu().numpy()
     accum.add(
-        "yaw_drift_deg",
-        _circ_diff(yaw_p - yaw_p[0], yaw_g - yaw_g[0]).abs() * 180.0 / math.pi,
+        "root_orientation_deg",
+        torch.from_numpy(
+            root_orientation_error_deg(R_p_np, R_g_np, forward_axis=forward_axis)
+        ),
+    )
+    accum.add(
+        "root_orientation_drift_deg",
+        torch.from_numpy(
+            root_orientation_drift_deg(R_p_np, R_g_np, forward_axis=forward_axis)
+        ),
     )
 
     # ---- retained AnySole temporal diagnostics ----
@@ -501,7 +597,7 @@ def _evaluate_config(
         result["contact_recall"] + result["air_recall"]
     )
     if "T_mse" in result:
-        result["T_rmse"] = math.sqrt(result.pop("T_mse"))
+        result["T_rmse"] = math.sqrt(result["T_mse"])
     if "pressure_force_mse" in result:
         result["pressure_force_rmse"] = math.sqrt(result.pop("pressure_force_mse"))
     if "accel_mag_upper_ms2" in result:
@@ -530,9 +626,11 @@ def run_protocol(
     contact_method: str,
     tw: int,
     out_path: Path,
+    brief_out: Optional[Path] = None,
     v2t_out_dir: Optional[Path] = None,
 ) -> Dict[str, Dict[str, float]]:
-    """Run the full F0a protocol and write metrics/<split>_fseries.json."""
+    """Run the full F0a protocol and write metrics/<split>.json (detail) and,
+    when brief_out is given, metrics/<split>_brief.json (whole-body brief)."""
     if dataset.stride != dataset.window_length:
         print("protocol skipped: dataset stride %d != window %d (E6.4 continuation eval)"
               % (dataset.stride, dataset.window_length))
@@ -553,11 +651,9 @@ def run_protocol(
                 sample_steps, warm_start, tw, forward_axis,
                 v2t_out_dir=v2t_out_dir,
             )
-            print("protocol %s: mpjpe=%.3fmm pa_mpjpe=%.3fmm w_mpjpe100=%.3fmm "
-                  "contact_f1=%.4f"
+            print("protocol %s: mpjpe=%.3fmm pa_mpjpe=%.3fmm w_mpjpe100=%.3fmm"
                   % (name, metrics[name]["mpjpe_mm"], metrics[name]["pa_mpjpe_mm"],
-                     metrics[name].get("w_mpjpe100_mm", float("nan")),
-                     metrics[name].get("contact_f1", float("nan"))))
+                     metrics[name].get("w_mpjpe100_mm", float("nan"))))
         if robustness and CONFIG_VT in config_values:
             metrics["robust_vdrop"] = _evaluate_config(
                 dataset, model, device, CONFIG_VT, regress_mode, diffusion,
@@ -567,12 +663,12 @@ def run_protocol(
                 dataset, model, device, CONFIG_VT, regress_mode, diffusion,
                 sample_steps, warm_start, tw, forward_axis, degrade="t", seed=seed,
             )
-            print("protocol robust_vdrop: mpjpe=%.3fmm pa_mpjpe=%.3fmm contact_f1=%.4f"
+            print("protocol robust_vdrop: mpjpe=%.3fmm pa_mpjpe=%.3fmm"
                   % (metrics["robust_vdrop"]["mpjpe_mm"], metrics["robust_vdrop"]["pa_mpjpe_mm"],
-                     metrics["robust_vdrop"]["contact_f1"]))
-            print("protocol robust_tdrop: mpjpe=%.3fmm pa_mpjpe=%.3fmm contact_f1=%.4f"
+                     ))
+            print("protocol robust_tdrop: mpjpe=%.3fmm pa_mpjpe=%.3fmm"
                   % (metrics["robust_tdrop"]["mpjpe_mm"], metrics["robust_tdrop"]["pa_mpjpe_mm"],
-                     metrics["robust_tdrop"]["contact_f1"]))
+                     ))
     finally:
         torch.set_rng_state(prev_cpu)
         if prev_cuda is not None:
@@ -587,14 +683,30 @@ def run_protocol(
         "sample_steps": sample_steps,
         "robustness": bool(robustness and CONFIG_VT in config_values),
         "forward_axis": "+Z" if forward_axis == 2 else "+X",
+        # Detail-file keys that are training/diagnostic outputs, not formal
+        # metrics; they must not be consumed as formal comparison candidates.
+        "diagnostic_fields": sorted(
+            {key for name, block in metrics.items() for key in block if key in DIAGNOSTIC_KEYS}
+        ),
+        # V2T leaf keys are formal computed metrics excluded from the brief
+        # (one representative per level); their values live in the detail
+        # V2M tactile row.
+        "v2t_leaf_keys": sorted(V2T_LEAF_NAMES),
         "metrics": metrics,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    # Canonical file (回填表口径) always reflects the latest run; a per-seed
-    # copy is archived so the three --protocol-seed 0/1/2 runs can be diffed
-    # for sigma-seed without overwriting each other.
     out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    seed_path = out_path.with_name("%s_seed%d.json" % (out_path.stem, seed))
-    seed_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print("wrote %s (+ %s)" % (out_path, seed_path.name))
+    if brief_out is not None:
+        brief = dict(payload)
+        brief["metrics"] = summary_metrics(metrics)
+        brief_out.parent.mkdir(parents=True, exist_ok=True)
+        # No sort_keys: BRIEF_GROUP_ORDER fixes the group order (V2T fourth);
+        # group keys are sorted by summary_metrics, so diffs stay stable.
+        brief_out.write_text(
+            json.dumps(brief, indent=2, sort_keys=False, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print("wrote %s (+ %s)" % (out_path, brief_out.name))
+    else:
+        print("wrote %s" % out_path)
     return metrics

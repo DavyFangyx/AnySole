@@ -190,10 +190,16 @@ def run_one(session: str, row: dict, args: argparse.Namespace) -> dict:
     if args.max_frames > 0:
         return {"session": session, "smoke": str(output), "frames": args.max_frames}
     shutil.copy2(output, fpp_session / "CLIFF_results.npz")
-    toolkit_root = ROOT / "results/baselines/pressure_toolkit" / session / date / subject / session
-    toolkit_root.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(output, toolkit_root / f"{session}_cliff_{args.backbone}.npz")
-    return {"session": session, "cliff": str(output), "fpp": str(fpp_session / "CLIFF_results.npz"), "toolkit": str(toolkit_root)}
+    # 评估整改任务 02：canonical CLIFF 初始化进入 workspace，
+    # 不再向 results/baselines/pressure_toolkit/Sxxxx/... 写入副本。
+    canonical_root = (
+        WORKSPACE / "derived/pressure_toolkit/initialization" / date / subject / session
+    )
+    canonical_root.mkdir(parents=True, exist_ok=True)
+    canonical = canonical_root / f"{session}_cliff_{args.backbone}.npz"
+    shutil.copy2(output, canonical)
+    return {"session": session, "cliff": str(output), "fpp": str(fpp_session / "CLIFF_results.npz"),
+            "initialization": str(canonical)}
 
 
 def main() -> None:

@@ -291,9 +291,9 @@ def _eval_command(registry: dict[str, Any], model_id: str, root: Path, ckpt: Pat
         "--contact-method",
         contact,
         "--metrics-out",
-        str(metrics_dir / (split + ".json")),
+        str(metrics_dir / (split + "_brief.json")),
         "--protocol-out",
-        str(metrics_dir / (split + "_fseries.json")),
+        str(metrics_dir / (split + ".json")),
     ]
     if split == "val":
         command.append("--no-write-motion")
@@ -332,8 +332,8 @@ def _run_model(registry: dict[str, Any], experiment_id: str, model_id: str, forc
             checkpoint=str(ckpt),
             checkpoint_sha256=sha256_file(ckpt),
             metrics={
-                "val": str(root / "metrics" / "val_fseries.json"),
-                "test": str(root / "metrics" / "test_fseries.json"),
+                "val": str(root / "metrics" / "val.json"),
+                "test": str(root / "metrics" / "test.json"),
             },
         )
         (root / "finished_at").write_text(time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n", encoding="utf-8")

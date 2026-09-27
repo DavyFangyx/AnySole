@@ -3,11 +3,11 @@
 机制：V/T 保留率网格 (rV, rT) ∈ ρ×ρ，每格 = 逐帧独立掷硬币把该帧 token 换成
 null token（保留率 = 不换的概率；mask=True 的位置换 null）。config 恒为 VT，
 mask 叠在 config 级替换之后 → 四角（100/100、100/0、0/100、0/0）与现有
-VT2M/V2M/T2M/纯先验严格同机制；ρ=100%/0% 角与 fseries 的对应配置行一致 =
+VT2M/V2M/T2M/纯先验严格同机制；ρ=100%/0% 角与明细文件（metrics/<split>.json）的对应配置行一致 =
 实现自检项（grid_metrics.json 的 corner_check）。
 
 每格 × 每种子 × 每 session 落盘（默认 results_display/BTest/B3Test_rho_grid/）：
-  - grid_metrics.json：全格协议指标（与 fseries 同构；复用
+  - grid_metrics.json：全格协议指标（与明细文件同构；复用
     eval_protocol._session_metrics，逐字节同源）
   - npz/<session>_rhoV<rV>_rhoT<rT>[_s<seed>].npz：eval_motion 同格式 SMPL npz
   - repr/<session>_rhoV<rV>_rhoT<rT>[_s<seed>]_repr.npz：F/t_tok/v_tok
@@ -59,7 +59,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--ckpt", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=REPO / "anysole" / "configs" / "v1.yaml")
     parser.add_argument("--split", choices=("train", "val", "test"), default="val",
-                        help="train 只用于落 repr/npz 供 ridge train-fit（无 fseries 自检）")
+                        help="train 只用于落 repr/npz 供 ridge train-fit（无明细文件自检）")
     parser.add_argument("--seeds", type=str, default="0",
                         help="逗号分隔的 mask 种子（val 用 0,1,2 估方差；test 单种子 0）")
     parser.add_argument("--rhos", type=str, default="0,20,40,60,80,100",
@@ -100,10 +100,10 @@ def seed_suffix(seed: int) -> str:
 
 
 def metric_config_of(rV: int, rT: int) -> int:
-    """各格协议指标的配置口径（与 fseries 行同构的关键）：
-    T 全缺（rT=0, rV>0）→ CONFIG_V（含 V2T 压力行，同 fseries V2M）；
-    V 全缺（rV=0, rT>0）→ CONFIG_T（无压力行，同 fseries T2M）；
-    其余 → CONFIG_VT（纯先验角 (0,0) 也走此口径，无 fseries 对应行）。"""
+    """各格协议指标的配置口径（与明细文件对应配置行同构的关键）：
+    T 全缺（rT=0, rV>0）→ CONFIG_V（含 V2T 压力行，同明细 V2M）；
+    V 全缺（rV=0, rT>0）→ CONFIG_T（无压力行，同明细 T2M）；
+    其余 → CONFIG_VT（纯先验角 (0,0) 也走此口径，无明细对应行）。"""
     if rT == 0 and rV > 0:
         return CONFIG_V
     if rV == 0 and rT > 0:
@@ -285,28 +285,28 @@ def _cell_products_ok(npz_dir, repr_dir, groups, rV, rT, seed, args) -> bool:
 
 
 def _corner_check(cells: dict, seeds: List[int], args) -> dict:
-    """角格 vs 现有 fseries 对应配置行（自检：必须一致）。
+    """角格 vs 现有明细文件（metrics/<split>.json）对应配置行（自检：必须一致）。
 
     只在全会话口径下有意义（--limit-sessions 冒烟时 diff 是预期的）。"""
-    fseries_path = model_root_of(args.ckpt) / "metrics" / ("%s_fseries.json" % args.split)
-    if not fseries_path.is_file():
-        return {"note": "fseries 缺失，跳过自检：%s" % fseries_path}
-    fseries = json.loads(fseries_path.read_text(encoding="utf-8"))["metrics"]
+    detail_path = model_root_of(args.ckpt) / "metrics" / ("%s.json" % args.split)
+    if not detail_path.is_file():
+        return {"note": "明细文件缺失，跳过自检：%s" % detail_path}
+    detail = json.loads(detail_path.read_text(encoding="utf-8"))["metrics"]
     check = {}
     if args.limit_sessions is not None:
         check["note"] = "--limit-sessions=%d 冒烟口径：diff 非 0 属预期" % args.limit_sessions
     seed_cells = cells.get("s%d" % seeds[0], {})
     for rV, rT, cfg in ((100, 0, "V2M"), (0, 100, "T2M"), (100, 100, "VT2M")):
         row = {}
-        for metric in ("pa_mpjpe_mm", "mpjpe_mm", "contact_f1", "yaw_abs_deg", "root_rte_percent"):
-            if metric not in fseries[cfg]:
+        for metric in ("pa_mpjpe_mm", "mpjpe_mm", "contact_f1", "root_orientation_deg", "root_rte_percent"):
+            if metric not in detail[cfg]:
                 continue
             grid_val = seed_cells.get(cell_key(rV, rT), {}).get(metric)
             if grid_val is None:
                 continue
             row[metric] = {"grid": round(grid_val, 4),
-                           "fseries": round(fseries[cfg][metric], 4),
-                           "diff": round(grid_val - fseries[cfg][metric], 4)}
+                           "detail": round(detail[cfg][metric], 4),
+                           "diff": round(grid_val - detail[cfg][metric], 4)}
         check[cfg] = row
     return check
 

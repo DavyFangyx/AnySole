@@ -20,8 +20,7 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from utils.motion_io import load_session_gt  # noqa: E402
-from r_test2_compare import array_from_file  # noqa: E402
+from utils.compare_core import array_from_file, native_edges, protocol_gt  # noqa: E402
 
 MANIFEST = ROOT / "AnysoleWorkspace/manifests/session_manifest.jsonl"
 DISPLAY = ROOT / "results_display/ResultTest/R1Test_visualize"
@@ -30,17 +29,6 @@ INFERNO = np.asarray([
     [186, 54, 85], [227, 89, 51], [249, 140, 10], [252, 194, 39],
     [252, 255, 164],
 ], dtype=np.float32)
-
-EDGES = [
-    ("pelvis", "left_hip"), ("pelvis", "right_hip"),
-    ("left_hip", "left_knee"), ("left_knee", "left_ankle"),
-    ("left_ankle", "left_foot"), ("right_hip", "right_knee"),
-    ("right_knee", "right_ankle"), ("right_ankle", "right_foot"),
-    ("pelvis", "neck"), ("neck", "head"),
-    ("neck", "left_shoulder"), ("left_shoulder", "left_elbow"),
-    ("left_elbow", "left_wrist"), ("neck", "right_shoulder"),
-    ("right_shoulder", "right_elbow"), ("right_elbow", "right_wrist"),
-]
 
 
 def manifest_row(session: str) -> dict:
@@ -52,18 +40,14 @@ def manifest_row(session: str) -> dict:
     raise KeyError(session)
 
 
-def seq_dir(row: dict) -> Path:
-    parts = Path(row["pressure_path"]).parts
-    cam = parts.index("cam3")
-    return ROOT / Path(*parts[:cam + 4])
-
-
 def prediction_path(model: str, session: str, explicit: str) -> Path:
     if explicit:
         return Path(explicit).expanduser()
     if model == "MMVP_pressure_toolkit":
-        root = ROOT / "results/baselines/pressure_tookit/predictions/eval_motion"
-    elif model in {"MMVP_FPP-Net", "MMVP_VP-MoCap"}:
+        root = ROOT / "results/baselines/pressure_toolkit/predictions/eval_motion"
+    elif model == "MMVP_VP-MoCap":
+        # V2M motion comes from PoseTransOpt (VP-MoCap); FPP-Net is V2T-only
+        # and has no motion output, so the old MMVP_FPP-Net label is gone.
         root = ROOT / "results/baselines/VP-MoCap/predictions/eval_motion"
     else:
         raise ValueError(f"unsupported MMVP model label: {model}")
@@ -102,16 +86,16 @@ def render(args: argparse.Namespace) -> Path:
         raise ValueError(
             f"unified prediction must have {expected} frames and valid_mask: {pred_path}"
         )
-    gt = load_session_gt(seq_dir(row), int(row["n_frames"]), float(row.get("target_fps") or 40.0))
-    n = min(len(pred), len(gt["joints"]))
-    pred, gt_points = np.asarray(pred[:n]), np.asarray(gt["joints"][:n])
+    # Paired native GT: SMPL-protocol predictions against the SMPL GT.
+    gt = np.asarray(protocol_gt(row, "smpl24")[0], dtype=np.float64)
+    n = min(len(pred), len(gt))
+    pred, gt_points = np.asarray(pred[:n]), gt[:n]
     pred_xy, gt_xy = normalize_xy(np.concatenate([pred, gt_points], axis=0))[:n], normalize_xy(np.concatenate([pred, gt_points], axis=0))[n:]
-    names = {name: i for i, name in enumerate(pred_names)}
-    edges = [(names[a], names[b]) for a, b in EDGES if a in names and b in names]
+    edges = native_edges(pred_names)
     row_parts = Path(row["pressure_path"]).parts
     cam = row_parts.index("cam3")
     date, subject = row_parts[cam + 1], row_parts[cam + 2]
-    insole_root = (ROOT / "AnysoleWorkspace/derived/pressure_tookit/images" / date / subject / args.session / "insole"
+    insole_root = (ROOT / "AnysoleWorkspace/derived/pressure_toolkit/images" / date / subject / args.session / "insole"
                    if args.model == "MMVP_pressure_toolkit" else
                    ROOT / "AnysoleWorkspace/derived/VP-MoCap" / date / subject / args.session / "insole")
     output = DISPLAY / args.model / f"{args.session}.gif"
@@ -143,7 +127,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model",
-        choices=("MMVP_pressure_toolkit", "MMVP_FPP-Net", "MMVP_VP-MoCap"),
+        choices=("MMVP_pressure_toolkit", "MMVP_VP-MoCap"),
         required=True,
     )
     parser.add_argument("--session", required=True)

@@ -65,6 +65,8 @@ from anysole.types import (  # noqa: E402
     V_FEAT_DIM,
 )
 from utils.compare_core import (  # noqa: E402
+    V2T_BRIEF_KEYS,
+    V2T_METRICS,
     find_prediction,
     load_mode_registry,
     load_v2t_archive,
@@ -285,7 +287,7 @@ def parse_args() -> argparse.Namespace:
                         help="archives reads standardized V2T outputs; infer is the legacy on-the-fly diagnostic.")
     parser.add_argument("--model-name", "--modal", dest="modal", default="V4B")
     parser.add_argument("--contact-method", default="joint_and")
-    parser.add_argument("--modes-config", type=Path, default=SCRIPT_DIR / "models_modes.yaml")
+    parser.add_argument("--modes-config", type=Path, default=SCRIPT_DIR.parent / "models_modes.yaml")
     parser.add_argument("--config-id", type=str, default="V2T",
                         help="archives mode; infer accepts the legacy VT2M,V2M,T2M arms.")
     parser.add_argument("--limit-sessions", type=int, default=0, help="Cap the number of sessions (0 = all).")
@@ -417,15 +419,19 @@ def plot_archive_error(cells_mae: np.ndarray, out_png: Path, session_id: str, mo
 def archive_entries(args: argparse.Namespace) -> list[dict[str, str]]:
     registry = load_mode_registry(args.modes_config)
     entries = []
+    from r_test2_compare import anysole_run_dirs
     for modal in cli_common.split_csv_arg(args.modal):
         for contact_method in cli_common.split_csv_arg(args.contact_method):
             model_dir = cli_common.anysole_model_dir(modal, contact_method)
-            entries.append({
-                "name": f"AnySole/{model_dir}/V2T",
-                "prediction_root": str(cli_common.RESULTS_ROOT / "AnySole" / model_dir / "predictions" / "eval_motion"),
-                "pattern": "{session_id}_V2T.npz",
-                "color": "#50c8ff",
-            })
+            base = cli_common.RESULTS_ROOT / "AnySole" / model_dir
+            for run_name, run_dir in anysole_run_dirs(base, None):
+                suffix = f"/{run_name}" if run_name else ""
+                entries.append({
+                    "name": f"AnySole/{model_dir}{suffix}/V2T",
+                    "prediction_root": str(run_dir / "predictions" / "eval_motion"),
+                    "pattern": "{session_id}_V2T.npz",
+                    "color": "#50c8ff",
+                })
     entries.extend(dict(entry) for entry in registry.get("V2T", []))
     return entries
 
@@ -466,13 +472,16 @@ def main_archives(args: argparse.Namespace) -> int:
                     )
                 values = v2t_metrics(
                     archive["pressure_pred"], archive["pressure_gt"],
-                    archive["contact_pred"], archive["contact_gt"],
                     archive["valid_mask"],
+                    contact_smpl_pred=archive.get("contact_smpl_pred"),
+                    contact_smpl_gt=archive.get("contact_smpl_gt"),
                 )
                 row = {
                     "model": entry["name"], "session": session_id, "status": "ok",
                     "n_valid_frames": int(values.get("n_valid_frames", 0)),
-                    **{key: values.get(key) for key in ("T_mae", "T_rmse", "T_corr", "pressure_force_mae", "pressure_force_rmse", "pressure_force_r2", "pressure_cop_error_left", "pressure_cop_error_right", "pressure_cop_error_mean", "contact_f1", "contact_acc", "contact_recall", "air_recall")},
+                    # Detail rows keep every computed key (brief + leaf);
+                    # the summary CSV and aggregate below show brief only.
+                    **{key: values.get(key) for key in V2T_METRICS},
                 }
                 # Store canonical cell errors for downstream inspection.  The
                 # archive itself remains in its native grid.
@@ -513,7 +522,7 @@ def main_archives(args: argparse.Namespace) -> int:
                 rows.append({"model": entry["name"], "session": session_id, "status": "invalid", "reason": str(exc)})
         export_count += 1
 
-    fieldnames = ["model", "session", "status", "reason", "n_valid_frames", "T_mae", "T_rmse", "T_corr", "pressure_force_mae", "pressure_force_rmse", "pressure_force_r2", "pressure_cop_error_left", "pressure_cop_error_right", "pressure_cop_error_mean", "contact_f1", "contact_acc", "contact_recall", "air_recall"]
+    fieldnames = ["model", "session", "status", "reason", "n_valid_frames", *V2T_BRIEF_KEYS]
     with (out_dir / "tgen_summary.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -523,7 +532,7 @@ def main_archives(args: argparse.Namespace) -> int:
         ok = [row for row in model_rows if row.get("status") == "ok"]
         aggregate[model] = {
             "sessions": len(ok),
-            **{key: float(np.average([row[key] for row in ok], weights=[row["n_valid_frames"] for row in ok])) if ok else None for key in ("T_mae", "T_rmse", "T_corr", "pressure_force_mae", "pressure_force_rmse", "pressure_force_r2", "pressure_cop_error_mean", "contact_f1")},
+            **{key: float(np.average([row[key] for row in ok], weights=[row["n_valid_frames"] for row in ok])) if ok else None for key in V2T_BRIEF_KEYS},
         }
     (out_dir / "tgen_report.json").write_text(json.dumps({"source": "standardized_v2t_archives", "split": args.split, "models": aggregate}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return 0

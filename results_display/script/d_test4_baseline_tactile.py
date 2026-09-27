@@ -7,7 +7,7 @@ tactile.py 的产物落盘（产物齐全则跳过生成，缺则调用生成脚
     AnySole         原始 pressure.npz → 原生 4x12 / 脚（主方法参考坐标）
     MotionPRO       AnysoleWorkspace/derived/MotionPRO/pressure_96/<sid>.npz
                     （FRAPPE 实际输入的 96x96；可视化按左右脚等尺度并旋转到参考坐标）
-    MMVP            pressure_tookit 与 VP-MoCap 共用的 31x11 原始压力
+    MMVP            pressure_toolkit 与 VP-MoCap 共用的 31x11 原始压力
                     （两棵目录逐帧校验一致，只显示一个逻辑工作）
     Step2Motion     AnysoleWorkspace/derived/Step2Motion/pressure_16ch/<sid>.npz
                     （16 通道/脚，回填为统一脚形仅作展示）
@@ -299,14 +299,14 @@ def render_one(sid: str, args: argparse.Namespace) -> None:
         # MotionPRO：生成器落盘的 96x96 实际输入
         p_motion = render_motionpro_foot_blocks(
             pressure96[fi], "MotionPRO", "FRAPPE 96×96 · L/R 等尺度", C_MOTIONPRO)
-        # MMVP：pressure_tookit 与 VP-MoCap 两棵目录必须是同一份观测。
+        # MMVP：pressure_toolkit 与 VP-MoCap 两棵目录必须是同一份观测。
         grid = load_insole_frame(paths["toolkit_insole_dir"], fi)
         fpp_grid = load_insole_frame(paths["fpp_insole_dir"], fi)
         if not np.array_equal(grid, fpp_grid):
-            raise ValueError(f"MMVP pressure_tookit/VP-MoCap mismatch at frame {fi}")
+            raise ValueError(f"MMVP pressure_toolkit/VP-MoCap mismatch at frame {fi}")
         p_mmvp = render_foot_blocks(
             grid[:, :11], grid[:, 11:],
-            "MMVP", "pressure_tookit / VP-MoCap · shared 31×11", C_TOOLKIT)
+            "MMVP", "pressure_toolkit / VP-MoCap · shared 31×11", C_TOOLKIT)
         # Step2Motion：16 通道组值回填 4x12，再使用同一脚形显示尺寸。
         up_l, up_r = left16[fi][pids], right16[fi][pids]
         p_s2m = render_foot_blocks(

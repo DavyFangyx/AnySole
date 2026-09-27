@@ -41,7 +41,7 @@ def session_paths(row: dict) -> tuple[str, str, Path]:
     parts = Path(row["pressure_path"]).parts
     cam = parts.index("cam3")
     date, subject, session = parts[cam + 1 : cam + 4]
-    color = WORKSPACE / "derived/pressure_tookit/images" / date / subject / session / "color"
+    color = WORKSPACE / "derived/pressure_toolkit/images" / date / subject / session / "color"
     return date, subject, color
 
 
@@ -64,7 +64,7 @@ def run_session(session: str, row: dict, inferencer, force: bool) -> dict:
     if len(images) != int(row["n_frames"]):
         raise ValueError(f"{session}: RGB count {len(images)} != manifest {row['n_frames']}")
     roots = [
-        WORKSPACE / "derived/pressure_tookit/input" / subject / session / "keypoints",
+        WORKSPACE / "derived/pressure_toolkit/input" / subject / session / "keypoints",
         WORKSPACE / "derived/VP-MoCap" / date / subject / session / "keypoints",
     ]
     for root in roots:

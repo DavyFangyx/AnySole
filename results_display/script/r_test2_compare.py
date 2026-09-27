@@ -1,23 +1,29 @@
-"""Protocol-aware comparison evaluator (Test2) for AnySole and BVH baselines.
+"""Protocol-aware comparison evaluator (R_Test2), native-protocol edition.
 
-AnySole predicts native SMPL-24 while Step2Motion predicts Skeleton3/BVH-23.
-Those arrays must never be truncated or compared by numeric joint index.  This
-evaluator identifies each prediction protocol, selects an explicit 19-joint
-semantic intersection, and evaluates against GT expressed in the *same native
-protocol* as that prediction.  SMPL is converted to the display/common z-up
-coordinate convention by ``motion_io``; BVH remains z-up.
+评估整改任务 03：删除 common19 作为跨模型数值协议。每个模型按其原生协议
+评估——SMPL-24 预测对 SMPL GT、BVH-23 预测对 BVH GT，绝不按数值关节下标对齐
+或裁剪成公共关节集。指标适用性由注册表声明的真实输出能力
+（``models_modes.yaml`` 的 ``protocol``/``capabilities``/``sources``）加实际
+预测文件内容门控：
 
-Writes metrics to ``results_display/r_test2_compare``:
-``comparison_per_session.csv`` (full detail), ``comparison_summary.csv``
-(model x metrics only) and ``comparison_summary.png`` (table render of the
-summary).  With ``--by-mode`` the summary is additionally split into one
-table per generation mode (``by_mode/<mode>/comparison_summary.{csv,png}``)
-plus a stacked ``by_mode/mode_overview.png``; rows from different modes never
-share a block (a model without a resolvable mode is excluded from the mode
-blocks and reported in ``evaluation.log``, never guessed).
+    missing         预测文件不存在
+    invalid         声明能力与文件矛盾（协议不符 / 缺统一契约 / 帧数不符 /
+                    声明为真但必要字段缺失）
+    not_applicable  模型没有该能力（或来源为 GT 回填/模板重建）——对应指标
+                    展示为 ``—``，绝不写 0
 
-Visualization is Test1's job and lives in
-``results_display/Test1_visualization``.
+contact 不进入任何正式指标集（无 motion 模型训练并显式导出 contact prediction）；
+V2T 为三层压力层级（网格/力/CoP），表列只显示 brief 6 键，叶 4 键
+（T_mse/T_mae/pressure_force_mae/pressure_cop_error_mean）保留在逐会话明细。
+指标公式一律来自 ``utils.compare_core`` / 根 ``metrics.py``
+（任务 01 唯一实现），本脚本不再定义任何公式。
+
+输出（``results_display/ResultTest/R2Test_compare/``）：
+``comparison_per_session.csv``（逐会话明细，含 protocol/gt_source/metric_reasons）、
+``comparison_summary.csv``（模型 × 指标，含 protocol 列）、``comparison_summary.png``、
+``evaluation.log``。``--by-mode`` 另写 ``by_mode/<mode>/`` 分块与
+``mode_overview.png``；``--write-model-metrics`` 把同一套指标写入
+``<model>/metrics/<split>_comparison.json``（schema ``mmvp_native_metrics_v2``）。
 """
 from __future__ import annotations
 
@@ -33,134 +39,245 @@ import numpy as np
 
 from utils import cli_common
 from utils.compare_core import (
-    COMMON_JOINTS,  # noqa: F401  (re-exported for historical importers)
+    CAPABILITY_ALIASES,
     METRICS,
+    METRIC_REQUIRES,
     MODES,
     MODE_METRICS,
+    PROTOCOL_LABELS,
     aggregate,
+    applicable_metrics,
     array_from_file,
+    bvh_joints,
     find_prediction,
     load_mode_registry,
     load_split_ids,
-    load_contact_gt,
     load_v2t_archive,
     metrics,
+    normalize_protocol,
     protocol_gt,
     protocol_gt_surface,
     protocol_gt_rotations,
+    read_capabilities,
     read_manifest,
     resolve_mode_for,
     resolve_repo_path,
-    select_common_joints,
-    select_common_rotations,
-    contact_from_joints,
-    v2t_metrics,
     sha256,
     valid_mask,
+    v2t_metrics,
 )
 
 ROOT = cli_common.REPO_ROOT
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from anysole.types import JOINT_NAMES  # noqa: E402  (historical import surface)
-from utils.motion_io import LEGACY_BVH_NAMES, load_motion, load_rotations, load_surface  # noqa: E402
+from utils.motion_io import load_rotations, load_surface  # noqa: E402
+
+# Cross-model comparison file schema.  v1 (common19) is superseded and must
+# never be read back as a current result; the writer only emits v2.
+COMPARISON_SCHEMA_V2 = "mmvp_native_metrics_v2"
+LEGACY_SCHEMA_V1 = "mmvp_common_metrics_v1"
+
+# Capability sources allowed to feed public metrics (评估整改 00 §5):
+# model_prediction / method_optimization and their deterministic derivations.
+OK_SOURCES = ("model_prediction", "method_optimization")
+# Source labels are retained for audit only. They do not override the
+# generation-capability contract used for metric applicability.
+DENIED_SOURCES = (
+    "ground_truth_fallback", "template_reconstruction", "method_fitting",
+    "derived_for_visualization",
+)
+
+# AnySole 主模型能力：模型直接输出 SMPL pose（= 关节旋转）、root
+# translation、root rotation；不输出 shape/表面/contact。V2T 行额外输出
+# pressure。GT beta 不构成 predicted shape/surface。
+ANYSOLE_MOTION_CAPS = {
+    "joint_positions": True,
+    "direct_joint_rotations": True,
+    "root_translation": True,
+    "root_rotation": True,
+    "predicted_surface": False,
+    "predicted_shape": False,
+    "pressure_prediction": False,
+    "contact_prediction": False,
+}
+ANYSOLE_V2T_CAPS = {**ANYSOLE_MOTION_CAPS, "pressure_prediction": True}
+# 评估资格以各模型生成清单为唯一依据（2026-09-27 用户裁定，见
+# z_note/metrics_指标改动说明.md §2）：AnySole 不生成 shape/表面，PVE 一律
+# 不适用（此前 pose-only + GT beta 的批准例外已废除）；pressure_toolkit 的
+# 拟合表面属其 pipeline 原生生成，PVE 可评估。
+ANYSOLE_APPROVED = ()
+
+# Root-orientation forward axis per protocol (both pred and GT rotations of
+# one protocol live in the same frame, so the two must match):
+#   smpl24: rotations are native SMPL (y-up, body forward +Z)        -> axis 2
+#   bvh23:  rotations are the z-up display frame, body forward -Y
+#           (verified 2026-09-26 against SMPL GT heading on S13013:
+#           median circular diff 4.4 deg; the common 180 deg sign flip
+#           cancels exactly in the circular-difference error formulas) -> axis 1
+PROTOCOL_FORWARD_AXIS = {"smpl24": 2, "bvh23": 1}
 
 
-def expand_requested_models(results_root: Path, modals: list[str], contact_methods: list[str], config_ids: list[str]) -> list[dict[str, str]]:
-    """Expand AnySole modal/contact-method/config combinations and retain baseline models."""
-    models: list[dict[str, str]] = []
+def capability_map(model: dict[str, Any]) -> dict[str, bool]:
+    """Normalized capabilities of one comparison row (AnySole rows use the
+    built-in declaration; registry rows carry their own)."""
+    caps = model.get("capabilities")
+    if isinstance(caps, dict) and caps:
+        return read_capabilities(caps)
+    return {}
+
+
+def denied_capabilities(entry: dict[str, Any], archive: dict[str, Any] | None = None) -> set[str]:
+    """Return provenance findings for audit metadata only.
+
+    The returned set is deliberately not used by ``applicable_for``. Metric
+    eligibility comes from generated capabilities and actual solver inputs.
+    """
+    denied: set[str] = set()
+    sources = entry.get("sources")
+    if isinstance(sources, dict):
+        alias_to_canonical = CAPABILITY_ALIASES
+        for field in ("joint_positions", "direct_joint_rotations", "root_translation",
+                      "root_rotation", "predicted_surface", "predicted_shape",
+                      "pressure_prediction", "contact_prediction"):
+            # Registry entries may spell a source under either schema key
+            # (e.g. ``surface: template_reconstruction``).
+            value = sources.get(field)
+            for alias, canonical in alias_to_canonical.items():
+                if canonical == field and field not in sources:
+                    value = sources.get(alias)
+                    break
+            if str(value or "").strip().lower() in DENIED_SOURCES:
+                denied.add(field)
+    meta = archive or {}
+    if str(meta.get("provenance_source_type", "")).strip() in DENIED_SOURCES:
+        # Archive-level fallback marks the whole payload as not a model output.
+        denied.update(
+            ("joint_positions", "direct_joint_rotations", "root_translation",
+             "root_rotation", "predicted_surface", "predicted_shape",
+             "pressure_prediction", "contact_prediction")
+        )
+    field_to_cap = {
+        "root_translation_source": "root_translation",
+        "surface_source": "predicted_surface",
+        "shape_source": "predicted_shape",
+        "pressure_source_type": "pressure_prediction",
+    }
+    for field, cap in field_to_cap.items():
+        if str(meta.get(field, "")).strip() in DENIED_SOURCES:
+            denied.add(cap)
+    return denied
+
+
+def applicable_for(caps: dict[str, bool], denied: set[str],
+                   approved: Any = ()) -> set[str]:
+    """Metrics this row may compute from generated capabilities and GT.
+
+    ``denied`` and ``approved`` remain in the signature for compatibility,
+    but provenance labels and historical exceptions do not alter
+    applicability.
+    """
+    del denied, approved
+    return applicable_metrics(caps)
+
+
+def mask_metrics(values: dict[str, Any], applicable: set[str],
+                 reasons: dict[str, str], *, reason: str = "not_applicable") -> None:
+    """Blank every metric outside the applicable set and record the reason.
+
+    Missing values stay NaN in the row and are written as ``—``/blank by the
+    CSV/PNG writers — never as 0.
+    """
+    for key in METRICS:
+        if key not in applicable:
+            values[key] = float("nan")
+            reasons.setdefault(key, reason)
+
+
+def archive_meta(path: Path) -> dict[str, str]:
+    """Read scalar provenance/string fields of one NPZ without loading arrays."""
+    if path.suffix.lower() != ".npz":
+        return {}
+    with np.load(path, allow_pickle=False) as data:
+        out = {}
+        for key in data.files:
+            arr = data[key]
+            if arr.ndim == 0 and arr.dtype.kind in "US":
+                out[key] = str(arr)
+        return out
+
+
+def _csv_value(value: Any) -> Any:
+    """CSV cells: NaN/None -> empty (native missing value, rendered as —)."""
+    if value is None:
+        return ""
+    if isinstance(value, (float, np.floating)):
+        return "" if not math.isfinite(float(value)) else float(value)
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    return value
+
+
+def anysole_run_dirs(model_dir: Path, variant: str | None) -> list[tuple[str, Path]]:
+    """AnySole run subdirs (stacked-hyperparameter naming, 2026-09-24).
+
+    A run dir carries checkpoints/ or predictions/; the flat historical layout
+    (model dir itself) is still accepted when no run subdir matches.
+    """
+    if variant:
+        return [(variant, model_dir / variant)]
+    if not model_dir.is_dir():
+        return []
+    runs = sorted(
+        p for p in model_dir.iterdir()
+        if p.is_dir() and ((p / "checkpoints").is_dir() or (p / "predictions").is_dir())
+    )
+    return [(p.name, p) for p in runs] or [("", model_dir)]
+
+
+def expand_anysole_models(results_root: Path, modals: list[str],
+                          contact_methods: list[str], config_ids: list[str],
+                          variant: str | None = None) -> list[dict[str, Any]]:
+    """Expand AnySole modal/contact-method/run/config combinations."""
+    models: list[dict[str, Any]] = []
     anysole_root = results_root / "AnySole"
     for modal in modals:
         for contact_method in contact_methods:
-            model_dir = cli_common.anysole_model_dir(modal, contact_method)
-            root = anysole_root / model_dir
-            if not root.is_dir():
+            model_dir = anysole_root / cli_common.anysole_model_dir(modal, contact_method)
+            if not model_dir.is_dir():
                 continue
-            for config_id in config_ids:
-                if config_id == "V2T":
-                    continue
-                models.append({
-                    "name": f"AnySole/{model_dir}/{config_id}",
-                    "variant": config_id,
-                    "prediction_root": str(root / "predictions" / "eval_motion"),
-                    "pattern": f"{{session_id}}_{config_id}.npz",
-                    "checkpoint": str(root / "checkpoints" / "ckpt_last.pt"),
-                    "modal": modal,
-                    "contact_method": contact_method,
-                    "config_id": config_id,
-                    "mode": config_id,
-                })
-            if "V2T" in config_ids:
-                models.append({
-                    "name": f"AnySole/{model_dir}/V2T",
-                    "variant": "V2T",
-                    "prediction_root": str(root / "predictions" / "eval_motion"),
-                    "pattern": "{session_id}_V2T.npz",
-                    "checkpoint": str(root / "checkpoints" / "ckpt_last.pt"),
-                    "modal": modal,
-                    "contact_method": contact_method,
-                    "config_id": "V2T",
-                    "mode": "V2T",
-                })
-    # Baselines are independent models and remain in the comparison alongside AnySole.
-    for model in discover_models(results_root):
-        if model["name"].startswith("AnySole/"):
-            continue
-        models.append(model)
+            for run_name, run_dir in anysole_run_dirs(model_dir, variant):
+                suffix = f"/{run_name}" if run_name else ""
+                for config_id in config_ids:
+                    models.append({
+                        "name": f"AnySole/{model_dir.name}{suffix}/{config_id}",
+                        "variant": config_id,
+                        "run_name": run_name,
+                        "prediction_root": str(run_dir / "predictions" / "eval_motion"),
+                        "pattern": f"{{session_id}}_{config_id}.npz",
+                        "checkpoint": str(run_dir / "checkpoints" / "ckpt_last.pt"),
+                        "modal": modal,
+                        "contact_method": contact_method,
+                        "config_id": config_id,
+                        "mode": config_id,
+                        "capabilities": ANYSOLE_V2T_CAPS if config_id == "V2T" else ANYSOLE_MOTION_CAPS,
+                        "approved": list(ANYSOLE_APPROVED),
+                        "sources": {},
+                    })
     return models
 
 
-def discover_models(results_root: Path) -> list[dict[str, str]]:
-    """Discover self-contained model result directories under results/."""
-    found = []
-    for model_root in sorted(p for p in results_root.rglob("*") if p.is_dir()):
-        if model_root.name in {"checkpoints", "predictions", "metrics", "logs", "tensorboard"}:
-            continue
-        has_artifact = any((model_root / name).is_dir() for name in ("checkpoints", "predictions", "metrics"))
-        if not has_artifact:
-            continue
-        rel = model_root.relative_to(results_root)
-        name = "/".join(rel.parts)
-        # Archived BVH-era results live under *_backup dirs; leave them out of
-        # the automatic sweep (list them explicitly via --models-config).
-        if any("backup" in part.lower() for part in rel.parts):
-            continue
-        prediction_root = model_root / "predictions"
-        # MotionPRO/Step2Motion may keep predictions at the model family root.
-        if not prediction_root.is_dir():
-            prediction_root = model_root
-        pattern = None
-        if "AnySole" in rel.parts:
-            prediction_root = model_root / "predictions" / "eval_motion"
-            pattern = "{session_id}*.npz"
-        checkpoint_dir = model_root / "checkpoints"
-        found.append({
-            "name": name,
-            "variant": rel.parts[-1],
-            "prediction_root": str(prediction_root),
-            "pattern": pattern or "",
-            "checkpoint": str(checkpoint_dir) if checkpoint_dir.is_dir() else "",
-        })
-    # Keep only the deepest model directories, avoiding AnySole parent duplicates.
-    def is_relative_to(path: Path, parent: Path) -> bool:
-        try:
-            path.relative_to(parent)
-            return True
-        except ValueError:
-            return False
-
-    return [m for m in found if not any(is_relative_to(Path(m["prediction_root"]), Path(other["prediction_root"])) and m is not other for other in found)]
-
-
-def registry_baselines(results_root: Path, registry: dict[str, list[dict[str, str]]]) -> list[dict[str, str]]:
+def registry_baselines(results_root: Path,
+                       registry: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]]:
     """Registry baselines as comparison rows (independent of what is on disk).
 
     Models without any exported prediction yet still get a row with
     status=missing inside their mode block, so the table tells the reader
     explicitly what was compared and what is not available.
     """
-    rows = []
+    rows: list[dict[str, Any]] = []
     for mode in MODES:
         for entry in registry.get(mode, []):
             name = str(entry.get("name") or "")
@@ -170,18 +287,23 @@ def registry_baselines(results_root: Path, registry: dict[str, list[dict[str, st
             resolved = cli_common.resolve_path(pred_root, results_root) if pred_root else results_root / name / "predictions"
             rows.append({
                 "name": name,
+                "display_name": str(entry.get("display_name") or name),
                 "variant": name,
                 "prediction_root": str(resolved),
                 "pattern": str(entry.get("pattern") or ""),
                 "checkpoint": "",
                 "family": str(entry.get("family") or "baseline"),
                 "mode": mode,
+                "protocol": str(entry.get("protocol") or ""),
+                "capabilities": dict(entry.get("capabilities") or {}),
+                "sources": dict(entry.get("sources") or {}),
+                "approved": [],
             })
     return rows
 
 
 def _model_result_root(prediction_root: Path) -> Path:
-    """Return the owning ``results/<model>`` directory for metric provenance."""
+    """Return the owning ``<model>`` directory for metric provenance."""
     prediction_root = Path(prediction_root)
     if prediction_root.name == "eval_motion" and prediction_root.parent.name == "predictions":
         return prediction_root.parent.parent
@@ -201,7 +323,7 @@ def _json_safe(value):
 
 
 def write_model_metrics(
-    model: dict[str, str],
+    model: dict[str, Any],
     prediction_root: Path,
     split: str,
     split_csv: Path,
@@ -210,16 +332,29 @@ def write_model_metrics(
     family: str,
     rows: list[dict[str, Any]],
     summary: dict[str, Any],
+    capabilities: dict[str, bool],
+    denied: set[str],
+    applicable: set[str],
+    gt_source: str,
     surface_metrics: bool = False,
 ) -> Path:
     """Persist the same comparison metrics beside each model's results.
 
     Native model logs remain untouched.  ``<split>_comparison.json`` is the
-    cross-model contract: common19 semantic joints, native-protocol GT,
-    canonical metric names/units, and the exact split/manifest hashes used.
+    cross-model contract: native protocol, capability gating, canonical metric
+    names/units, and the exact split/manifest hashes used.  Schema v2 — a
+    legacy v1 (common19) file at the same path is reported and superseded,
+    never read back as a current result.
     """
     result_root = _model_result_root(prediction_root)
     output = result_root / "metrics" / f"{split}_comparison.json"
+    if output.is_file():
+        try:
+            existing = json.loads(output.read_text(encoding="utf-8"))
+            if str(existing.get("schema_version")) == LEGACY_SCHEMA_V1:
+                print(f"[legacy] {output}: schema v1 (common19) superseded, rewriting as v2")
+        except (ValueError, OSError):
+            pass
     metric_rows = []
     for row in rows:
         metric_rows.append({
@@ -227,8 +362,9 @@ def write_model_metrics(
             for key in ("session_id", "status", "reason", "n_valid_frames", *METRICS)
         })
     payload = {
-        "schema_version": "mmvp_common_metrics_v1",
+        "schema_version": COMPARISON_SCHEMA_V2,
         "model": model.get("name", ""),
+        "display_name": model.get("display_name", model.get("name", "")),
         "family": family,
         "mode": mode,
         "split": split,
@@ -236,8 +372,16 @@ def write_model_metrics(
         "split_sha256": sha256(split_csv),
         "manifest": str(manifest_path),
         "manifest_sha256": sha256(manifest_path),
-        "joint_set": "common19",
-        "protocol_rule": "native_protocol_gt_with_explicit_semantic_joint_mapping",
+        "evaluation_protocol": summary.get("protocol", ""),
+        "capabilities": {
+            field: bool(capabilities.get(field, False))
+            for field in ("joint_positions", "direct_joint_rotations", "root_translation",
+                          "root_rotation", "predicted_surface", "predicted_shape",
+                          "pressure_prediction", "contact_prediction")
+        },
+        "capabilities_denied": sorted(denied),
+        "applicable_metrics": sorted(applicable),
+        "gt_source": gt_source,
         "surface_metrics": bool(surface_metrics),
         "evaluation_fps": float(summary.get("eval_fps", 40.0)),
         "units": {
@@ -263,7 +407,8 @@ def write_model_metrics(
 
 def render_summary_png(csv_path: Path, png_path: Path, title: str) -> None:
     """Render the slim summary CSV as a plain table image (identity via row
-    labels, neutral ink; no categorical color coding)."""
+    labels, neutral ink; no categorical color coding).  Missing values render
+    as —, never as 0."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -277,13 +422,13 @@ def render_summary_png(csv_path: Path, png_path: Path, title: str) -> None:
 
     def cell(value: Any, field: str) -> str:
         if value == "" or value is None:
-            return "-"
+            return "—"
         try:
             number = float(value)
         except (TypeError, ValueError):
             return str(value)
         if not math.isfinite(number):
-            return "-"
+            return "—"
         return f"{number:.3f}" if field in ("accel_error_m_s2", "jitter_pred_m_s3", "jitter_gt_m_s3") else f"{number:.2f}"
 
     def short_model(name: str) -> str:
@@ -346,13 +491,13 @@ def render_mode_overview_png(by_mode_csvs: dict[str, Path], png_path: Path, titl
 
     def cell(value: Any, field: str) -> str:
         if value == "" or value is None:
-            return "-"
+            return "—"
         try:
             number = float(value)
         except (TypeError, ValueError):
             return str(value)
         if not math.isfinite(number):
-            return "-"
+            return "—"
         return f"{number:.3f}" if field in ("accel_error_m_s2", "jitter_pred_m_s3", "jitter_gt_m_s3") else f"{number:.2f}"
 
     blocks = []
@@ -364,8 +509,8 @@ def render_mode_overview_png(by_mode_csvs: dict[str, Path], png_path: Path, titl
             rows = [dict(row) for row in csv.DictReader(handle)]
         if not rows:
             continue
-        fields = ["model", "family", *MODE_METRICS[mode]]
-        blocks.append((mode, fields, [[short_model(r["model"]), r.get("family", "")] + [cell(r[f], f) for f in MODE_METRICS[mode]] for r in rows]))
+        fields = ["model", "protocol", "family", *MODE_METRICS[mode]]
+        blocks.append((mode, fields, [[short_model(r["model"]), r.get("protocol", ""), r.get("family", "")] + [cell(r[f], f) for f in MODE_METRICS[mode]] for r in rows]))
     if not blocks:
         print(f"[skip] no mode blocks for {png_path}")
         return
@@ -400,6 +545,203 @@ def render_mode_overview_png(by_mode_csvs: dict[str, Path], png_path: Path, titl
     print(f"Wrote {png_path}")
 
 
+def _session_time_grid(row: dict[str, str]) -> np.ndarray:
+    """Canonical mocap time axis: t_mocap = visual_start_s + i/fps - offset_s."""
+    n = int(float(row["n_frames"]))
+    fps = float(row.get("target_fps") or 40.0)
+    return float(row["visual_start_s"]) + np.arange(n, dtype=np.float64) / fps - float(row["offset_s"])
+
+
+def evaluate_pressure_row(model: dict[str, Any], row: dict[str, str],
+                          pred_path: Path, registry: dict[str, list[dict[str, str]]],
+                          mode: str) -> dict[str, Any]:
+    """One session of a V2T (pressure) row: brief (6) + leaf (4) pressure keys."""
+    caps = capability_map(model)
+    denied = denied_capabilities(model)
+    applicable = applicable_for(caps, denied)
+    reasons: dict[str, str] = {}
+    base = {
+        "model": model["name"], "variant": model.get("variant", ""),
+        "run_name": model.get("run_name", ""), "session_id": row["session_id"],
+        "subject_id": row.get("subject_id", ""), "action": row.get("action", ""),
+        "split": "placeholder", "protocol": "pressure", "gt_source": "",
+        "n_valid_frames": 0, "mode": mode, "family": str(model.get("family") or
+        ("main" if model["name"].startswith("AnySole/") else "baseline")),
+        "status": "ok", "reason": "", "metric_reasons": {}, "prediction": str(pred_path),
+    }
+    base.update({key: float("nan") for key in METRICS})
+    try:
+        archive = load_v2t_archive(pred_path)
+        expected = int(float(row.get("n_frames") or 0))
+        if len(archive["valid_mask"]) != expected:
+            raise ValueError(
+                f"standard V2T archive length={len(archive['valid_mask'])}; "
+                f"canonical session={expected}"
+            )
+        values = v2t_metrics(archive["pressure_pred"], archive["pressure_gt"],
+                             archive["valid_mask"],
+                             contact_smpl_pred=archive.get("contact_smpl_pred"),
+                             contact_smpl_gt=archive.get("contact_smpl_gt"))
+        base.update(values)
+        # Pressure keys require generated pressure output; contact-level keys
+        # additionally require an explicit contact prediction. Provenance is
+        # retained in the row metadata but does not override this contract.
+        mask_metrics(base, applicable, reasons)
+        # The binarized legacy archive contact fields are never consumed;
+        # contact_smpl_mse/bce come from the continuous maps.  contact_f1
+        # stays out until a binary contact GT exists (待处理).
+        base["metric_reasons"] = json.dumps(reasons, ensure_ascii=False, sort_keys=True)
+        base["gt_source"] = "archive embedded pressure_gt (same session grid)"
+    except FileNotFoundError as exc:
+        base.update({"status": "missing", "reason": str(exc)})
+    except Exception as exc:
+        base.update({"status": "invalid", "reason": str(exc)})
+    return base
+
+
+def evaluate_motion_row(model: dict[str, Any], row: dict[str, str],
+                        pred_path: Path, args: argparse.Namespace, split: str,
+                        registry: dict[str, list[dict[str, str]]], mode: str,
+                        gt_cache: dict, gt_surface_cache: dict,
+                        gt_rotation_cache: dict) -> dict[str, Any]:
+    """One session of a motion row: native protocol, capability-gated metrics."""
+    caps = capability_map(model)
+    archive_info = archive_meta(pred_path) if pred_path is not None else {}
+    denied = denied_capabilities(model, archive_info)
+    applicable = applicable_for(caps, denied, approved=model.get("approved", ()))
+    reasons: dict[str, str] = {}
+    base = {
+        "model": model["name"], "variant": model.get("variant", ""),
+        "run_name": model.get("run_name", ""), "session_id": row["session_id"],
+        "subject_id": row.get("subject_id", ""), "action": row.get("action", ""),
+        "split": split, "protocol": "", "gt_source": "",
+        "n_valid_frames": 0, "mode": mode, "family": str(model.get("family") or
+        ("main" if model["name"].startswith("AnySole/") else "baseline")),
+        "status": "ok", "reason": "", "metric_reasons": {}, "prediction": str(pred_path),
+    }
+    base.update({key: float("nan") for key in METRICS})
+    if pred_path is None:
+        base.update({"status": "missing",
+                     "reason": f"no prediction under {model.get('prediction_root', '')}"})
+        return base
+    try:
+        declared = normalize_protocol(str(model.get("protocol") or ""))
+        if declared == "pressure":
+            raise ValueError("pressure rows use evaluate_pressure_row")
+        # Load the prediction in its native protocol (BVH resampled onto the
+        # canonical session grid so the frame pairing with GT is exact).
+        if pred_path.suffix.lower() == ".bvh":
+            pred, pred_names, _parents = bvh_joints(pred_path, row)
+            pred_mask = None
+            protocol = "bvh23"
+        else:
+            pred, pred_mask, pred_names, protocol_label = array_from_file(pred_path)
+            protocol = normalize_protocol(protocol_label)
+            if pred_mask is None:
+                raise ValueError(
+                    "legacy motion archive lacks the unified "
+                    "joint_xyz_world/valid_mask contract"
+                )
+        if protocol != declared:
+            raise ValueError(
+                f"declared protocol {declared!r} but prediction is "
+                f"{PROTOCOL_LABELS[protocol]!r}"
+            )
+        expected = int(float(row.get("n_frames") or 0))
+        if pred_mask is not None and len(pred_mask) != expected:
+            raise ValueError(
+                f"unified motion archive mask={len(pred_mask)}; canonical session={expected}"
+            )
+        gt, gt_names = gt_cache.setdefault((row["session_id"], protocol),
+                                           protocol_gt(row, protocol))
+        base["protocol"] = PROTOCOL_LABELS[protocol]
+        base["gt_source"] = _gt_source_path(row, protocol)
+        if not caps.get("joint_positions", False):
+            raise ValueError("declared joint_positions=false for a motion row")
+
+        eval_fps = float(row.get("target_fps") or args.fps)
+        times = _session_time_grid(row)
+        n_eval = min(len(pred), len(gt), expected)
+        keep = valid_mask(row, n_eval)
+        if pred_mask is not None:
+            keep &= pred_mask[:n_eval].astype(bool)
+
+        # Rotations: needed only when root orientation / MPJAE are applicable.
+        want_rotations = bool(applicable & {"root_orientation_deg", "root_orientation_drift_deg", "mpjae_deg"})
+        pred_rotations = gt_rotations = None
+        if want_rotations:
+            pred_rotation_data = load_rotations(pred_path)
+            cache_key = (row["session_id"], protocol)
+            gt_rotation_data = gt_rotation_cache.setdefault(
+                cache_key, protocol_gt_rotations(row, protocol)
+            )
+            pred_rotations = np.asarray(pred_rotation_data["rotations"], dtype=np.float64)
+            gt_rotations = np.asarray(gt_rotation_data["rotations"], dtype=np.float64)
+
+        # Surface: only for PVE-applicable models, and only when requested.
+        pred_vertices = gt_vertices = None
+        public_surface = str(archive_info.get("public_surface_metrics", "true")).strip().lower()
+        if ("pve_mm" in applicable and args.surface_metrics
+                and public_surface not in {"0", "false", "no"}):
+            if protocol != "smpl24":
+                reasons["pve_mm"] = "not_applicable: no SMPL surface for bvh23"
+            else:
+                pred_surface = load_surface(pred_path)
+                if pred_surface is None:
+                    if caps.get("predicted_surface", False):
+                        raise ValueError(
+                            "declared predicted_surface=true but archive has no "
+                            "surface/vertex contract"
+                        )
+                    reasons["pve_mm"] = "not_computed: no surface in archive"
+                else:
+                    pred_vertices = pred_surface.get("vertices")
+                    cache_key = (row["session_id"], protocol)
+                    if cache_key not in gt_surface_cache:
+                        gt_surface_cache[cache_key] = protocol_gt_surface(row, protocol)
+                    gt_surface = gt_surface_cache[cache_key]
+                    gt_vertices = gt_surface.get("vertices") if gt_surface else None
+        elif "pve_mm" in applicable and public_surface in {"0", "false", "no"}:
+            reasons["pve_mm"] = "not_applicable: archive public_surface_metrics=false"
+        elif "pve_mm" in applicable:
+            reasons["pve_mm"] = "not_computed: --surface-metrics off"
+
+        values = metrics(
+            pred[:n_eval], gt[:n_eval], keep, eval_fps,
+            protocol=protocol,
+            names=pred_names,
+            pred_rotations=pred_rotations,
+            gt_rotations=gt_rotations,
+            pred_vertices=pred_vertices,
+            gt_vertices=gt_vertices,
+            times=times,
+            forward_axis=PROTOCOL_FORWARD_AXIS[protocol],
+        )
+        base.update(values)
+        # Post-gate: metrics the capability contract does not permit stay
+        # blank with an explicit reason (never silently kept).
+        mask_metrics(base, applicable, reasons)
+        base["n_valid_frames"] = int(keep.sum())
+        for metric in METRICS:
+            if not math.isfinite(float(base[metric])) and metric in applicable:
+                reasons.setdefault(metric, "missing: solver returned no value")
+    except FileNotFoundError as exc:
+        base.update({"status": "missing", "reason": str(exc)})
+    except Exception as exc:
+        base.update({"status": "invalid", "reason": str(exc)})
+        base.update({key: float("nan") for key in METRICS})
+    base["metric_reasons"] = json.dumps(reasons, ensure_ascii=False, sort_keys=True)
+    return base
+
+
+def _gt_source_path(row: dict[str, str], protocol: str) -> str:
+    key = "bvh_path" if protocol == "bvh23" else "smpl_path"
+    try:
+        return str(resolve_repo_path(row[key], ROOT))
+    except (KeyError, ValueError):
+        return f"{key}:{row.get(key, '')}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", type=Path, default=ROOT / "AnysoleWorkspace/manifests/session_manifest.csv")
@@ -407,23 +749,25 @@ def main() -> int:
                     help="Canonical train/val/test membership table; manifest is metadata only.")
     ap.add_argument("--models-config", type=Path, default=None)
     ap.add_argument("--results-root", type=Path, default=ROOT / "results")
-    ap.add_argument("--auto-scan", action="store_true", help="Scan results/ model directories instead of YAML")
+    ap.add_argument("--auto-scan", action="store_true",
+                    help="Deprecated alias: baselines always come from the mode registry now.")
     ap.add_argument("--split", default="val")
     ap.add_argument("--out-dir", type=Path, default=cli_common.DISPLAY_ROOT / "ResultTest/R2Test_compare")
     ap.add_argument("--force", action="store_true", help="Rebuild and overwrite existing outputs.")
     ap.add_argument("--fps", type=float, default=40.0)
     ap.add_argument("--model-name", "--modal", dest="modal", metavar="MODEL_NAME", default="anysolev1,anysolev1_insole_drift", help="AnySole model name(s), comma-separated; legacy alias: --modal")
     ap.add_argument("--contact-method", default="tactile_abs", help="Contact-label scheme(s), comma-separated; model dir is <model-name>_<contact-method>")
+    ap.add_argument("--variant", default=None, help="AnySole stacked-hyperparameter run subdir (omit to scan all runs).")
     ap.add_argument("--config-id", default="VT2M,V2M,T2M,V2T", help="AnySole generation task(s), comma-separated")
-    ap.add_argument("--modes-config", type=Path, default=Path(__file__).resolve().parent / "models_modes.yaml",
-                    help="Mode registry declaring which generation mode each baseline belongs to.")
+    ap.add_argument("--modes-config", type=Path, default=Path(__file__).resolve().parent.parent / "models_modes.yaml",
+                    help="Mode/protocol/capability registry for baselines.")
     ap.add_argument("--by-mode", action="store_true",
                     help="Additionally write per-mode summary blocks (by_mode/<mode>/) and mode_overview.png. "
                          "Rows of different modes never share a block.")
     ap.add_argument("--write-model-metrics", action="store_true",
-                    help="Also write <results>/<model>/metrics/<split>_comparison.json with the same canonical metrics.")
+                    help="Also write <results>/<model>/metrics/<split>_comparison.json with the same canonical metrics (schema v2).")
     ap.add_argument("--surface-metrics", action="store_true",
-                    help="Compute PVE/shape_vertex_std/foot_sliding; this requires loading SMPL surfaces and is slower.")
+                    help="Compute PVE for surface-capable models (SMPL surface loading is slower).")
     args = ap.parse_args()
     modals = cli_common.split_csv_arg(args.modal)
     contact_methods = cli_common.split_csv_arg(args.contact_method)
@@ -432,38 +776,29 @@ def main() -> int:
     invalid = set(config_ids) - allowed_configs
     if invalid:
         raise SystemExit(f"Unsupported --config-id: {sorted(invalid)}; choices={sorted(allowed_configs)}")
-    registry = load_mode_registry(args.modes_config) if args.by_mode else {}
-    if args.auto_scan or args.models_config is None:
-        models = expand_requested_models(args.results_root, modals, contact_methods, config_ids)
-        if args.by_mode:
-            registered_names = {
-                str(entry.get("name") or "")
-                for entries in registry.values()
-                for entry in entries
-            }
-            # The mode registry is the authoritative baseline allow-list.
-            # Do not accidentally compare unrelated experiment folders such
-            # as singlemodal_eval or ablation dumps found under results/.
-            models = [
-                model for model in models
-                if model["name"].startswith("AnySole/")
-                or model["name"] in registered_names
-            ]
-            existing = {m["name"] for m in models}
-            for row in registry_baselines(args.results_root, registry):
-                if row["name"] not in existing:
-                    models.append(row)
-        configs = {"models": models}
-    else:
+    registry = load_mode_registry(args.modes_config)
+    if args.models_config is not None:
         try:
             import yaml
             configs = yaml.safe_load(args.models_config.read_text(encoding="utf-8"))
         except ImportError:
             configs = json.loads(args.models_config.read_text(encoding="utf-8"))
+        models = [dict(m) for m in configs.get("models", configs)]
+        # External model lists must declare protocol/capabilities themselves.
+        refused = [m["name"] for m in models if not m.get("capabilities") or not m.get("protocol")]
+        for m in models:
+            if not m.get("capabilities") or not m.get("protocol"):
+                m["refused_reason"] = "no declared protocol/capabilities"
+    else:
+        models = expand_anysole_models(args.results_root, modals, contact_methods,
+                                       config_ids, variant=args.variant)
+        models.extend(registry_baselines(args.results_root, registry))
+        refused = []
     split_csv = Path(cli_common.resolve_path(args.split_csv, ROOT))
     requested_ids = load_split_ids(split_csv, args.split)
     manifest = read_manifest(args.manifest, args.split, split_csv=split_csv, evaluable_only=True)
-    if not manifest: raise SystemExit(f"No '{args.split}' sessions found in {args.manifest}")
+    if not manifest:
+        raise SystemExit(f"No '{args.split}' sessions found in {args.manifest}")
     evaluated_ids = [row["session_id"] for row in manifest]
     excluded_ids = [sid for sid in requested_ids if sid not in set(evaluated_ids)]
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -475,119 +810,57 @@ def main() -> int:
     gt_cache: dict[tuple[str, str], tuple[np.ndarray, tuple[str, ...]]] = {}
     gt_surface_cache: dict[tuple[str, str], dict | None] = {}
     gt_rotation_cache: dict[tuple[str, str], dict] = {}
-    contact_cache: dict[tuple[str, str], np.ndarray | None] = {}
-    for model in configs.get("models", configs):
-        name, root = model["name"], resolve_repo_path(model["prediction_root"], ROOT)
+    for model in models:
+        name = model["name"]
+        if model.get("refused_reason"):
+            mode_resolution.append(f"REFUSED {name}: {model['refused_reason']}")
+            continue
+        root = Path(cli_common.resolve_path(model["prediction_root"], ROOT))
         mode = resolve_mode_for(model, registry) if args.by_mode else str(model.get("mode") or "")
         family = str(model.get("family") or ("main" if name.startswith("AnySole/") else "baseline"))
-        model_contact_method = str(model.get("contact_method") or (contact_methods[0] if contact_methods else "tactile_abs"))
-        if "," in model_contact_method:
-            model_contact_method = cli_common.split_csv_arg(model_contact_method)[0]
+        if args.by_mode and not mode:
+            mode_resolution.append(f"UNRESOLVED mode -> excluded from mode blocks: {name} (declare it in {args.modes_config})")
         model_rows = []
+        declared = normalize_protocol(str(model.get("protocol") or ""))
+        gt_source = ""
         for row in manifest:
             sid = row["session_id"]
             pred_path = find_prediction(root, sid, model.get("pattern"), config_id=model.get("config_id"))
-            base = {"model": name, "variant": model.get("variant", ""), "run_name": model.get("run_name", root.name), "session_id": sid, "subject_id": row.get("subject_id", ""), "action": row.get("action", ""), "split": args.split, "protocol": "", "joint_set": "common19", "status": "ok", "reason": "", "mode": mode, "family": family, "contact_method": model_contact_method}
-            try:
-                if pred_path is None: raise FileNotFoundError(f"no prediction under {root}")
-                if mode == "V2T" or str(model.get("config_id") or "") == "V2T":
-                    v2t = load_v2t_archive(pred_path)
-                    expected_frames = int(float(row.get("n_frames") or 0))
-                    if len(v2t["valid_mask"]) != expected_frames:
-                        raise ValueError(
-                            f"unified V2T archive has {len(v2t['valid_mask'])} frames; "
-                            f"canonical session has {expected_frames}"
-                        )
-                    vals = v2t_metrics(
-                        v2t["pressure_pred"], v2t["pressure_gt"],
-                        v2t["contact_pred"], v2t["contact_gt"],
-                        v2t["valid_mask"],
-                    )
-                    base.update(vals)
-                    base["protocol"] = "pressure"
-                    base["joint_set"] = "per_foot_intensity"
-                    base["prediction"] = str(pred_path)
-                    details.append(base)
-                    model_rows.append(base)
-                    continue
-                pred, pred_mask, pred_names, protocol = array_from_file(pred_path)
-                if name.startswith("AnySole/") and pred_mask is None:
-                    raise ValueError(
-                        "legacy AnySole motion archive lacks the unified "
-                        "joint_xyz_world/valid_mask contract; rerun anysole.eval"
-                    )
-                if pred_mask is not None:
-                    expected_frames = int(float(row.get("n_frames") or 0))
-                    if len(pred) != expected_frames or len(pred_mask) != expected_frames:
-                        raise ValueError(
-                            f"unified motion archive length={len(pred)} mask={len(pred_mask)}; "
-                            f"canonical session={expected_frames}"
-                        )
-                cache_key = (sid, protocol)
-                if cache_key not in gt_cache:
-                    gt_cache[cache_key] = protocol_gt(row, protocol)
-                gt, gt_names = gt_cache[cache_key]
-                pred_surface = load_surface(pred_path) if args.surface_metrics else None
-                if args.surface_metrics:
-                    if cache_key not in gt_surface_cache:
-                        gt_surface_cache[cache_key] = protocol_gt_surface(row, protocol)
-                    gt_surface = gt_surface_cache[cache_key]
-                else:
-                    gt_surface = None
-                pred_rotation_data = load_rotations(pred_path)
-                if cache_key not in gt_rotation_cache:
-                    gt_rotation_cache[cache_key] = protocol_gt_rotations(row, protocol)
-                gt_rotation_data = gt_rotation_cache[cache_key]
-                pred_full, gt_full = pred, gt
-                floor = float(np.percentile(gt_full[..., 2], 5))
-                eval_fps = float(row.get("target_fps") or args.fps)
-                pred_contact = contact_from_joints(pred_full, pred_names, floor, eval_fps)
-                contact_key = (sid, model_contact_method)
-                if contact_key not in contact_cache:
-                    contact_cache[contact_key] = load_contact_gt(
-                        row, min(len(pred_full), len(gt_full)), method=model_contact_method
-                    )
-                gt_contact = contact_cache[contact_key]
-                pred = select_common_joints(pred_full, pred_names, protocol)
-                gt = select_common_joints(gt_full, gt_names, protocol)
-                pred_rotations = select_common_rotations(
-                    pred_rotation_data["rotations"], pred_rotation_data["names"], protocol
-                )
-                gt_rotations = select_common_rotations(
-                    gt_rotation_data["rotations"], gt_rotation_data["names"], protocol
-                )
-                base["protocol"] = protocol
-                n_eval = min(len(pred), len(gt), len(pred_mask) if pred_mask is not None else max(len(pred), len(gt)))
-                keep = valid_mask(row, n_eval)
-                if pred_mask is not None:
-                    keep &= pred_mask[:n_eval].astype(bool)
-                vals = metrics(
-                    pred, gt, keep, eval_fps,
-                    pred_rotations=pred_rotations,
-                    gt_rotations=gt_rotations,
-                    pred_vertices=None if pred_surface is None else pred_surface.get("vertices"),
-                    gt_vertices=None if gt_surface is None else gt_surface.get("vertices"),
-                    pred_contact=pred_contact,
-                    gt_contact=gt_contact,
-                )
-                base.update(vals); base["prediction"] = str(pred_path)
-            except Exception as exc:
-                base.update({"status": "missing", "reason": str(exc), "n_valid_frames": 0}); base.update({k: float("nan") for k in METRICS})
-            details.append(base); model_rows.append(base)
-        s = aggregate(model_rows); s.update({"model": name, "variant": model.get("variant", ""), "run_name": model.get("run_name", root.name), "n_sessions": sum(r["status"] == "ok" for r in model_rows), "split_sha256": sha256(split_csv), "manifest_sha256": sha256(args.manifest), "eval_fps": args.fps, "checkpoint": model.get("checkpoint", ""), "mode": mode, "family": family})
+            if declared == "pressure":
+                result = evaluate_pressure_row(model, row, pred_path, registry, mode)
+            else:
+                result = evaluate_motion_row(model, row, pred_path, args, args.split,
+                                             registry, mode, gt_cache, gt_surface_cache,
+                                             gt_rotation_cache)
+            if result.get("status") == "ok":
+                gt_source = result.get("gt_source", "")
+            details.append(result)
+            model_rows.append(result)
+        s = aggregate(model_rows)
+        s.update({"model": name, "display_name": model.get("display_name", name),
+                  "protocol": _row_protocol(model_rows), "variant": model.get("variant", ""),
+                  "run_name": model.get("run_name", ""),
+                  "n_sessions": sum(r["status"] == "ok" for r in model_rows),
+                  "split_sha256": sha256(split_csv), "manifest_sha256": sha256(args.manifest),
+                  "eval_fps": args.fps, "checkpoint": model.get("checkpoint", ""),
+                  "mode": mode, "family": family})
         summaries.append(s)
-        if args.write_model_metrics:
+        if args.write_model_metrics and model_rows and model_rows[0].get("protocol"):
+            caps = capability_map(model)
+            denied = denied_capabilities(model)
+            applicable = applicable_for(caps, denied, approved=model.get("approved", ()))
             write_model_metrics(
                 model, root, args.split, split_csv, args.manifest, mode, family,
-                model_rows, s, surface_metrics=args.surface_metrics,
+                model_rows, s, caps, denied, applicable, gt_source,
+                surface_metrics=args.surface_metrics,
             )
-        if args.by_mode and not mode:
-            mode_resolution.append(f"UNRESOLVED mode -> excluded from mode blocks: {name} (declare it in {args.modes_config})")
-    detail_fields = ["model", "variant", "run_name", "session_id", "subject_id", "action", "split", "protocol", "joint_set", "contact_method", "n_valid_frames", *METRICS, "mode", "family", "status", "reason", "prediction"]
-    summary_fields = ["model", *METRICS, "mode", "family"]
+    detail_fields = ["model", "variant", "run_name", "session_id", "subject_id", "action", "split", "protocol", "gt_source", "n_valid_frames", *METRICS, "mode", "family", "status", "reason", "metric_reasons", "prediction"]
+    summary_fields = ["model", "protocol", *METRICS, "mode", "family"]
     for filename, fields, rows in (("comparison_per_session.csv", detail_fields, details), ("comparison_summary.csv", summary_fields, summaries)):
         with (args.out_dir / filename).open("w", encoding="utf-8", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fields); w.writeheader(); w.writerows({k: r.get(k, "") for k in fields} for r in rows)
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
+            w.writerows({k: _csv_value(r.get(k, "")) for k in fields} for r in rows)
     mode_report = []
     by_mode_csvs: dict[str, Path] = {}
     if args.by_mode:
@@ -595,25 +868,40 @@ def main() -> int:
         for mode in MODES:
             rows = [r for r in summaries if r.get("mode") == mode]
             mode_report.append(f"mode[{mode}]: {len(rows)} models ({', '.join(r['model'] for r in rows) or 'none'})")
-            mode_fields = ["model", "family", *MODE_METRICS[mode]]
+            mode_fields = ["model", "protocol", "family", *MODE_METRICS[mode]]
             csv_path = by_mode_dir / mode / "comparison_summary.csv"
             csv_path.parent.mkdir(parents=True, exist_ok=True)
             with csv_path.open("w", encoding="utf-8", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=mode_fields); w.writeheader(); w.writerows({k: r.get(k, "") for k in mode_fields} for r in rows)
+                w = csv.DictWriter(f, fieldnames=mode_fields)
+                w.writeheader()
+                w.writerows({k: _csv_value(r.get(k, "")) for k in mode_fields} for r in rows)
             render_summary_png(csv_path, by_mode_dir / mode / "comparison_summary.png", f"Test2 {mode} comparison  split={args.split}  fps={args.fps}")
             by_mode_csvs[mode] = csv_path
         render_mode_overview_png(by_mode_csvs, by_mode_dir / "mode_overview.png", f"Test2 comparison by generation mode  split={args.split}  fps={args.fps}")
+    # Per-model protocol/capability/status digest for the log.
+    model_lines = []
+    for s in summaries:
+        n_ok = s.get("n_sessions", 0)
+        n_missing = sum(1 for r in details if r.get("model") == s["model"] and r.get("status") == "missing")
+        n_invalid = sum(1 for r in details if r.get("model") == s["model"] and r.get("status") == "invalid")
+        model_lines.append(
+            f"model[{s['model']}] protocol={s.get('protocol','')} mode={s.get('mode','')} "
+            f"ok={n_ok} missing={n_missing} invalid={n_invalid}"
+        )
     (args.out_dir / "evaluation.log").write_text(
         f"split={args.split}\nsplit_csv={split_csv}\nsplit_sha256={sha256(split_csv)}\n"
+        f"manifest={args.manifest}\nmanifest_sha256={sha256(args.manifest)}\n"
         f"requested_sessions={len(requested_ids)}\n"
         f"evaluable_sessions={len(manifest)}\n"
         f"excluded_no_valid_frames={','.join(excluded_ids) or 'none'}\n"
-        f"models={len(configs.get('models', configs))}\n"
+        f"models={len(models)}\n"
         f"modal={','.join(modals)}\ncontact_method={','.join(contact_methods)}\nconfig_id={','.join(config_ids)}\n"
-        f"joint_set=common19\nprotocol_rule=native-protocol GT; explicit semantic-name mapping\n"
+        f"protocol_rule=native-protocol GT (smpl24-native/bvh23-native); no common19\n"
+        f"comparison_schema={COMPARISON_SCHEMA_V2}\n"
         f"surface_metrics={bool(args.surface_metrics)}\n"
-        f"modes_config={args.modes_config if args.by_mode else 'disabled'}\n"
-        + "\n".join(f"mode_report: {line}" for line in mode_report)
+        f"modes_config={args.modes_config}\n"
+        + "\n".join(model_lines)
+        + ("\n" + "\n".join(mode_report) if mode_report else "")
         + ("\n" + "\n".join(mode_resolution) if mode_resolution else "")
         + "\n" + "".join(f"checkpoint[{row['model']}]={row['checkpoint']}\n" for row in summaries),
         encoding="utf-8",
@@ -625,6 +913,14 @@ def main() -> int:
         f"Test2 comparison  split={args.split}  fps={args.fps}",
     )
     return 0
+
+
+def _row_protocol(model_rows: list[dict[str, Any]]) -> str:
+    """Protocol label of one model's rows (from the first evaluated row)."""
+    for row in model_rows:
+        if row.get("protocol"):
+            return row["protocol"]
+    return ""
 
 
 if __name__ == "__main__":

@@ -1,8 +1,24 @@
-"""Canonical numerical metrics shared by AnySole and all baselines.
+"""Canonical public metric definitions (评估整改任务 01 唯一实现).
 
-These definitions are migrated from the repository-level ``metrics.py``.
-Keep formulas, units, and field names stable: model-specific evaluators may
-add diagnostics, but must not redefine a canonical metric locally.
+The single implementation of every public metric formula: SMPL-24-native
+motion metrics, BVH-23-native motion metrics and the V2T pressure metrics all
+consume these solvers.  This module lives in the main model's own utils
+(``anysole/utils/``) per the 2026-09-26 structure decision — the baseline side
+keeps its own ``Baselines/utils/`` for baseline data/evaluation protocols and
+imports the metric formulas from here, so no second copy of a formula exists
+anywhere.  Model-specific evaluators may add diagnostics but must not redefine
+a canonical metric locally.
+
+The public joint-based ``foot_sliding_mm`` (SMPL ankle/foot joints, BVH
+``LeftFoot``/``RightFoot``/``LeftToeBase``/``RightToeBase``) is implemented by
+:func:`foot_sliding_joints`; the vertex-based variant lives under the separate
+diagnostic name :func:`foot_sliding_vertices` and is SMPL-only.
+
+``root_orientation_deg`` / ``root_orientation_drift_deg`` are the formal names
+of the former ``yaw_abs_deg`` / ``yaw_drift_deg``; their only implementation
+is :func:`root_orientation_error_deg` / :func:`root_orientation_drift_deg`.
+
+``pve_t_mm`` was cancelled (2026-09-26) and does not exist anywhere.
 """
 
 from __future__ import annotations
@@ -13,16 +29,37 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
+METRIC_UNITS = {
+    "mpjpe_mm": "mm",
+    "pa_mpjpe_mm": "mm",
+    "pve_mm": "mm",
+    "mpjae_deg": "degree",
+    "accel_error_m_s2": "m/s^2",
+    "jitter_pred_m_s3": "m/s^3",
+    "jitter_gt_m_s3": "m/s^3",
+    "w_mpjpe100_mm": "mm",
+    "wa_mpjpe100_mm": "mm",
+    "root_ate_mm": "mm",
+    "root_rte_percent": "%",
+    "root_orientation_deg": "degree",
+    "root_orientation_drift_deg": "degree",
+    "foot_sliding_mm": "mm/contact transition",
+}
+
+# Public motion metric set (formal tables).  ``shape_vertex_std_mm`` and the
+# vertex-based foot sliding are SMPL-only diagnostics computed by the solvers
+# when surface data exists, but they are not public comparison metrics.
 MOTION_METRIC_NAMES = (
     "mpjpe_mm",
     "pa_mpjpe_mm",
     "mpjae_deg",
     "pve_mm",
-    "shape_vertex_std_mm",
     "root_ate_mm",
     "root_rte_percent",
     "w_mpjpe100_mm",
     "wa_mpjpe100_mm",
+    "root_orientation_deg",
+    "root_orientation_drift_deg",
     "accel_error_m_s2",
     "jitter_pred_m_s3",
     "jitter_gt_m_s3",
@@ -30,8 +67,12 @@ MOTION_METRIC_NAMES = (
 )
 
 
-def pelvis_align(joints: np.ndarray, vertices: np.ndarray | None = None,
-                 *, pelvis_indices: tuple[int, int] = (1, 2)) -> tuple[np.ndarray, np.ndarray | None]:
+def pelvis_align(
+    joints: np.ndarray,
+    vertices: np.ndarray | None = None,
+    *,
+    pelvis_indices: tuple[int, int] = (1, 2),
+) -> tuple[np.ndarray, np.ndarray | None]:
     joints = np.asarray(joints, dtype=np.float64)
     if joints.ndim != 3 or joints.shape[-1] != 3:
         raise ValueError("joints must have shape [T,J,3]")
@@ -55,6 +96,8 @@ def mean_point_error(predicted: np.ndarray, target: np.ndarray, *, scale: float 
 
 
 def similarity_align(predicted: np.ndarray, target: np.ndarray, *, fixed_scale: bool = False) -> np.ndarray:
+    """Align ``predicted`` to ``target`` independently over leading batches."""
+
     predicted = np.asarray(predicted, dtype=np.float64)
     target = np.asarray(target, dtype=np.float64)
     if predicted.shape != target.shape or predicted.shape[-1] != 3 or predicted.ndim < 2:
@@ -75,9 +118,10 @@ def similarity_align(predicted: np.ndarray, target: np.ndarray, *, fixed_scale: 
         scale = np.ones(x.shape[0], dtype=np.float64)
     else:
         variance = np.sum(x0 * x0, axis=(1, 2)) / x.shape[1]
+        numerator = np.sum(singular * correction, axis=1)
         if np.any(variance <= 1e-12):
             raise ValueError("degenerate predicted point set")
-        scale = np.sum(singular * correction, axis=1) / variance
+        scale = numerator / variance
     translation = my[:, 0] - scale[:, None] * np.einsum("bij,bj->bi", rotation, mx[:, 0])
     aligned = scale[:, None, None] * np.einsum("bij,bnj->bni", rotation, x) + translation[:, None]
     return aligned.reshape(original_shape)
@@ -105,11 +149,67 @@ def matrix_rotation_error_degrees(predicted: np.ndarray, target: np.ndarray) -> 
     if predicted.shape != target.shape or predicted.shape[-2:] != (3, 3):
         raise ValueError("rotation matrices must have matching [...,3,3] shapes")
     relative = np.einsum("...ji,...jk->...ik", predicted, target)
-    angles = Rotation.from_matrix(relative.reshape(-1, 3, 3)).magnitude()
-    return np.degrees(angles).reshape(predicted.shape[:-2])
+    return np.degrees(Rotation.from_matrix(relative.reshape(-1, 3, 3)).magnitude()).reshape(predicted.shape[:-2])
+
+
+def _forward_yaw(rotations: np.ndarray, forward_axis: int) -> np.ndarray:
+    """Yaw of each rotation: angle of the fixed forward axis on the ground plane.
+
+    ``rotations`` has shape ``(...,3,3)``; the selected axis column is the
+    body-forward vector, whose atan2(x, z) is the heading.
+    """
+    forward = np.asarray(rotations, dtype=np.float64)[..., :, int(forward_axis)]
+    return np.arctan2(forward[..., 0], forward[..., 2])
+
+
+def _circular_difference(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    return (a - b + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def root_orientation_error_deg(
+    predicted: np.ndarray, target: np.ndarray, *, forward_axis: int = 2
+) -> np.ndarray:
+    """Per-frame absolute root heading error in degrees (``root_orientation_deg``).
+
+    The only implementation of the former ``yaw_abs_deg`` formula: circular
+    difference of predicted vs GT yaw, ``±180°`` wrap-safe.  ``predicted`` /
+    ``target`` are root rotation matrices ``(T,3,3)`` in the same frame;
+    ``forward_axis`` is the fixed body-forward axis of that frame (+Z for
+    native SMPL).  Step2Motion passes its parsed BVH Hips/root rotation here
+    — no separate formula exists.
+    """
+    pred = np.asarray(predicted, dtype=np.float64)
+    tgt = np.asarray(target, dtype=np.float64)
+    if pred.shape != tgt.shape or pred.shape[-2:] != (3, 3):
+        raise ValueError("root rotations must have matching [...,3,3] shapes")
+    yaw_p = _forward_yaw(pred, forward_axis)
+    yaw_g = _forward_yaw(tgt, forward_axis)
+    return np.abs(_circular_difference(yaw_p, yaw_g)) * 180.0 / np.pi
+
+
+def root_orientation_drift_deg(
+    predicted: np.ndarray, target: np.ndarray, *, forward_axis: int = 2
+) -> np.ndarray:
+    """Per-frame accumulated root heading drift in degrees (``root_orientation_drift_deg``).
+
+    Only implementation of the former ``yaw_drift_deg`` formula: predicted and
+    GT heading are each measured relative to their own first frame; the
+    circular difference of those two changes is the drift error.
+    """
+    pred = np.asarray(predicted, dtype=np.float64)
+    tgt = np.asarray(target, dtype=np.float64)
+    if pred.shape != tgt.shape or pred.shape[-2:] != (3, 3):
+        raise ValueError("root rotations must have matching [...,3,3] shapes")
+    yaw_p = _forward_yaw(pred, forward_axis)
+    yaw_g = _forward_yaw(tgt, forward_axis)
+    delta_p = _circular_difference(yaw_p, yaw_p[..., :1])
+    delta_g = _circular_difference(yaw_g, yaw_g[..., :1])
+    return np.abs(_circular_difference(delta_p, delta_g)) * 180.0 / np.pi
 
 
 def collapse_duplicate_times(times: np.ndarray, *arrays: np.ndarray) -> tuple[np.ndarray, ...]:
+    """Average samples sharing the same recorded physical timestamp."""
+
     times = np.asarray(times, dtype=np.float64)
     if times.ndim != 1 or not np.isfinite(times).all() or np.any(np.diff(times) < 0.0):
         raise ValueError("times must be finite and non-decreasing")
@@ -148,15 +248,24 @@ def _differentiate(values: np.ndarray, times: np.ndarray) -> tuple[np.ndarray, n
     return derivative, (times[1:] + times[:-1]) * 0.5
 
 
-def temporal_metrics(predicted: np.ndarray, target: np.ndarray, times: np.ndarray,
-                     *, gap_factor: float = 3.0) -> dict[str, float | int]:
+def temporal_metrics(
+    predicted: np.ndarray,
+    target: np.ndarray,
+    times: np.ndarray,
+    *,
+    gap_factor: float = 3.0,
+) -> dict[str, float | int]:
+    """Acceleration error and prediction/target jerk on actual irregular time."""
+
     times, predicted, target = collapse_duplicate_times(times, predicted, target)
     acceleration_errors: list[np.ndarray] = []
     pred_jerks: list[np.ndarray] = []
     target_jerks: list[np.ndarray] = []
     accel_samples = jerk_samples = 0
     for segment in _segments(times, gap_factor=gap_factor):
-        ts, pp, tt = times[segment], predicted[segment], target[segment]
+        ts = times[segment]
+        pp = predicted[segment]
+        tt = target[segment]
         if ts.size < 3:
             continue
         pv, vt = _differentiate(pp, ts)
@@ -171,10 +280,8 @@ def temporal_metrics(predicted: np.ndarray, target: np.ndarray, times: np.ndarra
             pred_jerks.append(np.linalg.norm(pj, axis=-1).mean(axis=-1))
             target_jerks.append(np.linalg.norm(tj, axis=-1).mean(axis=-1))
             jerk_samples += pj.shape[0]
-
     def average(parts: list[np.ndarray]) -> float:
         return float(np.concatenate(parts).mean()) if parts else float("nan")
-
     return {
         "accel_error_m_s2": average(acceleration_errors),
         "jitter_pred_m_s3": average(pred_jerks),
@@ -185,8 +292,34 @@ def temporal_metrics(predicted: np.ndarray, target: np.ndarray, times: np.ndarra
     }
 
 
-def _fit_similarity(source: np.ndarray, target: np.ndarray,
-                    *, fixed_scale: bool = False) -> tuple[float, np.ndarray, np.ndarray]:
+def windowed_world_mpjpe(
+    predicted: np.ndarray,
+    target: np.ndarray,
+    *,
+    window: int = 100,
+) -> tuple[float, float]:
+    first_errors: list[np.ndarray] = []
+    all_errors: list[np.ndarray] = []
+    for start in range(0, predicted.shape[0], window):
+        pred = predicted[start : start + window]
+        gt = target[start : start + window]
+        if pred.shape[0] < 2:
+            continue
+        first = similarity_align(pred[:2].reshape(1, -1, 3), gt[:2].reshape(1, -1, 3))[0]
+        # Recover the transform by augmenting the first-two fit with all points.
+        # Fitting and application are separated explicitly below.
+        x = pred[:2].reshape(-1, 3)
+        y = gt[:2].reshape(-1, 3)
+        transformed = _apply_fitted_similarity(x, y, pred)
+        global_aligned = similarity_align(pred.reshape(1, -1, 3), gt.reshape(1, -1, 3))[0].reshape(pred.shape)
+        first_errors.append(mean_point_error(transformed, gt, scale=1000.0))
+        all_errors.append(mean_point_error(global_aligned, gt, scale=1000.0))
+    if not first_errors:
+        return float("nan"), float("nan")
+    return float(np.concatenate(first_errors).mean()), float(np.concatenate(all_errors).mean())
+
+
+def _fit_similarity(source: np.ndarray, target: np.ndarray, *, fixed_scale: bool = False) -> tuple[float, np.ndarray, np.ndarray]:
     x = np.asarray(source, dtype=np.float64)
     y = np.asarray(target, dtype=np.float64)
     mx, my = x.mean(axis=0), y.mean(axis=0)
@@ -208,28 +341,9 @@ def _fit_similarity(source: np.ndarray, target: np.ndarray,
     return scale, rotation, translation
 
 
-def _apply_fitted_similarity(source_fit: np.ndarray, target_fit: np.ndarray,
-                             values: np.ndarray) -> np.ndarray:
+def _apply_fitted_similarity(source_fit: np.ndarray, target_fit: np.ndarray, values: np.ndarray) -> np.ndarray:
     scale, rotation, translation = _fit_similarity(source_fit, target_fit)
     return scale * np.einsum("ij,...j->...i", rotation, values) + translation
-
-
-def windowed_world_mpjpe(predicted: np.ndarray, target: np.ndarray,
-                         *, window: int = 100) -> tuple[float, float]:
-    first_errors: list[np.ndarray] = []
-    all_errors: list[np.ndarray] = []
-    for start in range(0, predicted.shape[0], window):
-        pred = predicted[start:start + window]
-        gt = target[start:start + window]
-        if pred.shape[0] < 2:
-            continue
-        transformed = _apply_fitted_similarity(pred[:2].reshape(-1, 3), gt[:2].reshape(-1, 3), pred)
-        global_aligned = similarity_align(pred.reshape(1, -1, 3), gt.reshape(1, -1, 3))[0].reshape(pred.shape)
-        first_errors.append(mean_point_error(transformed, gt, scale=1000.0))
-        all_errors.append(mean_point_error(global_aligned, gt, scale=1000.0))
-    if not first_errors:
-        return float("nan"), float("nan")
-    return float(np.concatenate(first_errors).mean()), float(np.concatenate(all_errors).mean())
 
 
 def root_trajectory_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[str, float]:
@@ -247,10 +361,51 @@ def root_trajectory_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[s
     }
 
 
-def foot_sliding(predicted_vertices: np.ndarray, target_vertices: np.ndarray,
-                 times: np.ndarray, *,
-                 foot_indices: Iterable[int] = (3216, 3387, 6617, 6787),
-                 contact_speed_m_s: float = 0.3) -> tuple[float, int]:
+def foot_sliding_joints(
+    predicted_foot_joints: np.ndarray,
+    target_foot_joints: np.ndarray,
+    times: np.ndarray,
+    *,
+    contact_speed_m_s: float = 0.3,
+) -> tuple[float, int]:
+    """Public joint-based foot sliding (``foot_sliding_mm``): mean predicted
+    foot-joint displacement per GT-contact frame, in mm.
+
+    ``predicted`` / ``target`` are ``(T,K,3)`` trajectories of the protocol's
+    four foot joints in a common world frame — SMPL uses ``left_ankle`` /
+    ``right_ankle`` / ``left_foot`` / ``right_foot``, BVH-23 uses
+    ``LeftFoot`` / ``RightFoot`` / ``LeftToeBase`` / ``RightToeBase``.
+    Contact frames come from the GT only (GT foot speed below
+    ``contact_speed_m_s``), the same rule for every model; this does not need
+    vertices, a template or a shape.
+    """
+    times, predicted, target = collapse_duplicate_times(
+        times, predicted_foot_joints, target_foot_joints
+    )
+    if times.size < 2:
+        return float("nan"), 0
+    dt = np.diff(times)
+    gt_displacement = np.linalg.norm(np.diff(target, axis=0), axis=-1)
+    pred_displacement = np.linalg.norm(np.diff(predicted, axis=0), axis=-1)
+    contact = gt_displacement / dt[:, None] < contact_speed_m_s
+    count = int(contact.sum())
+    return (float(pred_displacement[contact].mean() * 1000.0), count) if count else (float("nan"), 0)
+
+
+def foot_sliding_vertices(
+    predicted_vertices: np.ndarray,
+    target_vertices: np.ndarray,
+    times: np.ndarray,
+    *,
+    foot_indices: Iterable[int] = (3216, 3387, 6617, 6787),
+    contact_speed_m_s: float = 0.3,
+) -> tuple[float, int]:
+    """Vertex-based foot sliding — SMPL-only diagnostic, NOT the public metric.
+
+    Kept under a separate name from the joint-based :func:`foot_sliding_joints`
+    so the two definitions can never collide; reported as
+    ``foot_sliding_vertex_mm`` in AnySole's own detail file only.
+    """
     ids = np.asarray(tuple(foot_indices), dtype=np.int64)
     times, predicted, target = collapse_duplicate_times(
         times, predicted_vertices[:, ids], target_vertices[:, ids]
@@ -269,3 +424,30 @@ def shape_vertex_std(vertices: np.ndarray) -> float:
     vertices = np.asarray(vertices, dtype=np.float64)
     center = vertices.mean(axis=0, keepdims=True)
     return float(np.linalg.norm(vertices - center, axis=-1).mean() * 1000.0)
+
+
+def paired_cluster_bootstrap(
+    first: np.ndarray,
+    second: np.ndarray,
+    *,
+    samples: int = 10_000,
+    seed: int = 20260923,
+) -> tuple[float, float, float]:
+    """Return mean(first-second) and a paired percentile 95% interval."""
+
+    first = np.asarray(first, dtype=np.float64)
+    second = np.asarray(second, dtype=np.float64)
+    valid = np.isfinite(first) & np.isfinite(second)
+    difference = first[valid] - second[valid]
+    if difference.size == 0:
+        return float("nan"), float("nan"), float("nan")
+    generator = np.random.default_rng(seed)
+    chunk = 512
+    means: list[np.ndarray] = []
+    for start in range(0, samples, chunk):
+        count = min(chunk, samples - start)
+        indices = generator.integers(0, difference.size, size=(count, difference.size))
+        means.append(difference[indices].mean(axis=1))
+    distribution = np.concatenate(means)
+    low, high = np.percentile(distribution, [2.5, 97.5])
+    return float(difference.mean()), float(low), float(high)

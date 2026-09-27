@@ -37,6 +37,7 @@ in-interval height/speed/sum context), sorted by span.
 
 Usage (from the repository root):
     python AnysoleWorkspace/tool/contact_labels.py                     # 全部 session, 全部方法 + 对比报告
+    python AnysoleWorkspace/tool/contact_labels.py --split test        # 只 test split（train/val 同理）
     python AnysoleWorkspace/tool/contact_labels.py --session S11023    # 单个 session
     python AnysoleWorkspace/tool/contact_labels.py --methods bvh_h --no-report
 """
@@ -130,6 +131,26 @@ REL_ALPHA = 0.25  # tactile_rel: thr = min + alpha * (max - min)
 
 def seq_dirs(seq_root: Path) -> list[Path]:
     return sorted(p for p in Path(seq_root).glob("*/*/S*") if p.is_dir())
+
+
+def split_session_ids(split_csv: Path, split: str) -> set[str]:
+    """Session ids of one splits.csv column (train/val/test)."""
+    with Path(split_csv).open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    return {row[split].strip() for row in rows if row[split].strip()}
+
+
+def select_dirs(args: argparse.Namespace) -> list[Path]:
+    """Sequence dirs for the requested scope: explicit ``--session`` wins,
+    else the ``--split`` column filters (default 'all' = every session)."""
+    dirs = seq_dirs(Path(resolve_path(args.seq_root)))
+    if args.session:
+        wanted = set(split_csv_arg(args.session))
+        dirs = [d for d in dirs if d.name in wanted]
+    elif args.split != "all":
+        wanted = split_session_ids(Path(resolve_path(args.split_csv)), args.split)
+        dirs = [d for d in dirs if d.name in wanted]
+    return dirs
 
 
 def load_aligned(seq_dir: Path) -> dict:
@@ -547,13 +568,9 @@ def ensure_labels(dirs: list[Path], methods: list[str], force: bool = False) -> 
 
 
 def generate(args: argparse.Namespace) -> None:
-    root = Path(resolve_path(args.seq_root))
-    dirs = seq_dirs(root)
-    if args.session:
-        wanted = set(split_csv_arg(args.session))
-        dirs = [d for d in dirs if d.name in wanted]
+    dirs = select_dirs(args)
     if not dirs:
-        raise SystemExit(f"No sequence dirs under {root}")
+        raise SystemExit(f"No sequence dirs under {resolve_path(args.seq_root)} for split={args.split}")
     methods = [m for m in METHOD_NAMES if args.methods == "all" or m in args.methods]
     ensure_labels(dirs, methods, force=args.force)
 
@@ -587,10 +604,7 @@ def report(args: argparse.Namespace, out_dir: Path) -> None:
         plt.rcParams["font.family"] = "Noto Sans CJK JP"
 
     root = Path(resolve_path(args.seq_root))
-    dirs = seq_dirs(root)
-    if args.session:
-        wanted = set(split_csv_arg(args.session))
-        dirs = [d for d in dirs if d.name in wanted]
+    dirs = select_dirs(args)
     methods = METHOD_NAMES if args.methods == "all" else [m for m in METHOD_NAMES if m in args.methods]
 
     rows = []
@@ -740,10 +754,7 @@ def diff_report(args: argparse.Namespace, out_dir: Path) -> None:
         plt.rcParams["font.family"] = "Noto Sans CJK JP"
 
     root = Path(resolve_path(args.seq_root))
-    dirs = seq_dirs(root)
-    if args.session:
-        wanted = set(split_csv_arg(args.session))
-        dirs = [d for d in dirs if d.name in wanted]
+    dirs = select_dirs(args)
     methods = METHOD_NAMES if args.methods == "all" else [m for m in METHOD_NAMES if m in args.methods]
 
     rows_by_method = {m: [] for m in methods}
@@ -869,6 +880,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate per-method contact labels and compare them.")
     parser.add_argument("--session", type=str, default="", help="Session ids, e.g. S14103,S14023. Empty uses the split column.")
     parser.add_argument("--seq-root", type=str, default=str(SEQ_ROOT), help="Centralized sequence root.")
+    parser.add_argument("--split", type=str, default="all", choices=["all", "train", "val", "test"],
+                        help="Split column scope when --session is empty ('all' = every session under the seq root).")
+    parser.add_argument("--split-csv", type=str, default=str(WORKSPACE_ROOT / "splits/default/splits.csv"),
+                        help="splits.csv path used by --split.")
     parser.add_argument("--force", action="store_true", help="Rebuild and overwrite existing outputs.")
     parser.add_argument("--methods", type=str, default="all", help="Comma-separated methods or 'all'.")
     parser.add_argument("--no-report", action="store_true", help="Skip the comparison report.")
