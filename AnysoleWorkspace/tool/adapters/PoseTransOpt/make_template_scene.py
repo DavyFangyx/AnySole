@@ -8,7 +8,9 @@ canonical frame that is ``valid=1`` and ``fake=0`` in shared facts.
 
 Depth comes from Apple Depth Pro (transformers), inferred at the RGB
 resolution so the PoseTransOpt unprojection (image_width/image_height,
-focal 1394) stays self-consistent.  Runs in the ``depthpro`` environment.
+focal = per-date cam3 fx from protocol/calibration, recorded in the
+join_manifest.json camera block) stays self-consistent.  Runs in the
+``depthpro`` environment.
 """
 from __future__ import annotations
 

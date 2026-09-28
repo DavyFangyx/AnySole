@@ -209,9 +209,21 @@ def build_join(row: dict, force: bool) -> dict:
     for frame in joined_frames.tolist():
         link_one(fpp_src / f"{frame:06d}.npy", fpp_dir / f"{frame:06d}.npy", force)
 
+    # camera delivery contract (D6): per-date cam3 intrinsics from the
+    # protocol calibration json; the scheduler overrides task.focal_length
+    # with cam3_fx at runtime (the MMVP.yaml value is only a fallback)
+    calibration_json = WORKSPACE / "protocol" / "calibration" / f"{date}.json"
+    camera = {"source": str(calibration_json)}
+    if calibration_json.is_file():
+        cam3_k = json.loads(calibration_json.read_text(encoding="utf-8"))["cameras"]["cam3"]["K"]
+        camera.update({"cam3_fx": float(cam3_k[0][0]), "cam3_fy": float(cam3_k[1][1])})
+    else:
+        camera["error"] = "protocol calibration json missing for this date"
+
     manifest = {
         "adapter_version": ADAPTER_VERSION,
         "session_id": sid, "date": date, "subject": subject,
+        "camera": camera,
         "n_frames": n,
         "streams": {
             "keypoints": {"count": int(kp_present.sum()), "total": n},
