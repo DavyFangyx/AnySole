@@ -6,6 +6,12 @@ Baselines/
 # v2 重构期间的全量基线备份（1.8G，机器本地产物，不进 git）
 /Baselines_Backup/
 
+# Baselines 已独立成库（remote: Anysole_Baselines）；旧改动树仅本地存档
+Baselines_old/
+
+# anysole 内的参考实现（半注册 gitlink，本地参考用，不进 git）
+/anysole/ReferenceWorks/*/
+
 # Generated artifacts
 *.png
 *.pkl
