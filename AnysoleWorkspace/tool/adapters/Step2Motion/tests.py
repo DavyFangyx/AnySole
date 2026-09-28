@@ -1,22 +1,26 @@
-"""Step2Motion adapter acceptance tests (任务书 04 §7).
+"""Step2Motion adapter acceptance tests (T1 消费端读取测试 + T2 重型 smoke).
 
 Run from the repo root in the touch_gait environment:
 
     python3 AnysoleWorkspace/tool/adapters/Step2Motion/tests.py
     python3 AnysoleWorkspace/tool/adapters/Step2Motion/tests.py --skip-heavy
 
-Covers: canonical-split consistency / disjointness, normalizer provenance,
-dataset contract (dims, BVH-23 order, translation head data), 16-channel
-parity with the D_Test4 frozen pooler, pred=GT public BVH-23 metric zeroing
-with name-based foot groups, one-batch train smoke, and the export/evaluator
-smoke (native pred_to_bvh code path + public evaluator CLI reading the
-prediction).
+T1 段（恒运行）：canonical-split 一致性 / normalizer provenance / 原生
+dataset 契约（维度、BVH-23 序、翻译头数据、frame id 单调）/ 16 通道与
+D_Test4 冻结 pooler 逐值一致 / pred=GT 公共 BVH-23 指标归零。消费端 =
+Baselines/Step2Motion/src/dataset.py 的 pristine MotionDataset（py3.8 兼容
+加载见 _load_native），.pt 必须是原生 pickled 实例（T1 契约）。
+
+T2 段（--skip-heavy 或 src 内无 bvh_export.py 时跳过）：one-batch train
+smoke、export/evaluator smoke、src/test.py smoke——依赖 T2 移植后的模型侧
+（prefer_env_site / bvh_export / workspace / isolate_clip 等）。
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 import os
 import subprocess
@@ -45,6 +49,38 @@ ADAPTER_ROOT = ROOT / "AnysoleWorkspace/model_inputs/Step2Motion/adapter_v1"
 SMOKE_ROOT = RESULTS_ROOT / "baselines/Step2Motion/smoke"
 
 _PASSED = 0
+
+
+def _load_native():
+    """Import the pristine ``dataset`` module (module name ``dataset``).
+
+    Python 3.8 cannot import it as-is (``list[int]`` annotations without
+    ``from __future__ import annotations``; ~/.local pymotion shadow), so the
+    module source is compiled with the future import and the user site is
+    filtered out.  The produced .pt files pickle against ``dataset.MotionDataset``,
+    so this module entry must carry that name.
+    """
+    kept = []
+    for path in sys.path:
+        normalized = path.replace("\\", "/")
+        if "/.local/lib/python" in normalized and normalized.rstrip("/").endswith("site-packages"):
+            continue
+        kept.append(path)
+    sys.path[:] = kept
+    for name in list(sys.modules):
+        if name == "pymotion" or name.startswith("pymotion."):
+            del sys.modules[name]
+    if "dataset" in sys.modules:
+        return sys.modules["dataset"].MotionDataset
+    src = STEP2MOTION_SRC / "dataset.py"
+    spec = importlib.util.spec_from_file_location("dataset", str(src))
+    mod = importlib.util.module_from_spec(spec)
+    code = src.read_text(encoding="utf-8")
+    if not code.startswith("from __future__ import annotations"):
+        code = "from __future__ import annotations\n" + code
+    exec(compile(code, str(src), "exec"), mod.__dict__)
+    sys.modules["dataset"] = mod
+    return mod.MotionDataset
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -122,18 +158,18 @@ def test_normalizer_provenance() -> None:
               sha256_file(ADAPTER_ROOT / variant / "gait_train.pt") == info["source_sha256"])
         # structural check: the train .pt can only contain train sessions
         import torch
-        from dataset import MotionDataset
+        MotionDataset = _load_native()
         db = MotionDataset.load(str(ADAPTER_ROOT / variant / "gait_train.pt"), torch.device("cpu"))
         val_test = set(splits["val"]) | set(splits["test"])
         leaked = [sid for sid in db.session_ids if sid in val_test]
         check(f"{variant}: no val/test session in train dataset", not leaked, str(leaked))
-        print(f"  info {variant}: train clips={db.n_clips()}, sessions={len(set(db.session_ids))}")
+        print(f"  info {variant}: train clips={len(db.clips) - 1}, sessions={len(set(db.session_ids))}")
 
 
 def test_dataset_contract() -> None:
     print("== dataset contract (dims / BVH-23 order / translation head) ==")
     import torch
-    from dataset import MotionDataset
+    MotionDataset = _load_native()
     for variant, input_dim in (("gait", 50), ("gait_noimu", 38)):
         for split in ("train", "val", "test"):
             db = MotionDataset.load(str(ADAPTER_ROOT / variant / f"gait_{split}.pt"), torch.device("cpu"))
@@ -178,7 +214,7 @@ def test_16ch_parity() -> None:
     # verbatim (see build_gait.py, plus --self-test) and is verified here on
     # shared 48-grid inputs for representative sessions.
     import torch
-    from dataset import MotionDataset
+    MotionDataset = _load_native()
     for sid in ("S10101", "S11073", "S13011"):
         session = bg.load_shared_session(sid)
         pooled_l = bg.pool_48_to_16(np.asarray(session["pressure"]["left48"], dtype=np.float32))
@@ -202,8 +238,19 @@ def test_16ch_parity() -> None:
 
 def test_public_metrics_zero() -> None:
     print("== pred=GT BVH-23 public metrics zero + name-based foot groups ==")
-    from Baselines.utils.protocols import BVH_JOINT_NAMES, PROTOCOL_FORWARD_AXIS, PROTOCOL_FOOT_NAMES
-    from Baselines.utils.solver import metrics as public_metrics
+    # 公共评估层现位于 Baselines_old/utils（09-28 两库拆分后 utils 迁移被叫停，
+    # 尚未定新归宿）；其内部 17 处 import 仍指向旧包名 Baselines.utils——
+    # 测试侧注册别名，不改写参考树。
+    import importlib
+
+    import Baselines_old.utils as _utils_pkg
+    sys.modules.setdefault("Baselines.utils", _utils_pkg)
+    for _sub in ("motion_io", "protocols", "solver", "gt_loading", "capabilities", "bvh_aligner"):
+        _mod = importlib.import_module(f"Baselines_old.utils.{_sub}")
+        sys.modules.setdefault(f"Baselines.utils.{_sub}", _mod)
+        setattr(_utils_pkg, _sub, _mod)
+    from Baselines_old.utils.protocols import BVH_JOINT_NAMES, PROTOCOL_FORWARD_AXIS, PROTOCOL_FOOT_NAMES
+    from Baselines_old.utils.solver import metrics as public_metrics
 
     n = 200
     fps = 40.0
@@ -247,7 +294,7 @@ def test_public_metrics_zero() -> None:
     # the same result (selection by name), missing names must raise.
     foot_ids = [names.index(j) for j in PROTOCOL_FOOT_NAMES["bvh23"]]
     check("bvh23 foot names resolve", foot_ids == [17, 21, 18, 22], str(foot_ids))
-    from Baselines.utils.solver import _foot_joint_indices
+    from Baselines_old.utils.solver import _foot_joint_indices
     shuffled = list(names)
     shuffled[0], shuffled[1] = shuffled[1], shuffled[0]  # swap Hips/Spine positions
     ids = _foot_joint_indices(tuple(shuffled), "bvh23")
@@ -333,7 +380,7 @@ def _run_evaluator(sid: str) -> tuple[Path, dict]:
     smoke_manifest = _write_smoke_manifest(sid)
     smoke_split = _write_smoke_split(sid)
     cmd = [
-        sys.executable, "-m", "Baselines.utils.evaluate",
+        sys.executable, "-m", "Baselines_old.utils.evaluate",
         "--model", "step2motion", "--split", "test",
         "--registry", str(smoke_registry),
         "--manifest", str(smoke_manifest),
@@ -416,8 +463,8 @@ def test_export_and_evaluator_smoke() -> None:
     # grid-aligned prediction by mocap_start (~151 mm on S13073); that public
     # alignment defect is recorded in the delivery report.  The correct read
     # is the prediction's own axis (it already sits on the canonical grid).
-    from Baselines.utils.gt_loading import bvh_joints as _bj, protocol_gt as _pgt
-    from Baselines.utils.solver import metrics as _pub_metrics
+    from Baselines_old.utils.gt_loading import bvh_joints as _bj, protocol_gt as _pgt
+    from Baselines_old.utils.solver import metrics as _pub_metrics
     pred_own, pred_names, _ = _bj(pred_bvh)
     gt_own, gt_names = _pgt({**manifest[sid], "bvh_path": str(resolve_uri(manifest[sid]["bvh_path"]))},
                             "bvh23")
@@ -552,6 +599,11 @@ def main() -> int:
     test_dataset_contract()
     test_16ch_parity()
     test_public_metrics_zero()
+    # T2 gate: the heavy smokes exercise the ported model side (bvh_export /
+    # prefer_env_site / workspace / isolate_clip ...), which lands with T2.
+    if not args.skip_heavy and not (STEP2MOTION_SRC / "bvh_export.py").exists():
+        print("== heavy smokes skipped: T2 模型侧接入未移植 (no bvh_export.py in src) ==")
+        args.skip_heavy = True
     if not args.skip_heavy:
         test_export_and_evaluator_smoke()
         test_train_smoke()

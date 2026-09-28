@@ -676,6 +676,70 @@ def build_motion_dataset_state(clips_data: list[dict], no_imu: bool = False) -> 
     return dataset
 
 
+def _prefer_env_site() -> None:
+    """Drop ``~/.local`` user site-packages so the conda-env pymotion wins.
+
+    The ``~/.local`` pymotion copy uses ``tuple[T, T]`` annotations that crash
+    Python 3.8 imports of ``pymotion.ops.skeleton_torch``.
+    """
+    kept = []
+    for path in sys.path:
+        normalized = path.replace("\\", "/")
+        if "/.local/lib/python" in normalized and normalized.rstrip("/").endswith("site-packages"):
+            continue
+        kept.append(path)
+    sys.path[:] = kept
+    for name in list(sys.modules):
+        if name == "pymotion" or name.startswith("pymotion."):
+            del sys.modules[name]
+
+
+def _dataset_shim() -> object:
+    """Class-identity stand-in for the pristine ``dataset.MotionDataset``.
+
+    The native .pt contract is a pickled ``MotionDataset`` instance whose
+    pickle records the class reference ``dataset.MotionDataset``. The pristine
+    ``dataset.py`` cannot be imported on Python 3.8 (``list[int]`` annotations
+    without ``from __future__ import annotations``), so the producer builds the
+    instance on a synthetic module named ``dataset``; the consumer unpickles it
+    against the real class and restores ``__dict__`` through ``__new__``.
+    """
+    import types
+
+    import torch
+
+    mod = sys.modules.get("dataset")
+    if mod is None:
+        mod = types.ModuleType("dataset")
+
+        class MotionDataset:
+            """Identity stand-in; behaviour comes from the real class at unpickle time."""
+
+            @staticmethod
+            def load(data_path: str, device: torch.device):
+                return torch.load(data_path).to(device)
+
+            def to(self, device: torch.device):
+                # Mirrors the real MotionDataset.to: move tensor attributes
+                # (also inside lists/tuples) so the producer-side load works.
+                for key, value in list(self.__dict__.items()):
+                    if isinstance(value, torch.Tensor):
+                        setattr(self, key, value.to(device))
+                    elif isinstance(value, (list, tuple)):
+                        moved = type(value)(
+                            item.to(device) if isinstance(item, torch.Tensor) else item
+                            for item in value
+                        )
+                        setattr(self, key, moved)
+                return self
+
+        MotionDataset.__module__ = "dataset"
+        MotionDataset.__qualname__ = "MotionDataset"
+        mod.MotionDataset = MotionDataset
+        sys.modules["dataset"] = mod
+    return mod.MotionDataset
+
+
 def create_dataset(clips_data: list[dict], out_path: Path, dry_run: bool, no_imu: bool = False):
     if not clips_data:
         return None
@@ -683,9 +747,16 @@ def create_dataset(clips_data: list[dict], out_path: Path, dry_run: bool, no_imu
         return clips_data
     import torch
 
-    dataset = build_motion_dataset_state(clips_data, no_imu=no_imu)
+    state = build_motion_dataset_state(clips_data, no_imu=no_imu)
+    # Native serialization: a pickled MotionDataset instance (upstream
+    # torch.save(dataset) contract). __init__ must not run here — the
+    # displacements are already folded into poses, and __init__ would
+    # concatenate them a second time.
+    shim = _dataset_shim()
+    dataset = shim.__new__(shim)
+    dataset.__dict__.update(state.__dict__)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"_kind": "MotionDatasetState", "state": dataset.__dict__}, out_path)
+    torch.save(dataset, out_path)
     return dataset
 
 
@@ -761,7 +832,13 @@ def build_normalizer(dataset_path: Path, out_path: Path, name: str, *, dry_run: 
 
     The class identity must be the module object named ``normalizer`` (the
     upstream training/test code unpickles it from the Step2Motion src dir).
+    The pristine ``normalizer.Normalizer.__init__`` has the upstream NameError
+    (``prior_db``/``insole_db`` undefined, registry Step2Motion #6), so the
+    same stats are computed here and attached to a bare pristine-class
+    instance — the pickled class identity stays ``normalizer.Normalizer``.
     """
+    _prefer_env_site()
+    _dataset_shim()
     if not str(STEP2MOTION_SRC) in sys.path:
         sys.path.insert(0, str(STEP2MOTION_SRC))
     import importlib
@@ -770,8 +847,25 @@ def build_normalizer(dataset_path: Path, out_path: Path, name: str, *, dry_run: 
     import torch
 
     db = normalizer_mod.MotionDataset.load(str(dataset_path), torch.device("cpu"))
-    normalizer = normalizer_mod.Normalizer(db)
-    normalizer.__class__ = normalizer_mod.Normalizer
+
+    def compute_mean_std(data: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        mean = data.mean(dim=0).float()
+        std = data.std(dim=0)
+        std = torch.where(std < 1e-6, torch.ones_like(std), std).float()
+        return mean, std
+
+    normalizer = normalizer_mod.Normalizer.__new__(normalizer_mod.Normalizer)
+    normalizer.poses_mean, normalizer.poses_std = compute_mean_std(torch.cat(db.poses, dim=0))
+    normalizer.distances_mean, normalizer.distances_std = compute_mean_std(db.distances)
+    normalizer.insoles_mean, normalizer.insoles_std = compute_mean_std(torch.cat(db.insole, dim=0))
+    normalizer.id = hash(
+        normalizer.poses_mean.mean().item()
+        + normalizer.poses_std.mean().item()
+        + normalizer.distances_mean.mean().item()
+        + normalizer.distances_std.mean().item()
+        + normalizer.insoles_mean.mean().item()
+        + normalizer.insoles_std.mean().item()
+    )
     if not dry_run:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(normalizer, out_path)
