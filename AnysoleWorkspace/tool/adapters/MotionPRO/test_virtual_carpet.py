@@ -338,8 +338,9 @@ def parse_args(argv=None):
                              "'ball' = ankle->toe interpolation diagnostic")
     parser.add_argument("--ball-blend", type=float, default=0.75,
                         help="ankle->toe interpolation weight for --foot-query ball")
-    parser.add_argument("--gate", type=float, default=0.8,
-                        help="per-column in-carpet agreement gate (T1-A spec: 0.8)")
+    parser.add_argument("--gate", type=float, default=None,
+                        help="optional per-column in-carpet agreement gate; default off "
+                             "(09-28 user ruling: V3 is a diagnostic record, not a hard gate)")
     parser.add_argument("--report-only", action="store_true",
                         help="print the table and exit 0 even when the gate fails "
                              "(used to record the structural ceiling)")
@@ -433,8 +434,9 @@ def main(argv=None) -> int:
                   f"({values['n_stance_runs']} stance runs)")
 
     gate_failures = [row["column"] for row in rows
-                     if row["accuracy_in_carpet"] is None
-                     or row["accuracy_in_carpet"] < args.gate]
+                     if args.gate is not None
+                     and (row["accuracy_in_carpet"] is None
+                          or row["accuracy_in_carpet"] < args.gate)]
     report = {
         "session": args.session,
         "anchor": list(anchor),
@@ -461,7 +463,8 @@ def main(argv=None) -> int:
         "rows": rows,
         "summary": summary,
         "cop_layout_check": cop,
-        "gate": {"threshold": args.gate, "metric": "per-column accuracy on in-carpet frames",
+        "gate": {"threshold": args.gate, "enabled": args.gate is not None,
+                 "metric": "per-column accuracy on in-carpet frames",
                  "failed_columns": gate_failures, "passed": not gate_failures,
                  "ceiling_per_column": {row["column"]: row["ceiling_accuracy_in_carpet"]
                                         for row in rows}},
@@ -470,6 +473,12 @@ def main(argv=None) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(f"\nreport -> {args.out}")
+    if args.gate is None:
+        print(f"\nV3 diagnostic (no gate): per-column in-carpet agreement "
+              f"{ {row['column']: row['accuracy_in_carpet'] for row in rows} } "
+              f"(threshold-free ceilings "
+              f"{ {row['column']: round(row['ceiling_accuracy_in_carpet'], 3) for row in rows} })")
+        return 0
     if gate_failures:
         message = (f"V3 gate failed (< {args.gate:g} in-carpet agreement): {gate_failures}; "
                    f"threshold-free ceilings "
