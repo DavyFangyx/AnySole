@@ -111,7 +111,7 @@ case "$MODEL" in
   fpp_infer)
     cd Baselines/VP-MoCap/FPP-Net
     fpp_cfg="${CONFIG_FILE:-configs/temporalKPSMPLCont_series5_mlp.yaml}"; [[ "$fpp_cfg" = /* ]] || fpp_cfg="$repo/$fpp_cfg"
-    "$py" app/infer_smplcont.py --config "$fpp_cfg" --phase "${FPP_PHASE:-test}" --batch_size "${BATCH_SIZE:-1}" --num_threads "${NUM_THREADS:-0}" --gpus "${CUDA_VISIBLE_DEVICES:-cpu}" ;;
+    "$py" app/infer_smplcont.py --config "$fpp_cfg" --phase "${FPP_PHASE:-test}" --batch_size "${BATCH_SIZE:-32}" --num_threads "${NUM_THREADS:-4}" --gpus "${CUDA_VISIBLE_DEVICES:-cpu}" ;;
   posetransopt)
     cd Baselines/VP-MoCap/PoseTransOpt
     "$py" -m app.optimize task.input_path_base="${INPUT_PATH_BASE:?}" task.scene_rgbd="${SCENE_RGBD:?}" gpu="${CUDA_VISIBLE_DEVICES:-0}" ;;
