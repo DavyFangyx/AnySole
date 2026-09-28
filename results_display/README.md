@@ -267,10 +267,10 @@ python results_display/script/d_test3_contact.py --methods f6_soft
 
 | 工作 | 触觉输入 | 落盘位置 |
 | --- | --- | --- |
-| AnySole（主方法） | 原始 pressure.npz → 原生 4×12 / 脚 | `AnysoleWorkspace/shared/facts/sessions/cam3/<date>/<sub>/<sid>/pressure.npz` |
-| MotionPRO | pressure.npz → bilinear 96×96 /255（FRAPPE 口径；可视化按 L/R 脚区等尺度显示） | `AnysoleWorkspace/model_inputs/MotionPRO/pressure_96/<sid>.npz` |
-| MMVP（pressure_toolkit / VP-MoCap） | 共享同一份 insole `{'insole': [L(31,11), R(31,11)]}`；两棵目录逐帧一致 | `AnysoleWorkspace/model_inputs/pressure_toolkit/.../insole/%03d.npy` + `AnysoleWorkspace/model_inputs/VP-MoCap/.../insole/%03d.npy` |
-| Step2Motion | 16 通道/脚（process_gait 冻结池化，展示/审计产物） | `AnysoleWorkspace/model_inputs/Step2Motion/pressure_16ch/<sid>.npz` |
+| AnySole（主方法） | 原始 pressure_48 → 原生 4×12 / 脚 | `AnysoleWorkspace/shared/facts/sessions/cam3/<date>/<sub>/<sid>/pressure_48.npz` |
+| MotionPRO | pressure_48 → bilinear 96×96 /255（FRAPPE 口径；可视化按 L/R 脚区等尺度显示） | `AnysoleWorkspace/model_inputs/MotionPRO/adapter_v1/cam3/<date>/<sub>/<sid>/pressure.npz` |
+| MMVP（pressure_toolkit / VP-MoCap） | 共享唯一公共表示 `{'insole': [L(31,11), R(31,11)]}`（00 §2.1：不再有两棵私有树） | `AnysoleWorkspace/shared/representations/tactile/mmvp_31x11/v1/<date>/<sub>/<sid>/insole/%03d.npy` |
+| Step2Motion | 16 通道/脚（D_Test4 冻结池化，包含在 gait 数据内） | `AnysoleWorkspace/model_inputs/Step2Motion/adapter_v1/{gait,gait_noimu}/*.pt` |
 
    方法                                  实际数据                            当前显示
   ━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

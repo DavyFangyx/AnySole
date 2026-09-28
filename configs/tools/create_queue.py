@@ -71,7 +71,7 @@ def main():
             index += 1
             date = date_from_row(row)
             session = row['session_id']
-            base = f'model-input://VP-MoCap/{date}/{row["subject_id"]}/{session}'
+            base = f'model-input://PoseTransOpt/adapter_v1/{date}/{row["subject_id"]}/{session}'
             # 评估整改任务 02：staging（task.conf/日志）落在 results/logs，
             # results/baselines/VP-MoCap/ 只保留 predictions/ 与 metrics/。
             text = (f'MODEL=posetransopt\nRUN_NAME=posetransopt_{session}\nCONDA_ENV=mmvp\n'
@@ -92,9 +92,9 @@ def main():
                     'CONFIG_FILE=Baselines/pressure_tookit/configs/fit_smpl_rgbd.yaml\n'
                     f'DATASET={date_from_row(row)}\nSUB_IDS={subject}\nSEQ_NAME={session}\n'
                     f'FITTING_STAGE={stage}\nSTART_IDX=0\nEND_IDX=-1\n'
-                    'OUTPUT_DIR=model-input://pressure_toolkit/fitting\n'
-                    'INIT_DATA_DIR=model-input://pressure_toolkit\n'
-                    'BASDIR=model-input://pressure_toolkit\n'
+                    'OUTPUT_DIR=work://pressure_toolkit/fitting\n'
+                    'INIT_DATA_DIR=model-input://pressure_toolkit/v1\n'
+                    'BASDIR=model-input://pressure_toolkit/v1\n'
                     'ESSENTIAL_ROOT=asset://third_party/pressure_toolkit/essential\n')
             put(f'{index:05d}_pressure_{session}_{stage}', text)
 

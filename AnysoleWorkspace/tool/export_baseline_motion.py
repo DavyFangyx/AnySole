@@ -363,7 +363,7 @@ def main() -> None:
     parser.add_argument("--session", default="", help="comma-separated session IDs")
     # 评估整改任务 02：pressure 输入默认读 workspace fitting 根；
     # 迁移期旧树可通过 --pressure-root results://baselines/pressure_toolkit 显式传入。
-    parser.add_argument("--pressure-root", default="model-input://pressure_toolkit/fitting")
+    parser.add_argument("--pressure-root", default="work://pressure_toolkit/fitting")
     parser.add_argument("--female", "--famale", dest="female", default="S14")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()

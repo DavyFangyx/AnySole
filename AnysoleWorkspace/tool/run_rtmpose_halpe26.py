@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Run real RTMPose HALPE-26 observations into both MMVP input trees.
 
+DEPRECATED (2026-09-28): superseded by ``tool/adapters/FPP-Net/run_rtmpose.py``
+（FPP-Net 关键点）与 ``tool/adapters/PoseTransOpt/build_inputs.py``
+（PoseTransOpt 关键点）。本工具保留只读兼容，不再进入 README 主命令链。
+
 The script intentionally imports MMPose lazily.  It can therefore be syntax
 checked in the main training environment while execution remains explicit in
 the dedicated pose environment.
@@ -67,8 +71,8 @@ def run_session(session: str, row: dict, inferencer, force: bool) -> dict:
     if len(images) != int(row["n_frames"]):
         raise ValueError(f"{session}: RGB count {len(images)} != manifest {row['n_frames']}")
     roots = [
-        WORKSPACE / "model_inputs/pressure_toolkit/input" / subject / session / "keypoints",
-        WORKSPACE / "model_inputs/VP-MoCap" / date / subject / session / "keypoints",
+        WORKSPACE / "model_inputs/pressure_toolkit/v1/input" / subject / session / "keypoints",
+        WORKSPACE / "model_inputs/PoseTransOpt/adapter_v1" / date / subject / session / "keypoints",
     ]
     for root in roots:
         root.mkdir(parents=True, exist_ok=True)

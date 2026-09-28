@@ -257,6 +257,8 @@ def main() -> int:
         raise SystemExit("--facts-only and --mmvp-only are mutually exclusive")
     rows = read_manifest()
     wanted = {value.strip() for value in args.sessions.split(",") if value.strip()} or set(rows)
+    partial = bool(args.sessions)
+    built: list[str] = []
     for sid in sorted(wanted):
         if sid not in rows:
             raise SystemExit(f"{sid} not found in {MANIFEST}")
@@ -274,8 +276,15 @@ def main() -> int:
                 raise SystemExit(f"facts missing for MMVP build: {session_root}")
             build_mmvp(sid, session_root, force=args.force)
         print(f"built {sid}")
+        built.append(sid)
+    # 部分构建（--sessions）只更新 session 级 artifact，不得覆写根 artifact
+    # 的全局统计（08 全局审阅：根 artifact 曾因 C1 单 session 冒烟被覆写成
+    # session_count=1，与实际 140 个 session 不符）。
+    if partial:
+        print(f"partial build ({len(built)} sessions); root artifacts not rewritten")
+        return 0
     write_artifact(FACTS_ROOT, schema_version="shared.facts.v1", producer="build_shared.py", repository_root=ROOT,
-                   parameters={"session_count": len(wanted)}, source_artifacts=["protocol://manifests/session_manifest.jsonl"],
+                   parameters={"session_count": len(built)}, source_artifacts=["protocol://manifests/session_manifest.jsonl"],
                    consumers=["model_inputs/<model>"])
     if args.mmvp_only:
         write_artifact(MMVP_ROOT, schema_version="shared.representations.v1", producer="build_shared.py", repository_root=ROOT,

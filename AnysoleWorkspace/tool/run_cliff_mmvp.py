@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run CLIFF using the canonical SAM3.1 single-subject bbox frontend."""
+"""Run CLIFF using the canonical SAM3.1 single-subject bbox frontend.
+
+DEPRECATED (2026-09-28): superseded by ``tool/adapters/PoseTransOpt/run_cliff.py``。
+本工具保留只读兼容，不再进入 README 主命令链。
+"""
 from __future__ import annotations
 
 import argparse
@@ -149,11 +153,11 @@ def run_official_demo(work: Path, ckpt: str, backbone: str, batch_size: int) -> 
 
 def run_one(session: str, row: dict, args: argparse.Namespace) -> dict:
     date, subject, _ = info(row)
-    fpp_session = WORKSPACE / "model_inputs/VP-MoCap" / date / subject / session
+    fpp_session = WORKSPACE / "model_inputs/PoseTransOpt/adapter_v1" / date / subject / session
     color = fpp_session / "color"
     if not color.is_dir() or not any(color.iterdir()):
         raise FileNotFoundError(f"{session}: missing prepared RGB directory {color}")
-    work = WORKSPACE / "model_inputs/VP-MoCap/_cliff_inputs" / date / subject / session
+    work = WORKSPACE / "work/VP-MoCap/v1/cliff_inputs" / date / subject / session
     work.mkdir(parents=True, exist_ok=True)
     imgs = work / "imgs"
     if imgs.is_symlink() or imgs.exists():

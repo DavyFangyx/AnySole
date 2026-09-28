@@ -38,24 +38,30 @@ def session_paths(row: dict, sid: str) -> tuple[str, str, int, dict[str, Path]]:
     recording = resolve_uri(row["video_path"], must_exist=True)
     date, subject, n = recording.parts[-3], recording.parts[-2], int(row["n_frames"])
     seq = WORKSPACE / "shared/facts/sessions/cam3" / date / subject / sid
+    # v2 布局：SMPL 来源记录在 shared session.json 的 source_files 里；
+    # MMVP 31×11 是 FPP-Net/pressure_toolkit 共用的唯一公共表示。
+    session_meta = json.loads((seq / "session.json").read_text(encoding="utf-8"))
+    smpl = resolve_uri(session_meta["source_files"]["smpl"], must_exist=False)
+    mmvp = WORKSPACE / "shared/representations/tactile/mmvp_31x11/v1" / date / subject / sid
+    toolkit = WORKSPACE / "model_inputs/pressure_toolkit/v1"
+    fpp_adapter = WORKSPACE / "model_inputs/FPP-Net/adapter_v1"
+    pto_adapter = WORKSPACE / "model_inputs/PoseTransOpt/adapter_v1"
     return date, subject, n, {
         "motion_color": seq / "rgb",
-        "motion_pressure": seq / "pressure.npz",
-        "motion_smpl": seq / "smpl.npy",
-        "motion_feature": seq / "feature_hrnet.pth",
-        "motion_bbox": seq / "bbox.npy",
-        "insole_tool": WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / sid / "insole",
-        "insole_fpp": WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "insole",
-        "mmvp_color_tool": WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / sid / "color",
-        "mmvp_color_fpp": WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "color",
-        "calibration": WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / sid / "calibration.npy",
-        "floor": WORKSPACE / "model_inputs/pressure_toolkit/annotations" / date / "floor_info" / f"floor_{subject}.npy",
-        "depth": WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / sid / "depth",
-        "depth_mask": WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / sid / "depth_mask",
-        "keypoints_tool": WORKSPACE / "model_inputs/pressure_toolkit/input" / subject / sid / "keypoints",
-        "keypoints_fpp": WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "keypoints",
-        "cliff": WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "CLIFF_results.npz",
-        "scene": WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "template_scene_rgbd.npy",
+        "motion_pressure": seq / "pressure_48.npz",
+        "motion_smpl": smpl,
+        "insole_tool": toolkit / "images" / date / subject / sid / "insole",
+        "insole_fpp": mmvp / "insole",
+        "mmvp_color_tool": toolkit / "images" / date / subject / sid / "color",
+        "mmvp_color_fpp": pto_adapter / date / subject / sid / "color",
+        "calibration": toolkit / "images" / date / subject / sid / "calibration.npy",
+        "floor": toolkit / "annotations" / date / "floor_info" / f"floor_{subject}.npy",
+        "depth": toolkit / "images" / date / subject / sid / "depth",
+        "depth_mask": toolkit / "images" / date / subject / sid / "depth_mask",
+        "keypoints_tool": toolkit / "input" / subject / sid / "keypoints",
+        "keypoints_fpp": fpp_adapter / date / subject / sid / "keypoints",
+        "cliff": pto_adapter / date / subject / sid / "CLIFF_results.npz",
+        "scene": pto_adapter / date / subject / sid / "template_scene_rgbd.npy",
     }
 
 
@@ -70,7 +76,7 @@ def present(path: Path, n: int | None = None, suffix: str | None = None) -> bool
 
 def fpp_expected_counts(split: str) -> dict[str, int]:
     """Return the exact temporal-window center count used by FPP-Net."""
-    path = WORKSPACE / "work" / "VP-MoCap" / "dataset_split_temporal5.npy"
+    path = WORKSPACE / "model_inputs/FPP-Net/adapter_v1/dataset_split_temporal5.npy"
     if not path.is_file():
         return {}
     payload = np.load(path, allow_pickle=True).item()
@@ -102,8 +108,6 @@ def main() -> None:
         ("motion_color", "motion_color", None),
         ("motion_pressure", "motion_pressure", None),
         ("motion_smpl", "motion_smpl", None),
-        ("motion_feature", "motion_feature", None),
-        ("motion_bbox", "motion_bbox", None),
         ("insole_tool", "insole_tool", ".npy"),
         ("insole_fpp", "insole_fpp", ".npy"),
         ("mmvp_color_tool", "mmvp_color_tool", None),
@@ -122,7 +126,9 @@ def main() -> None:
         ok_ids, missing = [], []
         for sid in all_ids:
             _, _, n, paths = session_paths(manifest[sid], sid)
-            expected = n if key in {"motion_color", "insole_tool", "insole_fpp", "mmvp_color_tool", "mmvp_color_fpp", "depth", "depth_mask", "keypoints_tool", "keypoints_fpp"} else None
+            # mmvp_color_fpp 只含 join 后的帧（join_manifest 为对齐权威），
+            # 帧数必然 <= n，因此只做存在性检查。
+            expected = n if key in {"motion_color", "insole_tool", "insole_fpp", "mmvp_color_tool", "depth", "depth_mask", "keypoints_tool", "keypoints_fpp"} else None
             if present(paths[key], expected, suffix):
                 ok_ids.append(sid)
             else:
@@ -159,13 +165,13 @@ def main() -> None:
     # 评估整改任务 02：原生拟合结果按 canonical workspace fitting 根检查；
     # 迁移期保留旧 results 树作为回退位置。
     pressure_roots = [
-        WORKSPACE / "model_inputs/pressure_toolkit/fitting/results",
+        WORKSPACE / "work/pressure_toolkit/fitting/results",
         RESULTS / "baselines/pressure_toolkit/results",
         RESULTS / "offline/pressure_toolkit/results",
     ]
     for sid in all_ids:
         date, subject, n, _ = session_paths(manifest[sid], sid)
-        fpp_dir = WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "pred_contact_smpl"
+        fpp_dir = WORKSPACE / "model_inputs/PoseTransOpt/adapter_v1" / date / subject / sid / "pred_contact_smpl"
         fpp_count = len(list(fpp_dir.glob("*.npy"))) if fpp_dir.is_dir() else 0
         expected_fpp = int(fpp_expected.get(sid, 0))
         if expected_fpp > 0 and fpp_count == expected_fpp:
@@ -179,7 +185,7 @@ def main() -> None:
         pressure_count = len(list(pressure_dir.glob("smpl_*.npz"))) if pressure_dir else 0
         artifact_checks["pressure_native_fit"].append(sid) if pressure_count == n else None
 
-        pose_path = WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "opt_results/opt_result.pth"
+        pose_path = WORKSPACE / "work/VP-MoCap/v1/pose_optimization" / date / subject / sid / "opt_result.pth"
         if pose_path.is_file():
             artifact_checks["posetransopt_native_fit"].append(sid)
 

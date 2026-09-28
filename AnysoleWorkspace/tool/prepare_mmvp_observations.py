@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Prepare the shared MMVP directory layout without regenerating insole data.
 
+DEPRECATED (2026-09-28): superseded by the per-model adapters —
+``tool/adapters/FPP-Net/build_inputs.py``、``tool/adapters/PoseTransOpt/build_inputs.py``、
+``tool/adapters/pressure_toolkit/build_inputs.py``。本工具保留只读兼容，不再进入
+README 主命令链；insole 的唯一公共表示是
+``shared/representations/tactile/mmvp_31x11/v1``。
+
 This adapter only links the canonical RGB frames and derives calibration/floor
 files from the date-level calibration summary.  The existing 31x11 insole
-    files under ``model_inputs/pressure_toolkit`` and ``model_inputs/VP-MoCap`` are treated as
+    files under ``model_inputs/pressure_toolkit/v1`` are treated as
 read-only inputs.  Depth, RTMPose and CLIFF remain explicit front-end stages;
 the generated report records their presence and never substitutes GT data.
 """
@@ -27,8 +33,8 @@ WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 MANIFEST = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
 SPLITS = WORKSPACE / "protocol/splits/default/splits.csv"
 SEQ_ROOT = WORKSPACE / "shared/facts/sessions/cam3"
-TOOLKIT_ROOT = WORKSPACE / "model_inputs/pressure_toolkit"
-FPP_ROOT = WORKSPACE / "model_inputs/VP-MoCap"
+TOOLKIT_ROOT = WORKSPACE / "model_inputs/pressure_toolkit/v1"
+FPP_ROOT = WORKSPACE / "model_inputs/PoseTransOpt/adapter_v1"
 
 
 def manifest_rows() -> dict[str, dict]:
