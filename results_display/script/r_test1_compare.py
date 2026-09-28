@@ -85,17 +85,17 @@ def hex_to_rgb(value: str) -> tuple[int, int, int]:
 
 
 def load_pressure(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    pressure = np.load(seq_dir / "pressure.npz")["pressure"].astype(np.float32)
-    fake_path = seq_dir / "fake_mask.npy"
-    fake = np.load(fake_path).astype(np.uint8).reshape(-1) if fake_path.is_file() else np.zeros((pressure.shape[0],), dtype=np.uint8)
+    with np.load(seq_dir / "pressure_48.npz", allow_pickle=True) as data:
+        pressure = np.stack((data["left48"], data["right48"]), axis=1).reshape(-1, 2, 4, 12).astype(np.float32)
+        fake = np.asarray(data["fake"], dtype=np.uint8).reshape(-1)
     return pressure, fake
 
 
 def video_frames(session_id: str) -> list[Path]:
     """RGB camera frames for the V2M input panel (0..N-1 aligned to the grid)."""
-    images = cli_common.WORKSPACE_ROOT / "derived/pressure_toolkit/images"
+    images = cli_common.WORKSPACE_ROOT / "shared/facts/sessions/cam3"
     for d in sorted(images.glob(f"*/*/{session_id}")):
-        color = d / "color"
+        color = d / "rgb"
         if color.is_dir():
             frames = sorted(p for p in color.iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png"))
             if frames:
@@ -172,9 +172,10 @@ def load_baseline_pred(entry: dict, session_id: str, row: dict):
     try:
         protocol = normalize_protocol(str(entry.get("protocol") or ""))
         if path.suffix.lower() == ".bvh":
-            # Resample the BVH onto the canonical session grid (exact frame
-            # pairing with the GT, same rule as R_Test2).
-            joints, names, _parents = bvh_joints(path, row)
+            # A prediction BVH owns its own frame axis.  Do not query it with
+            # the GT manifest's n_frames/offset; pairing is handled by the
+            # explicit prediction length and frame axis downstream.
+            joints, names, _parents = bvh_joints(path)
             return {"joints": joints, "names": names,
                     "protocol": PROTOCOL_LABELS[protocol]}, str(path)
         joints, mask, names, protocol_label = array_from_file(path)
@@ -272,7 +273,7 @@ def render_session(mode: str, session_id: str, model_dir: Path, run_name: str,
                            if frames_path else render_missing_panel("Video", "no RGB frames"))
         else:
             input_panel = render_foot_panel(
-                crop_foot(pressure[t], LEFT_FOOT_BOX), crop_foot(pressure[t], RIGHT_FOOT_BOX),
+                np.rot90(pressure[t, 0], k=1), np.rot90(pressure[t, 1], k=1),
                 session_id, t, n, args.fps, not bool(fake[t]),
             )
         panels = [input_panel]

@@ -390,7 +390,6 @@ def _rho_grid_commands(registry: dict[str, Any], experiment_id: str, model_id: s
             str(root),
             "--device",
             device,
-            "--reuse",
         ]))
     return commands
 
@@ -415,7 +414,7 @@ def _rho_grid_cell(
         "--ckpt", str(ckpt), "--config", str(config),
         "--split", split, "--seeds", str(seed),
         "--rho-v", str(rho_v), "--rho-t", str(rho_t),
-        "--out-dir", str(root), "--device", device, "--reuse",
+        "--out-dir", str(root), "--device", device,
     ]
     code = _command_log(command, log)
     if code != 0:
@@ -476,6 +475,11 @@ def _run_task(
     dry_run: bool = False,
 ) -> None:
     """Execute one generated task conf (SurvPGC one-conf-one-run granularity)."""
+    # Generated confs explicitly request a fresh run. CLI --force remains
+    # available for manually supplied confs and takes precedence.
+    force = force or str(values.get("FORCE", "false")).strip().lower() in {
+        "1", "true", "yes", "on"
+    }
     task = str(values.get("TASK", "")).strip()
     if task == "model_run":
         model_id = str(values.get("MODEL_ID", "")).strip()

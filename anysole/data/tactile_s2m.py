@@ -71,12 +71,19 @@ LEGACY_RIGHT_TOE = LEGACY_BVH_JOINT_NAMES.index("RightToeBase")
 
 def resolve_legacy_bvh_path(meta: dict) -> Path:
     """Resolve the directly exported BVH using Step2Motion's original rule."""
-    recorded = Path(meta["bvh_path"])
+    recorded_value = str(meta.get("bvh_path", ""))
+    if "://" in recorded_value:
+        from AnysoleWorkspace.tool.workspace import resolve_uri
+        try:
+            return resolve_uri(recorded_value, must_exist=True)
+        except (FileNotFoundError, ValueError):
+            pass
+    recorded = Path(recorded_value)
     if recorded.is_file():
         return recorded
     session_id = str(meta["session_id"])
     date = str(meta["date"])
-    root = WORKSPACE_ROOT / "sources" / "raw" / date / "mocap_ori_bvh" / session_id
+    root = WORKSPACE_ROOT / "raw" / "bvh" / date / "mocap_ori_bvh" / session_id
     candidates = sorted(root.glob("*.bvh"))
     if not candidates:
         raise FileNotFoundError(

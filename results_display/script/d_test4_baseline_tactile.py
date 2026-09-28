@@ -5,11 +5,11 @@ tactile.py 的产物落盘（产物齐全则跳过生成，缺则调用生成脚
 重生成），再读统一压力源和落盘文件渲染 1x4 横向逐帧动画。四个面板为：
 
     AnySole         原始 pressure.npz → 原生 4x12 / 脚（主方法参考坐标）
-    MotionPRO       AnysoleWorkspace/derived/MotionPRO/pressure_96/<sid>.npz
+    MotionPRO       AnysoleWorkspace/model_inputs/MotionPRO/pressure_96/<sid>.npz
                     （FRAPPE 实际输入的 96x96；可视化按左右脚等尺度并旋转到参考坐标）
     MMVP            pressure_toolkit 与 VP-MoCap 共用的 31x11 原始压力
                     （两棵目录逐帧校验一致，只显示一个逻辑工作）
-    Step2Motion     AnysoleWorkspace/derived/Step2Motion/pressure_16ch/<sid>.npz
+    Step2Motion     AnysoleWorkspace/model_inputs/Step2Motion/pressure_16ch/<sid>.npz
                     （16 通道/脚，回填为统一脚形仅作展示）
 
 映射口径（生成器与 meta 为准）：点对点按 SMPL 模板足底系欧氏最近点，厂商布局

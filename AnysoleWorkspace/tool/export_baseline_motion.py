@@ -26,7 +26,11 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "AnysoleWorkspace"
 RESULTS = ROOT / "results"
-MANIFEST = WORKSPACE / "manifests" / "session_manifest.jsonl"
+import sys
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from AnysoleWorkspace.tool.workspace import resolve_uri as _frozen_resolve_uri  # noqa: E402
+MANIFEST = WORKSPACE / "protocol/manifests" / "session_manifest.jsonl"
 SMPL_NAMES = (
     "pelvis", "left_hip", "right_hip", "spine1", "left_knee", "right_knee",
     "spine2", "left_ankle", "right_ankle", "spine3", "left_foot", "right_foot",
@@ -52,7 +56,7 @@ def rows() -> dict[str, dict]:
 def split_sessions(split: str) -> list[str]:
     columns = ("train", "val", "test") if split == "all" else (split,)
     out = []
-    with (WORKSPACE / "splits" / "default" / "splits.csv").open(
+    with (WORKSPACE / "protocol/splits" / "default" / "splits.csv").open(
             encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
             for column in columns:
@@ -63,9 +67,8 @@ def split_sessions(split: str) -> list[str]:
 
 
 def session_parts(row: dict) -> tuple[str, str]:
-    parts = Path(row["pressure_path"]).parts
-    cam = parts.index("cam3")
-    return parts[cam + 1], parts[cam + 2]
+    recording = resolve_uri(row["video_path"], must_exist=True)
+    return recording.parts[-3], recording.parts[-2]
 
 
 def valid_frames(row: dict, n: int) -> np.ndarray:
@@ -100,17 +103,12 @@ def smpl_yup_to_display(points: np.ndarray) -> np.ndarray:
     return np.stack((points[..., 0], -points[..., 2], points[..., 1]), axis=-1)
 
 
-def resolve_uri(value: str) -> Path:
+def resolve_uri(value: str, **kwargs) -> Path:
+    """Delegate to the frozen workspace resolver; ``workspace://`` stays removed."""
     text = str(value)
-    prefixes = {
-        "workspace://": WORKSPACE,
-        "results://": RESULTS,
-    }
-    for prefix, root in prefixes.items():
-        if text.startswith(prefix):
-            return root / text[len(prefix):]
-    path = Path(text).expanduser()
-    return path if path.is_absolute() else ROOT / path
+    if text.startswith("workspace://"):
+        raise ValueError("workspace:// has been removed; use a canonical URI")
+    return _frozen_resolve_uri(text, **kwargs)
 
 
 def write_archive(path: Path, joints: np.ndarray, valid: np.ndarray,
@@ -170,7 +168,7 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
     from lib.core.smpl_mmvp import SMPL_MMVP
     import torch
 
-    essential = WORKSPACE / "dependencies" / "pressure_toolkit" / "essential"
+    essential = WORKSPACE / "assets/third_party" / "pressure_toolkit" / "essential"
     model = SMPL_MMVP(str(essential), gender=gender, stage="tracking").cpu()
     n = int(row["n_frames"])
     joints = np.zeros((n, 24, 3), dtype=np.float32)
@@ -226,7 +224,7 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
 def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
     session = row["session_id"]
     date, subject = session_parts(row)
-    native_path = WORKSPACE / "derived" / "VP-MoCap" / date / subject / session / "opt_results" / "opt_result.pth"
+    native_path = WORKSPACE / "work" / "VP-MoCap" / date / subject / session / "opt_results" / "opt_result.pth"
     if not native_path.is_file():
         raise FileNotFoundError(f"PoseTransOpt output missing: {native_path}")
     import torch
@@ -241,7 +239,7 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
         raise ValueError(f"{native_path}: expected pose (T,24,3,3), got {tuple(pose.shape)}")
     if beta.ndim == 1:
         beta = beta.reshape(1, -1).repeat(len(pose), 1)
-    smpl_path = WORKSPACE / "dependencies" / "smpl" / "SMPL_NEUTRAL.pkl"
+    smpl_path = WORKSPACE / "assets/third_party" / "smpl" / "SMPL_NEUTRAL.pkl"
     model = smplx.create(str(smpl_path), "smpl", gender="neutral", batch_size=len(pose), num_betas=10)
     with torch.no_grad():
         result = model(
@@ -274,7 +272,7 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
 def export_fpp_v2t(row: dict, output: Path) -> None:
     session = row["session_id"]
     date, subject = session_parts(row)
-    source = WORKSPACE / "derived" / "VP-MoCap" / date / subject / session / "pred_contact_smpl"
+    source = WORKSPACE / "work" / "VP-MoCap" / date / subject / session / "pred_contact_smpl"
     n = int(row["n_frames"])
     pressure_pred = np.zeros((n, 31, 22), dtype=np.float32)
     pressure_gt = np.zeros_like(pressure_pred)
@@ -349,7 +347,7 @@ def choose_sessions(args: argparse.Namespace, manifest: dict[str, dict]) -> list
 def split_sessions(split: str) -> list[str]:
     columns = ("train", "val", "test") if split == "all" else (split,)
     values = []
-    with (WORKSPACE / "splits" / "default" / "splits.csv").open(encoding="utf-8-sig", newline="") as handle:
+    with (WORKSPACE / "protocol/splits" / "default" / "splits.csv").open(encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
             for column in columns:
                 value = (row.get(column) or "").strip()
@@ -365,7 +363,7 @@ def main() -> None:
     parser.add_argument("--session", default="", help="comma-separated session IDs")
     # 评估整改任务 02：pressure 输入默认读 workspace fitting 根；
     # 迁移期旧树可通过 --pressure-root results://baselines/pressure_toolkit 显式传入。
-    parser.add_argument("--pressure-root", default="workspace://derived/pressure_toolkit/fitting")
+    parser.add_argument("--pressure-root", default="model-input://pressure_toolkit/fitting")
     parser.add_argument("--female", "--famale", dest="female", default="S14")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()

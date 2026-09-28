@@ -43,6 +43,7 @@ from scipy.spatial.transform import Rotation as SciRotation
 from utils.bvh_aligner_pose import parse_bvh_aligner
 from utils.motion_io import load_motion, smpl_yup_to_display
 from utils.smpl_mesh import mesh_from_archive, render_mesh_frame, smpl_faces
+from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 from anysole.data.smpl_io import resolve_smpl_path
 from anysole.types import SMPL_ROOTS
 
@@ -64,7 +65,7 @@ ROOT_COLOR = (255, 220, 90)
 HIGHLIGHT_JOINTS = (0, 3, 4, 7, 8, 13, 17, 21)
 
 GAIT_ROOT = REPO_ROOT
-SEQ_ROOT = cli_common.WORKSPACE_ROOT / "derived/MotionPRO/sequences/cam3"
+SEQ_ROOT = cli_common.WORKSPACE_ROOT / "shared/facts/sessions/cam3"
 DEFAULT_VIZ_DIR = cli_common.DISPLAY_ROOT / "ResultTest/R1Test_visualize/Step2Motion/gait_model"
 MIN_FRAMES = 101
 TARGET_HZ = 40.0
@@ -331,28 +332,24 @@ def find_seq_dir(session_id: str) -> Path:
 
 
 def _gt_time_grid(clip_id: str, n_frames: int, fps: float) -> np.ndarray:
-    """Mocap-source query grid for a clip (visual_start/offset + fake-split clip start)."""
+    """Use the shared session's canonical mocap frame axis for a clip."""
     session_id, clip_index = parse_clip_id(clip_id)
     seq_dir = find_seq_dir(session_id)
-    meta = json.loads((seq_dir / "align_meta.json").read_text())
-    fake_path = seq_dir / "fake_mask.npy"
-    if fake_path.is_file():
-        clips = split_fake_clips(np.load(fake_path).astype(bool), MIN_FRAMES)
-    else:
-        clips = []
+    frames = np.load(seq_dir / "frames.npz", allow_pickle=True)
+    clips = split_fake_clips(np.asarray(frames["fake"], dtype=bool), MIN_FRAMES)
     if clips:
         start, _end = clips[min(clip_index, len(clips) - 1)]
     else:
         start = 0
-    t_grid = float(meta["visual_start_s"]) + (start + 1 + np.arange(n_frames, dtype=np.float64)) / float(fps)
-    return t_grid - float(meta["offset_s"])
+    mocap = np.asarray(frames["mocap_time_s"], dtype=np.float64)
+    return mocap[start:start + n_frames]
 
 
 def load_original_gt(clip_id: str, n_frames: int, fps: float = TARGET_HZ) -> dict:
     session_id, _clip_index = parse_clip_id(clip_id)
     seq_dir = find_seq_dir(session_id)
-    meta = json.loads((seq_dir / "align_meta.json").read_text())
-    parsed = parse_bvh(meta["bvh_path"])
+    meta = json.loads((seq_dir / "session.json").read_text())
+    parsed = parse_bvh(resolve_uri(meta["source_files"]["bvh"], must_exist=True))
     joints = interp_joints(parsed["joints"], parsed["frame_time"], _gt_time_grid(clip_id, n_frames, fps))
     return {
         "joints": joints_to_meters(joints),
@@ -369,9 +366,9 @@ def load_original_gt_mesh(clip_id: str, n_frames: int, fps: float = TARGET_HZ) -
     """
     session_id, _clip_index = parse_clip_id(clip_id)
     seq_dir = find_seq_dir(session_id)
-    meta = json.loads((seq_dir / "align_meta.json").read_text())
+    meta = json.loads((seq_dir / "session.json").read_text())
     try:
-        smpl = resolve_smpl_path(meta, tuple(SMPL_ROOTS))
+        smpl = resolve_uri(meta["source_files"]["smpl"], must_exist=True)
     except FileNotFoundError:
         return None
     t_mocap = _gt_time_grid(clip_id, n_frames, fps)

@@ -223,7 +223,8 @@ python results_display/script/d_test2_dataset_check.py --session S10103 --limit-
 渲染判定动画。标签生成器属数据构建代码，位于 `AnysoleWorkspace/tool/contact_labels.py`。
 F6 三件套（`motion_f6`/`pressure_f6`/`f6_soft`，2026-09-18 定稿，设计见 fix_plan_v2.md F6a）
 是最终标签设计：`bvh_h` 在台阶承重与低净空两类反例上失效后降级为对比参考；
-`f6_soft` 硬决策与 `motion_f6` 一致（渲染相同），软值只进训练。
+`f6_soft` 中间阶段按 pressure_f6 一致度计算 4 档软值，导出的 npy 已二值化
+（== `motion_f6`，与其他方案统一 {0, 1}；软值不进 npy）。
 
 | 方法 | 判据 |
 | --- | --- |
@@ -237,7 +238,7 @@ F6 三件套（`motion_f6`/`pressure_f6`/`f6_soft`，2026-09-18 定稿，设计�
 | `joint_and` | air intersection / contact union（两来源都判离地才离地） |
 | `motion_f6` | F6 运动学状态机：接触→离地 v>0.6m/s 连续 2 帧（压力永不触发离地）；离地→接触 (v<0.3 且 \|az\|<3 连续 2 帧) 或 (压力承重 且 v<0.6)；h≥20cm 且无压力时拒绝接触 |
 | `pressure_f6` | F6 承重：逐格基线 = 离地帧值 90 分位（自举自 motion_f6），corrected 和 + 迟滞阈值（80 或 0.2×stance 中位，1.5× 滞回） |
-| `f6_soft（目前作为GT）` | F6 软标签：硬值 = motion_f6，按 pressure_f6 一致度取 {0.95 触地承重 / 0.70 触地未承重 / 0.05 离地 / 0.30 离地残余压} |
+| `f6_soft（目前作为GT）` | F6 软标签：中间按 pressure_f6 一致度取 4 档软值 {0.95 触地承重 / 0.70 触地未承重 / 0.05 离地 / 0.30 离地残余压}，导出二值化 == motion_f6（与其他方案统一 {0, 1}） |
 
 ```bash
 conda activate touch_gait
@@ -266,10 +267,10 @@ python results_display/script/d_test3_contact.py --methods f6_soft
 
 | 工作 | 触觉输入 | 落盘位置 |
 | --- | --- | --- |
-| AnySole（主方法） | 原始 pressure.npz → 原生 4×12 / 脚 | `AnysoleWorkspace/derived/MotionPRO/sequences/cam3/<date>/<sub>/<sid>/pressure.npz` |
-| MotionPRO | pressure.npz → bilinear 96×96 /255（FRAPPE 口径；可视化按 L/R 脚区等尺度显示） | `AnysoleWorkspace/derived/MotionPRO/pressure_96/<sid>.npz` |
-| MMVP（pressure_toolkit / VP-MoCap） | 共享同一份 insole `{'insole': [L(31,11), R(31,11)]}`；两棵目录逐帧一致 | `AnysoleWorkspace/derived/pressure_toolkit/.../insole/%03d.npy` + `AnysoleWorkspace/derived/VP-MoCap/.../insole/%03d.npy` |
-| Step2Motion | 16 通道/脚（process_gait 冻结池化，展示/审计产物） | `AnysoleWorkspace/derived/Step2Motion/pressure_16ch/<sid>.npz` |
+| AnySole（主方法） | 原始 pressure.npz → 原生 4×12 / 脚 | `AnysoleWorkspace/shared/facts/sessions/cam3/<date>/<sub>/<sid>/pressure.npz` |
+| MotionPRO | pressure.npz → bilinear 96×96 /255（FRAPPE 口径；可视化按 L/R 脚区等尺度显示） | `AnysoleWorkspace/model_inputs/MotionPRO/pressure_96/<sid>.npz` |
+| MMVP（pressure_toolkit / VP-MoCap） | 共享同一份 insole `{'insole': [L(31,11), R(31,11)]}`；两棵目录逐帧一致 | `AnysoleWorkspace/model_inputs/pressure_toolkit/.../insole/%03d.npy` + `AnysoleWorkspace/model_inputs/VP-MoCap/.../insole/%03d.npy` |
+| Step2Motion | 16 通道/脚（process_gait 冻结池化，展示/审计产物） | `AnysoleWorkspace/model_inputs/Step2Motion/pressure_16ch/<sid>.npz` |
 
    方法                                  实际数据                            当前显示
   ━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -285,7 +286,7 @@ python results_display/script/d_test3_contact.py --methods f6_soft
    Step2Motion             16 通道/脚，32 通道/帧     当前显示 48 格/脚，但只有 16 个
                                                               唯一值，每个值重复 3 格
 
-关键实测（`AnysoleWorkspace/derived/baseline_tactile/<sid>/meta.json`）：MMVP mask 242/241 像素/脚；
+关键实测（`AnysoleWorkspace/work/baseline_tactile/<sid>/meta.json`）：MMVP mask 242/241 像素/脚；
 最近格距离 L 均值 9.2mm / R 8.7mm；FPP weight = 静立帧总压；布局文件未标注内外侧
 方向，默认与模板 x 同向（`--mirror-x` 翻转，透传生成器）。
 
@@ -399,8 +400,8 @@ python results_display/script/r_test1_compare.py --model-name V4B --contact-meth
 
 ```bash
 python results_display/script/r_test2_compare.py \
-  --manifest AnysoleWorkspace/manifests/session_manifest.csv \
-  --split-csv AnysoleWorkspace/splits/default/splits.csv \
+  --manifest AnysoleWorkspace/protocol/manifests/session_manifest.csv \
+  --split-csv AnysoleWorkspace/protocol/splits/default/splits.csv \
   --model-name V4A \
   --contact-method joint_and \
   --variant tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1 \

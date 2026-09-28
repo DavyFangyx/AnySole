@@ -42,9 +42,9 @@ def main() -> int:
         "--batch-size",
         str(args.batch_size),
         "--cache-root",
-        str(REPO_ROOT / "AnysoleWorkspace" / "derived" / "AnySole" / "hrnet_cache" / ("cam%d" % args.cam_id)),
+        str(REPO_ROOT / "AnysoleWorkspace" / "work" / "AnySole" / "hrnet_cache" / ("cam%d" % args.cam_id)),
         "--seq-root",
-        str(REPO_ROOT / "AnysoleWorkspace" / "derived" / "MotionPRO" / "sequences" / ("cam%d" % args.cam_id)),
+        str(REPO_ROOT / "AnysoleWorkspace" / "work" / "MotionPRO" / "sequences" / ("cam%d" % args.cam_id)),
     ]
     if args.session:
         command += ["--session", args.session]

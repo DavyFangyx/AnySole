@@ -3,7 +3,7 @@
 
 This adapter only links the canonical RGB frames and derives calibration/floor
 files from the date-level calibration summary.  The existing 31x11 insole
-files under ``derived/pressure_toolkit`` and ``derived/VP-MoCap`` are treated as
+    files under ``model_inputs/pressure_toolkit`` and ``model_inputs/VP-MoCap`` are treated as
 read-only inputs.  Depth, RTMPose and CLIFF remain explicit front-end stages;
 the generated report records their presence and never substitutes GT data.
 """
@@ -13,18 +13,22 @@ import argparse
 import csv
 import json
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
-MANIFEST = WORKSPACE / "manifests/session_manifest.jsonl"
-SPLITS = WORKSPACE / "splits/default/splits.csv"
-SEQ_ROOT = WORKSPACE / "derived/MotionPRO/sequences/cam3"
-TOOLKIT_ROOT = WORKSPACE / "derived/pressure_toolkit"
-FPP_ROOT = WORKSPACE / "derived/VP-MoCap"
+MANIFEST = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
+SPLITS = WORKSPACE / "protocol/splits/default/splits.csv"
+SEQ_ROOT = WORKSPACE / "shared/facts/sessions/cam3"
+TOOLKIT_ROOT = WORKSPACE / "model_inputs/pressure_toolkit"
+FPP_ROOT = WORKSPACE / "model_inputs/VP-MoCap"
 
 
 def manifest_rows() -> dict[str, dict]:
@@ -47,9 +51,8 @@ def split_sessions(split: str) -> list[str]:
 
 
 def sequence_info(row: dict) -> tuple[str, str, Path]:
-    parts = Path(row["pressure_path"]).parts
-    cam = parts.index("cam3")
-    date, subject, session = parts[cam + 1 : cam + 4]
+    recording = resolve_uri(row["video_path"], must_exist=True)
+    date, subject, session = recording.parts[-3], recording.parts[-2], row["session_id"]
     return date, subject, SEQ_ROOT / date / subject / session
 
 
@@ -65,10 +68,10 @@ def link_one(source: Path, target: Path, force: bool = False) -> None:
 
 
 def link_color(seq_dir: Path, output_dir: Path, force: bool) -> int:
-    frames = sorted(p for p in (seq_dir / "color").iterdir()
+    frames = sorted(p for p in (seq_dir / "rgb").iterdir()
                     if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"})
     if not frames:
-        raise FileNotFoundError(f"no canonical RGB frames: {seq_dir / 'color'}")
+        raise FileNotFoundError(f"no canonical RGB frames: {seq_dir / 'rgb'}")
     output_dir.mkdir(parents=True, exist_ok=True)
     for index, source in enumerate(frames):
         # Keep a stable numeric frame index independent of the original camera
@@ -78,7 +81,7 @@ def link_color(seq_dir: Path, output_dir: Path, force: bool) -> int:
 
 
 def load_calibration(date: str) -> dict:
-    path = WORKSPACE / "calibration" / f"{date}.json"
+    path = WORKSPACE / "protocol/calibration" / f"{date}.json"
     if not path.is_file():
         raise FileNotFoundError(f"missing date calibration: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))

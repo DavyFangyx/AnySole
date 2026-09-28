@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -12,16 +13,19 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "AnysoleWorkspace"
 RESULTS = ROOT / "results"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
 
 def assigned_sessions() -> tuple[dict[str, dict], list[str]]:
     manifest = {}
-    for line in (WORKSPACE / "manifests/session_manifest.jsonl").read_text().splitlines():
+    for line in (WORKSPACE / "protocol/manifests/session_manifest.jsonl").read_text().splitlines():
         if line.strip():
             row = json.loads(line)
             manifest[row["session_id"]] = row
     ids = []
-    with (WORKSPACE / "splits/default/splits.csv").open(encoding="utf-8-sig", newline="") as handle:
+    with (WORKSPACE / "protocol/splits/default/splits.csv").open(encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
             for split in ("train", "val", "test"):
                 value = (row.get(split) or "").strip()
@@ -31,28 +35,27 @@ def assigned_sessions() -> tuple[dict[str, dict], list[str]]:
 
 
 def session_paths(row: dict, sid: str) -> tuple[str, str, int, dict[str, Path]]:
-    parts = Path(row["pressure_path"]).parts
-    cam = parts.index("cam3")
-    date, subject, n = parts[cam + 1], parts[cam + 2], int(row["n_frames"])
-    seq = WORKSPACE / "derived/MotionPRO/sequences/cam3" / date / subject / sid
+    recording = resolve_uri(row["video_path"], must_exist=True)
+    date, subject, n = recording.parts[-3], recording.parts[-2], int(row["n_frames"])
+    seq = WORKSPACE / "shared/facts/sessions/cam3" / date / subject / sid
     return date, subject, n, {
-        "motion_color": seq / "color",
+        "motion_color": seq / "rgb",
         "motion_pressure": seq / "pressure.npz",
         "motion_smpl": seq / "smpl.npy",
         "motion_feature": seq / "feature_hrnet.pth",
         "motion_bbox": seq / "bbox.npy",
-        "insole_tool": WORKSPACE / "derived/pressure_toolkit/images" / date / subject / sid / "insole",
-        "insole_fpp": WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "insole",
-        "mmvp_color_tool": WORKSPACE / "derived/pressure_toolkit/images" / date / subject / sid / "color",
-        "mmvp_color_fpp": WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "color",
-        "calibration": WORKSPACE / "derived/pressure_toolkit/images" / date / subject / sid / "calibration.npy",
-        "floor": WORKSPACE / "derived/pressure_toolkit/annotations" / date / "floor_info" / f"floor_{subject}.npy",
-        "depth": WORKSPACE / "derived/pressure_toolkit/images" / date / subject / sid / "depth",
-        "depth_mask": WORKSPACE / "derived/pressure_toolkit/images" / date / subject / sid / "depth_mask",
-        "keypoints_tool": WORKSPACE / "derived/pressure_toolkit/input" / subject / sid / "keypoints",
-        "keypoints_fpp": WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "keypoints",
-        "cliff": WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "CLIFF_results.npz",
-        "scene": WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "template_scene_rgbd.npy",
+        "insole_tool": WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / sid / "insole",
+        "insole_fpp": WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "insole",
+        "mmvp_color_tool": WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / sid / "color",
+        "mmvp_color_fpp": WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "color",
+        "calibration": WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / sid / "calibration.npy",
+        "floor": WORKSPACE / "model_inputs/pressure_toolkit/annotations" / date / "floor_info" / f"floor_{subject}.npy",
+        "depth": WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / sid / "depth",
+        "depth_mask": WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / sid / "depth_mask",
+        "keypoints_tool": WORKSPACE / "model_inputs/pressure_toolkit/input" / subject / sid / "keypoints",
+        "keypoints_fpp": WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "keypoints",
+        "cliff": WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "CLIFF_results.npz",
+        "scene": WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "template_scene_rgbd.npy",
     }
 
 
@@ -67,7 +70,7 @@ def present(path: Path, n: int | None = None, suffix: str | None = None) -> bool
 
 def fpp_expected_counts(split: str) -> dict[str, int]:
     """Return the exact temporal-window center count used by FPP-Net."""
-    path = WORKSPACE / "derived" / "VP-MoCap" / "dataset_split_temporal5.npy"
+    path = WORKSPACE / "work" / "VP-MoCap" / "dataset_split_temporal5.npy"
     if not path.is_file():
         return {}
     payload = np.load(path, allow_pickle=True).item()
@@ -88,7 +91,7 @@ def main() -> None:
     manifest, all_ids = assigned_sessions()
     if args.split != "all":
         selected = []
-        with (WORKSPACE / "splits/default/splits.csv").open(encoding="utf-8-sig", newline="") as handle:
+        with (WORKSPACE / "protocol/splits/default/splits.csv").open(encoding="utf-8-sig", newline="") as handle:
             for row in csv.DictReader(handle):
                 value = (row.get(args.split) or "").strip()
                 if value:
@@ -128,12 +131,12 @@ def main() -> None:
         report["missing"][label] = missing
 
     report["dependencies"] = {
-        "smpl_neutral": (WORKSPACE / "dependencies/smpl/SMPL_NEUTRAL.pkl").is_file(),
-        "depthpro": (WORKSPACE / "dependencies/pressure_toolkit/depthpro/model.safetensors").is_file(),
-        "rtmpose_checkpoint": (WORKSPACE / "dependencies/rtmpose/rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.pth").is_file(),
-        "cliff_checkpoint": (WORKSPACE / "dependencies/MotionPRO/cliff_ckpt/hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt").is_file(),
-        "yolov3_code": (WORKSPACE / "dependencies/CLIFF/lib/pytorch_yolo_v3_master/darknet.py").is_file(),
-        "yolov3_weights": (WORKSPACE / "dependencies/CLIFF/data/ckpt/yolov3.weights").is_file(),
+        "smpl_neutral": (WORKSPACE / "assets/third_party/smpl/SMPL_NEUTRAL.pkl").is_file(),
+        "depthpro": (WORKSPACE / "assets/third_party/pressure_toolkit/depthpro/model.safetensors").is_file(),
+        "rtmpose_checkpoint": (WORKSPACE / "assets/third_party/rtmpose/rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.pth").is_file(),
+        "cliff_checkpoint": (WORKSPACE / "assets/third_party/MotionPRO/cliff_ckpt/hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt").is_file(),
+        "yolov3_code": (WORKSPACE / "assets/third_party/CLIFF/lib/pytorch_yolo_v3_master/darknet.py").is_file(),
+        "yolov3_weights": (WORKSPACE / "assets/third_party/CLIFF/data/ckpt/yolov3.weights").is_file(),
         "fpp_checkpoint": (ROOT / "Baselines/VP-MoCap/FPP-Net/checkpoints/tempKPSMPL_series5_mlp/latest").is_file(),
     }
 
@@ -156,13 +159,13 @@ def main() -> None:
     # 评估整改任务 02：原生拟合结果按 canonical workspace fitting 根检查；
     # 迁移期保留旧 results 树作为回退位置。
     pressure_roots = [
-        WORKSPACE / "derived/pressure_toolkit/fitting/results",
+        WORKSPACE / "model_inputs/pressure_toolkit/fitting/results",
         RESULTS / "baselines/pressure_toolkit/results",
         RESULTS / "offline/pressure_toolkit/results",
     ]
     for sid in all_ids:
         date, subject, n, _ = session_paths(manifest[sid], sid)
-        fpp_dir = WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "pred_contact_smpl"
+        fpp_dir = WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "pred_contact_smpl"
         fpp_count = len(list(fpp_dir.glob("*.npy"))) if fpp_dir.is_dir() else 0
         expected_fpp = int(fpp_expected.get(sid, 0))
         if expected_fpp > 0 and fpp_count == expected_fpp:
@@ -176,7 +179,7 @@ def main() -> None:
         pressure_count = len(list(pressure_dir.glob("smpl_*.npz"))) if pressure_dir else 0
         artifact_checks["pressure_native_fit"].append(sid) if pressure_count == n else None
 
-        pose_path = WORKSPACE / "derived/VP-MoCap" / date / subject / sid / "opt_results/opt_result.pth"
+        pose_path = WORKSPACE / "model_inputs/VP-MoCap" / date / subject / sid / "opt_results/opt_result.pth"
         if pose_path.is_file():
             artifact_checks["posetransopt_native_fit"].append(sid)
 

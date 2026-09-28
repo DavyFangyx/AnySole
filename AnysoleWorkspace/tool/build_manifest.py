@@ -17,12 +17,13 @@ from anysole.types import (  # noqa: E402
     JOINT_PARENTS as SMPL24_PARENTS,
     JOINT_PROTOCOL_CHECKSUM as SMPL24_CHECKSUM,
 )
+from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
 WORKSPACE = ROOT / "AnysoleWorkspace"
 FIELDS = ("session_id", "subject_id", "action", "trial", "camera", "video_path",
           "pressure_path", "bvh_path", "smpl_path", "target_fps", "n_frames", "visual_start_s",
           "mocap_start_s", "offset_s", "fake_frame_indices", "valid_frame_indices",
-          "quality", "eligible_anysole", "eligibility_reason", "split_iid", "split_ood", "joint_checksum")
+          "quality", "eligible_anysole", "eligibility_reason", "joint_checksum")
 
 SMPL_COORDINATE_SYSTEM = "SMPL right-handed +X left, +Y up, +Z forward; world motion preserved"
 LEGACY_BVH23_NAMES = (
@@ -32,46 +33,6 @@ LEGACY_BVH23_NAMES = (
     "LeftFoot", "LeftToeBase", "RightUpLeg", "RightLeg", "RightFoot", "RightToeBase",
 )
 LEGACY_BVH23_PARENTS = (-1, 0, 1, 2, 3, 4, 5, 4, 7, 8, 9, 4, 11, 12, 13, 0, 15, 16, 17, 0, 19, 20, 21)
-
-
-def rel(path: Path | str) -> str:
-    p = Path(path)
-    try:
-        return p.resolve().relative_to(ROOT.resolve()).as_posix()
-    except ValueError:
-        return str(p)
-
-
-def bvh_for(session_id: str, meta: dict) -> Path:
-    recorded = Path(str(meta.get("bvh_path", "")))
-    if recorded.is_file():
-        return recorded
-    date = str(meta.get("date", ""))
-    candidates = sorted((WORKSPACE / "sources/raw" / date / "mocap_ori_bvh" / session_id).glob("*.bvh"))
-    if candidates:
-        return candidates[0]
-    raw = Path(str(meta.get("rec_dir", ""))).parent / "mocap_ori_bvh" / session_id
-    candidates = sorted(raw.glob("*.bvh")) if raw.is_dir() else []
-    return candidates[0] if candidates else recorded
-
-
-SMPL_ROOTS = tuple(Path(p) for p in (
-    "/data/lizhe/projects/Tactile/Mocap/0804",
-    "/data/lizhe/projects/Tactile/Mocap/0807",
-    "/data/lizhe/projects/Tactile/Mocap/0808",
-    "/data/lizhe/projects/Tactile/Mocap/0810",
-))
-
-
-def smpl_for(session_id: str, meta: dict) -> Path:
-    recorded = Path(str(meta.get("smpl_path", "")))
-    if recorded.is_file():
-        return recorded
-    for root in SMPL_ROOTS:
-        matches = sorted(root.glob(f"**/{session_id}/motion_neutral_smpl.npz"))
-        if matches:
-            return matches[0]
-    return recorded
 
 
 def validate_smpl(path: Path) -> list[str]:
@@ -144,17 +105,55 @@ def parse_bvh_header(path: Path) -> tuple[list[str], list[int]]:
     return names, parents
 
 
-def split_map(split_path: Path) -> dict[str, str]:
-    result: dict[str, list[str]] = {}
-    if not split_path.is_file():
-        return result
-    with split_path.open(encoding="utf-8-sig", newline="") as f:
-        for row in csv.DictReader(f):
-            for split in ("train", "val", "test"):
-                sid = (row.get(split) or "").strip()
-                if sid:
-                    result.setdefault(sid, []).append(split)
-    return {sid: ",".join(dict.fromkeys(values)) for sid, values in result.items()}
+def raw_index(path: Path) -> list[dict]:
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"missing raw session index: {path}; run build_raw_index.py explicitly"
+        )
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def pressure_files(recording_name: str, pressure_uri: str | None = None) -> tuple[Path, Path] | None:
+    root = resolve_uri(pressure_uri or "raw://pressure", must_exist=True)
+    if root.is_dir() and (root / "pressure_left.csv").is_file():
+        left = [root / "pressure_left.csv"]
+        right = [root / "pressure_right.csv"]
+    else:
+        left = sorted(root.glob(f"**/{recording_name}/pressure_left.csv"))
+        right = sorted(root.glob(f"**/{recording_name}/pressure_right.csv"))
+    if not left or not right:
+        return None
+    return left[-1], right[-1]
+
+
+def pressure_flags(recording_name: str, n_frames: int, pressure_uri: str | None = None) -> tuple[list[int], list[int], str]:
+    files = pressure_files(recording_name, pressure_uri)
+    if files is None:
+        return [], [], "missing_pressure_final"
+    import numpy as np
+
+    columns = []
+    for path in files:
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            values = list(csv.DictReader(handle))
+        if not values:
+            return [], [], "empty_pressure_final"
+        fake = np.asarray([int(float(row.get("fake", 0))) for row in values], dtype=np.uint8)
+        valid = np.asarray([int(float(row.get("valid_mask", 1))) for row in values], dtype=np.uint8)
+        columns.append((fake, valid))
+    target = np.linspace(0.0, 1.0, n_frames)
+    flags = []
+    valids = []
+    for fake_left, valid_left in columns[:1]:
+        fake_right, valid_right = columns[1]
+        left_index = np.rint(target * max(len(fake_left) - 1, 0)).astype(int)
+        right_index = np.rint(target * max(len(fake_right) - 1, 0)).astype(int)
+        fake = np.maximum(fake_left[left_index], fake_right[right_index])
+        valid = np.minimum(valid_left[left_index], valid_right[right_index])
+        valid = np.minimum(valid, 1 - fake)
+        flags = np.flatnonzero(fake).astype(int).tolist()
+        valids = np.flatnonzero(valid).astype(int).tolist()
+    return flags, valids, ""
 
 
 def ood_split(subjects: list[str]) -> dict[str, str]:
@@ -166,20 +165,22 @@ def ood_split(subjects: list[str]) -> dict[str, str]:
     return {s: ("test" if s in test else "val" if s in val else "train") for s in unique}
 
 
-def write_splits(rows: list[dict], output: Path) -> None:
-    """Write the AnySole split consumed by ``AnySoleDataset``.
+def _subject_list(value: str | None) -> set[str]:
+    return {item.strip() for item in (value or "").split(",") if item.strip()}
 
-    A session is eligible only when tactile CSVs, both motion formats and
-    video are present.  Splits are subject-disjoint to avoid leaking a
-    person's gait between train/validation/test.
-    """
-    eligible = [row for row in rows if row.get("eligible_anysole") == "1"]
+
+def write_splits(rows: list[dict], output: Path, *, exclude: set[str] | None = None,
+                 test: set[str] | None = None, val: set[str] | None = None) -> None:
+    """Generate a subject split; validation equals test unless ``val`` is given."""
+    excluded = exclude or set()
+    eligible = [row for row in rows if row.get("eligible_anysole") == "1" and row["subject_id"] not in excluded]
     by_subject = sorted({row["subject_id"] for row in eligible},
                         key=lambda value: (int(re.sub(r"\D", "", value) or 0), value))
-    n_test = max(1, round(len(by_subject) * 0.2)) if by_subject else 0
-    n_val = max(1, round(len(by_subject) * 0.1)) if len(by_subject) > 2 else 0
-    test_subjects = set(by_subject[-n_test:])
-    val_subjects = set(by_subject[-n_test - n_val:-n_test]) if n_val else set()
+    test_subjects = set(test) if test is not None else set(by_subject[-2:])
+    unknown = (test_subjects | (val or set())) - set(by_subject)
+    if unknown:
+        print(f"warning: requested subjects not present in eligible manifest: {sorted(unknown)}")
+    val_subjects = set(test_subjects if val is None else val)
     groups = {
         "train": sorted(row["session_id"] for row in eligible if row["subject_id"] not in test_subjects | val_subjects),
         "val": sorted(row["session_id"] for row in eligible if row["subject_id"] in val_subjects),
@@ -194,93 +195,93 @@ def write_splits(rows: list[dict], output: Path) -> None:
                              groups["train"][index] if index < len(groups["train"]) else "",
                              groups["val"][index] if index < len(groups["val"]) else "",
                              groups["test"][index] if index < len(groups["test"]) else ""])
-    print("wrote %s: train=%d val=%d test=%d (subjects=%s)" %
-          (output, len(groups["train"]), len(groups["val"]), len(groups["test"]), by_subject))
+    print("wrote %s: train=%d val=%d test=%d; exclude=%s test_subjects=%s val_subjects=%s" %
+          (output, len(groups["train"]), len(groups["val"]), len(groups["test"]),
+           sorted(excluded), sorted(test_subjects), sorted(val_subjects)))
 
 
-def build(fps: float, camera: str, output: Path) -> tuple[list[dict], list[str]]:
-    seq_root = WORKSPACE / "derived/MotionPRO/sequences" / camera
-    metas = sorted(seq_root.glob("*/*/*/align_meta.json"))
+def build(fps: float, camera: str, output: Path,
+          index_path: Path | None = None, split_path: Path | None = None) -> tuple[list[dict], list[str]]:
+    index_path = index_path or WORKSPACE / "protocol/manifests/raw_session_index.jsonl"
     rows, issues = [], []
-    subjects = []
-    for meta_path in metas:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        sid = str(meta.get("session_id") or meta_path.parent.name)
-        subject = str(meta.get("subject") or "")
-        subjects.append(subject)
-        pressure = meta_path.parent / "pressure.npz"
-        fake_path = meta_path.parent / "fake_mask.npy"
-        bvh = bvh_for(sid, meta)
-        smpl = smpl_for(sid, meta)
+    for meta in raw_index(index_path):
+        sid = str(meta["session_id"])
+        subject = str(meta["subject_id"])
+        n = int(meta["n_frames"])
+        bvh = resolve_uri(meta["bvh_uri"])
+        smpl = resolve_uri(meta["smpl_uri"]) if meta.get("smpl_uri") else Path("__missing_smpl__")
+        recording = resolve_uri(meta["recording_uri"], must_exist=True)
+        fake, valid, pressure_issue = pressure_flags(recording.name, n, meta.get("pressure_uri"))
         names, parents = parse_bvh_header(bvh)
-        fake = []
-        if fake_path.is_file():
-            import numpy as np
-            fake = np.flatnonzero(np.asarray(np.load(fake_path)).reshape(-1) != 0).astype(int).tolist()
-        n = int(meta.get("n_frames", 0))
-        valid = [i for i in range(n) if i not in set(fake)]
-        rec_dir = Path(str(meta.get("rec_dir", "")))
-        tactile_left = rec_dir / "pressure_left.csv"
-        tactile_right = rec_dir / "pressure_right.csv"
-        video_dir = Path(str(meta.get("cam_dir", "")))
         quality = []
-        # AnySole consumes the original left/right pressure CSVs below.  The
-        # derived pressure.npz is retained as metadata but is not an
-        # eligibility requirement (in particular, C3D/derived-only records do
-        # not satisfy the tactile requirement).
-        for label, path in (("bvh", bvh), ("smpl", smpl), ("video", video_dir)):
-            if not Path(path).is_file() and label != "video": quality.append(f"missing_{label}")
-            if label == "video" and (not Path(path).is_dir() or not any(Path(path).iterdir())): quality.append("missing_video_source")
-        if not tactile_left.is_file() or not tactile_right.is_file(): quality.append("missing_tactile_csv")
+        for label, path in (("bvh", bvh), ("smpl", smpl)):
+            if not path.is_file():
+                quality.append(f"missing_{label}")
+        if not recording.is_dir() or not any(recording.glob("3/*.jpg")):
+            quality.append("missing_video_source")
+        if pressure_issue:
+            quality.append(pressure_issue)
         quality.extend(validate_smpl(smpl))
         if tuple(names) != LEGACY_BVH23_NAMES or tuple(parents) != LEGACY_BVH23_PARENTS:
             quality.append("invalid_bvh23_protocol")
-        if fps != float(meta.get("target_fps", fps)): quality.append("fps_mismatch")
-        required_missing = {"missing_tactile_csv", "missing_bvh", "missing_smpl", "missing_video_source"}
+        if fps != float(meta.get("target_fps", fps)):
+            quality.append("fps_mismatch")
+        required_missing = {"missing_bvh", "missing_smpl", "missing_video_source", "missing_pressure_final"}
         eligible = not required_missing.intersection(quality) and not any(
             issue.startswith("invalid_smpl_") or issue.startswith("invalid_bvh23_")
             for issue in quality
         )
         eligibility_reason = "ok" if eligible else ";".join(
-            issue for issue in quality
-            if issue.startswith("missing_") or issue.startswith("invalid_smpl_")
-            or issue.startswith("invalid_bvh23_")
+            issue for issue in quality if issue.startswith("missing_") or issue.startswith("invalid_")
         )
-        rows.append({"session_id": sid, "subject_id": subject, "action": sid[len(subject):-1] if sid.startswith(subject) else "",
-                     "trial": sid[-1:] if sid.startswith(subject) else "", "camera": camera,
-                     "video_path": rel(meta.get("cam_dir", "")), "pressure_path": rel(pressure),
-                     "bvh_path": rel(bvh), "smpl_path": rel(smpl), "target_fps": float(meta.get("target_fps", fps)),
-                     "n_frames": n, "visual_start_s": meta.get("visual_start_s", ""),
-                     "mocap_start_s": meta.get("mocap_start_s", ""), "offset_s": meta.get("offset_s", ""),
+        pressure_uri = meta.get("pressure_uri", f"raw://pressure/{meta['date']}/{subject}/{recording.name}")
+        rows.append({"session_id": sid, "subject_id": subject, "action": meta.get("action", ""),
+                     "trial": meta.get("trial", ""), "camera": camera,
+                     "video_path": meta["recording_uri"], "pressure_path": pressure_uri,
+                     "bvh_path": meta["bvh_uri"], "smpl_path": meta.get("smpl_uri", ""),
+                     "target_fps": float(meta.get("target_fps", fps)), "n_frames": n,
+                     "visual_start_s": meta.get("visual_start_s", 0.0),
+                     "mocap_start_s": meta.get("mocap_start_s", 0.0), "offset_s": meta.get("offset_s", 0.0),
                      "fake_frame_indices": json.dumps(fake), "valid_frame_indices": json.dumps(valid),
                      "quality": "ok" if not quality else ";".join(quality),
                      "eligible_anysole": "1" if eligible else "0", "eligibility_reason": eligibility_reason,
-                     "split_iid": "", "split_ood": "",
-                     # AnySole's joint contract is native SMPL-24.  The BVH
-                     # header is still validated above because Step2Motion is
-                     # a required companion modality, but it must not define
-                     # AnySole's protocol checksum.
                      "joint_checksum": SMPL24_CHECKSUM if smpl.is_file() else ""})
-    ood = ood_split([row["subject_id"] for row in rows if row["eligible_anysole"] == "1"])
-    for row in rows:
-        row["split_ood"] = ood.get(row["subject_id"], "unassigned") if row["eligible_anysole"] == "1" else "unassigned"
-        row["split_iid"] = row["split_ood"]
+    rows.sort(key=lambda row: row["session_id"])
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDS); writer.writeheader(); writer.writerows(rows)
     jsonl = output.with_suffix(".jsonl")
     with jsonl.open("w", encoding="utf-8") as f:
         for row in rows: f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
-    split_output = WORKSPACE / "splits/default/splits.csv"
-    write_splits(rows, split_output)
     return rows, issues
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(); p.add_argument("--fps", type=float, default=40); p.add_argument("--camera", default="cam3")
-    p.add_argument("--output", type=Path, default=WORKSPACE / "manifests/session_manifest.csv")
-    a = p.parse_args(); rows, _ = build(a.fps, a.camera, a.output)
-    print(f"wrote {a.output} and {a.output.with_suffix('.jsonl')} ({len(rows)} sessions)"); return 0 if rows else 1
+    argv = sys.argv[1:]
+    command = argv[0] if argv and argv[0] in {"build", "split"} else "build"
+    if command == "split":
+        p = argparse.ArgumentParser(description="Generate the canonical subject split")
+        p.add_argument("--manifest", type=Path, required=True)
+        p.add_argument("--output", type=Path, default=WORKSPACE / "protocol/splits/default/splits.csv")
+        p.add_argument("--exclude", default="", help="subjects to remove, e.g. S4,S5")
+        p.add_argument("--test", default="", help="test subjects, e.g. S13,S14; default: last two")
+        p.add_argument("--val", default=None, help="validation subjects; default: same subjects as --test")
+        a = p.parse_args(argv[1:])
+        rows = [json.loads(line) for line in a.manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+        write_splits(rows, a.output, exclude=_subject_list(a.exclude),
+                     test=_subject_list(a.test) if a.test else None,
+                     val=_subject_list(a.val) if a.val is not None else None)
+        return 0
+    p = argparse.ArgumentParser()
+    p.add_argument("--fps", type=float, default=40)
+    p.add_argument("--camera", default="cam3")
+    p.add_argument("--output", type=Path, default=WORKSPACE / "protocol/manifests/session_manifest.csv")
+    p.add_argument("--index", type=Path, default=WORKSPACE / "protocol/manifests/raw_session_index.jsonl")
+    build_args = argv[1:] if argv and argv[0] == "build" else argv
+    a = p.parse_args(build_args)
+    rows, _ = build(a.fps, a.camera, a.output, a.index)
+    print(f"wrote {a.output} and {a.output.with_suffix('.jsonl')} ({len(rows)} sessions); split file unchanged")
+    return 0 if rows else 1
 
 
 if __name__ == "__main__": raise SystemExit(main())

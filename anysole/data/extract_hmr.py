@@ -8,7 +8,7 @@ both camera and gravity-aligned world space) + 22 SMPL-X body joints via
 EnDecoder.fk_v2 (for the zero-training probe).
 
 Cache layout (per session):
-  AnysoleWorkspace/derived/AnySole/hmr_cache/<model>/cam3/<session>.pt
+  AnysoleWorkspace/model_inputs/AnySole/adapter_v1/visual/hmr/<model>/cam3/<session>.pt
   keys: body_pose (N,63) aa | global_orient (N,3) aa | betas (N,10)
         transl (N,3) | kp2d (N,17,3) | f_imgseq (N,1024) | bbx_xys (N,3)
         joints_hmr (N,22,3) global-space FK | q_v (N,2)
@@ -42,6 +42,7 @@ GVHMR_ROOT = GAIT_ROOT / "Baselines" / "Video2Motion" / "GVHMR"
 sys.path.insert(0, str(GVHMR_ROOT))
 
 from anysole.data.dataset import find_session_dir  # noqa: E402
+from anysole.data.workspace_adapter import load_shared_session, write_cache_provenance  # noqa: E402
 from anysole.types import HMR_CACHE_ROOT, SEQ_ROOT  # noqa: E402
 
 REQUIRED_FILES = (
@@ -64,6 +65,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--force", "--overwrite", dest="force", action="store_true",
                         help="Recompute and overwrite existing caches.")
     parser.add_argument("--limit-sessions", type=int, default=None)
+    parser.add_argument("--bbox-root", type=Path, default=None,
+                        help="Optional private/shared frontend bbox root.")
     parser.add_argument("--device", default="cuda")
     return parser.parse_args(argv)
 
@@ -95,7 +98,7 @@ def load_model(device: str):
 def load_frames(seq_dir: Path, n_frames: int) -> np.ndarray:
     """(L, H, W, 3) RGB uint8 frames, L = n_frames."""
     import cv2
-    color_dir = seq_dir / "color"
+    color_dir = seq_dir / ("rgb" if (seq_dir / "rgb").is_dir() else "color")
     frames = []
     for i in range(n_frames):
         path = color_dir / ("%06d.jpg" % i)
@@ -105,8 +108,11 @@ def load_frames(seq_dir: Path, n_frames: int) -> np.ndarray:
     return np.stack(frames, axis=0)
 
 
-def load_bbox_xyxy(seq_dir: Path, n_frames: int) -> torch.Tensor:
-    bbox = np.load(seq_dir / "bbox.npy")
+def load_bbox_xyxy(seq_dir: Path, n_frames: int, bbox_root: Path | None = None) -> torch.Tensor:
+    bbox_path = (bbox_root / f"{seq_dir.name}.npy") if bbox_root else seq_dir / "bbox.npy"
+    if not bbox_path.is_file():
+        raise FileNotFoundError(f"Missing AnySole bbox frontend {bbox_path}")
+    bbox = np.load(bbox_path)
     # rows: [frame, x1, y1, x2, y2, ...] (CLIFF output, see extract_hrnet.py).
     xyxy = np.zeros((n_frames, 4), dtype=np.float32)
     for row in bbox:
@@ -127,18 +133,22 @@ def bbox_trunc_ratio(bbx_xys: torch.Tensor, img_w: int, img_h: int) -> np.ndarra
     return (1.0 - inside.clamp(min=0)).numpy().astype(np.float32)
 
 
-def extract_session(model, session_id: str, device: str) -> dict:
+def extract_session(model, session_id: str, device: str, bbox_root: Path | None = None) -> dict:
     from hmr4d.utils.geo.hmr_cam import estimate_K, get_bbx_xys_from_xyxy
     from hmr4d.utils.geo_transform import compute_cam_angvel
     from hmr4d.utils.preproc.vitfeat_extractor import Extractor, get_batch
     from hmr4d.utils.preproc.vitpose import VitPoseExtractor
 
     seq_dir = find_session_dir(SEQ_ROOT, session_id)
-    meta = json.loads((seq_dir / "align_meta.json").read_text())
-    n = int(meta["n_frames"])
+    if (seq_dir / "session.json").is_file():
+        meta = json.loads((seq_dir / "session.json").read_text())
+        n = int(meta["frame_count"])
+    else:
+        meta = json.loads((seq_dir / "align_meta.json").read_text())
+        n = int(meta["n_frames"])
     frames = load_frames(seq_dir, n)
     img_h, img_w = frames.shape[1], frames.shape[2]
-    bbx_xys = get_bbx_xys_from_xyxy(load_bbox_xyxy(seq_dir, n), base_enlarge=1.2)  # (L,3)
+    bbx_xys = get_bbx_xys_from_xyxy(load_bbox_xyxy(seq_dir, n, bbox_root), base_enlarge=1.2)  # (L,3)
 
     # Shared cropped batch (L,3,256,256) — ViTPose and the HMR2 backbone both
     # consume the get_batch output tensor.
@@ -208,9 +218,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("skip %s (cache exists)" % session_id)
             continue
         print("extracting %s ..." % session_id)
-        out = extract_session(model, session_id, args.device)
+        out = extract_session(model, session_id, args.device, args.bbox_root)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(out, out_path)
+        session_dir = find_session_dir(SEQ_ROOT, session_id)
+        if (session_dir / "session.json").is_file():
+            write_cache_provenance(
+                out_path,
+                session=load_shared_session(session_id),
+                kind="extract_hmr",
+                shape=(int(out["body_pose"].shape[0]),),
+                parameters={"frontend": args.model, "keys": sorted(out)},
+            )
         print("  -> %s (%d frames)" % (out_path, out["body_pose"].shape[0]))
     return 0
 

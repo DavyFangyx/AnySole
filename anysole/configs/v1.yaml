@@ -49,16 +49,16 @@ traj_deltas: [2, 4, 8, 19]
 # Config order is [VT, V-only, T-only]. Values are normalized when sampled.
 config_probs: [0.50, 0.25, 0.25]
 cam_id: 3
-seq_root: /data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/MotionPRO/sequences/cam3
-split_csv: /data/fangyuxuan/projects/gait/AnysoleWorkspace/splits/default/splits.csv
-cache_root: /data/fangyuxuan/projects/gait/AnysoleWorkspace/derived/AnySole/hrnet_cache/cam3
+seq_root: shared://facts/sessions/cam3
+split_csv: protocol://splits/default/splits.csv
+cache_root: model-input://AnySole/adapter_v1/visual/hrnet/cam3
 use_insole_drift: false
 modal: anysolev1
-contact_method: joint_and
+contact_method: f6_soft
 # AnySole always reads SMPL NPZ. BVH is a Step2Motion-only baseline format.
 smpl_roots:
   - /data/lizhe/projects/Tactile/Mocap/0804
   - /data/lizhe/projects/Tactile/Mocap/0807
   - /data/lizhe/projects/Tactile/Mocap/0808
   - /data/lizhe/projects/Tactile/Mocap/0810
-template_path: /data/fangyuxuan/projects/gait/AnysoleWorkspace/calibration/insole_templates.json
+template_path: /data/fangyuxuan/projects/gait/AnysoleWorkspace/assets/insole_templates.json

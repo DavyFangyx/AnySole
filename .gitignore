@@ -3,6 +3,8 @@
 Baselines/
 
 /Baselines_backup/
+# v2 重构期间的全量基线备份（1.8G，机器本地产物，不进 git）
+/Baselines_Backup/
 
 # Generated artifacts
 *.png
@@ -27,12 +29,22 @@ __pycache__/
 
 # Centralized baseline data and generated artifacts. Keep only the workspace
 # manifest/documentation and management tooling under version control.
-/AnysoleWorkspace/dependencies/
-/AnysoleWorkspace/derived/
-/AnysoleWorkspace/sources/
-/AnysoleWorkspace/calibration/
-/AnysoleWorkspace/splits/
 /AnysoleWorkspace/**/workspace_cache/
+
+# AnysoleWorkspace v2: raw links and generated facts/representations are
+# machine-local outputs. Keep protocol contracts and hand-off reports tracked.
+/AnysoleWorkspace/raw/
+/AnysoleWorkspace/shared/
+/AnysoleWorkspace/model_inputs/
+/AnysoleWorkspace/work/
+/AnysoleWorkspace/assets/third_party/
+/AnysoleWorkspace/reports/*
+!/AnysoleWorkspace/reports/*.md
+# The repository-wide *.csv rule is intentional for runtime data, but the
+# frozen protocol manifest/split files are source contracts and must remain
+# visible to git.
+!/AnysoleWorkspace/protocol/**/*.csv
+!/AnysoleWorkspace/protocol/**/*.jsonl
 
 # Results and visualisation outputs. Keep only the visualisation scripts.
 /results/

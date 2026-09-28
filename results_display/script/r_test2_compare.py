@@ -744,7 +744,7 @@ def _gt_source_path(row: dict[str, str], protocol: str) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--manifest", type=Path, default=ROOT / "AnysoleWorkspace/manifests/session_manifest.csv")
+    ap.add_argument("--manifest", type=Path, default=ROOT / "AnysoleWorkspace/protocol/manifests/session_manifest.csv")
     ap.add_argument("--split-csv", type=Path, default=cli_common.DEFAULT_SPLIT_CSV,
                     help="Canonical train/val/test membership table; manifest is metadata only.")
     ap.add_argument("--models-config", type=Path, default=None)

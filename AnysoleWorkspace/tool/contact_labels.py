@@ -25,8 +25,9 @@ Methods (``METHODS`` registry):
                 h>=20cm 且无压力时拒绝接触(台阶承重走压力分支不受影响)
     pressure_f6 F6 承重: 逐格基线=离地帧值90分位(自举自 motion_f6), corrected和
                 + 迟滞阈值(80 或 0.2*stance中位, 1.5x 滞回)
-    f6_soft     F6 软标签: 硬值=motion_f6, 按 pressure_f6 一致度取
-                {0.95 触地承重 / 0.70 触地未承重 / 0.05 离地 / 0.30 离地残余压}
+    f6_soft     F6 软标签: 中间阶段按 pressure_f6 一致度取 4 档软值
+                {0.95 触地承重 / 0.70 触地未承重 / 0.05 离地 / 0.30 离地残余压},
+                导出时二值化 (硬值=motion_f6), 与其他方案统一 {0, 1}
 
 The ``--report`` step scores every method against ``bvh_h`` as reference
 (视觉判据: 脚离地) and writes ``comparison.csv`` / ``comparison.png``
@@ -84,15 +85,15 @@ def _resolve_raw_bvh(path: Path) -> Path:
     if marker not in normalized:
         return path
     suffix = normalized.split(marker, 1)[1]
-    matches = sorted((WORKSPACE_ROOT / "sources/raw").glob("*/mocap_ori_bvh/" + suffix))
+    matches = sorted((WORKSPACE_ROOT / "raw/bvh").glob("*/mocap_ori_bvh/" + suffix))
     return matches[0] if matches else path
 
 
 def resolve_path(value, base_dir=None) -> Path:
-    """Resolve a path that may use the ``workspace://`` scheme."""
+    """Resolve a canonical path; legacy workspace URIs are rejected."""
     text = str(value or "")
     if text.startswith("workspace://"):
-        return Path(WORKSPACE_ROOT) / text[len("workspace://"):]
+        raise ValueError("workspace:// has been removed; use a canonical URI")
     normalized = text.replace("\\", "/").rstrip("/")
     path = Path(os.path.expandvars(text)).expanduser()
     if path.is_absolute():
@@ -433,6 +434,8 @@ def m_pressure_f6(ctx: dict) -> np.ndarray:
 
 
 def m_f6_soft(ctx: dict) -> np.ndarray:
+    """F6 软标签导出：中间阶段按 pressure_f6 一致度算 4 档软值，导出时
+    二值化为 motion_f6 硬决策（>0.5），与其他方案统一 {0, 1}；软值不进 npy。"""
     pipe = _f6_pipeline(ctx)
     out = np.zeros((ctx["n"], 2), dtype=np.float32)
     for k, side in enumerate(("left", "right")):
@@ -442,7 +445,7 @@ def m_f6_soft(ctx: dict) -> np.ndarray:
         out[cont & ~loaded, k] = F6_SOFT["contact_unloaded"]
         out[~cont & ~loaded, k] = F6_SOFT["air_unloaded"]
         out[~cont & loaded, k] = F6_SOFT["air_loaded"]
-    return out
+    return (out > 0.5).astype(np.float32)
 
 
 METHODS: dict[str, dict] = {
@@ -456,7 +459,7 @@ METHODS: dict[str, dict] = {
     "joint_and": {"desc": "bvh_h ∧ tactile_gmm (都判离地才离地)", "fn": lambda ctx, po: m_joint_and(ctx)},
     "motion_f6": {"desc": "F6 运动学状态机: v>0.6离地 / v<0.3&|az|<3 或承重落地 / h>=20cm无压力否决", "fn": lambda ctx, po: m_motion_f6(ctx)},
     "pressure_f6": {"desc": "F6 承重: 逐格离地基线90分位 + corrected和 + 迟滞阈值", "fn": lambda ctx, po: m_pressure_f6(ctx)},
-    "f6_soft": {"desc": "F6 软标签: motion_f6 硬值 × pressure_f6 一致度 {0.05,0.3,0.7,0.95}", "fn": lambda ctx, po: m_f6_soft(ctx)},
+    "f6_soft": {"desc": "F6 软标签: 中间 4 档软值 {0.05,0.3,0.7,0.95}, 导出二值 == motion_f6", "fn": lambda ctx, po: m_f6_soft(ctx)},
 }
 METHOD_NAMES = list(METHODS)
 
@@ -882,7 +885,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seq-root", type=str, default=str(SEQ_ROOT), help="Centralized sequence root.")
     parser.add_argument("--split", type=str, default="all", choices=["all", "train", "val", "test"],
                         help="Split column scope when --session is empty ('all' = every session under the seq root).")
-    parser.add_argument("--split-csv", type=str, default=str(WORKSPACE_ROOT / "splits/default/splits.csv"),
+    parser.add_argument("--split-csv", type=str, default=str(WORKSPACE_ROOT / "protocol/splits/default/splits.csv"),
                         help="splits.csv path used by --split.")
     parser.add_argument("--force", action="store_true", help="Rebuild and overwrite existing outputs.")
     parser.add_argument("--methods", type=str, default="all", help="Comma-separated methods or 'all'.")

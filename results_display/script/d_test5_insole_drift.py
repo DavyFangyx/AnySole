@@ -211,7 +211,7 @@ def parse_args() -> argparse.Namespace:
         help="Trained anysolev1_insole_drift checkpoint; only the drift_compensator weights are used. "
         "Default: results/AnySole/anysolev1_insole_drift_<contact-method>/checkpoints/ckpt_last.pt.",
     )
-    parser.add_argument("--templates", type=str, default=str(cli_common.WORKSPACE_ROOT / "calibration/insole_templates.json"))
+    parser.add_argument("--templates", type=str, default=str(cli_common.WORKSPACE_ROOT / "assets/insole_templates.json"))
     parser.add_argument(
         "--no-subject-cond",
         action="store_true",

@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -23,18 +24,19 @@ from PIL import Image
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # utils/ -> script/ -> results_display/ -> gait repo root
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 WORKSPACE_ROOT = Path(os.environ.get("ANYSOLE_WORKSPACE", REPO_ROOT / "AnysoleWorkspace")).expanduser()
 RESULTS_ROOT = Path(os.environ.get("ANYSOLE_RESULTS", REPO_ROOT / "results")).expanduser()
 DISPLAY_ROOT = Path(os.environ.get("ANYSOLE_RESULTSDISPLAY", REPO_ROOT / "results_display")).expanduser()
 
 DEFAULT_FPS = 40.0
 DEFAULT_STRIDE = 2
-DEFAULT_SPLIT_CSV = WORKSPACE_ROOT / "splits/default/splits.csv"
-DEFAULT_MANIFEST = WORKSPACE_ROOT / "manifests/session_manifest.csv"
-DEFAULT_SEQ_ROOT = WORKSPACE_ROOT / "derived/MotionPRO/sequences/cam3"
+DEFAULT_SPLIT_CSV = WORKSPACE_ROOT / "protocol/splits/default/splits.csv"
+DEFAULT_MANIFEST = WORKSPACE_ROOT / "protocol/manifests/session_manifest.csv"
+DEFAULT_SEQ_ROOT = WORKSPACE_ROOT / "shared/facts/sessions/cam3"
 
 PREFIXES = {
-    "workspace://": WORKSPACE_ROOT,
     "results://": RESULTS_ROOT,
     "display://": DISPLAY_ROOT,
 }
@@ -50,17 +52,24 @@ def _resolve_raw_bvh(path: Path) -> Path:
     if marker not in normalized:
         return path
     suffix = normalized.split(marker, 1)[1]
-    matches = sorted((WORKSPACE_ROOT / "sources/raw").glob("*/mocap_ori_bvh/" + suffix))
+    matches = sorted((WORKSPACE_ROOT / "raw/bvh").glob("*/mocap_ori_bvh/" + suffix))
     return matches[0] if matches else path
 
 
 def resolve_path(value, base_dir=None) -> Path:
     """Resolve a path that may use a ``results://``-style scheme.
 
-    Equivalent to the public subset of the Baselines workspace resolvers
-    (without their legacy prefixes, which no results_display script uses).
+    Equivalent to the public workspace URI resolver.
     """
     text = str(value or "")
+    if text.startswith("display://"):
+        return DISPLAY_ROOT / text[len("display://"):]
+    try:
+        from AnysoleWorkspace.tool.workspace import resolve_uri
+        if "://" in text:
+            return resolve_uri(text)
+    except (ImportError, ValueError):
+        raise ValueError(f"unsupported canonical URI: {text}")
     for prefix, root in PREFIXES.items():
         if text.startswith(prefix):
             return Path(root) / text[len(prefix):]

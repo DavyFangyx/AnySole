@@ -5,7 +5,8 @@ One conf per model (TASK=model_run): the runner trains the model from
 random init — the 2026-09-24 independence restructure has no warm-start
 lineage — then runs the formal val/test evaluation.  Checkpoints land in
 the registry addresses under results/AnySole/, so a model already trained
-by any experiment is reused instead of retrained.
+by any experiment is not implicitly reused: each invocation emits a fresh
+rerun task.
 """
 
 from __future__ import annotations
@@ -19,11 +20,8 @@ from model_registry import MODELS
 
 EXPERIMENT_ID = "all_models"
 
-# States that block re-emission.  Re-running this generator while a model
-# is queued, running or already finished must not enqueue a duplicate
-# 740-epoch training.  failed/ deliberately does NOT block: the recovery
-# path for a failed task is to fix the cause and regenerate (e.g. V4B once
-# its partition input has been exported).
+# Historical queue states are consulted only when the caller explicitly asks
+# for deduplication.
 _BLOCKING_STATES = ("queue", "running", "done")
 
 
@@ -60,8 +58,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models", default="",
                         help="comma-separated model IDs (default: every registered model)")
-    parser.add_argument("--force", action="store_true",
-                        help="emit confs even when a model already has one queued/running/done")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="retain legacy deduplication and skip queued/running/done models")
+    parser.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     models = [item.strip() for item in args.models.split(",") if item.strip()] or list(MODELS)
     unknown = [model_id for model_id in models if model_id not in MODELS]
@@ -73,7 +72,7 @@ def main() -> int:
 
     emitted = 0
     for model_id in models:
-        if not args.force:
+        if args.skip_existing and not args.force:
             existing = _existing_conf(model_id)
             if existing:
                 print("[skip] %s: conf already in %s/ (%s; use --force to re-emit)"

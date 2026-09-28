@@ -21,8 +21,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from utils.compare_core import array_from_file, native_edges, protocol_gt  # noqa: E402
+from utils import cli_common  # noqa: E402
 
-MANIFEST = ROOT / "AnysoleWorkspace/manifests/session_manifest.jsonl"
+MANIFEST = ROOT / "AnysoleWorkspace/protocol/manifests/session_manifest.jsonl"
 DISPLAY = ROOT / "results_display/ResultTest/R1Test_visualize"
 INFERNO = np.asarray([
     [0, 0, 4], [31, 12, 72], [85, 15, 109], [136, 34, 106],
@@ -92,12 +93,9 @@ def render(args: argparse.Namespace) -> Path:
     pred, gt_points = np.asarray(pred[:n]), gt[:n]
     pred_xy, gt_xy = normalize_xy(np.concatenate([pred, gt_points], axis=0))[:n], normalize_xy(np.concatenate([pred, gt_points], axis=0))[n:]
     edges = native_edges(pred_names)
-    row_parts = Path(row["pressure_path"]).parts
-    cam = row_parts.index("cam3")
-    date, subject = row_parts[cam + 1], row_parts[cam + 2]
-    insole_root = (ROOT / "AnysoleWorkspace/derived/pressure_toolkit/images" / date / subject / args.session / "insole"
-                   if args.model == "MMVP_pressure_toolkit" else
-                   ROOT / "AnysoleWorkspace/derived/VP-MoCap" / date / subject / args.session / "insole")
+    recording = cli_common.resolve_path(row["video_path"])
+    date, subject = recording.parts[-3], recording.parts[-2]
+    insole_root = ROOT / "AnysoleWorkspace/shared/representations/tactile/mmvp_31x11/v1" / date / subject / args.session / "insole"
     output = DISPLAY / args.model / f"{args.session}.gif"
     output.parent.mkdir(parents=True, exist_ok=True)
     frames = []
@@ -111,10 +109,14 @@ def render(args: argparse.Namespace) -> Path:
         for point in pred_xy[frame]:
             draw.ellipse((point[0] - 3, point[1] - 3, point[0] + 3, point[1] + 3), fill=(210, 40, 40))
         draw.text((40, 408), "red=prediction  blue=GT", fill="black")
-        insole_path = insole_root / f"{frame:03d}.npy"
+        insole_path = insole_root / f"{frame:06d}.npy"
         if insole_path.is_file():
-            payload = np.load(insole_path, allow_pickle=True).item()
-            grid = np.concatenate(payload["insole"], axis=1)
+            payload = np.load(insole_path, allow_pickle=True)
+            if isinstance(payload, np.ndarray) and payload.shape == (2, 31, 11):
+                grid = np.concatenate(payload, axis=1)
+            else:
+                payload = payload.item()
+                grid = np.concatenate(payload["insole"], axis=1)
             canvas.paste(heatmap(grid), (570, 65))
         frames.append(canvas)
     if not frames:

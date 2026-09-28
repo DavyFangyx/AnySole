@@ -142,7 +142,7 @@ def main(argv=None) -> int:
     model.eval()
 
     tw = int(saved.get("tw", config["tw"]))
-    contact_method = str(saved.get("contact_method", config.get("contact_method", "joint_and")))
+    contact_method = str(saved.get("contact_method", config["contact_method"]))
     no_imu = bool(saved.get("no_imu", False))
     v_hmr_mode = str(saved.get("v_input", "hrnet")) == "hmr_gvhmr"
     f2_repr = bool(saved.get("f2_repr", False))

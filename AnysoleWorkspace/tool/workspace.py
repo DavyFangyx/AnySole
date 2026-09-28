@@ -1,245 +1,183 @@
 #!/usr/bin/env python3
-"""Initialize and validate the centralized baseline workspace."""
+"""Initialize and validate the canonical AnysoleWorkspace only.
+
+The historical ``sources/``, ``derived/``, ``dependencies/``, ``calibration/``,
+``manifests/`` and ``splits/`` trees are intentionally not supported here.
+"""
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE = ROOT / "AnysoleWorkspace"
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
-RESULTS = REPO_ROOT / "results"
-DISPLAY = REPO_ROOT / "results_display"
+CANONICAL_ROOTS = {
+    "raw": WORKSPACE / "raw",
+    "protocol": WORKSPACE / "protocol",
+    "shared": WORKSPACE / "shared",
+    "model_inputs": WORKSPACE / "model_inputs",
+    "work": WORKSPACE / "work",
+    "assets": WORKSPACE / "assets",
+    "reports": WORKSPACE / "reports",
+    "results": ROOT / "results",
+}
+URI_ROOTS = {key: CANONICAL_ROOTS[key] for key in ("raw", "protocol", "shared", "work", "results")}
+URI_ROOTS.update({"asset": CANONICAL_ROOTS["assets"]})
 
-SOURCE_LINKS = {
-    WORKSPACE / "sources/raw": Path("/data/lizhe/projects/Tactile/1_Data"),
-    WORKSPACE / "sources/published": Path("/data/lizhe/projects/Tactile/4_Dataset"),
-    WORKSPACE / "sources/calibration_artifacts": Path("/data/lizhe/projects/Tactile/0_Calibration"),
-    WORKSPACE / "sources/smpl": Path("/data/lizhe/projects/Tactile/Mocap"),
+RAW_LINKS = {
+    WORKSPACE / "raw/rgb": Path("/data/lizhe/projects/Tactile/1_Data"),
+    WORKSPACE / "raw/pressure": Path("/data/lizhe/projects/Tactile/1_Data"),
+    WORKSPACE / "raw/bvh": Path("/data/lizhe/projects/Tactile/1_Data"),
+    WORKSPACE / "raw/smpl": Path("/data/lizhe/projects/Tactile/Mocap"),
+    WORKSPACE / "raw/calibration": Path("/data/lizhe/projects/Tactile/0_Calibration"),
 }
 
-# PressureWasher runtime data is kept with the other source-side datasets.
-PRESSURE_SOURCE_DIR = WORKSPACE / "sources/PressureWasher"
 
-# 结构重组（2026-09-24）的历史迁移映射，仅保留供 doctor 体检「旧路径是否残留」；
-# migrate 子命令已随迁移完成移除。
-# Order matters where a child is separated from its former parent.
-MIGRATIONS = (
-    (REPO_ROOT / "Baselines/Step2Motion/models/gait_model/predictions", RESULTS / "Step2Motion/predictions/gait_model"),
-    (REPO_ROOT / "Baselines/Step2Motion/models/gait_model", RESULTS / "Step2Motion/checkpoints/gait_model"),
-    (REPO_ROOT / "Baselines/Step2Motion/models/UnderPressure", WORKSPACE / "dependencies/Step2Motion/models/UnderPressure"),
-    (REPO_ROOT / "Baselines/Step2Motion/models/dancing", WORKSPACE / "dependencies/Step2Motion/models/dancing"),
-    (REPO_ROOT / "Baselines/Step2Motion/models/step2motion", WORKSPACE / "dependencies/Step2Motion/models/step2motion"),
-    (REPO_ROOT / "Baselines/Step2Motion/data/gait", WORKSPACE / "derived/Step2Motion/gait"),
-    (REPO_ROOT / "Baselines/Step2Motion/data/UnderPressure", WORKSPACE / "dependencies/Step2Motion/data/UnderPressure"),
-    (REPO_ROOT / "Baselines/Step2Motion/data/dancing", WORKSPACE / "dependencies/Step2Motion/data/dancing"),
-    (REPO_ROOT / "Baselines/Step2Motion/data/exp/viz_compare", DISPLAY / "Test1_visualization/Step2Motion/gait_model"),
-    (REPO_ROOT / "Baselines/Step2Motion/configs/normalizer_dancing.pth", WORKSPACE / "dependencies/Step2Motion/normalizers/normalizer_dancing.pth"),
-    (REPO_ROOT / "Baselines/Step2Motion/configs/normalizer_default.pth", WORKSPACE / "dependencies/Step2Motion/normalizers/normalizer_default.pth"),
-    (REPO_ROOT / "Baselines/Step2Motion/configs/normalizer_gait.pth", WORKSPACE / "dependencies/Step2Motion/normalizers/normalizer_gait.pth"),
-    (REPO_ROOT / "Baselines/Step2Motion/configs/normalizer_step2motion.pth", WORKSPACE / "dependencies/Step2Motion/normalizers/normalizer_step2motion.pth"),
-    (REPO_ROOT / "Baselines/MotionPRO/data/sequences", WORKSPACE / "derived/MotionPRO/sequences"),
-    (REPO_ROOT / "Baselines/MotionPRO/data/splits", WORKSPACE / "splits/default"),
-    (REPO_ROOT / "Baselines/MotionPRO/data/smpl", WORKSPACE / "dependencies/smpl"),
-    (REPO_ROOT / "Baselines/MotionPRO/data/cliff_ckpt", WORKSPACE / "dependencies/MotionPRO/cliff_ckpt"),
-    (REPO_ROOT / "Baselines/MotionPRO/data/mmdetection", WORKSPACE / "dependencies/MotionPRO/mmdetection"),
-    (REPO_ROOT / "Baselines/MotionPRO/data/exp/checkpoint", RESULTS / "MotionPRO/checkpoints"),
-    (REPO_ROOT / "Baselines/MotionPRO/data/exp/result", RESULTS / "MotionPRO/metrics"),
-    (REPO_ROOT / "Baselines/MotionPRO/data/exp/viz_compare", DISPLAY / "Test1_visualization/MotionPRO"),
-    (REPO_ROOT / "Baselines/MotionPRO/data/tensorboard", RESULTS / "MotionPRO/tensorboard"),
-    (REPO_ROOT / "Baselines/MotionPRO/log", RESULTS / "MotionPRO/logs"),
-)
+class WorkspacePathError(ValueError):
+    pass
 
-LOCAL_DIRS = (
-    PRESSURE_SOURCE_DIR,
-    WORKSPACE / "derived/pressure_toolkit",
-    WORKSPACE / "dependencies/pressure_toolkit",
-    RESULTS / "Step2Motion/checkpoints",
-    RESULTS / "Step2Motion/predictions",
-    RESULTS / "Step2Motion/metrics",
-    RESULTS / "Step2Motion/logs",
-    # 评估整改任务 02：正式结果只允许 predictions/ 与 metrics/（学习模型另有 checkpoints/）。
-    RESULTS / "baselines/pressure_toolkit/predictions/eval_motion",
-    RESULTS / "baselines/pressure_toolkit/metrics",
-    RESULTS / "baselines/FPP-Net/predictions/v2t",
-    RESULTS / "baselines/FPP-Net/metrics",
-    RESULTS / "baselines/VP-MoCap/predictions/eval_motion",
-    RESULTS / "baselines/VP-MoCap/metrics",
-    DISPLAY / "Test1_visualization/Step2Motion",
-    DISPLAY / "Test1_visualization/pressure_toolkit",
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        Path(os.path.abspath(path)).relative_to(Path(os.path.abspath(root)))
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_uri(value: str | Path, *, for_write: bool = False, must_exist: bool = False) -> Path:
+    """Resolve one canonical URI; legacy ``workspace://`` is rejected."""
+    text = os.fspath(value)
+    if "://" not in text:
+        candidate = Path(text)
+        if not candidate.is_absolute():
+            candidate = ROOT / candidate
+        if not _inside(candidate, ROOT):
+            raise WorkspacePathError(f"path escapes repository: {value}")
+    else:
+        scheme, remainder = text.split("://", 1)
+        if scheme == "model-input":
+            model, separator, tail = remainder.partition("/")
+            if not separator or not model or model in {".", ".."}:
+                raise WorkspacePathError(f"model-input URI requires <model>/: {value}")
+            root = CANONICAL_ROOTS["model_inputs"] / model
+            candidate = root / tail
+        elif scheme in URI_ROOTS:
+            root = URI_ROOTS[scheme]
+            candidate = root / remainder
+        else:
+            raise WorkspacePathError(f"unsupported URI scheme: {scheme}://")
+        if not _inside(candidate, root):
+            raise WorkspacePathError(f"URI escapes its root: {value}")
+    if must_exist and not candidate.exists():
+        raise WorkspacePathError(f"path does not exist: {value}")
+    if for_write and text.startswith("raw://"):
+        raise WorkspacePathError("raw:// is read-only")
+    return candidate
+
+
+def canonical_uri(path: str | Path) -> str:
+    candidate = Path(path).resolve(strict=False)
+    model_root = CANONICAL_ROOTS["model_inputs"].resolve(strict=False)
+    if _inside(candidate, model_root):
+        return "model-input://" + candidate.relative_to(model_root).as_posix()
+    for scheme, root in sorted(URI_ROOTS.items(), key=lambda item: len(str(item[1])), reverse=True):
+        resolved_root = root.resolve(strict=False)
+        if _inside(candidate, resolved_root):
+            return f"{scheme}://{candidate.relative_to(resolved_root).as_posix()}"
+    raise WorkspacePathError(f"path is outside canonical roots: {path}")
+
+
+CANONICAL_DIRS = (
+    WORKSPACE / "raw",
+    WORKSPACE / "protocol/manifests",
+    WORKSPACE / "protocol/splits/default",
+    WORKSPACE / "protocol/schemas",
+    WORKSPACE / "protocol/calibration",
+    WORKSPACE / "shared/facts/sessions",
+    WORKSPACE / "shared/representations/tactile/mmvp_31x11",
+    WORKSPACE / "shared/frontends",
+    WORKSPACE / "model_inputs",
+    WORKSPACE / "work/data_pipeline/pressure_washer",
+    WORKSPACE / "assets",
+    WORKSPACE / "reports",
 )
 
 
 def ensure_link(link: Path, target: Path, dry_run: bool) -> None:
     if link.is_symlink():
-        if Path(os.readlink(link)) != target:
-            raise RuntimeError(f"Unexpected link target: {link} -> {os.readlink(link)}")
+        actual = (link.parent / os.readlink(link)).resolve(strict=False)
+        if actual != target.resolve(strict=False):
+            raise RuntimeError(f"unexpected link target: {link} -> {os.readlink(link)}")
         return
     if link.exists():
-        raise RuntimeError(f"Cannot create source link over existing path: {link}")
-    print(f"link {link.relative_to(REPO_ROOT)} -> {target}")
+        raise RuntimeError(f"cannot create link over existing path: {link}")
+    print(f"link {link.relative_to(ROOT)} -> {target}")
     if not dry_run:
         link.parent.mkdir(parents=True, exist_ok=True)
         link.symlink_to(target, target_is_directory=True)
 
 
 def initialize(dry_run: bool = False) -> None:
-    for directory in LOCAL_DIRS:
-        print(f"mkdir {directory.relative_to(REPO_ROOT)}")
+    for directory in CANONICAL_DIRS:
+        print(f"mkdir {directory.relative_to(ROOT)}")
         if not dry_run:
             directory.mkdir(parents=True, exist_ok=True)
-    for link, target in SOURCE_LINKS.items():
+    for link, target in RAW_LINKS.items():
         ensure_link(link, target, dry_run)
-
-    published = Path("/data/lizhe/projects/Tactile/4_Dataset")
-    for source in sorted(published.glob("[0-9]" * 8 + "/" + "[0-9]" * 8 + ".json")):
-        link = WORKSPACE / "calibration" / source.name
-        target = Path("../sources/published") / source.parent.name / source.name
-        ensure_link(link, target, dry_run)
-
-
-def relink_color_frames(dry_run: bool = False) -> int:
-    sequence_root = WORKSPACE / "derived/MotionPRO/sequences"
-    physical_raw = Path("/data/lizhe/projects/Tactile/1_Data")
-    logical_raw = WORKSPACE / "sources/raw"
-    changed = 0
-    for link in sequence_root.rglob("color/*"):
-        if not link.is_symlink():
-            continue
-        raw_target = Path(os.readlink(link))
-        absolute_target = raw_target if raw_target.is_absolute() else link.parent / raw_target
-        try:
-            relative_source = absolute_target.resolve().relative_to(physical_raw)
-        except ValueError:
-            continue
-        desired = os.path.relpath(logical_raw / relative_source, link.parent)
-        if os.readlink(link) == desired:
-            continue
-        changed += 1
-        if not dry_run:
-            link.unlink()
-            link.symlink_to(desired)
-    print(f"relinked {changed} RGB frames through AnysoleWorkspace/sources/raw")
-    return changed
-
-
-def validate_calibration(path: Path) -> list[str]:
-    errors = []
-    try:
-        payload = json.loads(path.read_text())
-    except Exception as exc:
-        return [f"{path}: cannot load JSON: {exc}"]
-    cameras = payload.get("cameras", {})
-    for cam_id in range(1, 5):
-        camera = cameras.get(f"cam{cam_id}", {})
-        for key in ("K", "D", "R", "t"):
-            if key not in camera:
-                errors.append(f"{path}: missing cameras.cam{cam_id}.{key}")
-        if len(camera.get("K", [])) != 3 or any(len(row) != 3 for row in camera.get("K", [])):
-            errors.append(f"{path}: cameras.cam{cam_id}.K must be 3x3")
-        if len(camera.get("R", [])) != 3 or any(len(row) != 3 for row in camera.get("R", [])):
-            errors.append(f"{path}: cameras.cam{cam_id}.R must be 3x3")
-        if len(camera.get("t", [])) != 3:
-            errors.append(f"{path}: cameras.cam{cam_id}.t must have 3 values")
-    transform = payload.get("mocap_raw_to_checkerboard_world", {})
-    for key in ("input_scale", "R", "t"):
-        if key not in transform:
-            errors.append(f"{path}: missing mocap_raw_to_checkerboard_world.{key}")
-    return errors
 
 
 def doctor() -> int:
-    errors = []
-    symlink_count = 0
-    for link, _ in SOURCE_LINKS.items():
+    errors: list[str] = []
+    for link, target in RAW_LINKS.items():
         if not link.is_symlink():
-            errors.append(f"missing source link: {link}")
+            errors.append(f"missing raw link: {link}")
+        elif link.resolve(strict=False) != target.resolve(strict=False):
+            errors.append(f"wrong raw link: {link} -> {os.readlink(link)}")
         elif not link.exists():
-            errors.append(f"broken source link: {link} -> {os.readlink(link)}")
-    for root in (WORKSPACE, RESULTS, DISPLAY):
-        for path in root.rglob("*"):
-            if not path.is_symlink():
-                continue
-            symlink_count += 1
-            if not path.exists():
-                errors.append(f"broken link: {path} -> {os.readlink(path)}")
-    calibrations = sorted((WORKSPACE / "calibration").glob("*.json"))
-    if not calibrations:
-        errors.append("no calibration summaries found")
-    for path in calibrations:
-        # 识别相机标定文件：calibration/ 下还有非相机 JSON（如
-        # insole_templates.json），只对含 cameras 字典的相机标定摘要做校验；
-        # 无法解析的文件仍报错，不静默放过。
-        try:
-            payload = json.loads(path.read_text())
-        except Exception:
-            errors.append("%s: cannot load JSON" % path)
-            continue
-        if not isinstance(payload.get("cameras"), dict):
-            continue
-        errors.extend(validate_calibration(path))
-    split = WORKSPACE / "splits/default/splits.csv"
-    if not split.is_file():
-        errors.append(f"missing canonical split: {split}")
-    for path in (
-        WORKSPACE / "dependencies/smpl/SMPL_NEUTRAL.pkl",
-        WORKSPACE / "dependencies/MotionPRO/cliff_ckpt/hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt",
-        WORKSPACE / "dependencies/MotionPRO/mmdetection/checkpoints/yolox_x_8x8_300e_coco_20211126_140254-1ef88d67.pth",
-        WORKSPACE / "dependencies/pressure_toolkit/depthpro/config.json",
-        WORKSPACE / "dependencies/pressure_toolkit/depthpro/model.safetensors",
-        WORKSPACE / "dependencies/pressure_toolkit/depthpro/preprocessor_config.json",
-        WORKSPACE / "dependencies/Step2Motion/normalizers/normalizer_gait.pth",
-        WORKSPACE / "derived/MotionPRO/sequences/cam3",
-        WORKSPACE / "derived/Step2Motion/gait/gait_test.pt",
-        # 评估整改任务 02：正式结果统一位于 results/baselines/<baseline>/。
-        RESULTS / "baselines/MotionPRO/checkpoints",
-        RESULTS / "baselines/MotionPRO/predictions",
-        RESULTS / "baselines/MotionPRO/metrics",
-        RESULTS / "baselines/Step2Motion/checkpoints/gait_model",
-        RESULTS / "baselines/Step2Motion/predictions",
-        RESULTS / "baselines/Step2Motion/metrics",
-        RESULTS / "baselines/pressure_toolkit/predictions",
-        RESULTS / "baselines/pressure_toolkit/metrics",
-        RESULTS / "baselines/FPP-Net/predictions",
-        RESULTS / "baselines/FPP-Net/metrics",
-        RESULTS / "baselines/VP-MoCap/predictions",
-        RESULTS / "baselines/VP-MoCap/metrics",
-        # 展示目录是 R_Test1 的输出产物，不是 workspace 前置条件，不作硬性要求。
-    ):
+            errors.append(f"broken raw link: {link}")
+    required = (
+        WORKSPACE / "protocol/manifests/session_manifest.jsonl",
+        WORKSPACE / "protocol/splits/default/splits.csv",
+        WORKSPACE / "protocol/schemas/shared_session.schema.json",
+        WORKSPACE / "shared/facts/sessions/artifact.json",
+    )
+    for path in required:
         if not path.exists():
-            errors.append(f"missing required path: {path}")
-    for source, _ in MIGRATIONS:
-        if source.exists() or source.is_symlink():
-            errors.append(f"legacy path still exists after migration: {source}")
+            errors.append(f"missing required canonical path: {path}")
+    for root in (WORKSPACE / "raw", WORKSPACE / "protocol", WORKSPACE / "shared",
+                 WORKSPACE / "model_inputs", WORKSPACE / "work", WORKSPACE / "assets",
+                 WORKSPACE / "reports"):
+        for path in root.rglob("*"):
+            if path.is_symlink() and not path.exists():
+                errors.append(f"broken link: {path} -> {os.readlink(path)}")
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
-    print(
-        f"workspace ok: {len(calibrations)} calibration summaries, "
-        f"{symlink_count} valid links"
-    )
+    print("workspace ok: canonical tree, raw links and required artifacts are present")
     print(f"workspace={WORKSPACE}")
-    print(f"results={RESULTS}")
-    print(f"results_display={DISPLAY}")
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("init", "relink", "doctor"))
+    parser.add_argument("command", choices=("init", "doctor", "resolve"))
+    parser.add_argument("uri", nargs="?")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    if args.command == "init":
+        initialize(args.dry_run)
+        return 0
     if args.command == "doctor":
         return doctor()
-    if args.command == "init":
-        initialize(dry_run=args.dry_run)
-    else:
-        relink_color_frames(dry_run=args.dry_run)
+    if not args.uri:
+        parser.error("resolve requires a URI")
+    print(resolve_uri(args.uri))
     return 0
 
 

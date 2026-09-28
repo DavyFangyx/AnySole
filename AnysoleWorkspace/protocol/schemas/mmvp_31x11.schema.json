@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "shared.representation.mmvp_31x11.v1",
+  "type": "array",
+  "prefixItems": [
+    {"type": "array", "minItems": 31, "maxItems": 31},
+    {"type": "array", "minItems": 31, "maxItems": 31}
+  ],
+  "minItems": 2,
+  "maxItems": 2,
+  "description": "A frame is stored as float32 (2,31,11): left foot then right foot; mask-outside cells are zero."
+}

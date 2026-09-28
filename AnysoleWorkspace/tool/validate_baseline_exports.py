@@ -28,7 +28,7 @@ MODELS = {
 def sessions(split: str) -> list[str]:
     columns = ("train", "val", "test") if split == "all" else (split,)
     result = []
-    with (WORKSPACE / "splits" / "default" / "splits.csv").open(
+    with (WORKSPACE / "protocol/splits" / "default" / "splits.csv").open(
             encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
             for column in columns:
@@ -40,7 +40,7 @@ def sessions(split: str) -> list[str]:
 
 def manifest() -> dict[str, dict]:
     result = {}
-    with (WORKSPACE / "manifests" / "session_manifest.jsonl").open(encoding="utf-8") as handle:
+    with (WORKSPACE / "protocol/manifests" / "session_manifest.jsonl").open(encoding="utf-8") as handle:
         for line in handle:
             if line.strip():
                 row = json.loads(line)

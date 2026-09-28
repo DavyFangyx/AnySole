@@ -522,7 +522,7 @@ def load_model(checkpoint, device):
 def parse_args():
     parser = argparse.ArgumentParser(description="Visualize tactile vs predicted SMPL vs GT BVH.")
     cli_common.add_common_args(parser, seq_root=True, out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R1Test_visualize" / "MotionPRO")
-    parser.add_argument("--smpl-model", type=str, default=str(cli_common.WORKSPACE_ROOT / "dependencies/smpl/SMPL_NEUTRAL.pkl"))
+    parser.add_argument("--smpl-model", type=str, default=str(cli_common.WORKSPACE_ROOT / "assets/third_party/smpl/SMPL_NEUTRAL.pkl"))
     parser.add_argument(
         "--checkpoint",
         type=str,

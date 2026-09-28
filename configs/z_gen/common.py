@@ -191,7 +191,9 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
             f"GRID_SEED={task_model.split('|')[2]}" if task == "rho_grid" else "",
             f"RHO_V={task_model.split('|')[3]}" if task == "rho_grid" else "",
             f"RHO_T={task_model.split('|')[4]}" if task == "rho_grid" else "",
-            "FORCE=false",
+            # Generated tasks are explicit rerun requests.  The runner reads
+            # this flag and disables checkpoint/grid reuse for this task.
+            "FORCE=true",
         ]
         path.write_text("\n".join(line for line in lines if line) + "\n", encoding="utf-8")
         print(f"[queue] {path}")

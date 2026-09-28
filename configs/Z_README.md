@@ -236,20 +236,11 @@ A0–B3 不生成 queue conf，只读取 `results/`：
 ## 6. 运行命令
 
 ```bash
+cd /data/fangyuxuan/projects/gait
 python configs/z_gen/all_models.py
 python configs/z_gen/singlemodal_eval.py --models V3_3B
 python configs/z_gen/rho_grid_eval.py --models V3_3B
-CUDA_VISIBLE_DEVICES=0 bash configs/bg.sh
+CUDA_VISIBLE_DEVICES=6 bash configs/bg.sh
 python configs/tools/status.py
 ```
 
-每个 worker 和该 worker 领取的任务共用一份独立日志，日志名按「卡号 + worker
-编号」自动递增：
-
-```text
-configs/GPU4_worker1.log
-configs/GPU4_worker2.log   # 同一张卡重复执行 bg.sh 追加的第二个 worker
-configs/GPU5_worker1.log
-```
-
-成功任务进入 `done/`，失败任务进入 `failed/`。

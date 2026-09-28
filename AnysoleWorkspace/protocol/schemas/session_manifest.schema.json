@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "protocol.session_manifest.v1",
+  "type": "object",
+  "required": ["session_id", "subject_id", "camera", "video_path", "pressure_path", "bvh_path", "smpl_path", "n_frames", "eligible_anysole"],
+  "properties": {
+    "session_id": {"type": "string"},
+    "subject_id": {"type": "string"},
+    "camera": {"const": "cam3"},
+    "video_path": {"type": "string"},
+    "pressure_path": {"type": "string"},
+    "bvh_path": {"type": "string"},
+    "smpl_path": {"type": "string"},
+    "n_frames": {"type": "integer", "minimum": 1},
+    "eligible_anysole": {"enum": ["0", "1"]}
+  }
+}

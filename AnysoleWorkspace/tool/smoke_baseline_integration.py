@@ -12,8 +12,11 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "AnysoleWorkspace"
-MANIFEST = WORKSPACE / "manifests/session_manifest.jsonl"
-SPLITS = WORKSPACE / "splits/default/splits.csv"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
+MANIFEST = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
+SPLITS = WORKSPACE / "protocol/splits/default/splits.csv"
 
 
 def check_manifest() -> dict[str, int]:
@@ -36,12 +39,11 @@ def check_mmvp_artifacts(session: str) -> dict:
         for line in MANIFEST.read_text().splitlines() if line.strip()
     }
     row = manifest[session]
-    parts = Path(row["pressure_path"]).parts
-    cam = parts.index("cam3")
-    date, subject = parts[cam + 1], parts[cam + 2]
+    recording = resolve_uri(row["video_path"], must_exist=True)
+    date, subject = recording.parts[-3], recording.parts[-2]
     n = int(row["n_frames"])
-    toolkit = WORKSPACE / "derived/pressure_toolkit/images" / date / subject / session
-    fpp = WORKSPACE / "derived/VP-MoCap" / date / subject / session
+    toolkit = WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / session
+    fpp = WORKSPACE / "model_inputs/VP-MoCap" / date / subject / session
     tool_files = sorted((toolkit / "insole").glob("*.npy"))
     fpp_files = sorted((fpp / "insole").glob("*.npy"))
     assert len(tool_files) == len(fpp_files) == n, (len(tool_files), len(fpp_files), n)
@@ -52,7 +54,7 @@ def check_mmvp_artifacts(session: str) -> dict:
     assert np.asarray(first_tool["insole"][0]).shape == (31, 11)
     assert np.asarray(first_tool["insole"][1]).shape == (31, 11)
     assert (toolkit / "calibration.npy").is_file()
-    floor = WORKSPACE / "derived/pressure_toolkit/annotations" / date / "floor_info" / f"floor_{subject}.npy"
+    floor = WORKSPACE / "model_inputs/pressure_toolkit/annotations" / date / "floor_info" / f"floor_{subject}.npy"
     assert floor.is_file()
     floor_data = np.load(floor, allow_pickle=True).item()
     transform = np.asarray(floor_data["depth2floor"])
@@ -66,7 +68,7 @@ def check_mmvp_artifacts(session: str) -> dict:
 
 
 def check_fpp_metadata() -> dict:
-    path = WORKSPACE / "derived/VP-MoCap/dataset_split_temporal5.npy"
+    path = WORKSPACE / "model_inputs/VP-MoCap/dataset_split_temporal5.npy"
     assert path.is_file()
     data = np.load(path, allow_pickle=True).item()
     assert set(data) == {"train", "val", "test"}
@@ -92,7 +94,7 @@ def check_motionpro_cache(session: str) -> dict:
         sys.path.insert(0, str(motion_root))
     from lib.dataset.image_pressure import ImagePressureDataset  # noqa: E402
 
-    seq_root = WORKSPACE / "derived/MotionPRO/sequences/cam3"
+    seq_root = WORKSPACE / "shared/facts/sessions/cam3"
     cfg = {"task": {
         "window_length": 20, "cam_id": 3,
         "split_csv": str(SPLITS), "seq_root": str(seq_root),

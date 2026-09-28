@@ -10,18 +10,22 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "AnysoleWorkspace"
-MODEL_DEFAULT = WORKSPACE / "dependencies/rtmpose/rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.pth"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
+MODEL_DEFAULT = WORKSPACE / "assets/third_party/rtmpose/rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.pth"
 
 
 def read_manifest() -> dict[str, dict]:
     rows = {}
-    for line in (WORKSPACE / "manifests/session_manifest.jsonl").read_text().splitlines():
+    for line in (WORKSPACE / "protocol/manifests/session_manifest.jsonl").read_text().splitlines():
         if line.strip():
             row = json.loads(line)
             rows[row["session_id"]] = row
@@ -31,17 +35,16 @@ def read_manifest() -> dict[str, dict]:
 def split_sessions(name: str) -> list[str]:
     cols = ("train", "val", "test") if name == "all" else (name,)
     result = []
-    with (WORKSPACE / "splits/default/splits.csv").open(encoding="utf-8-sig", newline="") as handle:
+    with (WORKSPACE / "protocol/splits/default/splits.csv").open(encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
             result.extend((row.get(col) or "").strip() for col in cols)
     return sorted(set(x for x in result if x))
 
 
 def session_paths(row: dict) -> tuple[str, str, Path]:
-    parts = Path(row["pressure_path"]).parts
-    cam = parts.index("cam3")
-    date, subject, session = parts[cam + 1 : cam + 4]
-    color = WORKSPACE / "derived/pressure_toolkit/images" / date / subject / session / "color"
+    recording = resolve_uri(row["video_path"], must_exist=True)
+    date, subject, session = recording.parts[-3], recording.parts[-2], row["session_id"]
+    color = WORKSPACE / "model_inputs/pressure_toolkit/images" / date / subject / session / "color"
     return date, subject, color
 
 
@@ -64,8 +67,8 @@ def run_session(session: str, row: dict, inferencer, force: bool) -> dict:
     if len(images) != int(row["n_frames"]):
         raise ValueError(f"{session}: RGB count {len(images)} != manifest {row['n_frames']}")
     roots = [
-        WORKSPACE / "derived/pressure_toolkit/input" / subject / session / "keypoints",
-        WORKSPACE / "derived/VP-MoCap" / date / subject / session / "keypoints",
+        WORKSPACE / "model_inputs/pressure_toolkit/input" / subject / session / "keypoints",
+        WORKSPACE / "model_inputs/VP-MoCap" / date / subject / session / "keypoints",
     ]
     for root in roots:
         root.mkdir(parents=True, exist_ok=True)

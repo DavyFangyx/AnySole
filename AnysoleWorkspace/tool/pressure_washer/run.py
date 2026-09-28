@@ -11,7 +11,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PRESSURE_ROOT = Path(__file__).resolve().parent
-PRESSURE_DATA_ROOT = REPO_ROOT / "AnysoleWorkspace" / "sources" / "PressureWasher"
+PRESSURE_DATA_ROOT = REPO_ROOT / "AnysoleWorkspace" / "work" / "data_pipeline" / "pressure_washer"
 PYTHON = sys.executable
 
 STAGES = {
@@ -23,7 +23,7 @@ STAGES = {
 STAGE_OUTPUTS = {
     "inspect": "stats",
     "reconstruct": "reconstructed",
-    "mark-fake": "fake_marked",
+    "mark-fake": "final_fake_marked",
     "encode": "encoded",
 }
 
@@ -51,7 +51,7 @@ def main() -> int:
     elif args.stage == "encode" and args.input:
         command += ["-input", str(args.input)]
     elif args.stage in ("mark-fake", "encode"):
-        output_root = PRESSURE_DATA_ROOT / ("reconstructed" if args.stage == "mark-fake" else "fake_marked")
+        output_root = PRESSURE_DATA_ROOT / ("reconstructed" if args.stage == "mark-fake" else "final_fake_marked")
         candidates = sorted(path for path in output_root.iterdir() if path.is_dir()) if output_root.is_dir() else []
         if not candidates:
             raise FileNotFoundError("No input dataset found under %s" % output_root)

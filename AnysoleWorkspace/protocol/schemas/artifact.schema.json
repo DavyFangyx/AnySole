@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "artifact.v1",
+  "type": "object",
+  "required": ["schema_version", "producer", "producer_commit", "parameters", "source_artifacts", "source_hashes", "frame_id_min", "frame_id_max", "frame_count", "consumers"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "producer": {"type": "string"},
+    "producer_commit": {"type": "string"},
+    "parameters": {"type": "object"},
+    "source_artifacts": {"type": "array", "items": {"type": "string"}},
+    "source_hashes": {"type": "object"},
+    "frame_id_min": {"type": ["integer", "null"]},
+    "frame_id_max": {"type": ["integer", "null"]},
+    "frame_count": {"type": ["integer", "null"]},
+    "consumers": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -15,6 +15,7 @@ import torch
 
 from anysole.data.crop import CROP_IMG_HEIGHT, CROP_IMG_WIDTH, process_image
 from anysole.data.dataset import find_session_dir, hrnet_cache_path
+from anysole.data.workspace_adapter import load_shared_session, write_cache_provenance
 from anysole.types import (
     CLIFF_CKPT,
     HRNET_YAML,
@@ -40,7 +41,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--session", type=str, default=None, help="Only extract this session id.")
     parser.add_argument("--split", type=str, default="all", choices=["all", "train", "val", "test"],
                         help="Split column scope when --session is empty ('all' = every session under the seq root).")
-    parser.add_argument("--split-csv", type=str, default=str(WORKSPACE_ROOT / "splits/default/splits.csv"),
+    parser.add_argument("--split-csv", type=str, default=str(WORKSPACE_ROOT / "protocol/splits/default/splits.csv"),
                         help="splits.csv path used by --split.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--skip-existing", action="store_true", help="Skip sessions whose cache exists.")
@@ -49,6 +50,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--device", default=None, help="cuda, cuda:0, or cpu.")
     parser.add_argument("--cache-root", type=Path, default=None)
     parser.add_argument("--seq-root", type=Path, default=None)
+    parser.add_argument("--bbox-root", type=Path, default=None,
+                        help="Optional private/shared frontend bbox root; defaults to the session dir.")
     parser.add_argument("--limit-sessions", type=int, default=None)
     return parser.parse_args(argv)
 
@@ -122,7 +125,7 @@ def read_rgb(path: Path) -> np.ndarray:
 
 
 def session_frame_paths(seq_dir: Path, n_frames: int) -> List[Path]:
-    color_dir = seq_dir / "color"
+    color_dir = seq_dir / ("rgb" if (seq_dir / "rgb").is_dir() else "color")
     paths = [color_dir / ("%06d.jpg" % idx) for idx in range(n_frames)]
     missing = [str(path) for path in paths if not path.exists()]
     if missing:
@@ -138,11 +141,19 @@ def extract_session(
     model: torch.nn.Module,
     device: torch.device,
     batch_size: int,
+    bbox_root: Optional[Path] = None,
 ) -> None:
-    meta = json.loads((seq_dir / "align_meta.json").read_text())
-    n_frames = int(meta["n_frames"])
+    if (seq_dir / "session.json").is_file():
+        meta = json.loads((seq_dir / "session.json").read_text())
+        n_frames = int(meta["frame_count"])
+    else:
+        meta = json.loads((seq_dir / "align_meta.json").read_text())
+        n_frames = int(meta["n_frames"])
     image_paths = session_frame_paths(seq_dir, n_frames)
-    bbox = np.load(seq_dir / "bbox.npy")
+    bbox_path = (bbox_root / f"{seq_dir.name}.npy") if bbox_root else seq_dir / "bbox.npy"
+    if not bbox_path.is_file():
+        raise FileNotFoundError(f"Missing AnySole bbox frontend {bbox_path}")
+    bbox = np.load(bbox_path)
     if bbox.shape[0] != n_frames:
         raise ValueError("%s bbox.npy length %s != n_frames %d" % (seq_dir, bbox.shape, n_frames))
 
@@ -203,6 +214,14 @@ def extract_session(
         )
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(feat.contiguous(), cache_path)
+    if (seq_dir / "session.json").is_file():
+        write_cache_provenance(
+            cache_path,
+            session=load_shared_session(seq_dir.name),
+            kind="extract_hrnet",
+            shape=tuple(feat.shape),
+            parameters={"frontend": "CLIFF-HRNet", "feature_dim": V_FEAT_DIM},
+        )
     print("saved %s %s" % (cache_path, tuple(feat.shape)))
 
 
@@ -229,7 +248,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("load encoder on %s" % device)
             model = load_encoder(device)
         print("extract %s" % seq_dir)
-        extract_session(seq_dir, cache_path, model, device, int(args.batch_size))
+        extract_session(seq_dir, cache_path, model, device, int(args.batch_size), args.bbox_root)
     return 0
 
 

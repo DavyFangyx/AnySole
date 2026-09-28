@@ -20,9 +20,9 @@ from anysole.utils.geometry import fk_pose6d
 from anysole.types import POSE_DIM, T_PHYS_DIM, T_RAW_DIM, V_FEAT_DIM
 
 device = torch.device("cuda")
-CFG = dict(seq_root=Path("AnysoleWorkspace/derived/MotionPRO/sequences/cam3"),
-           split_csv=Path("AnysoleWorkspace/splits/default/splits.csv"),
-           cache_root=Path("AnysoleWorkspace/derived/AnySole/hrnet_cache/cam3"),
+CFG = dict(seq_root=Path("AnysoleWorkspace/shared/facts/sessions/cam3"),
+           split_csv=Path("AnysoleWorkspace/protocol/splits/default/splits.csv"),
+           cache_root=Path("AnysoleWorkspace/model_inputs/AnySole/hrnet_cache/cam3"),
            window_length=20, contact_method="joint_and")
 
 

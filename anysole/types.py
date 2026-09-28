@@ -21,20 +21,20 @@ ANYSOLE_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "v1.yaml"
 MOTIONPRO_ROOT = GAIT_ROOT / "Baselines" / "MotionPRO"
 WORKSPACE_ROOT = GAIT_ROOT / "AnysoleWorkspace"
-SEQ_ROOT = WORKSPACE_ROOT / "derived" / "MotionPRO" / "sequences" / "cam3"
-SPLIT_CSV = WORKSPACE_ROOT / "splits" / "default" / "splits.csv"
+# AnySole's default input contract is the public shared-facts tree.
+SEQ_ROOT = WORKSPACE_ROOT / "shared" / "facts" / "sessions" / "cam3"
+SPLIT_CSV = WORKSPACE_ROOT / "protocol" / "splits" / "default" / "splits.csv"
 FAKE_MARKED_ROOT = (
     WORKSPACE_ROOT
-    / "sources"
-    / "PressureWasher"
-    / "outputs"
-    / "fake_marked"
-    / "reconstruction_20260817_161459_fake_marked"
+    / "work"
+    / "data_pipeline"
+    / "pressure_washer"
+    / "final_fake_marked"
 )
-HRNET_CACHE_ROOT = WORKSPACE_ROOT / "derived" / "AnySole" / "hrnet_cache" / "cam3"
+HRNET_CACHE_ROOT = WORKSPACE_ROOT / "model_inputs" / "AnySole" / "adapter_v1" / "visual" / "hrnet" / "cam3"
 # F1: GVHMR per-session caches (<model>/cam3/<session>.pt), written by
 # anysole/data/extract_hmr.py.
-HMR_CACHE_ROOT = WORKSPACE_ROOT / "derived" / "AnySole" / "hmr_cache"
+HMR_CACHE_ROOT = WORKSPACE_ROOT / "model_inputs" / "AnySole" / "adapter_v1" / "visual" / "hmr"
 # SMPL archives are kept outside the repository.  Override with
 # ``ANYSOLE_SMPL_ROOTS`` (path-separator separated) when relocating them.
 _smpl_env = os.environ.get("ANYSOLE_SMPL_ROOTS", "")
@@ -46,12 +46,13 @@ SMPL_ROOTS = tuple(Path(p).expanduser() for p in _smpl_env.split(os.pathsep) if 
 )
 CLIFF_CKPT = (
     WORKSPACE_ROOT
-    / "dependencies"
+    / "assets"
+    / "third_party"
     / "MotionPRO"
     / "cliff_ckpt"
     / "hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt"
 )
-SMPL_MODEL_PATH = WORKSPACE_ROOT / "dependencies" / "smpl" / "SMPL_NEUTRAL.pkl"
+SMPL_MODEL_PATH = WORKSPACE_ROOT / "assets" / "third_party" / "smpl" / "SMPL_NEUTRAL.pkl"
 
 
 # Variant dir naming (2026-09-24 用户裁定：统一目录层级 + 完整超参记录).

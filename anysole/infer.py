@@ -20,6 +20,7 @@ from anysole.data.dataset import (
     session_time_grid,
 )
 from anysole.data.pressure import load_session_pressure, normalize_raw
+from anysole.data.workspace_adapter import load_shared_session, shared_smpl_path
 from anysole.data.tactile_s2m import build_t_s2m, resolve_legacy_bvh_path
 from anysole.utils.diffusion import GaussianDiffusion
 from anysole.utils.geometry import (
@@ -137,6 +138,9 @@ def _stride_windows(values: np.ndarray, tw: int, half: int):
 
 
 def _pressure_paths(meta: dict) -> tuple:
+    if "pressure_48_path" in meta:
+        path = Path(meta["pressure_48_path"])
+        return path, path
     root = FAKE_MARKED_ROOT / meta["date"] / meta["subject"] / meta["rec_name"]
     return root / "pressure_left.csv", root / "pressure_right.csv"
 
@@ -164,7 +168,20 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
         config["modal"] = args.modal
     device = resolve_device(args.device)
     seq_dir = find_session_dir(Path(config["seq_root"]), args.session)
-    meta = json.loads((seq_dir / "align_meta.json").read_text())
+    shared = None
+    if (seq_dir / "session.json").is_file():
+        shared = load_shared_session(args.session, Path(config["seq_root"]))
+        meta = dict(shared["meta"])
+        meta.update({
+            "n_frames": len(shared["frames"]["frame_id"]),
+            "visual_time_s": np.asarray(shared["frames"]["visual_time_s"]),
+            "mocap_time_s": np.asarray(shared["frames"]["mocap_time_s"]),
+            "bvh_path": shared["meta"].get("source_files", {}).get("bvh", ""),
+        })
+        pressure_path = shared["dir"] / "pressure_48.npz"
+        meta["pressure_48_path"] = str(pressure_path)
+    else:
+        meta = json.loads((seq_dir / "align_meta.json").read_text())
     n_frames = int(meta["n_frames"])
     if n_frames <= 0:
         raise ValueError("Session %s has no frames" % args.session)
@@ -189,9 +206,16 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     else:
         v_feat = np.zeros((n_frames, V_FEAT_DIM), dtype=np.float32)
     if config_value in (CONFIG_VT, CONFIG_T):
-        pressure = load_session_pressure(meta, session_time_grid(meta))
-        t_raw = normalize_raw(pressure["T_raw"])
-        t_phys = np.asarray(pressure["T_phys"], dtype=np.float32)
+        if shared is not None:
+            left48 = np.asarray(shared["pressure"]["left48"], dtype=np.float32)
+            right48 = np.asarray(shared["pressure"]["right48"], dtype=np.float32)
+            t_raw = normalize_raw(np.concatenate([left48, right48], axis=1))
+            from anysole.data.pressure import physical_tokens
+            t_phys = physical_tokens(normalize_raw(left48), normalize_raw(right48))
+        else:
+            pressure = load_session_pressure(meta, session_time_grid(meta))
+            t_raw = normalize_raw(pressure["T_raw"])
+            t_phys = np.asarray(pressure["T_phys"], dtype=np.float32)
     else:
         t_raw = np.zeros((n_frames, T_RAW_DIM), dtype=np.float32)
         t_phys = np.zeros((n_frames, T_PHYS_DIM), dtype=np.float32)
@@ -323,11 +347,12 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     motion = None
     if needs_gt_motion:
         t_mocap = session_time_grid(meta) - float(meta["offset_s"])
-        smpl_path = resolve_smpl_path(
-            meta,
-            tuple(Path(p) for p in saved_config.get(
-                "smpl_roots", config.get("smpl_roots", SMPL_ROOTS)
-            )),
+        smpl_roots = tuple(Path(p) for p in saved_config.get(
+            "smpl_roots", config.get("smpl_roots", SMPL_ROOTS)
+        ))
+        smpl_path = (
+            shared_smpl_path(shared, smpl_roots) if shared is not None
+            else resolve_smpl_path(meta, smpl_roots)
         )
         motion = load_smpl(smpl_path, query_t=t_mocap)
         print(
@@ -524,7 +549,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Automatic selection remains available when the mode is omitted.
         config = load_config(args.config)
         seq_dir = find_session_dir(Path(config["seq_root"]), args.session)
-        meta = json.loads((seq_dir / "align_meta.json").read_text())
+        if (seq_dir / "session.json").is_file():
+            shared = load_shared_session(args.session, Path(config["seq_root"]))
+            meta = {"pressure_48_path": str(shared["dir"] / "pressure_48.npz")}
+        else:
+            meta = json.loads((seq_dir / "align_meta.json").read_text())
         cache_path = hrnet_cache_path(args.session, Path(config["cache_root"]))
         left_path, right_path = _pressure_paths(meta)
         if cache_path.is_file() and left_path.is_file() and right_path.is_file():
