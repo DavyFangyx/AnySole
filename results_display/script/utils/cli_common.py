@@ -108,6 +108,22 @@ def anysole_model_dir(model_name: str, contact_method: str, variant: str | None 
     return f"{base}/{variant}" if variant else base
 
 
+def sweep_anysole_model_dirs(model_name_csv: str) -> list:
+    """--sweep helper: every variant dir under results/AnySole/<model>_*/.
+
+    Contact method and variant arguments are bypassed (the dir names carry
+    both); a subdir counts when it holds a checkpoints/ dir.  Returns
+    relative paths "<model>_<contact>/<variant>", sorted."""
+    out: list = []
+    root = RESULTS_ROOT / "AnySole"
+    for model_name in split_csv_arg(model_name_csv):
+        for contact_dir in sorted(p for p in root.glob("%s_*" % model_name) if p.is_dir()):
+            for variant_dir in sorted(p for p in contact_dir.iterdir() if p.is_dir()):
+                if (variant_dir / "checkpoints").is_dir():
+                    out.append("%s/%s" % (contact_dir.name, variant_dir.name))
+    return out
+
+
 def load_test_sessions(session_arg, split_csv, split="test") -> list:
     """Return session ids: explicit list when given, else the split column.
 
@@ -186,6 +202,7 @@ def add_common_args(
     variant: bool = False,
     contact_method: bool = False,
     contact_method_default: str = "tactile_abs",
+    sweep: bool = False,
     config_id: bool = False,
     config_default: str = "VT2M,V2M,T2M",
     gen: bool = True,
@@ -216,6 +233,13 @@ def add_common_args(
         parser.add_argument("--variant", type=str, default=None, help="Stacked hyperparameter subdir under the model dir (the full field stack, e.g. tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1); model+contact+variant == the ckpt address.")
     if contact_method:
         parser.add_argument("--contact-method", type=str, default=contact_method_default, help="Contact-label scheme(s), comma-separated; model dir is <model-name>_<contact-method>.")
+    if sweep:
+        parser.add_argument(
+            "--sweep",
+            action="store_true",
+            help="With --model-name: scan every variant subdir under "
+                 "results/AnySole/<model>_*/; --contact-method and --variant are ignored.",
+        )
     if config_id:
         parser.add_argument("--config-id", type=str, default=config_default, help="Generation configuration(s), comma-separated.")
     if gen:

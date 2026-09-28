@@ -55,17 +55,52 @@ PRED_ROOT = cli_common.RESULTS_ROOT / "AnySole"
 
 
 def load_pressure(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    pressure = np.load(seq_dir / "pressure.npz")["pressure"].astype(np.float32)
-    fake_path = seq_dir / "fake_mask.npy"
-    if fake_path.is_file():
-        fake = np.load(fake_path).astype(np.uint8).reshape(-1)
-    else:
-        fake = np.zeros((pressure.shape[0],), dtype=np.uint8)
+    legacy = seq_dir / "pressure.npz"
+    if legacy.is_file():
+        pressure = np.load(legacy)["pressure"].astype(np.float32)
+        fake_path = seq_dir / "fake_mask.npy"
+        if fake_path.is_file():
+            fake = np.load(fake_path).astype(np.uint8).reshape(-1)
+        else:
+            fake = np.zeros((pressure.shape[0],), dtype=np.uint8)
+        return pressure, fake
+    # T1 数据适配后 per-session pressure.npz 已废弃：走 shared facts 的
+    # pressure_48.npz（left48+right48 拼接 == 旧 pressure.npz["pressure"]
+    # 口径，与 anysole/data/dataset.py 的 shared 分支同源）。
+    from anysole.data.workspace_adapter import load_shared_session
+    shared = load_shared_session(seq_dir.name)
+    pressure = np.concatenate(
+        [
+            np.asarray(shared["pressure"]["left48"], dtype=np.float32),
+            np.asarray(shared["pressure"]["right48"], dtype=np.float32),
+        ],
+        axis=1,
+    )
+    fake = np.maximum(
+        np.asarray(shared["frames"]["fake"], dtype=np.uint8),
+        1 - np.asarray(shared["frames"]["valid"], dtype=np.uint8),
+    ).astype(np.uint8).reshape(-1)
     return pressure, fake
 
 
 def load_gt(seq_dir: Path, n_frames: int, fps: float = 40.0) -> dict:
     return load_session_gt(seq_dir, n_frames, fps)
+
+
+def pressure_cells(frame: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(left, right) per-foot cell grids for one frame, in panel layout.
+
+    Legacy 2-D canvas goes through crop_foot; the T1 48-token layout
+    (left48+right48 拼接) reshapes directly — 4 medial-lateral rows x 12
+    heel-to-toe columns, the same 口径 as crop_foot and anysole 的
+    cop_from_grid — and is normalized to 0-255 like the model's
+    normalize_raw (PRESSURE_CLIP)."""
+    if frame.ndim == 2:
+        return crop_foot(frame, LEFT_FOOT_BOX), crop_foot(frame, RIGHT_FOOT_BOX)
+    from anysole.types import PRESSURE_CLIP
+    grid = np.clip(np.asarray(frame, dtype=np.float32).reshape(2, 4, 12), 0.0, float(PRESSURE_CLIP))
+    grid = grid * (255.0 / float(PRESSURE_CLIP))
+    return np.rot90(grid[0], k=1), np.rot90(grid[1], k=1)
 
 
 def load_pred(pred_path: Path) -> dict:
@@ -154,9 +189,10 @@ def render_session(seq_dir: Path, pred_path: Path, session_id: str, config_id: s
         frames = []
         for t in frame_ids:
             valid = not bool(fake[t])
+            left_cells, right_cells = pressure_cells(pressure[t])
             left = render_foot_panel(
-                crop_foot(pressure[t], LEFT_FOOT_BOX),
-                crop_foot(pressure[t], RIGHT_FOOT_BOX),
+                left_cells,
+                right_cells,
                 session_id, t, n, args.fps, valid,
             )
             if kind == "mesh":
@@ -182,7 +218,7 @@ def render_session(seq_dir: Path, pred_path: Path, session_id: str, config_id: s
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize AnySole motion vs tactile input and SMPL GT.")
-    cli_common.add_common_args(parser, seq_root=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R1Test_visualize" / "AnySole")
+    cli_common.add_common_args(parser, seq_root=True, config_id=True, sweep=True, out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R1Test_visualize" / "AnySole")
     parser.add_argument(
         "--model-name", "--modal",
         dest="modal",
@@ -244,6 +280,9 @@ def main() -> int:
         if not model_dirs:
             raise SystemExit("No model dirs under %s" % PRED_ROOT)
         log.info(f"Models from {PRED_ROOT} ({len(model_dirs)}): {model_dirs}")
+    elif getattr(args, "sweep", False):
+        model_dirs = cli_common.sweep_anysole_model_dirs(args.modal)
+        log.info(f"Sweep variants for {args.modal} ({len(model_dirs)}): {model_dirs}")
     else:
         model_dirs = [
             cli_common.anysole_model_dir(modal, contact_method, args.variant)

@@ -308,14 +308,18 @@ def test_real_bvh23_semantic_filter():
 
 def test_brief_gating():
     print("== AnySole brief: contact/V2T gating ==")
-    from anysole.utils.eval_protocol import (BRIEF_MOTION_KEYS, V2T_BRIEF_NAMES,
-                                             V2T_LEAF_NAMES, V2T_NAMES,
-                                             summary_metrics)
+    from anysole.utils.eval_protocol import (BRIEF_MOTION_KEYS, METRIC_DISPLAY_NAMES,
+                                             V2T_BRIEF_NAMES, V2T_LEAF_NAMES,
+                                             V2T_NAMES, summary_metrics)
     check("brief V2T_NAMES is 6+4",
           len(V2T_BRIEF_NAMES) == 6 and len(V2T_LEAF_NAMES) == 4 and len(V2T_NAMES) == 10)
     check("brief motion keys exclude contact", "contact_f1" not in BRIEF_MOTION_KEYS)
     fake = {
-        "V2M": {"mpjpe_mm": 1.0, "pve_mm": 2.5, "contact_f1": 0.9, "foot_sliding_vertex_mm": 2.0,
+        "V2M": {"pa_mpjpe_mm": 2.0, "mpjpe_mm": 1.0, "mpjae_deg": 3.0,
+                "w_mpjpe100_mm": 4.0, "root_ate_mm": 5.0,
+                "root_orientation_drift_deg": 6.0, "foot_sliding_mm": 7.0,
+                "jitter_gt_m_s3": 8.0, "jitter_pred_m_s3": 9.0,
+                "pve_mm": 2.5, "contact_f1": 0.9, "foot_sliding_vertex_mm": 2.0,
                 "T_mae": 0.1, "T_rmse": 0.2, "T_mse": 0.04, "T_corr": 0.9,
                 "pressure_force_mae": 1.0, "pressure_force_rmse": 1.0, "pressure_force_r2": 0.8,
                 "pressure_cop_error_left": 0.1, "pressure_cop_error_right": 0.2,
@@ -327,6 +331,10 @@ def test_brief_gating():
     check("brief motion has no contact", "contact_f1" not in brief["V2M"])
     check("brief motion has no vertex foot slide", "foot_sliding_vertex_mm" not in brief["V2M"])
     check("brief motion has no pve (AnySole 不生成 shape)", "pve_mm" not in brief["V2M"])
+    check("brief motion renamed to display style, PA-MPJPE first",
+          list(brief["V2M"].keys())[:3] == ["PA-MPJPE", "MPJPE", "MPJRE"])
+    check("brief display names cover the whitelist",
+          all(key in METRIC_DISPLAY_NAMES for key in BRIEF_MOTION_KEYS))
 
 
 def main() -> int:

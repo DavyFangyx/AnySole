@@ -129,10 +129,34 @@ V2T_NAMES = V2T_BRIEF_NAMES + V2T_LEAF_NAMES
 # pve_mm is absent here.  foot_sliding_mm is the public joint-based
 # definition; the vertex-based variant is a detail-file diagnostic
 # (foot_sliding_vertex_mm).
+# Display (JSON) naming: internal snake_case keys are renamed to the classic
+# uppercase style only at serialization time (2026-09-28 裁定：PA-MPJPE 等
+# 旧式键名 + 主指标排最前); formulas and internal accumulation stay
+# snake_case.  INVERSE_DISPLAY_NAMES lets backfill tools read files that
+# already carry display names.
+METRIC_DISPLAY_NAMES = {
+    "pa_mpjpe_mm": "PA-MPJPE",
+    "mpjpe_mm": "MPJPE",
+    "mpjae_deg": "MPJRE",
+    "w_mpjpe100_mm": "W-MPJPE100",
+    "wa_mpjpe100_mm": "WA-MPJPE100",
+    "root_ate_mm": "traj_ATE",
+    "root_orientation_deg": "RootOrientation",
+    "root_orientation_drift_deg": "RootOrientationDrift",
+    "accel_error_m_s2": "AccelError",
+    "foot_sliding_mm": "FootSliding",
+    "jitter_gt_m_s3": "Jitter_gt",
+    "jitter_pred_m_s3": "Jitter_pred",
+}
+INVERSE_DISPLAY_NAMES = {
+    display: internal for internal, display in METRIC_DISPLAY_NAMES.items()
+}
+# Whole-body brief keys in their fixed JSON order — PA-MPJPE first so the
+# primary metric is visible at a glance; doubles as the brief whitelist.
 BRIEF_MOTION_KEYS = (
-    "mpjpe_mm", "pa_mpjpe_mm", "w_mpjpe100_mm", "mpjae_deg",
-    "root_ate_mm", "root_orientation_drift_deg",
-    "jitter_pred_m_s3", "jitter_gt_m_s3", "foot_sliding_mm",
+    "pa_mpjpe_mm", "mpjpe_mm", "mpjae_deg", "w_mpjpe100_mm",
+    "root_ate_mm", "root_orientation_drift_deg", "foot_sliding_mm",
+    "jitter_gt_m_s3", "jitter_pred_m_s3",
 )
 # Keys the detail file reports but that are diagnostics, not formal metrics
 # (kept for training monitoring and history; excluded from brief by the
@@ -148,12 +172,59 @@ DIAGNOSTIC_KEYS = (
 # V2T is always fourth, absent groups are skipped rather than invented.
 BRIEF_GROUP_ORDER = ("T2M", "V2M", "VT2M", "V2T", "robust_vdrop", "robust_tdrop")
 
+# Fixed top-level key order of both JSON files; extras (e.g. key_migration
+# in backfilled files) follow after "metrics"-order keys if absent above.
+PAYLOAD_KEY_ORDER = (
+    "checkpoint", "modal", "contact_method", "split", "protocol_seed", "tw",
+    "sample_steps", "robustness", "forward_axis",
+    "diagnostic_fields", "v2t_leaf_keys", "key_migration", "metrics",
+)
+
+
+def _display_block(block: Dict[str, float]) -> Dict[str, float]:
+    """Rename and reorder one metric block for JSON output.
+
+    BRIEF_MOTION_KEYS fixes the leading order (PA-MPJPE first); the remaining
+    keys (V2T tactile, per-part aggregates, diagnostics) keep a stable
+    alphabetical order.  Internal accumulation stays snake_case.
+    """
+    ordered: list[tuple[str, float]] = []
+    for key in BRIEF_MOTION_KEYS:
+        if key in block:
+            ordered.append((key, block[key]))
+    ordered.extend(
+        (key, block[key]) for key in sorted(set(block) - set(BRIEF_MOTION_KEYS))
+    )
+    return {METRIC_DISPLAY_NAMES.get(key, key): value for key, value in ordered}
+
+
+def display_metrics(metrics: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    """Every group block through the display rename/order; group order fixed."""
+    groups: Dict[str, Dict[str, float]] = {}
+    for name in BRIEF_GROUP_ORDER:
+        if name in metrics:
+            groups[name] = _display_block(metrics[name])
+    for name, block in metrics.items():
+        if name not in groups:
+            groups[name] = _display_block(block)
+    return groups
+
+
+def order_payload(payload: Dict) -> Dict:
+    """Fixed top-level key order for human-readable JSON output."""
+    ordered = {key: payload[key] for key in PAYLOAD_KEY_ORDER if key in payload}
+    for key, value in payload.items():
+        if key not in ordered:
+            ordered[key] = value
+    return ordered
+
 
 def summary_metrics(metrics: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
     """Derive the brief (whole-body) view from the detail metric blocks.
 
     Groups are copied in BRIEF_GROUP_ORDER; each motion group keeps only
-    BRIEF_MOTION_KEYS; V2T is built from the V2M tactile row and contains
+    BRIEF_MOTION_KEYS, renamed via METRIC_DISPLAY_NAMES and ordered with
+    PA-MPJPE first; V2T is built from the V2M tactile row and contains
     exactly the brief keys (one representative per level; leaf keys stay
     detail-only) whenever V2M is present.
     """
@@ -166,10 +237,11 @@ def summary_metrics(metrics: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str,
                     groups[name] = v2t
             continue
         if name in metrics:
+            block = metrics[name]
             groups[name] = {
-                key: value
-                for key, value in sorted(metrics[name].items())
-                if key in BRIEF_MOTION_KEYS
+                METRIC_DISPLAY_NAMES.get(key, key): block[key]
+                for key in BRIEF_MOTION_KEYS
+                if key in block
             }
     return groups
 
@@ -692,16 +764,21 @@ def run_protocol(
         # (one representative per level); their values live in the detail
         # V2M tactile row.
         "v2t_leaf_keys": sorted(V2T_LEAF_NAMES),
-        "metrics": metrics,
+        "metrics": display_metrics(metrics),
     }
+    payload = order_payload(payload)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # No sort_keys anywhere: PAYLOAD_KEY_ORDER fixes the top-level order and
+    # BRIEF_MOTION_KEYS puts PA-MPJPE first in every motion block, so diffs
+    # stay stable.
+    out_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=False, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
     if brief_out is not None:
         brief = dict(payload)
         brief["metrics"] = summary_metrics(metrics)
         brief_out.parent.mkdir(parents=True, exist_ok=True)
-        # No sort_keys: BRIEF_GROUP_ORDER fixes the group order (V2T fourth);
-        # group keys are sorted by summary_metrics, so diffs stay stable.
         brief_out.write_text(
             json.dumps(brief, indent=2, sort_keys=False, ensure_ascii=False) + "\n",
             encoding="utf-8",

@@ -182,6 +182,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "intermediate, may be several epochs older — use for final reports).",
     )
     parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="With --model-name: evaluate every variant subdir under "
+        "results/AnySole/<model>_*/ (any contact method); --contact-method and "
+        "--split are ignored (split defaults to test).",
+    )
+    parser.add_argument(
         "--contact-method",
         default=None,
         help="AnySole-private contact-label scheme for contact_gt, and the model-dir "
@@ -246,6 +253,37 @@ def _parse_config_values(value: Optional[str]) -> List[int]:
     return list(dict.fromkeys(mode_to_config[item] for item in modes))
 
 
+def _sweep_targets(model_name_csv: str, which: str = "last") -> List[tuple[Optional[str], Optional[str], Path]]:
+    """--sweep: every variant ckpt under results/AnySole/<model>_*/.
+
+    Contact method is read from the dir name (<model>_<contact>) and
+    --contact-method is bypassed; variant subdirs without the requested
+    checkpoint are skipped with a warning.  Returns (modal, contact_method,
+    ckpt) triples sorted by path.
+    """
+    anysole_root = Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results"))) / "AnySole"
+    ckpt_name = "ckpt_last.pt" if which == "last" else "ckpt_best.pt"
+    targets: List[tuple[Optional[str], Optional[str], Path]] = []
+    for model_name in [item.strip() for item in model_name_csv.split(",") if item.strip()]:
+        for contact_dir in sorted(
+            p for p in anysole_root.glob("%s_*" % model_name) if p.is_dir()
+        ):
+            contact = contact_dir.name[len(model_name) + 1:]
+            for variant_dir in sorted(p for p in contact_dir.iterdir() if p.is_dir()):
+                ckpt = variant_dir / "checkpoints" / ckpt_name
+                if ckpt.is_file():
+                    targets.append((None, contact, ckpt))
+                else:
+                    print("sweep %s/%s: no %s, skipped"
+                          % (contact_dir.name, variant_dir.name, ckpt_name))
+    if not targets:
+        raise ValueError(
+            "--sweep found no %s checkpoints under results/AnySole/%s_*"
+            % (ckpt_name, model_name_csv)
+        )
+    return targets
+
+
 def _discover_model_targets(
     modal: Optional[str], contact_method: Optional[str]
 ) -> List[tuple[str, str, Path]]:
@@ -275,8 +313,7 @@ def _discover_model_targets(
             ):
                 break
             ckpt = child / "checkpoints" / "ckpt_last.pt"
-            if ckpt.is_file():
-                targets.append((name, contact, ckpt))
+            if ckpt.is_file():                targets.append((name, contact, ckpt))
             else:
                 print("skip %s: missing %s" % (child.name, ckpt))
             break
@@ -408,6 +445,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         targets: List[tuple[Optional[str], Optional[str], Path]] = [
             (args.modal, args.contact_method, args.ckpt)
         ]
+    elif args.model_name is not None and args.sweep:
+        if args.split != "test":
+            print("--sweep ignores --split; using test")
+            args.split = "test"
+        targets = _sweep_targets(args.model_name, which=args.which)
     elif args.model_name is not None and args.contact_method is not None:
         if args.variant and args.model_name is None:
             raise ValueError("--variant requires --model-name (the dir identifier, e.g. V3_4a)")

@@ -461,7 +461,7 @@ def render_session(traj_path: Path, session_id: str, config_id: str, row: dict,
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize root trajectories (pred vs GT) as Test3 outputs, SMPL/BVH auto-detected.")
-    cli_common.add_common_args(parser, seq_root=True, modal=True, variant=True, contact_method=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R3Test_traj" / "AnySole")
+    cli_common.add_common_args(parser, seq_root=True, modal=True, variant=True, contact_method=True, sweep=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R3Test_traj" / "AnySole")
     parser.add_argument("--no-png", action="store_true", help="Skip the static per-session figure (not controlled by --gen).")
     parser.add_argument(
         "--auto",
@@ -612,11 +612,14 @@ def run_compare(args: argparse.Namespace) -> int:
                                  split_csv=split_csv, evaluable_only=True)
     }
 
-    model_dirs = [
-        cli_common.anysole_model_dir(modal, contact_method, getattr(args, "variant", None))
-        for modal in cli_common.split_csv_arg(args.modal)
-        for contact_method in cli_common.split_csv_arg(args.contact_method)
-    ]
+    if getattr(args, "sweep", False):
+        model_dirs = cli_common.sweep_anysole_model_dirs(args.modal)
+    else:
+        model_dirs = [
+            cli_common.anysole_model_dir(modal, contact_method, getattr(args, "variant", None))
+            for modal in cli_common.split_csv_arg(args.modal)
+            for contact_method in cli_common.split_csv_arg(args.contact_method)
+        ]
     for mode in modes:
         out_mode = out_dir / mode
         baselines = list(registry.get(mode, []))
@@ -755,11 +758,17 @@ def main() -> int:
 
     # Jobs: (pred_root, session_out_root, config_id); config_id "" = baseline.
     jobs: list[tuple[Path, Path, str]] = []
-    for modal in cli_common.split_csv_arg(args.modal):
-        for contact_method in cli_common.split_csv_arg(args.contact_method):
-            model_dir = cli_common.anysole_model_dir(modal, contact_method, getattr(args, "variant", None))
+    if getattr(args, "sweep", False):
+        model_dirs = cli_common.sweep_anysole_model_dirs(args.modal)
+        for model_dir in model_dirs:
             for config_id in cli_common.split_csv_arg(args.config_id):
                 jobs.append((PRED_ROOT / model_dir / "predictions", out_dir / model_dir / config_id, config_id))
+    else:
+        for modal in cli_common.split_csv_arg(args.modal):
+            for contact_method in cli_common.split_csv_arg(args.contact_method):
+                model_dir = cli_common.anysole_model_dir(modal, contact_method, getattr(args, "variant", None))
+                for config_id in cli_common.split_csv_arg(args.config_id):
+                    jobs.append((PRED_ROOT / model_dir / "predictions", out_dir / model_dir / config_id, config_id))
     if args.auto:
         for rel in discover_baseline_dirs(cli_common.RESULTS_ROOT):
             jobs.append((cli_common.RESULTS_ROOT / rel / "predictions", out_dir.parent / rel / "gen", "gen"))

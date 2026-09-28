@@ -17,6 +17,11 @@ fseries 文件与已取消的 `*_fseries_seedN.json` 归档。
 - `T_mse` 确定性派生：`T_mse = T_rmse²`（2026-09-27 V2T 层级叶键，
   与 FPP-Net 原生 pressure MSE 同名；纯平方关系，无需重跑 eval）。
 
+阶段 2 同时做展示键名/顺序同步（2026-09-28 裁定）：明细与 brief 的
+metrics 块套用 eval_protocol 的 display 映射（`mpjpe_mm` -> `MPJPE`、
+`pa_mpjpe_mm` -> `PA-MPJPE` 等）并按固定顺序写出（主指标 PA-MPJPE 排最
+前）。已带展示键名的文件会先还原为内部键再重新派生，保证幂等。
+
 brief 由迁移后的明细经 summary_metrics 白名单重新派生：contact 4 键、
 shape_vertex_std_mm、foot_sliding_vertex_mm 等诊断不再进入 brief，
 V2T 组为层级结构（brief 6 键，叶 4 键只留在明细）。
@@ -32,7 +37,13 @@ import argparse
 import json
 from pathlib import Path
 
-from anysole.utils.eval_protocol import DIAGNOSTIC_KEYS, summary_metrics
+from anysole.utils.eval_protocol import (
+    DIAGNOSTIC_KEYS,
+    INVERSE_DISPLAY_NAMES,
+    display_metrics,
+    order_payload,
+    summary_metrics,
+)
 
 # 旧键 -> 新键（纯改名或改标，语义说明见 MIGRATION_NOTES）。
 KEY_MIGRATION = {
@@ -74,6 +85,26 @@ def migrate_metric_keys(metrics: dict) -> dict[str, list[str]]:
     return record
 
 
+def restore_display_names(metrics: dict) -> bool:
+    """Convert serialized display names back to internal snake_case keys.
+
+    Returns True when any display name was present (the file already uses
+    the display naming).  Idempotent: files written by the current protocol
+    pass through unchanged in the internal space.
+    """
+    found = False
+    if not isinstance(metrics, dict):
+        return found
+    for block in metrics.values():
+        if not isinstance(block, dict):
+            continue
+        for display, internal in INVERSE_DISPLAY_NAMES.items():
+            if display in block and internal not in block:
+                block[internal] = block.pop(display)
+                found = True
+    return found
+
+
 def derive_t_mse(metrics: dict) -> list[str]:
     """Derive ``T_mse = T_rmse^2`` into any group block that has T_rmse
     but lacks T_mse (V2T hierarchy leaf key; pure square, no re-run).
@@ -110,7 +141,9 @@ def _migrate_pair(detail_path: Path, brief_path: Path, dry_run: bool) -> None:
     if not isinstance(metrics, dict) or not metrics:
         print("skip %s: no metrics" % detail_path)
         return
-    record = migrate_metric_keys(metrics)
+    # 已带展示键名的文件先还原内部键；旧式键名迁移只对历史文件生效。
+    is_display = restore_display_names(metrics)
+    record = {} if is_display else migrate_metric_keys(metrics)
     t_mse_groups = derive_t_mse(metrics)
     if t_mse_groups:
         record.setdefault("T_mse", t_mse_groups)
@@ -128,6 +161,9 @@ def _migrate_pair(detail_path: Path, brief_path: Path, dry_run: bool) -> None:
     detail["diagnostic_fields"] = sorted(
         existing_diagnostics | (present & set(DIAGNOSTIC_KEYS))
     )
+    # 展示键名 + 固定顺序同步（明细与 brief 同一口径，主指标排最前）。
+    detail["metrics"] = display_metrics(metrics)
+    detail = order_payload(detail)
     brief = {key: value for key, value in detail.items() if key != "metrics"}
     brief["metrics"] = summary_metrics(metrics)
     if dry_run:
@@ -135,7 +171,7 @@ def _migrate_pair(detail_path: Path, brief_path: Path, dry_run: bool) -> None:
             detail_path, brief_path.name,
             " [keys: %s]" % ", ".join(record) if record else " [keys already current]"))
         return
-    _write_json(detail_path, detail, sort_keys=True)
+    _write_json(detail_path, detail, sort_keys=False)
     _write_json(brief_path, brief, sort_keys=False)
     print("migrated %s (+ %s)%s" % (
         detail_path, brief_path.name,
@@ -166,6 +202,9 @@ def main(argv=None) -> int:
             continue
         split = str(detail.get("split") or detail_path.stem.replace("_fseries", ""))
         new_detail = detail_path.with_name("%s.json" % split)
+        restore_display_names(metrics)
+        detail["metrics"] = display_metrics(metrics)
+        detail = order_payload(detail)
         brief = {key: value for key, value in detail.items() if key != "metrics"}
         brief["metrics"] = summary_metrics(metrics)
         brief_path = detail_path.with_name("%s_brief.json" % split)
@@ -174,7 +213,7 @@ def main(argv=None) -> int:
             print("would write %s (+ %s) from %s"
                   % (new_detail, brief_path.name, detail_path))
         else:
-            _write_json(new_detail, detail, sort_keys=True)
+            _write_json(new_detail, detail, sort_keys=False)
             _write_json(brief_path, brief, sort_keys=False)
             detail_path.unlink()
             print("wrote %s (+ %s)" % (new_detail, brief_path.name))

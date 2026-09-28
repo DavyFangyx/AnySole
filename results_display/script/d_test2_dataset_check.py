@@ -388,7 +388,7 @@ def main() -> int:
         if metrics_path.is_file():
             payload = json.loads(metrics_path.read_text(encoding="utf-8"))
             vt2m = (payload.get("metrics") or {}).get("VT2M") or {}
-            model_mpjpe = vt2m.get("mpjpe_mm")
+            model_mpjpe = vt2m.get("MPJPE")
             if model_mpjpe is not None:
                 b1 = baseline["B1_mean_pose_gt_root_MPJPE_mm"]
                 print("  model VT2M MPJPE (%s): %.1f mm" % (metrics_path, model_mpjpe))
