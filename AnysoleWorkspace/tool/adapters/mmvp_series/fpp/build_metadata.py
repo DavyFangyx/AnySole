@@ -18,6 +18,16 @@ count).  The retired 4x12 96-cell sum is not used.  ``sub_info`` records the
 weight unit, computation domain, standing frame id, standing-frame source
 hash and the sigmoid saturation/dynamic-range report of the standing frame.
 
+V3 double-support fix (2026-09-28): the standing frame is now the
+min-velocity frame among **double-support** frames -- valid, non-fake frames
+where each foot's masked sum reaches ``DOUBLE_SUPPORT_FRACTION`` (0.15) of
+that foot's own session-wide maximum masked sum.  The previous min-velocity
+pick over all frames is gone: it landed on single-support frames for
+S8/S12/S13 (one insole at 1-4% of the other), which made the subject
+pressure scale a one-foot measurement.  A session with no double-support
+frame falls back to the old criterion and reports
+``standing_selection: single_support_fallback``.
+
 Only valid five-frame windows enter the split tree: FPP-Net reads
 ``frame-2..frame+2``, so the first/last two frames and any window touching a
 ``valid=0`` or ``fake=1`` shared frame are excluded.
@@ -34,7 +44,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[5]
 WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 MANIFEST = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
 SPLITS = WORKSPACE / "protocol/splits/default/splits.csv"
@@ -44,11 +54,56 @@ FACTS_ROOT = WORKSPACE / "shared/facts/sessions/cam3"
 ESSENTIALS = REPO_ROOT / "Baselines/VP-MoCap/FPP-Net/essentials/insole2cont"
 ADAPTER_VERSION = "adapter_v1"
 
+# V3 double-support standing-frame threshold: each foot must reach at least
+# this fraction of its own session-wide maximum masked sum (2026-09-28).
+DOUBLE_SUPPORT_FRACTION = 0.15
+
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from Baselines.utils.motion_io import load_motion  # noqa: E402
+from AnysoleWorkspace.tool._bvh_aligner_pose import parse_bvh_aligner  # noqa: E402
 from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# BVH reader (local, in-repo)
+#
+# ``Baselines/utils/motion_io.load_motion`` was the canonical motion reader, but
+# the 2026-09-28 two-repo split halted the utils migration: ``Baselines.utils``
+# is absent from the workspace, so importing it here would break the metadata
+# build for reasons unrelated to the adapter.  ``build_metadata`` needs only the
+# BVH branch of that reader (joint positions resampled onto the canonical frame
+# grid), which is reproduced below with the in-repo BVH parser
+# ``AnysoleWorkspace/tool/_bvh_aligner_pose.py``.  The three steps (parse with
+# ``trim_leading_seconds=0``, cm->m, linear resample) and their order/casting are
+# identical to the reference reader, so ``aligned_bvh_speed`` values are
+# unchanged.
+# ---------------------------------------------------------------------------
+
+
+def joints_to_meters(joints: np.ndarray) -> np.ndarray:
+    """cm->m when the parsed skeleton is centimetre-scaled (reference rule)."""
+    pts = np.asarray(joints, dtype=np.float32)
+    return pts * 0.01 if pts.size and float(np.ptp(pts[0], axis=0).max()) > 5.0 else pts
+
+
+def interp_joints(joints: np.ndarray, frame_time: float,
+                  query_t: np.ndarray) -> np.ndarray:
+    """Linear per-joint per-axis resample of a BVH onto ``query_t``."""
+    src_t = np.arange(joints.shape[0], dtype=np.float64) * float(frame_time)
+    clipped = np.clip(np.asarray(query_t, dtype=np.float64), src_t[0], src_t[-1])
+    out = np.empty((len(clipped),) + joints.shape[1:], dtype=np.float64)
+    for joint_i in range(joints.shape[1]):
+        for axis_i in range(3):
+            out[:, joint_i, axis_i] = np.interp(
+                clipped, src_t, joints[:, joint_i, axis_i])
+    return out.astype(np.float32)
+
+
+def load_bvh_joints(path: Path, query_t: np.ndarray) -> np.ndarray:
+    """BVH joint positions (T,J,3) on ``query_t`` seconds (metres)."""
+    parsed = parse_bvh_aligner(path, trim_leading_seconds=0.0)
+    return joints_to_meters(
+        interp_joints(parsed["joints"], parsed["frame_time"], query_t))
 
 
 def read_manifest() -> dict[str, dict]:
@@ -125,7 +180,7 @@ def aligned_bvh_speed(row: dict, n: int) -> np.ndarray:
         + np.arange(n, dtype=np.float64) / fps
         - float(row.get("offset_s") or 0.0)
     )
-    joints = np.asarray(load_motion(bvh, query_t=query_t)["joints"], dtype=np.float32)
+    joints = np.asarray(load_bvh_joints(bvh, query_t), dtype=np.float32)
     if joints.shape[0] != n:
         raise ValueError(f"BVH alignment length mismatch for {row['session_id']}: {joints.shape} vs {n}")
     speed = np.zeros(n, dtype=np.float32)
@@ -141,22 +196,72 @@ def insole_mask() -> tuple[np.ndarray, np.ndarray]:
     return mask_l, mask_r
 
 
+def masked_foot_sums(date: str, subject: str, sid: str, frames: np.ndarray,
+                     mask_l: np.ndarray, mask_r: np.ndarray
+                     ) -> tuple[np.ndarray, np.ndarray]:
+    """Per-frame masked insole sums for both feet over ``frames``.
+
+    The sums are the exact V3 weight domain (mapped 31x11 cells under the
+    FPP-Net insole masks), so a frame is "double support" when neither foot
+    falls off its own session scale.
+    """
+    insole_dir = TACTILE_ROOT / date / subject / sid / "insole"
+    left = np.zeros(len(frames), dtype=np.float64)
+    right = np.zeros(len(frames), dtype=np.float64)
+    for k, frame in enumerate(frames):
+        insole = np.load(insole_dir / f"{int(frame):06d}.npy")
+        if insole.shape != (2, 31, 11):
+            raise ValueError(f"bad public insole shape for {sid}: {insole.shape}")
+        left[k] = float(np.sum(insole[0][mask_l > 0]))
+        right[k] = float(np.sum(insole[1][mask_r > 0]))
+    return left, right
+
+
 def choose_standing(row: dict, mask_l: np.ndarray, mask_r: np.ndarray) -> dict:
-    """Select the standing frame and compute the V3 pixel weight.
+    """Select the double-support standing frame and compute the V3 pixel weight.
 
     The weight is the sum over the mapped 31x11 insole mask cells (both
     feet) at the standing frame -- the same domain FPP-Net's sigmoidNorm
     divides by ``pixel_num``.
+
+    2026-09-28 (V3 pixel-weight fix, 11 号文档 §10 #2): the frame must carry
+    **both feet**.  A min-velocity frame alone is often a single-support
+    frame (one insole nearly unloaded: S8/S12/S13 had one foot at ~1-4% of
+    the other), which makes the subject pressure scale a one-foot
+    measurement.  Candidates are therefore restricted to frames where each
+    foot's masked sum reaches at least ``DOUBLE_SUPPORT_FRACTION`` of that
+    foot's session-wide maximum masked sum; the min-velocity frame among
+    those is selected.  The old single-support pick is not kept.  If no
+    frame qualifies (pathological session), the old criterion is used and
+    ``standing_selection`` records ``single_support_fallback``.
     """
     sid = row["session_id"]
     date = session_date(row)
     _, valid, fake = shared_flags(row)
     n = len(valid)
     speed = aligned_bvh_speed(row, n)
-    candidates = np.flatnonzero(valid & ~fake)
+    keep = valid & ~fake
+    candidates = np.flatnonzero(keep)
     if candidates.size == 0:
-        raise ValueError(f"no valid double-foot-contact frame for {sid}")
-    frame = int(candidates[np.argmin(speed[candidates])])
+        raise ValueError(f"no valid frame for {sid}")
+
+    left_sums, right_sums = masked_foot_sums(
+        date, row["subject_id"], sid, candidates, mask_l, mask_r)
+    left_max = float(left_sums.max())
+    right_max = float(right_sums.max())
+    left_threshold = DOUBLE_SUPPORT_FRACTION * left_max
+    right_threshold = DOUBLE_SUPPORT_FRACTION * right_max
+    double_support = (left_sums >= left_threshold) & (right_sums >= right_threshold)
+    if double_support.any():
+        pool = candidates[double_support]
+        selection = "double_support"
+    else:
+        # pathological: no frame loads both feet -- keep the session usable
+        # and make the degradation explicit instead of failing the build
+        pool = candidates
+        selection = "single_support_fallback"
+    frame = int(pool[np.argmin(speed[pool])])
+
     insole = np.load(
         TACTILE_ROOT / date / row["subject_id"] / sid / "insole"
         / f"{frame:06d}.npy")
@@ -175,10 +280,17 @@ def choose_standing(row: dict, mask_l: np.ndarray, mask_r: np.ndarray) -> dict:
     sigmoid = 1.0 / (1.0 + np.exp(-ratio))
     report = {
         "session_id": sid,
-        "standing_frame": frame,
+        "standing_frame_id": frame,
         "standing_frame_visual_time_s": float(frame / float(row.get("target_fps") or 40.0)),
+        "standing_selection": selection,
         "speed_mps": float(speed[frame]),
         "candidate_count": int(candidates.size),
+        "double_support_fraction": DOUBLE_SUPPORT_FRACTION,
+        "double_support_candidate_count": int(double_support.sum()),
+        "left_session_max": left_max,
+        "right_session_max": right_max,
+        "left_threshold": left_threshold,
+        "right_threshold": right_threshold,
         "weight": weight,
         "pixel_num": pixel_num,
         "mean_press_per_pixel": mean_press,
@@ -239,11 +351,14 @@ def build_metadata(force: bool = False) -> dict:
                            "InsoleModule.sigmoidNorm",
             "weight_domain": "shared mmvp_31x11 insole mask; "
                              f"pixel_num={report['pixel_num']}",
-            "standing_frame_id": report["standing_frame"],
+            "standing_frame_id": report["standing_frame_id"],
+            "standing_selection": report["standing_selection"],
+            "standing_left_total": report["left_total"],
+            "standing_right_total": report["right_total"],
             "source_hash": sha256_file(
                 TACTILE_ROOT / date / row["subject_id"]
                 / row["session_id"] / "insole"
-                / f"{report['standing_frame']:06d}.npy"),
+                / f"{report['standing_frame_id']:06d}.npy"),
             "adapter_version": ADAPTER_VERSION,
         }
         standing_reports[subject] = {**report, "date": date}
@@ -299,6 +414,37 @@ def build_metadata(force: bool = False) -> dict:
         "frame_counts": {phase: sum(len(frames) for subjects in dates.values() for seqs in subjects.values() for frames in seqs.values()) for phase, dates in tree.items()},
         "no_temporal5_window_sessions": sorted(no_temporal_window_sessions),
         "standing": standing_reports,
+        "standing_selection": {
+            "rule": "min-BVH-velocity frame among valid & ~fake frames whose "
+                    "masked insole sum reaches DOUBLE_SUPPORT_FRACTION of that "
+                    "foot's session-wide maximum masked sum (both feet)",
+            "double_support_fraction": DOUBLE_SUPPORT_FRACTION,
+            "subjects": {subject: r["standing_selection"]
+                         for subject, r in sorted(standing_reports.items())},
+            "subjects_single_support_fallback": sorted(
+                subject for subject, r in standing_reports.items()
+                if r["standing_selection"] != "double_support"),
+            "per_subject_standing": {
+                subject: {
+                    "session_id": r["session_id"],
+                    "date": r["date"],
+                    "standing_frame_id": r["standing_frame_id"],
+                    "weight": r["weight"],
+                    "left_total": r["left_total"],
+                    "right_total": r["right_total"],
+                    "left_session_max": r["left_session_max"],
+                    "right_session_max": r["right_session_max"],
+                    "left_total_fraction_of_max": (
+                        r["left_total"] / r["left_session_max"]
+                        if r["left_session_max"] else None),
+                    "right_total_fraction_of_max": (
+                        r["right_total"] / r["right_session_max"]
+                        if r["right_session_max"] else None),
+                    "standing_selection": r["standing_selection"],
+                }
+                for subject, r in sorted(standing_reports.items())
+            },
+        },
         "weight_unit": "raw shared mmvp 31x11 insole values summed over the "
                        "insole mask cells; no kg conversion",
         "sigmoid_saturation_summary": {
@@ -322,7 +468,8 @@ def main() -> None:
     report = build_metadata(force=args.force)
     print(json.dumps({k: report[k] for k in (
         "split_path", "sub_info_paths", "session_counts", "frame_counts",
-        "no_temporal5_window_sessions", "sigmoid_saturation_summary")},
+        "no_temporal5_window_sessions", "standing_selection",
+        "sigmoid_saturation_summary")},
         ensure_ascii=False, indent=2))
 
 

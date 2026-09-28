@@ -2,8 +2,8 @@
 """Prepare the shared MMVP directory layout without regenerating insole data.
 
 DEPRECATED (2026-09-28): superseded by the per-model adapters —
-``tool/adapters/FPP-Net/build_inputs.py``、``tool/adapters/PoseTransOpt/build_inputs.py``、
-``tool/adapters/pressure_toolkit/build_inputs.py``。本工具保留只读兼容，不再进入
+``tool/adapters/mmvp_series/fpp/build_inputs.py``、``tool/adapters/mmvp_series/posetransopt/build_inputs.py``、
+``tool/adapters/mmvp_series/pressure_tookit/build_inputs.py``。本工具保留只读兼容，不再进入
 README 主命令链；insole 的唯一公共表示是
 ``shared/representations/tactile/mmvp_31x11/v1``。
 

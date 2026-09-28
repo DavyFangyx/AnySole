@@ -76,7 +76,9 @@ def check_mmvp_artifacts(session: str) -> dict:
     return {"session": session, "frames": n, "insole_shape": [31, 11],
             "joined_frames": int(join_data.get("joined_count", 0)),
             "depth_ready": (toolkit / "depth").is_dir(),
-            "keypoints_ready": (toolkit / "input" / subject / session / "keypoints").is_dir()}
+            # 关键点暂存树在 adapter 根下的 input/，不在 images/<date>/... 之下
+            "keypoints_ready": (WORKSPACE / "model_inputs/pressure_toolkit/v1/input"
+                                / subject / session / "keypoints").is_dir()}
 
 
 def check_fpp_metadata() -> dict:
@@ -122,12 +124,12 @@ def check_motionpro_cache(session: str) -> dict:
 
 def compile_sources() -> int:
     paths = [
-        "AnysoleWorkspace/tool/adapters/FPP-Net/build_inputs.py",
-        "AnysoleWorkspace/tool/adapters/FPP-Net/build_metadata.py",
-        "AnysoleWorkspace/tool/adapters/FPP-Net/run_rtmpose.py",
-        "AnysoleWorkspace/tool/adapters/PoseTransOpt/build_inputs.py",
-        "AnysoleWorkspace/tool/adapters/PoseTransOpt/run_cliff.py",
-        "AnysoleWorkspace/tool/adapters/pressure_toolkit/build_inputs.py",
+        "AnysoleWorkspace/tool/adapters/mmvp_series/fpp/build_inputs.py",
+        "AnysoleWorkspace/tool/adapters/mmvp_series/fpp/build_metadata.py",
+        "AnysoleWorkspace/tool/adapters/mmvp_series/keypoints/run_rtmpose.py",
+        "AnysoleWorkspace/tool/adapters/mmvp_series/posetransopt/build_inputs.py",
+        "AnysoleWorkspace/tool/adapters/mmvp_series/cliff/run_cliff.py",
+        "AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/build_inputs.py",
         "AnysoleWorkspace/tool/adapters/Step2Motion/build_gait.py",
         "AnysoleWorkspace/tool/export_baseline_motion.py",
         "Baselines/pressure_tookit/main_singleview.py",

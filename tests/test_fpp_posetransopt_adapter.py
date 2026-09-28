@@ -88,13 +88,16 @@ def make_dataset(phase: str = "test"):
 
 
 def import_adapter(relative: str, name: str):
-    """Import one adapter module (the adapter dirs contain hyphens)."""
-    import importlib.util
-    path = WORKSPACE / "tool/adapters" / relative
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    """Import one adapter module from the merged MMVP adapter package.
+
+    ``relative`` is a path below ``tool/adapters/mmvp_series`` (kept as a
+    string so the call sites stay readable); the modules are imported
+    through the canonical package path so their package-relative imports
+    resolve.
+    """
+    import importlib
+    module_path = "AnysoleWorkspace.tool.adapters.mmvp_series." + relative
+    return importlib.import_module(module_path)
 
 
 def t1_dataset_one_batch() -> None:
@@ -240,7 +243,7 @@ def t5_contact_loss_one_step() -> None:
 
 
 def t6_join_gap_sessions() -> None:
-    pt_build = import_adapter("PoseTransOpt/build_inputs.py", "pt_build_inputs")
+    pt_build = import_adapter("posetransopt.build_inputs", "pt_build_inputs")
     rows = manifest_rows()
     checked = 0
     for sid in GAP_SESSIONS:
@@ -307,7 +310,7 @@ def t7_cliff_contract(split: str) -> None:
 
 
 def t8_v2t_export(split: str) -> None:
-    fpp_export = import_adapter("FPP-Net/export_v2t.py", "fpp_export_v2t")
+    fpp_export = import_adapter("fpp.export_v2t", "fpp_export_v2t")
     from AnysoleWorkspace.tool.validate_baseline_exports import validate_v2t
     rows = manifest_rows()
     session = SMOKE_SESSION
@@ -343,7 +346,7 @@ def t9_v2m_smoke(split: str) -> None:
          "--max-frames", "30", "--no-visualization", "--force",
          "--hydra-root", "/tmp/fpp_posetransopt_smoke"],
         check=True)
-    vp_export = import_adapter("PoseTransOpt/export_v2m.py", "vp_export_v2m")
+    vp_export = import_adapter("posetransopt.export_v2m", "vp_export_v2m")
     from AnysoleWorkspace.tool.validate_baseline_exports import validate_motion
     result = vp_export.export_session(rows[session], force=True)
     print(result)

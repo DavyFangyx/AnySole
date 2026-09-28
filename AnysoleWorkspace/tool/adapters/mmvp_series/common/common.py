@@ -15,7 +15,7 @@ import numpy as np
 
 from AnysoleWorkspace.tool.workspace import resolve_uri
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[5]
 WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 MANIFEST = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
 SPLITS = WORKSPACE / "protocol/splits/default/splits.csv"

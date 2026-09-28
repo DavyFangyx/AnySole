@@ -110,29 +110,30 @@ python3 AnysoleWorkspace/tool/adapters/Step2Motion/build_gait.py
 
 输出位于 `model_inputs/Step2Motion/adapter_v1/{gait, gait_noimu}/`（含 train/val/test `.pt`、train-only normalizer、`split_sessions.json`）。
 
-### pressure_toolkit / FPP-Net / PoseTransOpt
+### MMVP 方法族（FPP-Net / PoseTransOpt / pressure_toolkit）
+
+数据端已合并为 `AnysoleWorkspace/tool/adapters/mmvp_series/`（一次生产、三处消费）。
 
 ```bash
 # 生成 pressure_toolkit/FPP-Net 共用的 MMVP 31×11 过程表示
 python3 AnysoleWorkspace/tool/build_shared.py --mmvp-only
+# 提取 HALPE-26 关键点（写 shared/frontends/rtmpose_halpe26/v1，并刷新两模型树软链接）
+python3 AnysoleWorkspace/tool/adapters/mmvp_series/keypoints/run_rtmpose.py --split all
+# 生成 CLIFF 单人视觉初始化（写 shared/frontends/cliff_hr48/v1 + pressure_tookit 初值）
+python3 AnysoleWorkspace/tool/adapters/mmvp_series/cliff/run_cliff.py --split all --backbone hr48
+# 用 DepthPro 生成深度图（写 shared/frontends/depthpro/v1）
+python3 -m AnysoleWorkspace.tool.adapters.mmvp_series.depth.rgb2depth --batch-size 4 --skip-existing
 # 生成 FPP-Net 模型输入树（RGB 链接 + adapter manifest）
-python3 AnysoleWorkspace/tool/adapters/FPP-Net/build_inputs.py --split all
-# 提取 FPP-Net HALPE-26 关键点
-python3 AnysoleWorkspace/tool/adapters/FPP-Net/run_rtmpose.py --split all
+python3 AnysoleWorkspace/tool/adapters/mmvp_series/fpp/build_inputs.py --split all
 # 生成 FPP-Net temporal-5 split 和 subject metadata
-python3 AnysoleWorkspace/tool/adapters/FPP-Net/build_metadata.py --force
+python3 AnysoleWorkspace/tool/adapters/mmvp_series/fpp/build_metadata.py --force
 # 生成 PoseTransOpt 模型输入树（join manifest 为对齐权威）
-python3 AnysoleWorkspace/tool/adapters/PoseTransOpt/build_inputs.py --split all
-# 生成 CLIFF 单人视觉初始化
-python3 AnysoleWorkspace/tool/adapters/PoseTransOpt/run_cliff.py --split all --backbone hr48
+python3 AnysoleWorkspace/tool/adapters/mmvp_series/posetransopt/build_inputs.py --split all
 # 生成 pressure_toolkit 上游原生目录契约
-python3 AnysoleWorkspace/tool/adapters/pressure_toolkit/build_inputs.py --split all
-# 用 DepthPro 生成深度图（直接写入 pressure_toolkit v1 树）
-python3 Baselines/pressure_tookit/data_prep/rgb2depth.py \
-  --images-root model-input://pressure_toolkit/v1/images --batch-size 4 --skip-existing
+python3 AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/build_inputs.py --split all
 ```
 
-输出分别位于 `model_inputs/FPP-Net/adapter_v1/`、`model_inputs/PoseTransOpt/adapter_v1/`、`model_inputs/pressure_toolkit/v1/` 和 `shared/frontends/`；31×11 压力统一读取 `shared/representations/tactile/mmvp_31x11/v1/`。
+输出分别位于 `model_inputs/FPP-Net/adapter_v1/`、`model_inputs/PoseTransOpt/adapter_v1/`、`model_inputs/pressure_toolkit/v1/` 和 `shared/frontends/`（`rtmpose_halpe26/v1`、`cliff_hr48/v1`、`depthpro/v1`、`human_masks/sam31/v1`）；31×11 压力统一读取 `shared/representations/tactile/mmvp_31x11/v1/`。
 
 MMVP 31×11 是 pressure_toolkit/FPP-Net 共用的过程表示，不被 AnySole 或 Step2Motion 读取。
 

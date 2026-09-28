@@ -72,27 +72,41 @@ def build_session(session: str, row: dict, *, force: bool) -> tuple[int, int, di
     if not mask_rows:
         raise ValueError(f"no camera-3 mask rows for {session}")
     mask_times = np.asarray([float(item["visual_time_s"]) for item in mask_rows], dtype=np.float64)
+    order = np.argsort(mask_times)
+    mask_rows_sorted = [mask_rows[i] for i in order]
+    mask_times_sorted = mask_times[order]
     bbox_norm = np.zeros((len(frame_ids), 4), dtype=np.float32)
     mask_area = np.zeros(len(frame_ids), dtype=np.int64)
     valid = np.zeros(len(frame_ids), dtype=np.uint8)
     index_rows: list[dict] = []
-    for source in mask_rows:
-        index = int(source.get("visual_frame", -1))
-        if not 0 <= index < len(frame_ids):
-            continue
+    for i, time_s in enumerate(visual):
+        # Time-based nearest-neighbour join (00 总控 §2.2: session + cam3 +
+        # visual_time_s, tolerance 20ms).  The raw csv ``visual_frame`` index
+        # is offset by the session's raw start index and must not be used for
+        # pairing; the real residual is recorded as time_error_s so the
+        # pressure_toolkit ±20ms contract check can pass on real numbers.
+        pos = int(np.searchsorted(mask_times_sorted, time_s))
+        candidates = [p for p in (pos - 1, pos) if 0 <= p < len(mask_times_sorted)]
+        if not candidates:
+            continue  # no matchable row -> frame stays invalid, no index row
+        best = min(candidates, key=lambda p: abs(mask_times_sorted[p] - time_s))
+        error = float(abs(mask_times_sorted[best] - time_s))
+        if error > TOLERANCE_S:
+            continue  # contract: >20ms -> invalid frame, no fallback row
+        source = mask_rows_sorted[best]
         bbox = np.asarray([float(source.get(key, 0.0)) for key in ("bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2")], dtype=np.float32)
-        mask_area[index] = int(float(source.get("mask_area", 0) or 0))
-        bbox_norm[index] = bbox
+        mask_area[i] = int(float(source.get("mask_area", 0) or 0))
+        bbox_norm[i] = bbox
         # Direct-use mode: the CSV row is authoritative, including zero bbox
         # rows.  Shared validity remains the only frame-level gate here.
-        valid[index] = shared_valid[index]
+        valid[i] = shared_valid[i]
         index_rows.append({
-            "session": session, "camera": "cam3", "frame_id": int(frame_ids[index]),
-            "visual_time_s": float(visual[index]), "source_visual_time_s": float(source.get("visual_time_s", 0.0)),
-            "time_error_s": None, "image_path": source.get("image_path", ""),
-            "mask_path": source.get("mask_path", ""), "mask_area": int(mask_area[index]),
-            "bbox_xyxy_norm": bbox_norm[index].tolist(),
-            "shared_valid": int(shared_valid[index]), "valid": int(valid[index]),
+            "session": session, "camera": "cam3", "frame_id": int(frame_ids[i]),
+            "visual_time_s": float(visual[i]), "source_visual_time_s": float(source.get("visual_time_s", 0.0)),
+            "time_error_s": error, "image_path": source.get("image_path", ""),
+            "mask_path": source.get("mask_path", ""), "mask_area": int(mask_area[i]),
+            "bbox_xyxy_norm": bbox_norm[i].tolist(),
+            "shared_valid": int(shared_valid[i]), "valid": int(valid[i]),
             "source_status": source.get("status", ""),
         })
     output.mkdir(parents=True, exist_ok=True)
@@ -108,7 +122,7 @@ def build_session(session: str, row: dict, *, force: bool) -> tuple[int, int, di
                         source_mode=np.asarray("direct_csv_bbox"))
     (output / "source.json").write_text(json.dumps({"mask_root": str(MASK_ROOT), "source_hashes": source_hashes}, indent=2) + "\n", encoding="utf-8")
     write_artifact(output, schema_version="shared.frontend.human_mask_bbox.v1", producer="build_human_mask_frontend.py", repository_root=ROOT,
-                   parameters={"mask_pipeline": "sam31", "camera": "cam3", "match": "csv.visual_frame", "bbox_source": "masks_index.csv"},
+                   parameters={"mask_pipeline": "sam31", "camera": "cam3", "match": "visual_time_s nearest <=20ms", "bbox_source": "masks_index.csv"},
                    source_artifacts=[f"external://rgb_human_masks/{session}/masks_index.csv"], source_hashes=source_hashes,
                    frame_id_min=0, frame_id_max=len(frame_ids) - 1, frame_count=len(frame_ids),
                    consumers=["CLIFF", "pressure_toolkit"])
@@ -139,7 +153,8 @@ def main() -> int:
     finally:
         index_handle.close()
     write_artifact(FRONTEND_ROOT, schema_version="shared.frontend.human_masks.sam31.v1", producer="build_human_mask_frontend.py", repository_root=ROOT,
-                   parameters={"session_count": len(wanted), "camera": "cam3", "bbox_source": "masks_index.csv", "mode": "direct_csv_bbox"},
+                   parameters={"session_count": len(wanted), "camera": "cam3", "bbox_source": "masks_index.csv",
+                               "mode": "direct_csv_bbox", "match": "visual_time_s nearest <=20ms (time_error_s recorded)"},
                    source_artifacts=["external://rgb_human_masks"], frame_id_min=0, frame_id_max=None, frame_count=total,
                    consumers=["CLIFF", "pressure_toolkit"])
     print(f"wrote {index_path}: frames={total} valid_bbox={valid_total}")

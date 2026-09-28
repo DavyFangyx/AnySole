@@ -40,10 +40,10 @@ for path in (REPO_ROOT, TOOLKIT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from AnysoleWorkspace.tool.adapters.pressure_toolkit import floor as floor_mod  # noqa: E402
-from AnysoleWorkspace.tool.adapters.pressure_toolkit.calibration import (  # noqa: E402
+from AnysoleWorkspace.tool.adapters.mmvp_series.calibration.calibration import (  # noqa: E402
     load_calibration,
 )
+from AnysoleWorkspace.tool.adapters.mmvp_series.pressure_tookit import floor as floor_mod  # noqa: E402
 
 OUT_DIR = REPO_ROOT / "results_display" / "DataTest" / "D6Test_floor"
 MASK_SOURCE_ROOT = Path("/data/lizhe/projects/Tactile/3_Result/processed/rgb_human_masks")

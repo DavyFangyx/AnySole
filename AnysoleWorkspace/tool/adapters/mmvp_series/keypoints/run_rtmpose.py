@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """Produce RTMPose HALPE-26 keypoint sidecars with shared frame ids.
 
-One sidecar per canonical frame, written to the FPP-Net (or PoseTransOpt)
-model_inputs tree:
+One sidecar per canonical frame, written to the shared keypoint frontend
+(T1-B: one production, three consumers):
 
-    <output-root>/<date>/<subject>/<session>/keypoints/<frame_id:06d>.npy
+    shared/frontends/rtmpose_halpe26/v1/<date>/<subject>/<session>/keypoints/<frame_id:06d>.npy
 
 Each sidecar stores ``keypoints`` (26,2), ``keypoint_scores`` (26,),
 ``frame_id`` (the canonical shared frame id), the source image name and the
 frontend model.  The stored frame id lets every downstream consumer verify
 the join instead of trusting file order.
+
+The consumer trees (``model_inputs/FPP-Net/adapter_v1`` and
+``model_inputs/PoseTransOpt/adapter_v1``) adopt the frontend by a directory
+symlink, refreshed after every session; ``--no-consumer-links`` skips that,
+and ``--also-output-root`` additionally writes a second physical copy only
+when a caller explicitly asks for one.
 
 MMPose is imported lazily: this module can be syntax-checked anywhere and
 only executed in an environment that provides ``mmpose`` (with the mmpose
@@ -25,10 +31,12 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[5]
 WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+from AnysoleWorkspace.tool.adapters.mmvp_series.common import common  # noqa: E402
+from AnysoleWorkspace.tool.adapters.mmvp_series import frontends  # noqa: E402
 from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
 MMPOSE_ROOT = WORKSPACE / "assets/third_party/mmpose"
@@ -41,7 +49,7 @@ CONFIG_DEFAULT = (
     / "rtmpose-m_8xb512-700e_body8-halpe26-256x192.py"
 )
 FACTS_ROOT = WORKSPACE / "shared/facts/sessions/cam3"
-DEFAULT_OUTPUT = WORKSPACE / "model_inputs/FPP-Net/adapter_v1"
+DEFAULT_OUTPUT = common.RTMPOSE_ROOT  # shared/frontends/rtmpose_halpe26/v1
 
 
 def read_manifest() -> dict[str, dict]:
@@ -82,7 +90,8 @@ def first_person(prediction: dict) -> tuple[np.ndarray, np.ndarray]:
 
 def run_session(session: str, row: dict, inferencer, output_root: Path,
                 force: bool, shard: int = 0, shards: int = 1,
-                also_root: Path | None = None, limit: int = 0) -> dict:
+                also_root: Path | None = None, limit: int = 0,
+                link_consumers: bool = True) -> dict:
     date, subject, sid = session_parts(row)
     color_root = FACTS_ROOT / date / subject / sid / "rgb"
     images = sorted(p for p in color_root.iterdir()
@@ -109,8 +118,12 @@ def run_session(session: str, row: dict, inferencer, output_root: Path,
                    "model": "RTMPose HALPE-26"}
         for out_dir in out_dirs:
             np.save(out_dir / f"{index:06d}.npy", payload)
-    return {"session": sid, "frames": len(images), "written": len(pending),
-            "outputs": [str(d) for d in out_dirs]}
+    result = {"session": sid, "frames": len(images), "written": len(pending),
+              "outputs": [str(d) for d in out_dirs]}
+    # 消费端采用：仅当产出落在共享前端时刷新目录符号链接（自定义输出根不牵连消费端）
+    if link_consumers and output_root == common.RTMPOSE_ROOT:
+        result["consumer_links"] = frontends.refresh_keypoint_links(date, subject, sid)
+    return result
 
 
 def main() -> None:
@@ -123,7 +136,11 @@ def main() -> None:
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT))
     parser.add_argument("--also-output-root", default="",
                         help="secondary tree (e.g. PoseTransOpt adapter root) "
-                             "written in the same inference pass")
+                             "written in the same inference pass as a second "
+                             "physical copy; omitted by default (consumers "
+                             "adopt the shared frontend by symlink)")
+    parser.add_argument("--no-consumer-links", action="store_true",
+                        help="do not refresh the consumer tree symlinks")
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", type=int, default=1)
     parser.add_argument("--limit-frames", type=int, default=0,
@@ -144,7 +161,7 @@ def main() -> None:
     also_root = Path(args.also_output_root) if args.also_output_root else None
     result = [run_session(session, rows[session], inferencer, output_root,
                           args.force, args.shard, args.shards, also_root,
-                          args.limit_frames)
+                          args.limit_frames, not args.no_consumer_links)
               for session in sessions]
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

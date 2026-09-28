@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-from AnysoleWorkspace.tool.adapters.pressure_toolkit import common
+from AnysoleWorkspace.tool.adapters.mmvp_series.common import common
 
 # 上游深度地面估计实现（坐标契约以其为准）。
 if str(common.TOOLKIT_ROOT) not in sys.path:
@@ -142,7 +142,7 @@ def checkerboard_floor_mapping(calibration_path: Path) -> dict:
 
     正式流程不使用；D_Test6 用它证明约 1.45m 的偏移来源。
     """
-    from AnysoleWorkspace.tool.adapters.pressure_toolkit.calibration import (
+    from AnysoleWorkspace.tool.adapters.mmvp_series.calibration.calibration import (
         load_calibration,
     )
 

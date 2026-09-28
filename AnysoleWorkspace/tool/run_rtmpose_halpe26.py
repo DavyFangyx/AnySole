@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run real RTMPose HALPE-26 observations into both MMVP input trees.
 
-DEPRECATED (2026-09-28): superseded by ``tool/adapters/FPP-Net/run_rtmpose.py``
-（FPP-Net 关键点）与 ``tool/adapters/PoseTransOpt/build_inputs.py``
+DEPRECATED (2026-09-28): superseded by ``tool/adapters/mmvp_series/keypoints/run_rtmpose.py``
+（FPP-Net 关键点）与 ``tool/adapters/mmvp_series/posetransopt/build_inputs.py``
 （PoseTransOpt 关键点）。本工具保留只读兼容，不再进入 README 主命令链。
 
 The script intentionally imports MMPose lazily.  It can therefore be syntax

@@ -30,7 +30,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[5]
 WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -115,7 +115,8 @@ def build_join(row: dict, force: bool) -> dict:
     cliff_path = session_root / "CLIFF_results.npz"
     if not cliff_path.is_file():
         raise FileNotFoundError(
-            f"{sid}: CLIFF_results.npz missing; run adapters/PoseTransOpt/run_cliff.py first")
+            f"{sid}: CLIFF_results.npz missing; run "
+            "mmvp_series/cliff/run_cliff.py first")
     cliff = np.load(cliff_path, allow_pickle=False)
     cliff_frame = np.asarray(cliff["frame_id"], dtype=np.int64)
     cliff_valid = np.asarray(cliff["valid"], dtype=np.uint8).astype(bool)

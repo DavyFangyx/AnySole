@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run CLIFF using the canonical SAM3.1 single-subject bbox frontend.
 
-DEPRECATED (2026-09-28): superseded by ``tool/adapters/PoseTransOpt/run_cliff.py``。
+DEPRECATED (2026-09-28): superseded by ``tool/adapters/mmvp_series/cliff/run_cliff.py``。
 本工具保留只读兼容，不再进入 README 主命令链。
 """
 from __future__ import annotations

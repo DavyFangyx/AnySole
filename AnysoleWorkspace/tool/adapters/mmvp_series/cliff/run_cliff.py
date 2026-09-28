@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Produce the single-person CLIFF NPZ for PoseTransOpt (V2 contract).
 
-One NPZ per canonical session under
-``model-input://PoseTransOpt/adapter_v1/<date>/<subject>/<session>/``:
+One NPZ per canonical session, written to the shared CLIFF frontend
+(T1-B: one production, two consumers):
 
-    CLIFF_results.npz
+    shared/frontends/cliff_hr48/v1/<date>/<subject>/<session>/CLIFF_results.npz
     ├── frame_id        int64[n_frames]      unique, sorted, one row per frame
     ├── pose            float32[n,72]        axis-angle (rotvec)
     ├── shape           float32[n,10]        SMPL betas
@@ -31,6 +31,12 @@ betas averaging/smoothing never mixes bystander shapes into the subject.
 
 Existing NPZ files are validated (row count, unique frame ids) and rebuilt
 when they violate the contract; existence alone never skips a rebuild.
+
+After each session the frontend also carries the pressure_tookit init
+contract (``<session>_cliff_hr48.npz``, produced by
+``mmvp_series/cliff/export_toolkit_init.py``), and the consumer tree
+(``model_inputs/PoseTransOpt/adapter_v1``) adopts the frontend by a file
+symlink; ``--no-consumer-links`` skips only the symlink refresh.
 """
 from __future__ import annotations
 
@@ -43,18 +49,21 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[5]
 WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+from AnysoleWorkspace.tool.adapters.mmvp_series.cliff import export_toolkit_init  # noqa: E402
+from AnysoleWorkspace.tool.adapters.mmvp_series.common import common  # noqa: E402
+from AnysoleWorkspace.tool.adapters.mmvp_series import frontends  # noqa: E402
 from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
-CLIFF_ROOT = WORKSPACE / "assets/third_party/CLIFF"
+CLIFF_ROOT = WORKSPACE / "assets/third_party/CLIFF"  # upstream CLIFF code/checkpoints
 CKPT_DEFAULT = CLIFF_ROOT / "data/ckpt/hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt"
 FACTS_ROOT = WORKSPACE / "shared/facts/sessions/cam3"
 MASK_ROOT = Path("/data/lizhe/projects/Tactile/3_Result/processed/rgb_human_masks")
 SMPL_NEUTRAL = WORKSPACE / "assets/third_party/smpl/SMPL_NEUTRAL.pkl"
-OUTPUT_ROOT = WORKSPACE / "model_inputs/PoseTransOpt/adapter_v1"
+OUTPUT_ROOT = common.CLIFF_ROOT  # shared/frontends/cliff_hr48/v1
 TOLERANCE_S = 0.020
 
 
@@ -155,8 +164,19 @@ def mask_bbox(mask_path: Path) -> np.ndarray | None:
                       dtype=np.float32)
 
 
+def finalize_frontend(date: str, subject: str, sid: str, out_dir: Path,
+                      link_consumers: bool) -> dict:
+    """前端配套产出（幂等）：pressure_tookit 初值 npz + 消费端符号链接。"""
+    result = {"toolkit_init": export_toolkit_init.convert(
+        out_dir / "CLIFF_results.npz", out_dir / f"{sid}_cliff_hr48.npz")}
+    if link_consumers:
+        result["consumer_links"] = frontends.refresh_cliff_links(date, subject, sid)
+    return result
+
+
 def run_session(session: str, row: dict, ckpt: str, backbone: str,
-                batch_size: int, device: str, force: bool) -> dict:
+                batch_size: int, device: str, force: bool,
+                link_consumers: bool = True) -> dict:
     import cv2
     import smplx
     import torch
@@ -180,7 +200,9 @@ def run_session(session: str, row: dict, ckpt: str, backbone: str,
     output = out_dir / "CLIFF_results.npz"
     reason = npz_contract_ok(output, n)
     if reason is None and not force:
-        return {"session": sid, "status": "ok_existing", "frames": n}
+        # 已存在的前端文件也要补齐初值 npz 与消费端符号链接
+        return {"session": sid, "status": "ok_existing", "frames": n,
+                **finalize_frontend(date, subject, sid, out_dir, link_consumers)}
 
     frames = np.load(FACTS_ROOT / date / subject / sid / "frames.npz")
     frame_ids = np.asarray(frames["frame_id"], dtype=np.int64)
@@ -304,7 +326,8 @@ def run_session(session: str, row: dict, ckpt: str, backbone: str,
         ckpt=np.asarray(str(ckpt)),
     )
     return {"session": sid, "status": "rebuilt" if reason else "built",
-            "frames": n, "mask_valid": int(valid.sum())}
+            "frames": n, "mask_valid": int(valid.sum()),
+            **finalize_frontend(date, subject, sid, out_dir, link_consumers)}
 
 
 def main() -> None:
@@ -317,6 +340,8 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", type=int, default=1)
+    parser.add_argument("--no-consumer-links", action="store_true",
+                        help="do not refresh the consumer tree symlinks")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     ckpt = Path(args.ckpt).expanduser()
@@ -328,7 +353,8 @@ def main() -> None:
     sessions = [args.session] if args.session else split_sessions(args.split)
     sessions = sessions[args.shard::args.shards]
     result = [run_session(sid, rows[sid], str(ckpt.resolve()), args.backbone,
-                          args.batch_size, args.device, args.force)
+                          args.batch_size, args.device, args.force,
+                          not args.no_consumer_links)
               for sid in sessions]
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
