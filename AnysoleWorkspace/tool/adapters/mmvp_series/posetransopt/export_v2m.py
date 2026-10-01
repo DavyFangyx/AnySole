@@ -158,6 +158,11 @@ def export_session(row: dict, force: bool) -> str:
         target_fps=np.asarray(40.0, dtype=np.float32),
         vertices_world=full_vertices,
         poses=full_poses,
+        # 2026-10-01 U7 拍 A / E6：三基线 provenance 统一——VP-MoCap 的
+        # pose/shape 来自 PoseTransOpt 优化 pipeline（与注册表 sources 一致），PVE 可评估。
+        surface_source=np.asarray("method_optimization"),
+        shape_source=np.asarray("method_optimization"),
+        public_surface_metrics=np.asarray("true"),
     )
     return f"wrote {output} frames={int(valid.sum())}/{n}"
 

@@ -111,7 +111,7 @@ sources:        # model_prediction / method_optimization（可进入公共指标
   `COMMON_EDGES`/`select_common_*`）与 `joint_set=common19` 元数据：已从
   `compare_core.py` 与 R_Test 脚本删除；其派生结果（R_Test1/2/3 compare 产物、
   含 contact 的旧 R_Test4 CSV/JSON、schema v1 `*_comparison.json`）列于任务 03
-  待清理清单，按 `z_note/评估/04_联合验收与历史清理任务书.md` 处置。
+  待清理清单，按 `z_note/评估/04_联合验收与历史清理任务书.md` 处置（该任务书已随 2026-10-01 U10 废止删除；现行说明见 `z_note/评估/评估配置说明书.md`）。
 - `yaw_abs_deg`/`yaw_drift_deg` → 已改名 `root_orientation_deg`/
   `root_orientation_drift_deg`（历史 JSON 已键名回填并记录 `key_migration`）。
 - 顶点版 `foot_sliding_mm` → 已改名 `foot_sliding_vertex_mm`（诊断）。

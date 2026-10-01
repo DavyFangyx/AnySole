@@ -264,9 +264,16 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
     full_poses[start:end] = poses_aa[: end - start]
     available = np.zeros(n, dtype=bool)
     available[start:end] = True
+    # 2026-10-01 U7 拍 A / E6：三基线 provenance 统一——VP-MoCap 的 pose/shape
+    # 来自 PoseTransOpt 优化 pipeline 原生生成（与注册表 sources 一致），PVE 可评估。
     write_archive(output, full, valid_frames(row, n) & available, str(native_path), session,
                   np.arange(n, dtype=np.int64), vertices=full_vertices, poses=full_poses,
-                  source_type="method_optimization")
+                  source_type="method_optimization",
+                  extra_meta={
+                      "surface_source": "method_optimization",
+                      "shape_source": "method_optimization",
+                      "public_surface_metrics": "true",
+                  })
 
 
 def export_fpp_v2t(row: dict, output: Path) -> None:
