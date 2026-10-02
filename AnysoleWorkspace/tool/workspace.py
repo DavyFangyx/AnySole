@@ -28,12 +28,13 @@ CANONICAL_ROOTS = {
 URI_ROOTS = {key: CANONICAL_ROOTS[key] for key in ("raw", "protocol", "shared", "work", "results")}
 URI_ROOTS.update({"asset": CANONICAL_ROOTS["assets"]})
 
-RAW_LINKS = {
-    WORKSPACE / "raw/rgb": Path("/data/lizhe/projects/Tactile/1_Data"),
-    WORKSPACE / "raw/pressure": Path("/data/lizhe/projects/Tactile/1_Data"),
-    WORKSPACE / "raw/bvh": Path("/data/lizhe/projects/Tactile/1_Data"),
-    WORKSPACE / "raw/smpl": Path("/data/lizhe/projects/Tactile/Mocap"),
+# raw/{rgb,pressure,bvh,smpl} are modality link farms built by tool/relink_raw.py
+# (shape-preserving views over the upstream tree; see reports/raw_relink_plan_20261001.md).
+# raw/{calibration,human_masks} are plain read-only symlinks to external sources.
+RAW_FARM_ENTRIES = ("rgb", "pressure", "bvh", "smpl")
+RAW_SYMLINKS = {
     WORKSPACE / "raw/calibration": Path("/data/lizhe/projects/Tactile/0_Calibration"),
+    WORKSPACE / "raw/human_masks": Path("/data/lizhe/projects/Tactile/3_Result/processed/rgb_human_masks"),
 }
 
 
@@ -127,19 +128,50 @@ def initialize(dry_run: bool = False) -> None:
         print(f"mkdir {directory.relative_to(ROOT)}")
         if not dry_run:
             directory.mkdir(parents=True, exist_ok=True)
-    for link, target in RAW_LINKS.items():
+    for link, target in RAW_SYMLINKS.items():
         ensure_link(link, target, dry_run)
+    if dry_run:
+        print("relink_raw build --dry-run")
+        return
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("relink_raw", Path(__file__).parent / "relink_raw.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.build(dry_run=False)
 
 
 def doctor() -> int:
     errors: list[str] = []
-    for link, target in RAW_LINKS.items():
+    for link, target in RAW_SYMLINKS.items():
         if not link.is_symlink():
             errors.append(f"missing raw link: {link}")
         elif link.resolve(strict=False) != target.resolve(strict=False):
             errors.append(f"wrong raw link: {link} -> {os.readlink(link)}")
         elif not link.exists():
             errors.append(f"broken raw link: {link}")
+    for name in RAW_FARM_ENTRIES:
+        entry = WORKSPACE / "raw" / name
+        if entry.is_symlink() or not entry.is_dir():
+            errors.append(f"missing raw farm entry: {entry}")
+    manifest = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
+    if manifest.is_file():
+        import json as _json
+        checked = missing = 0
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = _json.loads(line)
+            for field in ("video_path", "bvh_path", "smpl_path"):
+                uri = row.get(field)
+                if not uri:
+                    continue
+                checked += 1
+                try:
+                    resolve_uri(uri, must_exist=True)
+                except WorkspacePathError as exc:
+                    missing += 1
+                    errors.append(f"manifest URI missing target: {uri} ({exc})")
+        print(f"manifest URIs: {checked - missing}/{checked} resolve")
     required = (
         WORKSPACE / "protocol/manifests/session_manifest.jsonl",
         WORKSPACE / "protocol/splits/default/splits.csv",

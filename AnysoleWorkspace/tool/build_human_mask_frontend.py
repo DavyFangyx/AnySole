@@ -24,7 +24,7 @@ from AnysoleWorkspace.tool.artifacts import sha256_file, write_artifact  # noqa:
 from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
 WORKSPACE = ROOT / "AnysoleWorkspace"
-MASK_ROOT = Path("/data/lizhe/projects/Tactile/3_Result/processed/rgb_human_masks")
+MASK_ROOT = resolve_uri("raw://human_masks")  # external source registered in workspace.py RAW_SYMLINKS
 FRONTEND_ROOT = WORKSPACE / "shared/frontends/human_masks/sam31/v1"
 MANIFEST = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
 FACTS_ROOT = WORKSPACE / "shared/facts/sessions"

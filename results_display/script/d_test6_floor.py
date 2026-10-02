@@ -44,9 +44,10 @@ from AnysoleWorkspace.tool.adapters.mmvp_series.calibration.calibration import (
     load_calibration,
 )
 from AnysoleWorkspace.tool.adapters.mmvp_series.pressure_tookit import floor as floor_mod  # noqa: E402
+from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
 OUT_DIR = REPO_ROOT / "results_display" / "DataTest" / "D6Test_floor"
-MASK_SOURCE_ROOT = Path("/data/lizhe/projects/Tactile/3_Result/processed/rgb_human_masks")
+MASK_SOURCE_ROOT = resolve_uri("raw://human_masks")  # external source registered in workspace.py RAW_SYMLINKS
 
 # 每日期代表 session（date -> session id）
 REPRESENTATIVE = {

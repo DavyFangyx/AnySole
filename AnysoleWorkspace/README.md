@@ -5,7 +5,8 @@
 ```text
 AnysoleWorkspace/
 ├── raw/
-│   ├── rgb/ pressure/ bvh/ smpl/ calibration/   # 外部只读源软链接
+│   ├── rgb/ pressure/ bvh/ smpl/                 # 模态链接农场（relink_raw.py 生成）
+│   └── calibration/ human_masks/                 # 外部只读源软链接
 ├── protocol/
 │   ├── manifests/session_manifest.{csv,jsonl}
 │   ├── splits/default/splits.csv                # 由参数生成，默认 val=test
@@ -33,14 +34,20 @@ AnysoleWorkspace/
 ## 数据基座构建
 
 ```bash
-# 初始化 canonical Workspace 目录和 raw 外部只读链接
+# 初始化 canonical Workspace 目录、raw 外部只读软链接，并构建 raw 模态链接农场
 python3 AnysoleWorkspace/tool/workspace.py init
-# init 创建的 raw 只读软链接：
-# raw/rgb        -> /data/lizhe/projects/Tactile/1_Data
-# raw/pressure   -> /data/lizhe/projects/Tactile/1_Data
-# raw/bvh        -> /data/lizhe/projects/Tactile/1_Data
-# raw/smpl       -> /data/lizhe/projects/Tactile/Mocap
-# raw/calibration -> /data/lizhe/projects/Tactile/0_Calibration
+# init 创建的外部只读软链接：
+# raw/calibration  -> /data/lizhe/projects/Tactile/0_Calibration
+# raw/human_masks  -> /data/lizhe/projects/Tactile/3_Result/processed/rgb_human_masks
+# init 构建的模态链接农场（raw/rgb raw/pressure raw/bvh raw/smpl，路径形状与 manifest URI 逐段一致）：
+#   raw/rgb/<date>/<S#>/<rec>/{meta.json, <cam>/}          相机目录软链（默认 --cam 3）
+#   raw/pressure/<date>/<S#>/<rec>/pressure_{left,right}.csv
+#   raw/bvh/<date>/mocap_ori_bvh/<sid>/*.bvh (+ 0804 *.avi, calibration_Skeleton0.bvh)
+#   raw/smpl/<MMDD>/<MMDD>smpl/mocap_ori_c3d/<sid>/motion_neutral_smpl.npz
+# 上游新增日期/改名 rec 目录后，重建并校验农场（幂等，原子替换）：
+python3 AnysoleWorkspace/tool/relink_raw.py build --dates 20260804,20260807,20260808,20260810 --cam 3
+python3 AnysoleWorkspace/tool/relink_raw.py verify
+# 方案与回滚快照：reports/raw_relink_plan_20261001.md、reports/raw_relink_rollback_20261002.txt
 
 # 从现有 protocol manifest 建立 raw session 索引
 python3 AnysoleWorkspace/tool/build_raw_index.py \
@@ -51,15 +58,14 @@ python3 AnysoleWorkspace/tool/pressure_washer/run.py inspect --skip-existing
 python3 AnysoleWorkspace/tool/pressure_washer/run.py reconstruct --skip-existing
 python3 AnysoleWorkspace/tool/pressure_washer/run.py mark-fake --skip-existing
 python3 AnysoleWorkspace/tool/pressure_washer/run.py encode --skip-existing
+# 右脚故障格 cell 35 异常跳变 超出
 
 # 从 raw、session 索引和 PressureWasher 最终记录构建公共 manifest
 python3 AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3
-# 生成 split，默认 val=test
+# 生成 split，默认 val=test（当前冻结文件为 train/val/test = 104/36/36）
 python3 AnysoleWorkspace/tool/build_manifest.py split \
   --manifest AnysoleWorkspace/protocol/manifests/session_manifest.jsonl \
-  --exclude S4,S5 --test S13,S14
-# 将新 split 写回 manifest 的 split 字段
-python3 AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3
+  --test S13,S14
 
 # 构建公共 shared facts
 python3 AnysoleWorkspace/tool/build_shared.py --facts-only
@@ -71,6 +77,8 @@ python3 AnysoleWorkspace/tool/workspace.py doctor
 ```
 
 split 由 `build_manifest.py split` 生成，默认 `val=test`；manifest 只登记 session 元数据，模型直接读取 `protocol/splits/default/splits.csv`。
+触觉质量标注（A/B/C/D）登记在 manifest 的 `pressure_quality_class` / `pressure_quality_reason` 两列，作为排除依据
+（C/D 一律不进入管线、S9 整组排除等），详见 `protocol/splits/default/README.md`。
 
 ## 各模型过程产物与生成脚本
 

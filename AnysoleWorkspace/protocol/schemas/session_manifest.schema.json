@@ -12,6 +12,8 @@
     "bvh_path": {"type": "string"},
     "smpl_path": {"type": "string"},
     "n_frames": {"type": "integer", "minimum": 1},
-    "eligible_anysole": {"enum": ["0", "1"]}
+    "eligible_anysole": {"enum": ["0", "1"]},
+    "pressure_quality_class": {"enum": ["A", "B", "C", "D"]},
+    "pressure_quality_reason": {"type": "string"}
   }
 }
