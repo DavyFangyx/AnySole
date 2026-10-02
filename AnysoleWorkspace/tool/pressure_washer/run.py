@@ -18,12 +18,14 @@ STAGES = {
     "inspect": "analyze_pressure_csv_stats.py",
     "reconstruct": "reconstruct_pressure_dataset.py",
     "mark-fake": "mark_fake_frames_in_reconstruction.py",
+    "clean-fault-cell": "clean_fault_cell.py",
     "encode": "encode_fake_marked_reconstruction.py",
 }
 STAGE_OUTPUTS = {
     "inspect": "stats",
     "reconstruct": "reconstructed",
     "mark-fake": "final_fake_marked",
+    "clean-fault-cell": "final_fake_marked",
     "encode": "encoded",
 }
 
@@ -50,6 +52,12 @@ def main() -> int:
         command += ["-input", str(args.input)]
     elif args.stage == "encode" and args.input:
         command += ["-input", str(args.input)]
+    elif args.stage == "clean-fault-cell":
+        # Operates in place on the final fake-marked tree by default.
+        if args.input:
+            command += ["-input", str(args.input)]
+        if args.force:
+            command.append("--force")
     elif args.stage in ("mark-fake", "encode"):
         output_root = PRESSURE_DATA_ROOT / ("reconstructed" if args.stage == "mark-fake" else "final_fake_marked")
         candidates = sorted(path for path in output_root.iterdir() if path.is_dir()) if output_root.is_dir() else []

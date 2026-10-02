@@ -3,7 +3,16 @@
 This script post-processes a reconstructed tactile dataset directory.
 For each session:
 - add a `fake` column immediately after `valid_mask`
-- remove `source_frame_idx` and `source_t_us`
+- remove `source_frame_idx` but keep `source_t_us` (raw physical sample
+  timestamps; build_shared needs them for absolute-time resampling, per the
+  S2 clock-scan ruling, Baselines/决策/05_R1-R3_风险裁定.md §三 证据 C)
+- add a `raw_t_us` column: the reconstructed physical wall-clock time of
+  every shipped row, computed from the per-segment (t_us, source_t_us)
+  anchors in `reconstruction_manifest.csv`.  The shipped 40 Hz grid is
+  linear in t_us; each segment/bridge block maps its t_us range onto the raw
+  clock linearly (two-point slope), absorbing the recorder-clock drift.
+  Rows that must never be selected as a pressure source (valid_mask=0 or
+  fake=1) get an empty raw_t_us.
 - mark `fake=1` when reconstructed `frame_idx` is listed in
   `PressureWasher/configs/fake_frames/*_fake_frames.csv` for that side
 
@@ -128,14 +137,51 @@ def load_fake_frame_sets(fake_csv_dir: Path) -> dict[str, FakeFrameSets]:
 def transformed_fieldnames(fieldnames: list[str]) -> list[str]:
     output_fields: list[str] = []
     for field in fieldnames:
-        if field in {"source_frame_idx", "source_t_us"}:
+        if field == "source_frame_idx":
             continue
         output_fields.append(field)
         if field == "valid_mask":
             output_fields.append("fake")
     if "valid_mask" not in fieldnames:
         raise ValueError("Input pressure CSV is missing required field `valid_mask`.")
+    if "source_t_us" in fieldnames:
+        output_fields.append("raw_t_us")
     return output_fields
+
+
+def load_clock_blocks(manifest_path: Path, side: str) -> list[tuple[float, float, float, float]]:
+    """(t_start, t_end, raw_start, raw_end) per segment/bridge block, by t_us range."""
+    blocks: list[tuple[float, float, float, float]] = []
+    with manifest_path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            if row.get("side") != side or row.get("block_type") not in {"segment", "bridge"}:
+                continue
+            t_start, t_end = float(row["t_us_start"]), float(row["t_us_end"])
+            raw_start, raw_end = float(row["source_t_us_start"]), float(row["source_t_us_end"])
+            if t_end > t_start:
+                blocks.append((t_start, t_end, raw_start, raw_end))
+    return sorted(blocks)
+
+
+def raw_time_for_t(blocks: list[tuple[float, float, float, float]], t: float) -> float:
+    """Raw-clock time of a shipped row at synthetic time t (linear two-point map)."""
+    if not blocks:
+        return float("nan")
+    if t <= blocks[0][0]:
+        t_start, t_end, raw_start, raw_end = blocks[0]
+    elif t >= blocks[-1][1]:
+        t_start, t_end, raw_start, raw_end = blocks[-1]
+    else:
+        lo, hi = 0, len(blocks) - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if blocks[mid][1] < t:
+                lo = mid + 1
+            else:
+                hi = mid
+        t_start, t_end, raw_start, raw_end = blocks[lo]
+    return raw_start + (t - t_start) * (raw_end - raw_start) / (t_end - t_start)
 
 
 def process_pressure_csv(input_path: Path, output_path: Path, fake_frame_idxs: set[int]) -> tuple[int, int]:
@@ -144,6 +190,9 @@ def process_pressure_csv(input_path: Path, output_path: Path, fake_frame_idxs: s
         if reader.fieldnames is None:
             raise ValueError(f"Empty pressure CSV: {input_path}")
         output_fields = transformed_fieldnames(reader.fieldnames)
+        with_clock = "raw_t_us" in output_fields
+        side = "left" if input_path.name.startswith("pressure_left") else "right"
+        blocks = load_clock_blocks(input_path.parent / "reconstruction_manifest.csv", side) if with_clock else []
         rows_written = 0
         fake_rows = 0
         with output_path.open("w", encoding="utf-8", newline="") as out_handle:
@@ -154,11 +203,17 @@ def process_pressure_csv(input_path: Path, output_path: Path, fake_frame_idxs: s
                 fake_value = 1 if frame_idx in fake_frame_idxs else 0
                 output_row: dict[str, object] = {}
                 for field in reader.fieldnames:
-                    if field in {"source_frame_idx", "source_t_us"}:
+                    if field == "source_frame_idx":
                         continue
                     output_row[field] = row[field]
                     if field == "valid_mask":
                         output_row["fake"] = fake_value
+                if with_clock:
+                    if fake_value or int(float(row.get("valid_mask", 1))) != 1:
+                        output_row["raw_t_us"] = ""
+                    else:
+                        raw = raw_time_for_t(blocks, float(row["t_us"]))
+                        output_row["raw_t_us"] = "" if raw != raw else repr(raw)
                 writer.writerow(output_row)
                 rows_written += 1
                 fake_rows += fake_value
