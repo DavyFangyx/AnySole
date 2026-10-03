@@ -48,8 +48,9 @@ A/B 系列分析入口为语义化脚本（`complement.py`、`dropout_ablation.p
 | D_Test1 原始数据可视化 | GT/输入渲染（BVH/SMPL） | `d_test1_data_viz.py` |
 | D_Test2 数据集自检 | 数据集自检 | `d_test2_dataset_check.py` |
 | D_Test3 接触检测 | 接触标签判定 | `AnysoleWorkspace/tool/contact_labels.py`；`d_test3_contact.py` |
-| D_Test4 基线触觉审计 | 四基线触觉格式审计 | `d_test4_baseline_tactile.py` → `AnysoleWorkspace/tool/generate_baseline_tactile.py` |
+| D_Test4 基线触觉审计 | 四基线触觉格式审计（审计只读） | `d_test4_baseline_tactile.py`（数据源 = `build_shared.py` 产物） |
 | D_Test5 鞋垫偏移补偿（**待适配**） | 鞋垫漂移补偿器测试 | `d_test5_insole_drift.py` |
+| D_Test6 地面估计与坐标系审计 | 行走地面平面拟合审计（四日期） + 生产 floor 查看 | `d_test6_floor.py`；`d_test6_floor_view.py` |
 | R_Test1 模型可视化 | 模型动画 | `r_test1_visualize_{anysole,mmvp,motionpro,step2motion}.py`；`r_test1_compare.py`（跨模型并排，原生协议 + 分协议 GT 栏） |
 | R_Test2 参数对照 | 跨模型/参数对照评估 | `r_test2_compare.py`（`--by-mode` 模式分块；原生协议 + 能力门控） |
 | R_Test3 轨迹可视化 | 轨迹对比动画 | `r_test3_traj.py`（`--compare` 并排轨迹；配对协议 GT） |
@@ -77,8 +78,10 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   │   ├── d_test2_dataset_check.py    # D_Test2：数据集自检
 │   │   │   （D_Test3 标签生成器在 AnysoleWorkspace/tool/contact_labels.py，不在本目录）
 │   │   ├── d_test3_contact.py          # D_Test3：接触标签动画 + 阈值分析
-│   │   ├── d_test4_baseline_tactile.py # D_Test4：四基线触觉格式审计（生成器前置，产物落盘）
-│   │   └── d_test5_insole_drift.py     # D_Test5：鞋垫漂移补偿器测试（待适配）
+│   │   ├── d_test4_baseline_tactile.py # D_Test4：四基线触觉格式审计（审计只读，读 build_shared 产物）
+│   │   ├── d_test5_insole_drift.py     # D_Test5：鞋垫漂移补偿器测试（待适配）
+│   │   ├── d_test6_floor.py            # D_Test6：四日期行走地面平面审计
+│   │   └── d_test6_floor_view.py       # D_Test6：生产 floor 查看（floor 系点云/RGB+ROI/高度直方图）
 │   ├── ── 结果检验（R_TestN）──
 │   │   ├── r_test1_visualize_{anysole,mmvp,motionpro,step2motion}.py   # R_Test1：模型动画
 │   │   ├── r_test2_compare.py          # R_Test2：跨模型/参数对照评估（只出指标）
@@ -93,7 +96,8 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   ├── D2Test_dataset_check/           # D_Test2 输出（自检 JSON + 均值姿态 npz）
 │   ├── D3Test_contact/                 # D_Test3 输出（按方案分目录）
 │   ├── D4Test_baseline_tactile/        # D_Test4 输出（每 session 一个 <session>_adapted_tactile.gif/.mp4）
-│   └── D5Test_insole_drift/            # D_Test5 输出（补偿前后对比动画 + theta_summary.csv）
+│   ├── D5Test_insole_drift/            # D_Test5 输出（补偿前后对比动画 + theta_summary.csv）
+│   └── D6Test_floor/                   # D_Test6 输出（<date>_floor_audit.png + floor_candidates.csv + <date>_<subject>_floor_view.png）
 ├── ResultTest/                         # R 组：结果检验产物（R_TestN）
 │   ├── R1Test_visualize/               # R_Test1 输出（AnySole/MMVP/MotionPRO/Step2Motion 分栏 + compare/<mode> 并排）
 │   ├── R2Test_compare/                 # R_Test2 输出（只出指标，不做动画 + by_mode/ 模式分块）
@@ -137,9 +141,11 @@ BVH-23 对 BVH GT），协议标识写为 `smpl24-native` / `bvh23-native`：
   不存在是 `missing`；声明能力与文件矛盾是 `invalid`。
 - 正式 contact：motion 模型没有训练并显式导出的 contact prediction，正式
   `contact_f1` 一律 `—`。FPP-Net 接触头显式生成连续 SMPL 接触图（评估
-  contact_smpl_mse/bce）；其 `contact_f1` **待处理**——二值接触 GT 目前不存在
-  （f6_soft 无天然二值分界、motion_f6 是运动学状态机非模型输出）。任何
-  运动学/压力阈值推导的接触只用于诊断。
+  `contact_smpl_mse/bce`），GT = **press2Cont 顶点级二值 th=0.5**（E3-A
+  裁定，训练与评估同源；archive 携带 `contact_gt_source` /
+  `contact_gt_threshold` / `pixel_weight_revision` provenance）。`contact_f1`
+  经 E3-Q5 裁定保留在诊断（AnySole 无接触头，正式键将只有 FPP 一行有值）。
+  任何运动学/压力阈值推导的接触只用于诊断。
 - pressure_toolkit 的拟合表面属其 pipeline 原生生成（生成清单裁定 2026-09-27），
   PVE 照常计算；其真实 pose/translation/rotation 支持的关节、轨迹、朝向、时序
   指标照常计算。AnySole 不生成 shape/表面，PVE 一律 `—`。
@@ -259,26 +265,25 @@ python results_display/script/d_test3_contact.py --methods f6_soft
 `threshold_analysis.csv`（逐帧左右脚 48 格压力和）、`threshold_analysis_hist.csv`
 （64 分箱分布）与 `comparison.{csv,png}`（各方案 vs bvh_h 参考的一致率/假接触率/假离地率）。
 
-## D_Test4 基线触觉审计（Agent_06 前置）
+## D_Test4 基线触觉审计（审计只读）
 
-`d_test4_baseline_tactile.py` 是纯可视化前端：先确保转换产物落盘（产物齐全则跳过，
-缺则 subprocess 调用 `AnysoleWorkspace/tool/generate_baseline_tactile.py`；`--force`
-强制重生成）。
+`d_test4_baseline_tactile.py` 是纯可视化前端，**不做任何生成**：四个面板从
+`build_shared.py` 与各 adapter 的落盘产物直接读取，并逐 session 审计
+（mapping 字段 / 源 hash / frame_id parity / 帧数一致），审计失败即报错。
 
-| 工作 | 触觉输入 | 落盘位置 |
+| 工作 | 触觉输入 | 数据位置 |
 | --- | --- | --- |
-| AnySole（主方法） | 原始 pressure_48 → 原生 4×12 / 脚 | `AnysoleWorkspace/shared/facts/sessions/cam3/<date>/<sub>/<sid>/pressure_48.npz` |
-| MotionPRO | pressure_48 → bilinear 96×96 /255（FRAPPE 口径；可视化按 L/R 脚区等尺度显示） | `AnysoleWorkspace/model_inputs/MotionPRO/adapter_v1/cam3/<date>/<sub>/<sid>/pressure.npz` |
-| MMVP（pressure_toolkit / VP-MoCap） | 共享唯一公共表示 `{'insole': [L(31,11), R(31,11)]}`（00 §2.1：不再有两棵私有树） | `AnysoleWorkspace/shared/representations/tactile/mmvp_31x11/v1/<date>/<sub>/<sid>/insole/%03d.npy` |
-| Step2Motion | 16 通道/脚（D_Test4 冻结池化，包含在 gait 数据内） | `AnysoleWorkspace/model_inputs/Step2Motion/adapter_v1/{gait,gait_noimu}/*.pt` |
+| AnySole（主方法） | 原始 pressure_48 → 原生 4×12 / 脚（原始传感器单位） | `AnysoleWorkspace/shared/facts/sessions/cam3/<date>/<sub>/<sid>/pressure_48.npz` |
+| MotionPRO | 虚拟毯 (T,320,120)（1.25cm/px 世界系；整幅显示 + painted 像素计数） | `AnysoleWorkspace/model_inputs/MotionPRO/adapter_v1/cam3/<date>/<sub>/<sid>/pressure.npz` |
+| MMVP（pressure_toolkit / VP-MoCap） | 共享唯一公共表示，每帧 (2,31,11) float32 裸数组 | `AnysoleWorkspace/shared/representations/tactile/mmvp_31x11/v1/<date>/<sub>/<sid>/insole/%06d.npy` |
+| Step2Motion | 16 通道/脚：运行时 `build_gait.pool_48_to_16` 复算（无落盘 16ch 产物） | 源头 = `AnysoleWorkspace/shared/facts/.../pressure_48.npz` |
 
    方法                                  实际数据                            当前显示
   ━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    AnySole              4×12 = 48 格/脚，96 格/帧                      48 格/脚，正确
   ─────────────  ─────────────────────────────────  ──────────────────────────────────
-   MotionPRO      输入是 96×96 图像，即 9216 个像    当前没有显式网格，只显示连续热图
-                    素；底层来源仍是 48 格/脚，共
-                                    96 个传感器格
+   MotionPRO            虚拟毯 320×120（世界系锚定，                       整幅热图 + painted
+                         R1 锚点偏移，大量帧毯外）                            像素计数标注
   ─────────────  ─────────────────────────────────  ──────────────────────────────────
    MMVP               31×11 = 341 个位置/脚；有效                       31×11 网格/脚
                             mask 约 242/241 个/脚
@@ -286,19 +291,18 @@ python results_display/script/d_test3_contact.py --methods f6_soft
    Step2Motion             16 通道/脚，32 通道/帧     当前显示 48 格/脚，但只有 16 个
                                                               唯一值，每个值重复 3 格
 
-关键实测（`AnysoleWorkspace/work/baseline_tactile/<sid>/meta.json`）：MMVP mask 242/241 像素/脚；
-最近格距离 L 均值 9.2mm / R 8.7mm；FPP weight = 静立帧总压；布局文件未标注内外侧
-方向，默认与模板 x 同向（`--mirror-x` 翻转，透传生成器）。
+映射口径已冻结在 `build_shared.py`（`audited_4x12_to_31x11_nearest_cell`：每个 31×11
+格取最近 48 格的值，脚形外置 0）；D_Test4 只审计 parity，不再持有任何映射/生成
+逻辑。历史审计数字（映射冻结时实测）：MMVP mask 242/241 格/脚、最近格距离 L 均值
+9.2mm / R 8.7mm。FPP weight = 静立帧总压（build_metadata 计算）。
 
 ```bash
 conda activate touch_gait
-# 默认全部 splits session（train ∪ val ∪ test，缺产物自动生成）
+# 默认全部 splits session（train ∪ val ∪ test），只读审计 + 渲染
 python results_display/script/d_test4_baseline_tactile.py
 # 只跑 test
 python results_display/script/d_test4_baseline_tactile.py --split test
 python results_display/script/d_test4_baseline_tactile.py --session S12072
-# 只落盘不渲染
-python AnysoleWorkspace/tool/generate_baseline_tactile.py --split test
 ```
 
 ## D_Test5 鞋垫偏移补偿（待适配）
@@ -316,6 +320,23 @@ conda activate touch_gait
 python results_display/script/d_test5_insole_drift.py
 python results_display/script/d_test5_insole_drift.py --session S7013
 ```
+
+## D_Test6 地面估计与坐标系审计（pressure_toolkit）
+
+```bash
+conda activate touch_gait
+# 四日期代表 session 审计：每日期 3 帧 × 3 ROI = 9 候选
+# （重写 floor_candidates.csv；单日期用 --dates）
+python results_display/script/d_test6_floor.py
+python results_display/script/d_test6_floor.py --dates 20260807
+# 生产 floor 查看器：读 floor_<subject>.npy + 生产深度帧
+# （深度帧/ROI 默认取 floor_artifact_<date>.json，--depth-png/--roi 可覆盖）
+python results_display/script/d_test6_floor_view.py --date 20260808 --subject S12
+```
+
+产出（`DataTest/D6Test_floor/`）：`<date>_floor_audit.png`（四联审计图）、
+`floor_candidates.csv`（36 候选残差/棋盘格偏移/法向）、`<date>_<subject>_floor_view.png`
+（生产地面查看图：floor 系点云 / 侧视 / RGB+ROI / 高度直方图）。
 
 # 第二部分：结果检验（R_TestN）
 
