@@ -12,7 +12,8 @@ archive:
     ├── contact_smpl_gt  float16[n,2,96]    native binary vertex contact GT
     ├── contact_pred/gt  uint8[n,2]         diagnostic mean-threshold flags
     ├── valid_mask       bool[n]            available & shared-valid
-    └── provenance fields
+    └── provenance fields (contact_gt_source, contact_gt_threshold,
+        pixel_weight_revision, ...)
 
 The retired f6_soft broadcast GT is gone: ``contact_gt_source`` is now the
 native press2Cont binary vertex contact.
@@ -37,6 +38,15 @@ from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 FPP_PREDICTIONS = WORKSPACE / "work/VP-MoCap/v1/fpp_predictions"
 FACTS_ROOT = WORKSPACE / "shared/facts/sessions/cam3"
 OUTPUT_ROOT = RESULTS / "baselines/FPP-Net/predictions/v2t"
+
+# E3-A: the archive carries the contact-GT binarisation threshold and the
+# pixel-weight revision, so the "silent drift" between the on-disk GT and the
+# documented recipe cannot recur (04_E §4.4 step 3).  The revision id names
+# the build generation of the per-date sub_info.npy weights (R3-cleaned raw
+# insole + absolute-nearest-neighbour resampling, 2026-10-02); the adapter's
+# build_metadata report carries no separate revision identifier.
+CONTACT_GT_THRESHOLD = 0.5
+PIXEL_WEIGHT_REVISION = "R3_cleaned_20261002"
 
 
 def read_manifest() -> dict[str, dict]:
@@ -131,6 +141,8 @@ def export_session(row: dict, force: bool) -> str:
         source_native_output=np.asarray(str(source)),
         provenance_source_type=np.asarray("model_prediction"),
         contact_gt_source=np.asarray("press2Cont_binary_vertex"),
+        contact_gt_threshold=np.asarray(CONTACT_GT_THRESHOLD, dtype=np.float32),
+        pixel_weight_revision=np.asarray(PIXEL_WEIGHT_REVISION),
         formal_contact_metrics=np.asarray("contact_smpl_mse/contact_smpl_bce"),
     )
     return f"wrote {output} V2T frames={int(valid.sum())}/{n}"

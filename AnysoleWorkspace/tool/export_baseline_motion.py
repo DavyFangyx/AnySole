@@ -277,72 +277,17 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
 
 
 def export_fpp_v2t(row: dict, output: Path) -> None:
-    session = row["session_id"]
-    date, subject = session_parts(row)
-    source = WORKSPACE / "work" / "VP-MoCap" / date / subject / session / "pred_contact_smpl"
-    n = int(row["n_frames"])
-    pressure_pred = np.zeros((n, 31, 22), dtype=np.float32)
-    pressure_gt = np.zeros_like(pressure_pred)
-    contact_pred = np.zeros((n, 2), dtype=np.uint8)
-    contact_gt = np.zeros_like(contact_pred)
-    # Continuous per-vertex SMPL contact maps (contact level of the V2T
-    # hierarchy, 2026-09-27): pred is the network's contact head output,
-    # gt is the f6_soft per-foot soft label broadcast to vertices.  float16
-    # halves the archive size; values live in {0.05, 0.30, 0.70, 0.95}
-    # (pred is continuous in [0, 1]) so precision is not a concern.
-    contact_smpl_pred = None
-    contact_smpl_gt = None
-    available = np.zeros(n, dtype=bool)
-    for frame in range(n):
-        path = source / f"{frame:03d}.npy"
-        if not path.is_file():
-            continue
-        payload = np.load(path, allow_pickle=True).item()
-        if "pressure" not in payload or "contact_smpl" not in payload:
-            raise ValueError(f"{path}: FPP-Net V2T sidecar lacks pressure/contact_smpl")
-        p_pred = np.asarray(payload["pressure"]["pred"], dtype=np.float32)
-        p_gt = np.asarray(payload["pressure"]["gt"], dtype=np.float32)
-        if p_pred.shape != (31, 22) or p_gt.shape != (31, 22):
-            raise ValueError(f"{path}: expected pressure maps (31,22), got {p_pred.shape}/{p_gt.shape}")
-        pressure_pred[frame] = p_pred
-        pressure_gt[frame] = p_gt
-        cp = np.asarray(payload["contact_smpl"]["pred"], dtype=np.float32).reshape(2, -1)
-        cg = np.asarray(payload["contact_smpl"]["gt"], dtype=np.float32).reshape(2, -1)
-        if contact_smpl_pred is None:
-            contact_smpl_pred = np.zeros((n, 2, cp.shape[1]), dtype=np.float16)
-            contact_smpl_gt = np.zeros_like(contact_smpl_pred)
-        contact_smpl_pred[frame] = cp
-        contact_smpl_gt[frame] = cg
-        contact_pred[frame] = cp.mean(axis=1) > 0.5
-        contact_gt[frame] = cg.mean(axis=1) > 0.5
-        available[frame] = True
-    valid = valid_frames(row, n) & available
-    if not valid.any():
-        raise FileNotFoundError(f"no FPP-Net V2T frames found for {session}: {source}")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        output,
-        pressure_pred=pressure_pred,
-        pressure_gt=pressure_gt,
-        contact_smpl_pred=contact_smpl_pred,
-        contact_smpl_gt=contact_smpl_gt,
-        contact_pred=contact_pred,
-        contact_gt=contact_gt,
-        valid_mask=valid,
-        frame_indices=np.arange(n, dtype=np.int64),
-        target_fps=np.asarray(float(row.get("target_fps") or 40.0), dtype=np.float32),
-        mode=np.asarray("V2T"),
-        pressure_source_grid=np.asarray("31x11_per_foot"),
-        comparison_pressure_grid=np.asarray("31x11_per_foot"),
-        source_native_output=np.asarray(str(source)),
-        # contact_smpl_* 是 V2T 接触级的正式输入：pred 来自 FPP-Net 接触
-        # 头（model_prediction），gt 来自 f6_soft 软标签；二值
-        # contact_pred/contact_gt 仅作诊断/旧兼容保留。
-        provenance_source_type=np.asarray("model_prediction"),
-        contact_gt_source=np.asarray("f6_soft"),
-        formal_contact_metrics=np.asarray("contact_smpl_mse/contact_smpl_bce"),
-    )
-    print(f"wrote {output} V2T frames={int(valid.sum())}/{n}")
+    # E3-A (2026-10-03): the canonical exporter owns the V2T archive contract
+    # (press2Cont th=0.5 binary vertex GT + threshold/revision provenance).
+    # This entry point delegates so the two writers cannot drift again — the
+    # previous copy read the retired %03d sidecars and labelled the GT f6_soft.
+    # The canonical function writes the same output path.
+    from AnysoleWorkspace.tool.adapters.mmvp_series.fpp.export_v2t import export_session
+
+    expected = RESULTS / "baselines" / "FPP-Net" / "predictions" / "v2t" / f"{row['session_id']}.npz"
+    if output != expected:
+        raise ValueError(f"fpp_v2t output path drift: {output} != {expected}")
+    print(export_session(row, force=not output.is_file()))
 
 
 def choose_sessions(args: argparse.Namespace, manifest: dict[str, dict]) -> list[str]:
