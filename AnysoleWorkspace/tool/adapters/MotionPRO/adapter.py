@@ -11,9 +11,12 @@ Frozen conversions (audited in D_Test4, do not redefine):
 
 The raster is the fixed left/right block layout and is now called a
 *dual-sole raster*, never a pressure carpet.  ``contact.npy`` is NOT a public
-contact ground truth: it is the MotionPRO-private four-level soft-f6
-{0.05, 0.30, 0.70, 0.95} foot loss weight in the ten-column upstream contract,
-non-zero only in columns 6/7.
+contact ground truth: it is the MotionPRO-private binary f6 foot loss weight
+{0, 1} (= motion_f6 hard decision) in the ten-column upstream contract,
+non-zero only in columns 6/7.  The four-level soft-f6 intermediate
+{0.05, 0.30, 0.70, 0.95} is computed internally and never persisted
+(2026-10-03 ruling: back to the native binary contract, unified with the
+AnySole f6_soft export).
 
 T1 (09-28 user rulings, z_note/重构执行/11_T系列_运行时输入与接入方案.md §4)
 replaces that raster as the model pressure input with a **virtual carpet**
@@ -117,6 +120,9 @@ CONTACT_COLS = 10
 LEFT_COL, RIGHT_COL = 6, 7
 F6_V_LO, F6_V_HI, F6_A_THR, F6_H_HIGH = 0.3, 0.6, 3.0, 0.20
 F6_MIN_AIR = 10
+# Four-level soft-f6 intermediate (motion_f6 state x pressure_f6 consistency).
+# Computed internally for the F6 state machine; never persisted (2026-10-03
+# ruling: contact.npy exports the binary state only, native {0,1} contract).
 F6_SOFT = {"contact_loaded": 0.95, "contact_unloaded": 0.70,
            "air_loaded": 0.30, "air_unloaded": 0.05}
 
@@ -428,18 +434,15 @@ def _f6_pipeline(ctx: dict) -> tuple[np.ndarray, np.ndarray]:
 
 
 def soft_f6_contact(ctx: dict) -> np.ndarray:
-    """Private (T,10) contact: columns 6/7 hold the four-level soft-f6
-    foot loss weights; the other eight columns are always zero."""
-    states, loaded_values = _f6_pipeline(ctx)
+    """Private (T,10) contact: columns 6/7 hold the binary f6 foot loss
+    weights (= the motion_f6 hard decision); the other eight columns are
+    always zero.  2026-10-03 ruling: the four-level soft intermediate is
+    not persisted — this returns the native {0,1} contract, unified with
+    the AnySole f6_soft export."""
+    states, _ = _f6_pipeline(ctx)
     out = np.zeros((ctx["n"], CONTACT_COLS), dtype=np.float32)
     for column, side in enumerate(("left", "right")):
-        state, loaded = states[:, column], loaded_values[:, column]
-        values = np.zeros(len(state), dtype=np.float32)
-        values[state == 1] = np.where(loaded[state == 1], F6_SOFT["contact_loaded"],
-                                      F6_SOFT["contact_unloaded"])
-        values[state == 0] = np.where(loaded[state == 0], F6_SOFT["air_loaded"],
-                                      F6_SOFT["air_unloaded"])
-        out[:, (LEFT_COL, RIGHT_COL)[column]] = values
+        out[:, (LEFT_COL, RIGHT_COL)[column]] = states[:, column].astype(np.float32)
     return out
 
 
@@ -747,8 +750,9 @@ def build_one(session_id: str, *, force: bool = False, legacy_raster: bool = Fal
         },
         "contact": {
             "physical_file": "contact.npy",
-            "semantic_role": "motionpro_private_soft_f6_foot_loss_weight",
-            "value_set": [0.05, 0.30, 0.70, 0.95],
+            "semantic_role": "motionpro_private_f6_foot_loss_weight",
+            "value_set": [0, 1],
+            "soft_levels_intermediate_not_persisted": [0.05, 0.30, 0.70, 0.95],
             "nonzero_columns": [int(LEFT_COL), int(RIGHT_COL)],
             "formal_metric_input": False,
             "native_diagnostic_only": True,
