@@ -23,7 +23,8 @@ WORKSPACE = ROOT / "AnysoleWorkspace"
 FIELDS = ("session_id", "subject_id", "action", "trial", "camera", "video_path",
           "pressure_path", "bvh_path", "smpl_path", "target_fps", "n_frames", "visual_start_s",
           "mocap_start_s", "offset_s", "fake_frame_indices", "valid_frame_indices",
-          "quality", "eligible_anysole", "eligibility_reason", "joint_checksum")
+          "quality", "eligible_anysole", "eligibility_reason", "joint_checksum",
+          "pressure_quality_class", "pressure_quality_reason")
 
 SMPL_COORDINATE_SYSTEM = "SMPL right-handed +X left, +Y up, +Z forward; world motion preserved"
 LEGACY_BVH23_NAMES = (
@@ -169,6 +170,35 @@ def _subject_list(value: str | None) -> set[str]:
     return {item.strip() for item in (value or "").split(",") if item.strip()}
 
 
+def join_pressure_quality(rows: list[dict]) -> None:
+    """Fill pressure_quality_class/reason from the pressure washer stats table.
+
+    0605d1f registered the A/B/C/D tactile-quality annotation (join key =
+    dataset_id == session_id; source = stats/.../missing_pressure_objects.csv,
+    definitions in protocol/splits/default/README.md).  A manifest rebuilt
+    without this join silently drops the columns, so the join lives here.
+    """
+    stats_root = WORKSPACE / "work/data_pipeline/pressure_washer/stats"
+    candidates = sorted(stats_root.glob("pressure_stats_*/overall/missing_pressure_objects.csv"))
+    if not candidates:
+        print("join_pressure_quality: no pressure stats table under %s; columns left empty" % stats_root,
+              file=sys.stderr)
+        return
+    stats_path = candidates[-1]
+    lookup: dict[str, tuple[str, str]] = {}
+    with stats_path.open(encoding="utf-8") as handle:
+        for record in csv.DictReader(handle):
+            lookup[record["dataset_id"]] = (record["quality_class"], record["reason"])
+    joined = 0
+    for row in rows:
+        quality = lookup.get(row["session_id"])
+        row["pressure_quality_class"] = quality[0] if quality else ""
+        row["pressure_quality_reason"] = quality[1] if quality else ""
+        joined += quality is not None
+    print("join_pressure_quality: %d/%d sessions annotated from %s" % (joined, len(rows), stats_path),
+          file=sys.stderr)
+
+
 def write_splits(rows: list[dict], output: Path, *, exclude: set[str] | None = None,
                  test: set[str] | None = None, val: set[str] | None = None) -> None:
     """Generate a subject split; validation equals test unless ``val`` is given."""
@@ -246,6 +276,7 @@ def build(fps: float, camera: str, output: Path,
                      "quality": "ok" if not quality else ";".join(quality),
                      "eligible_anysole": "1" if eligible else "0", "eligibility_reason": eligibility_reason,
                      "joint_checksum": SMPL24_CHECKSUM if smpl.is_file() else ""})
+    join_pressure_quality(rows)
     rows.sort(key=lambda row: row["session_id"])
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="") as f:
