@@ -345,6 +345,9 @@ def main() -> None:
                 print(f"skip existing {output}")
                 continue
             if model == "motionpro":
+                if output.is_file():
+                    print(f"skip existing {output}")
+                    continue
                 raise FileNotFoundError(
                     f"MotionPRO unified output missing: {output}. Run app.test_frappe; "
                     "MotionPRO writes this contract during evaluation."
