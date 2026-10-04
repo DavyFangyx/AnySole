@@ -224,7 +224,7 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
 def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
     session = row["session_id"]
     date, subject = session_parts(row)
-    native_path = WORKSPACE / "work" / "VP-MoCap" / date / subject / session / "opt_results" / "opt_result.pth"
+    native_path = WORKSPACE / "work" / "VP-MoCap" / "v1" / "pose_optimization" / date / subject / session / "opt_result.pth"
     if not native_path.is_file():
         raise FileNotFoundError(f"PoseTransOpt output missing: {native_path}")
     import torch
@@ -239,6 +239,8 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
         raise ValueError(f"{native_path}: expected pose (T,24,3,3), got {tuple(pose.shape)}")
     if beta.ndim == 1:
         beta = beta.reshape(1, -1).repeat(len(pose), 1)
+    # PoseTransOpt saves float64 tensors; smplx's lbs matmul requires float32.
+    pose, beta, trans = pose.float(), beta.float(), trans.float()
     smpl_path = WORKSPACE / "assets/third_party" / "smpl" / "SMPL_NEUTRAL.pkl"
     model = smplx.create(str(smpl_path), "smpl", gender="neutral", batch_size=len(pose), num_betas=10)
     with torch.no_grad():
