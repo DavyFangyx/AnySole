@@ -50,7 +50,7 @@ A/B 系列分析入口为语义化脚本（`complement.py`、`dropout_ablation.p
 | D_Test3 接触检测 | 接触标签判定 | `AnysoleWorkspace/tool/contact_labels.py`；`d_test3_contact.py` |
 | D_Test4 基线触觉审计 | 四基线触觉格式审计（审计只读） | `d_test4_baseline_tactile.py`（数据源 = `build_shared.py` 产物） |
 | D_Test5 鞋垫偏移补偿（**待适配**） | 鞋垫漂移补偿器测试 | `d_test5_insole_drift.py` |
-| D_Test6 地面估计与坐标系审计 | 行走地面平面拟合审计（四日期） + 生产 floor 查看 | `d_test6_floor.py`；`d_test6_floor_view.py` |
+| D_Test6 地面估计与坐标系审计 | 行走地面 ROI 审计（`AnysoleWorkspace/tool/.../floor_audit.py`） + 生产 floor 查看 | `floor_audit.py`；`d_test6_floor_view.py` |
 | R_Test1 模型可视化 | 模型动画 | `r_test1_visualize_{anysole,mmvp,motionpro,step2motion}.py`；`r_test1_compare.py`（跨模型并排，原生协议 + 分协议 GT 栏） |
 | R_Test2 参数对照 | 跨模型/参数对照评估 | `r_test2_compare.py`（`--by-mode` 模式分块；原生协议 + 能力门控） |
 | R_Test3 轨迹可视化 | 轨迹对比动画 | `r_test3_traj.py`（`--compare` 并排轨迹；配对协议 GT） |
@@ -80,8 +80,7 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   │   ├── d_test3_contact.py          # D_Test3：接触标签动画 + 阈值分析
 │   │   ├── d_test4_baseline_tactile.py # D_Test4：四基线触觉格式审计（审计只读，读 build_shared 产物）
 │   │   ├── d_test5_insole_drift.py     # D_Test5：鞋垫漂移补偿器测试（待适配）
-│   │   ├── d_test6_floor.py            # D_Test6：四日期行走地面平面审计
-│   │   └── d_test6_floor_view.py       # D_Test6：生产 floor 查看（floor 系点云/RGB+ROI/高度直方图）
+│   │   └── d_test6_floor_view.py       # D_Test6：生产 floor 查看（floor 系点云/RGB+ROI/高度直方图；审计工具在 AnysoleWorkspace）
 │   ├── ── 结果检验（R_TestN）──
 │   │   ├── r_test1_visualize_{anysole,mmvp,motionpro,step2motion}.py   # R_Test1：模型动画
 │   │   ├── r_test2_compare.py          # R_Test2：跨模型/参数对照评估（只出指标）
@@ -325,12 +324,9 @@ python results_display/script/d_test5_insole_drift.py --session S7013
 
 ```bash
 conda activate touch_gait
-# 四日期代表 session 审计：每日期 3 帧 × 3 ROI = 9 候选
-# （重写 floor_candidates.csv；单日期用 --dates）
-python results_display/script/d_test6_floor.py
-python results_display/script/d_test6_floor.py --dates 20260807
+# 四日期代表 session 审计：每日期 3 帧 × 3 ROI = 9 候选，选出最优 ROI
+python AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/floor_audit.py
 # 生产 floor 查看器：读 floor_<subject>.npy + 生产深度帧
-# （深度帧/ROI 默认取 floor_artifact_<date>.json，--depth-png/--roi 可覆盖）
 python results_display/script/d_test6_floor_view.py --date 20260808 --subject S12
 ```
 
@@ -355,7 +351,7 @@ conda activate touch_gait
 # motionpro 可视化
 python results_display/script/r_test1_visualize_motionpro.py
 --session S14103
---checkpoint results://MotionPRO/checkpoints/imagepressure2smpl/init/5e-05/imagepressure2smpl_best.pth
+--checkpoint results://baselines/MotionPRO/checkpoints/imagepressure2smpl/init/5e-05/imagepressure2smpl_best.pth
 
 # step2motion 可视化
 python results_display/script/r_test1_visualize_step2motion.py
