@@ -37,7 +37,7 @@ from pathlib import Path
 
 import numpy as np
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent  # legacy/: utils lives in script/
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -133,7 +133,13 @@ def render_missing_panel(label: str, reason: str) -> np.ndarray:
 
 
 def anysole_prediction_roots(model_dir: Path, variant: str | None) -> list[tuple[str, Path]]:
-    """AnySole run subdirs (stacked-hyperparameter naming) or the flat layout."""
+    """AnySole run subdirs (stacked-hyperparameter naming) or the flat layout.
+
+    Omitted --variant: exactly one run dir -> use it; several -> newest by
+    mtime (logged); ``all`` -> every run dir (historical sweep).
+    """
+    if variant == "all":
+        variant = None
     if variant:
         return [(variant, model_dir / variant)]
     if not model_dir.is_dir():
@@ -142,7 +148,13 @@ def anysole_prediction_roots(model_dir: Path, variant: str | None) -> list[tuple
         p for p in model_dir.iterdir()
         if p.is_dir() and ((p / "checkpoints").is_dir() or (p / "predictions").is_dir())
     )
-    return [(p.name, p) for p in runs] or [("", model_dir)]
+    if len(runs) > 1:
+        newest = max(runs, key=lambda p: p.stat().st_mtime)
+        log.warning(f"{model_dir.name}: {len(runs)} run dirs; picking newest: {newest.name} (--variant to choose, 'all' for every run)")
+        return [(newest.name, newest)]
+    if runs:
+        return [(runs[0].name, runs[0])]
+    return [("", model_dir)]
 
 
 def load_anysole_pred(model_dir: Path, run_name: str, session_id: str, config_id: str, row: dict):

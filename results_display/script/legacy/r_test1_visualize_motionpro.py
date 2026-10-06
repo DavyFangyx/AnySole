@@ -24,13 +24,18 @@ import os
 import sys
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent.parent  # legacy/: utils lives in script/
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 from utils import cli_common
 
 
 REPO_ROOT = cli_common.REPO_ROOT
-# The BVH-era MotionPRO lib (FRAPPE / util.io) now lives in the archived
-# source tree; Baselines/MotionPRO keeps only data/checkpoints.
-MOTIONPRO_ROOT = REPO_ROOT / "Baselines_backup" / "MotionPRO"
+# The BVH-era MotionPRO lib (FRAPPE / util.io) ships with the Baselines
+# tree (T2 re-added the model source next to data/checkpoints; the old
+# full tree is archived as Baselines_old/).
+MOTIONPRO_ROOT = REPO_ROOT / "Baselines" / "MotionPRO"
 if str(MOTIONPRO_ROOT) not in sys.path:
     sys.path.insert(0, str(MOTIONPRO_ROOT))
 

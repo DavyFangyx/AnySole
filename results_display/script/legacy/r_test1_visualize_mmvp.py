@@ -17,9 +17,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]  # legacy/ -> repo root
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 from utils.compare_core import array_from_file, native_edges, protocol_gt  # noqa: E402
 from utils import cli_common  # noqa: E402
 

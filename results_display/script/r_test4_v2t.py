@@ -285,8 +285,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ckpt", type=str, default=str(DEFAULT_CKPT))
     parser.add_argument("--source", choices=("archives", "infer"), default="archives",
                         help="archives reads standardized V2T outputs; infer is the legacy on-the-fly diagnostic.")
-    parser.add_argument("--model-name", "--modal", dest="modal", default="V4B")
+    parser.add_argument("--model-name", "--modal", dest="modal", default="V3_3B")
     parser.add_argument("--contact-method", default="joint_and")
+    parser.add_argument("--variant", default=None, help="AnySole run subdir (omit: single run -> use it, several -> newest by mtime; 'all' = every run).")
+    parser.add_argument("--models", default="all", help="Select models: anysole and/or registry baseline names, comma-separated; default all.")
     parser.add_argument("--modes-config", type=Path, default=SCRIPT_DIR.parent / "models_modes.yaml")
     parser.add_argument("--config-id", type=str, default="V2T",
                         help="archives mode; infer accepts the legacy VT2M,V2M,T2M arms.")
@@ -418,21 +420,25 @@ def plot_archive_error(cells_mae: np.ndarray, out_png: Path, session_id: str, mo
 
 def archive_entries(args: argparse.Namespace) -> list[dict[str, str]]:
     registry = load_mode_registry(args.modes_config)
+    selection = [s.lower() for s in cli_common.split_csv_arg(args.models)]
+    want_all = not selection or selection == ["all"]
     entries = []
     from r_test2_compare import anysole_run_dirs
-    for modal in cli_common.split_csv_arg(args.modal):
-        for contact_method in cli_common.split_csv_arg(args.contact_method):
-            model_dir = cli_common.anysole_model_dir(modal, contact_method)
-            base = cli_common.RESULTS_ROOT / "AnySole" / model_dir
-            for run_name, run_dir in anysole_run_dirs(base, None):
-                suffix = f"/{run_name}" if run_name else ""
-                entries.append({
-                    "name": f"AnySole/{model_dir}{suffix}/V2T",
-                    "prediction_root": str(run_dir / "predictions" / "eval_motion"),
-                    "pattern": "{session_id}_V2T.npz",
-                    "color": "#50c8ff",
-                })
-    entries.extend(dict(entry) for entry in registry.get("V2T", []))
+    if want_all or "anysole" in selection:
+        for modal in cli_common.split_csv_arg(args.modal):
+            for contact_method in cli_common.split_csv_arg(args.contact_method):
+                model_dir = cli_common.anysole_model_dir(modal, contact_method)
+                base = cli_common.RESULTS_ROOT / "AnySole" / model_dir
+                for run_name, run_dir in anysole_run_dirs(base, args.variant):
+                    suffix = f"/{run_name}" if run_name else ""
+                    entries.append({
+                        "name": f"AnySole/{model_dir}{suffix}/V2T",
+                        "prediction_root": str(run_dir / "predictions" / "eval_motion"),
+                        "pattern": "{session_id}_V2T.npz",
+                        "color": "#50c8ff",
+                    })
+    entries.extend(dict(entry) for entry in registry.get("V2T", [])
+                   if want_all or str(entry.get("name") or "").lower() in selection)
     return entries
 
 

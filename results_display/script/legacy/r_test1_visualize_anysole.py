@@ -31,7 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent  # legacy/: utils lives in script/
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -228,7 +228,7 @@ def parse_args() -> argparse.Namespace:
         help="AnySole model names, comma-separated; 'auto' (default) scans every dir under results/AnySole/. "
         "Legacy alias: --modal. Model dir is <model-name>_<contact-method> (e.g. V4A_joint_and).",
     )
-    parser.add_argument("--contact-method", type=str, default="tactile_abs", help="Contact-label scheme(s), comma-separated; ignored when --model-name is 'auto'.")
+    parser.add_argument("--contact-method", type=str, default="joint_and", help="Contact-label scheme(s), comma-separated; ignored when --model-name is 'auto'.")
     parser.add_argument(
         "--variant",
         type=str,

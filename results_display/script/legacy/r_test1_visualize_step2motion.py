@@ -25,10 +25,13 @@ import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-# The BVH-era Step2Motion export helper now lives in the archived source
-# tree; Baselines/Step2Motion no longer ships bvh_export.py.
-STEP2MOTION_SRC = REPO_ROOT / "Baselines_backup" / "Step2Motion" / "src"
+REPO_ROOT = Path(__file__).resolve().parents[3]  # legacy/ -> repo root
+SCRIPT_DIR = Path(__file__).resolve().parent.parent  # legacy/: utils lives in script/
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+# The BVH-era Step2Motion export helper ships with the Baselines tree
+# (the old full tree is archived as Baselines_old/).
+STEP2MOTION_SRC = REPO_ROOT / "Baselines" / "Step2Motion" / "src"
 
 # results_display ``utils`` must win over the Step2Motion tree's own
 # ``utils.py``: import everything from it before pushing STEP2MOTION_SRC to
@@ -69,7 +72,7 @@ SEQ_ROOT = cli_common.WORKSPACE_ROOT / "shared/facts/sessions/cam3"
 DEFAULT_VIZ_DIR = cli_common.DISPLAY_ROOT / "ResultTest/R1Test_visualize/Step2Motion/gait_model"
 MIN_FRAMES = 101
 TARGET_HZ = 40.0
-DEFAULT_PRED_DIR = cli_common.RESULTS_ROOT / "Step2Motion/predictions/gait_model"
+DEFAULT_PRED_DIR = cli_common.RESULTS_ROOT / "baselines/Step2Motion/predictions/gait_model"
 
 
 def load_font(size: int):

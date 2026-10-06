@@ -51,7 +51,7 @@ A/B 系列分析入口为语义化脚本（`complement.py`、`dropout_ablation.p
 | D_Test4 基线触觉审计 | 四基线触觉格式审计（审计只读） | `d_test4_baseline_tactile.py`（数据源 = `build_shared.py` 产物） |
 | D_Test5 鞋垫偏移补偿（**待适配**） | 鞋垫漂移补偿器测试 | `d_test5_insole_drift.py` |
 | D_Test6 地面估计与坐标系审计 | 行走地面 ROI 审计（`AnysoleWorkspace/tool/.../floor_audit.py`） + 生产 floor 查看 | `floor_audit.py`；`d_test6_floor_view.py` |
-| R_Test1 模型可视化 | 模型动画 | `r_test1_visualize_{anysole,mmvp,motionpro,step2motion}.py`；`r_test1_compare.py`（跨模型并排，原生协议 + 分协议 GT 栏） |
+| R_Test1 模型可视化 | 姿态动画（选中 + 生成什么统一入口） | `r_test1_visualize.py`（缺省单独生成；`--compare` 同 mode 1×N 横排，复用单独生成中间帧） |
 | R_Test2 参数对照 | 跨模型/参数对照评估 | `r_test2_compare.py`（`--by-mode` 模式分块；原生协议 + 能力门控） |
 | R_Test3 轨迹可视化 | 轨迹对比动画 | `r_test3_traj.py`（`--compare` 并排轨迹；配对协议 GT） |
 | R_Test4 触觉生成 V2T | V2T 触觉生成 | `r_test4_v2t.py`（四层层级 brief 7 + 叶 5） |
@@ -82,7 +82,7 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   │   ├── d_test5_insole_drift.py     # D_Test5：鞋垫漂移补偿器测试（待适配）
 │   │   └── d_test6_floor_view.py       # D_Test6：生产 floor 查看（floor 系点云/RGB+ROI/高度直方图；审计工具在 AnysoleWorkspace）
 │   ├── ── 结果检验（R_TestN）──
-│   │   ├── r_test1_visualize_{anysole,mmvp,motionpro,step2motion}.py   # R_Test1：模型动画
+│   │   ├── r_test1_visualize.py         # R_Test1：姿态动画（选中 + 生成什么；--compare 同 mode 横排）
 │   │   ├── r_test2_compare.py          # R_Test2：跨模型/参数对照评估（只出指标）
 │   │   ├── r_test3_traj.py             # R_Test3：轨迹对比动画 + 静态图
 │   │   └── r_test4_v2t.py              # R_Test4：V2T 触觉生成
@@ -338,72 +338,34 @@ python results_display/script/d_test6_floor_view.py --date 20260808 --subject S1
 
 ## R_Test1 模型可视化
 
-| 脚本 | 作用 | 默认输出 |
-| --- | --- | --- |
-| `r_test1_visualize_motionpro.py` | MotionPRO 触觉输入/预测/GT 三栏对比动画 | `ResultTest/R1Test_visualize/MotionPRO/<checkpoint tag>/` |
-| `r_test1_visualize_step2motion.py` | Step2Motion 足底压力/生成 BVH/GT 对比动画 | `ResultTest/R1Test_visualize/Step2Motion/gait_model/` |
-| `r_test1_visualize_anysole.py` | AnySole 主模型与消融（足底压力/预测动作/SMPL GT；自动检测格式） | `ResultTest/R1Test_visualize/AnySole/<modal>/<config>/` |
-| `r_test1_visualize_mmvp.py` | MMVP 两条方法线的轻量动画（消费 eval_motion npz，缺预测显式报告） | `ResultTest/R1Test_visualize/` |
+统一入口 `r_test1_visualize.py`（2026-10-06 用户裁定：**选中 + 生成什么**）。
+`--models` 选中谁出谁（`anysole` 一次出四个系列 VT2M/V2M/T2M/V2T，基线各出自己
+注册的那个 mode；缺省 = 全部）；`--compare` 把同 mode 模型横排 1×N，只拼装
+单独生成已落的中间帧，不重新渲染。
+
+| 产物 | 位置 |
+| --- | --- |
+| 单独生成（输入\|预测\|GT 三栏动画 + 中间帧） | `ResultTest/R1Test_visualize/<model>/<mode>/{gif,mp4}/` 与 `frames/<session>/` |
+| 对比（同 mode 1×N 横排） | `ResultTest/R1Test_visualize/compare/<mode>/` |
 
 ```bash
-conda activate touch_gait
+# 单独生成：选中谁出谁；缺省全部模型
+python results_display/script/r_test1_visualize.py --models anysole,motionpro --session S13011
+python results_display/script/r_test1_visualize.py --session S13011
 
-# motionpro 可视化
-python results_display/script/r_test1_visualize_motionpro.py
---session S14103
---checkpoint results://baselines/MotionPRO/checkpoints/imagepressure2smpl/init/5e-05/imagepressure2smpl_best.pth
-
-# step2motion 可视化
-python results_display/script/r_test1_visualize_step2motion.py
---self-test
-
-# 默认 主模型 + 消融，全部 config
-CUDA_VISIBLE_DEVICES=4 python results_display/script/r_test1_visualize_anysole.py --model-name V4B --contact-method joint_and --gen gif --render bone,mesh --session S12042
---model-name V4B
---contact-method bvh_h,bvh_soft,tactile_abs,pat_offset,joint_and
---config-id VT2M
-
-# 历史 run 对照
---model-name F0b --contact-method joint_and
+# 对比：先跑过单独生成，再同 mode 横排
+python results_display/script/r_test1_visualize.py --compare --session S13011
 ```
 
-`--render bone,mesh`：面板渲染类型，逗号分隔；`bone` = 骨架面板（默认），`mesh` = 纯 SMPL
-表面面板（不叠骨架）。两种类型像 gif/mp4 一样**分目录输出**，互不混叠：
-`ResultTest/R1Test_visualize/AnySole/<model-name>/<config>/{bone,mesh}/{gif,mp4}/`。
-无 SMPL 参数的文件（BVH，如 Step2Motion）只有 bone 可渲染，mesh 自动跳过并告警。
+`--variant` 缺省自动选 run（只有一个直接取、多个取最新并 log 点名）；`--variant all`
+显式处理全部历史 run。缺预测的模型显示灰色占位并写明路径（不回退、不报错）。
+`--split` 缺省 `val`（迭代集）；正式 36-session 集加 `--split test`。
 
-### R_Test1 并排对比（compare/，原生协议）
-
-`r_test1_compare.py` 按生成模式生成一行式并排动画：同模式模型共屏，每个模型画
-**自己的原生骨架与骨架边**（SMPL-24 树 / BVH-23 Skeleton3 层级），主模型蓝 /
-GT 橙 / 基线按注册表配色，面板标题带 `SMPL-24 native` / `BVH-23 native` 标记，
-每栏 footer 显示该模型**与其配对同协议 GT** 的逐帧 MPJPE。
-混合协议的一行不再用一个 `GT Motion` 面板代表所有模型：每个出现过的协议各给一栏
-GT（`GT Motion — SMPL-24 native` / `GT Motion — BVH-23 native`）。
-输入栏随模式变：VT2M/T2M 触觉热力图，V2M 真实 RGB 帧（自动对比度增强）。
-缺预测的模型显示灰色占位并写明缺失路径（不退回到其他模型的 GT）。
-
-| 模式 | 行布局 |
-| --- | --- |
-| VT2M | 触觉 \| AnySole VT2M \| MotionPRO \| MMVP pressure_toolkit \| GT SMPL-24 |
-| V2M | 视频帧 \| AnySole V2M \| MMVP_VP-MoCap \| GT SMPL-24 |
-| T2M | 触觉 \| AnySole T2M \| Step2Motion \| GT SMPL-24 \| GT BVH-23 |
+四个分模型脚本（`r_test1_visualize_{anysole,mmvp,motionpro,step2motion}.py`）与旧
+`r_test1_compare.py` 已并入本入口，移至 `script/legacy/`。
 
 模式/协议/能力的唯一声明点：`results_display/models_modes.yaml`（AnySole 的模式 =
 config-id，无需声明；基线必须声明，解析不出模式的行不进比较）。跨模式行永不共屏。
-
-```bash
-conda activate touch_gait
-# 单 session 冒烟
-python results_display/script/r_test1_compare.py --mode VT2M --session S13013 --gen gif
-# 单模式 × val 全量
-python results_display/script/r_test1_compare.py --mode V2M --split val
-# 三模式全出（默认 val，--split test 换正式 36 集）
-python results_display/script/r_test1_compare.py --model-name V4B --contact-method joint_and
-```
-
-产出（`ResultTest/R1Test_visualize/compare/`）：`<mode>/{gif,mp4}/<session>_<mode>_compare.{gif,mp4}`。
-单个模型可视化目录不受影响。
 
 ## R_Test2 参数对照
 
@@ -416,14 +378,11 @@ python results_display/script/r_test1_compare.py --model-name V4B --contact-meth
 （split/manifest hash + 每模型 protocol/ok/missing/invalid 统计）。
 
 ```bash
-python results_display/script/r_test2_compare.py \
-  --manifest AnysoleWorkspace/protocol/manifests/session_manifest.csv \
-  --split-csv AnysoleWorkspace/protocol/splits/default/splits.csv \
-  --model-name V4A \
-  --contact-method joint_and \
-  --variant tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1 \
-  --config-id VT2M,V2M,T2M,V2T \
-  --split test --by-mode --write-model-metrics --surface-metrics --force
+# 默认全模型 × val（--models 选中谁评估谁，anysole 一次四个 config）
+python results_display/script/r_test2_compare.py --by-mode
+python results_display/script/r_test2_compare.py --models motionpro,step2motion --by-mode
+# 正式 36-session 集
+python results_display/script/r_test2_compare.py --split test --by-mode --write-model-metrics --surface-metrics --force
 ```
 
 基线模型清单来自 `models_modes.yaml`（协议/能力唯一声明点），AnySole 行按
@@ -520,7 +479,7 @@ BVH/Hips root GT），ATE 对各自配对 GT 计算；面板标题与静态图�
 # 冒烟
 python results_display/script/r_test3_traj.py --compare --session S13013 --mode VT2M
 # 三模式全出（默认 val，--split test 换正式 36 集）
-python results_display/script/r_test3_traj.py --compare --model-name V4B --contact-method joint_and
+python results_display/script/r_test3_traj.py --compare --models anysole,motionpro
 ```
 
 产出（`ResultTest/R3Test_traj/compare/`）：`<mode>/{gif,png}/<session>_<mode>_traj_compare.{gif,png}`。
@@ -554,10 +513,9 @@ V2T 指标统一到每脚 31×11 网格：AnySole 的 4×12 网格只在评估�
 
 ```bash
 conda activate touch_gait
-python results_display/script/r_test4_v2t.py \
-  --source archives --model-name V4A --contact-method joint_and --split test
-python results_display/script/r_test4_v2t.py \
-  --source archives --session S10103 --model-name V4A --contact-method joint_and
+# 默认 anysole(V3_3B) + FPP-Net，全部 test 会话；--models 选中谁评估谁
+python results_display/script/r_test4_v2t.py --source archives --split test
+python results_display/script/r_test4_v2t.py --source archives --session S10103
 # 仅运行旧的模型即时推理诊断：
 python results_display/script/r_test4_v2t.py --source infer --config-id VT2M,V2M --export-sessions 2
 ```

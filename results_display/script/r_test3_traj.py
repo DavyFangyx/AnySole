@@ -478,6 +478,7 @@ def parse_args() -> argparse.Namespace:
         "r_test3_traj/compare/<mode>/; per-model visualization is unaffected.",
     )
     parser.add_argument("--mode", default="all", help="Generation mode(s) for --compare: VT2M,V2M,T2M or 'all'.")
+    parser.add_argument("--models", default="all", help="Select models: anysole and/or registry baseline names, comma-separated; default all.")
     parser.add_argument("--modes-config", type=Path, default=Path(__file__).resolve().parent.parent / "models_modes.yaml",
                         help="Mode registry (--compare only).")
     args = parser.parse_args()
@@ -612,17 +613,22 @@ def run_compare(args: argparse.Namespace) -> int:
                                  split_csv=split_csv, evaluable_only=True)
     }
 
-    if getattr(args, "sweep", False):
-        model_dirs = cli_common.sweep_anysole_model_dirs(args.modal)
+    want_all, selected = selected_models(args)
+    if want_all or "anysole" in selected:
+        if getattr(args, "sweep", False):
+            model_dirs = cli_common.sweep_anysole_model_dirs(args.modal)
+        else:
+            model_dirs = [
+                cli_common.anysole_model_dir(modal, contact_method, pick_run_dir(PRED_ROOT / cli_common.anysole_model_dir(modal, contact_method), getattr(args, "variant", None)))
+                for modal in cli_common.split_csv_arg(args.modal)
+                for contact_method in cli_common.split_csv_arg(args.contact_method)
+            ]
     else:
-        model_dirs = [
-            cli_common.anysole_model_dir(modal, contact_method, getattr(args, "variant", None))
-            for modal in cli_common.split_csv_arg(args.modal)
-            for contact_method in cli_common.split_csv_arg(args.contact_method)
-        ]
+        model_dirs = []
     for mode in modes:
         out_mode = out_dir / mode
-        baselines = list(registry.get(mode, []))
+        baselines = [b for b in registry.get(mode, [])
+                     if want_all or str(b.get("name") or "").lower() in selected]
         log.info(f"compare mode {mode}: baselines={[b.get('name') for b in baselines]}")
         for session_id in session_ids:
             if session_id not in manifest_rows:
@@ -735,6 +741,34 @@ def run_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def selected_models(args: argparse.Namespace) -> tuple[bool, set]:
+    """--models csv -> (want_all, selected lowercased names)."""
+    selection = [s.lower() for s in cli_common.split_csv_arg(args.models)]
+    if not selection or selection == ["all"]:
+        return True, set()
+    return False, set(selection)
+
+
+def pick_run_dir(model_dir: Path, variant: str | None) -> str | None:
+    """AnySole variant rule: omitted --variant picks the single run dir, or
+    the newest by mtime when several; ``all`` is handled by --sweep upstream."""
+    if variant:
+        return variant
+    if not model_dir.is_dir():
+        return None
+    runs = sorted(
+        p for p in model_dir.iterdir()
+        if p.is_dir() and ((p / "checkpoints").is_dir() or (p / "predictions").is_dir())
+    )
+    if not runs:
+        return None
+    if len(runs) > 1:
+        newest = max(runs, key=lambda p: p.stat().st_mtime)
+        log.warning(f"{model_dir.name}: {len(runs)} run dirs; picking newest: {newest.name} (--variant to choose, --sweep for every run)")
+        return newest.name
+    return runs[0].name
+
+
 def main() -> int:
     args = parse_args()
     if args.compare:
@@ -756,19 +790,23 @@ def main() -> int:
                                  split_csv=split_csv, evaluable_only=True)
     }
 
+    want_all, selected = selected_models(args)
     # Jobs: (pred_root, session_out_root, config_id); config_id "" = baseline.
     jobs: list[tuple[Path, Path, str]] = []
-    if getattr(args, "sweep", False):
-        model_dirs = cli_common.sweep_anysole_model_dirs(args.modal)
-        for model_dir in model_dirs:
-            for config_id in cli_common.split_csv_arg(args.config_id):
-                jobs.append((PRED_ROOT / model_dir / "predictions", out_dir / model_dir / config_id, config_id))
-    else:
-        for modal in cli_common.split_csv_arg(args.modal):
-            for contact_method in cli_common.split_csv_arg(args.contact_method):
-                model_dir = cli_common.anysole_model_dir(modal, contact_method, getattr(args, "variant", None))
+    if want_all or "anysole" in selected:
+        if getattr(args, "sweep", False):
+            model_dirs = cli_common.sweep_anysole_model_dirs(args.modal)
+            for model_dir in model_dirs:
                 for config_id in cli_common.split_csv_arg(args.config_id):
                     jobs.append((PRED_ROOT / model_dir / "predictions", out_dir / model_dir / config_id, config_id))
+        else:
+            for modal in cli_common.split_csv_arg(args.modal):
+                for contact_method in cli_common.split_csv_arg(args.contact_method):
+                    model_dir = PRED_ROOT / cli_common.anysole_model_dir(modal, contact_method)
+                    variant = pick_run_dir(model_dir, getattr(args, "variant", None))
+                    model_rel = cli_common.anysole_model_dir(modal, contact_method, variant)
+                    for config_id in cli_common.split_csv_arg(args.config_id):
+                        jobs.append((PRED_ROOT / model_rel / "predictions", out_dir / model_rel / config_id, config_id))
     if args.auto:
         for rel in discover_baseline_dirs(cli_common.RESULTS_ROOT):
             jobs.append((cli_common.RESULTS_ROOT / rel / "predictions", out_dir.parent / rel / "gen", "gen"))

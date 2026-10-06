@@ -198,13 +198,13 @@ def add_common_args(
     split: bool = True,
     seq_root: bool = False,
     modal: bool = False,
-    modal_default: str = "anysolev1,anysolev1_insole_drift",
+    modal_default: str = "V3_3B",
     variant: bool = False,
     contact_method: bool = False,
-    contact_method_default: str = "tactile_abs",
+    contact_method_default: str = "joint_and",
     sweep: bool = False,
     config_id: bool = False,
-    config_default: str = "VT2M,V2M,T2M",
+    config_default: str = "VT2M,V2M,T2M,V2T",
     gen: bool = True,
     fps: bool = True,
     fps_default: float = DEFAULT_FPS,
@@ -230,7 +230,7 @@ def add_common_args(
             help="AnySole model name(s), comma-separated (legacy alias: --modal).",
         )
     if variant:
-        parser.add_argument("--variant", type=str, default=None, help="Stacked hyperparameter subdir under the model dir (the full field stack, e.g. tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1); model+contact+variant == the ckpt address.")
+        parser.add_argument("--variant", type=str, default=None, help="Stacked hyperparameter subdir under the model dir (the full field stack, e.g. tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1); model+contact+variant == the ckpt address. Omitted: exactly one run dir -> use it, several -> newest by mtime (logged). 'all' processes every run dir.")
     if contact_method:
         parser.add_argument("--contact-method", type=str, default=contact_method_default, help="Contact-label scheme(s), comma-separated; model dir is <model-name>_<contact-method>.")
     if sweep:

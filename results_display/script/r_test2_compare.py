@@ -225,7 +225,12 @@ def anysole_run_dirs(model_dir: Path, variant: str | None) -> list[tuple[str, Pa
 
     A run dir carries checkpoints/ or predictions/; the flat historical layout
     (model dir itself) is still accepted when no run subdir matches.
+
+    Omitted --variant: exactly one run dir -> use it; several -> newest by
+    mtime (logged); ``all`` -> every run dir (historical sweep).
     """
+    if variant == "all":
+        variant = None
     if variant:
         return [(variant, model_dir / variant)]
     if not model_dir.is_dir():
@@ -234,7 +239,13 @@ def anysole_run_dirs(model_dir: Path, variant: str | None) -> list[tuple[str, Pa
         p for p in model_dir.iterdir()
         if p.is_dir() and ((p / "checkpoints").is_dir() or (p / "predictions").is_dir())
     )
-    return [(p.name, p) for p in runs] or [("", model_dir)]
+    if len(runs) > 1:
+        newest = max(runs, key=lambda p: p.stat().st_mtime)
+        print(f"[variant] {model_dir.name}: {len(runs)} run dirs; picking newest: {newest.name} (--variant to choose, 'all' for every run)")
+        return [(newest.name, newest)]
+    if runs:
+        return [(runs[0].name, runs[0])]
+    return [("", model_dir)]
 
 
 def expand_anysole_models(results_root: Path, modals: list[str],
@@ -262,6 +273,7 @@ def expand_anysole_models(results_root: Path, modals: list[str],
                         "contact_method": contact_method,
                         "config_id": config_id,
                         "mode": config_id,
+                        "protocol": "smpl24",
                         "capabilities": ANYSOLE_V2T_CAPS if config_id == "V2T" else ANYSOLE_MOTION_CAPS,
                         "approved": list(ANYSOLE_APPROVED),
                         "sources": {},
@@ -749,15 +761,14 @@ def main() -> int:
                     help="Canonical train/val/test membership table; manifest is metadata only.")
     ap.add_argument("--models-config", type=Path, default=None)
     ap.add_argument("--results-root", type=Path, default=ROOT / "results")
-    ap.add_argument("--auto-scan", action="store_true",
-                    help="Deprecated alias: baselines always come from the mode registry now.")
     ap.add_argument("--split", default="val")
     ap.add_argument("--out-dir", type=Path, default=cli_common.DISPLAY_ROOT / "ResultTest/R2Test_compare")
     ap.add_argument("--force", action="store_true", help="Rebuild and overwrite existing outputs.")
     ap.add_argument("--fps", type=float, default=40.0)
-    ap.add_argument("--model-name", "--modal", dest="modal", metavar="MODEL_NAME", default="anysolev1,anysolev1_insole_drift", help="AnySole model name(s), comma-separated; legacy alias: --modal")
-    ap.add_argument("--contact-method", default="tactile_abs", help="Contact-label scheme(s), comma-separated; model dir is <model-name>_<contact-method>")
-    ap.add_argument("--variant", default=None, help="AnySole stacked-hyperparameter run subdir (omit to scan all runs).")
+    ap.add_argument("--model-name", "--modal", dest="modal", metavar="MODEL_NAME", default="V3_3B", help="AnySole model name(s), comma-separated; legacy alias: --modal")
+    ap.add_argument("--contact-method", default="joint_and", help="Contact-label scheme(s), comma-separated; model dir is <model-name>_<contact-method>")
+    ap.add_argument("--variant", default=None, help="AnySole stacked-hyperparameter run subdir (omit: single run -> use it, several -> newest by mtime; 'all' = every run).")
+    ap.add_argument("--models", default="all", help="Select models: anysole and/or registry baseline names, comma-separated; default all.")
     ap.add_argument("--config-id", default="VT2M,V2M,T2M,V2T", help="AnySole generation task(s), comma-separated")
     ap.add_argument("--modes-config", type=Path, default=Path(__file__).resolve().parent.parent / "models_modes.yaml",
                     help="Mode/protocol/capability registry for baselines.")
@@ -790,9 +801,16 @@ def main() -> int:
             if not m.get("capabilities") or not m.get("protocol"):
                 m["refused_reason"] = "no declared protocol/capabilities"
     else:
-        models = expand_anysole_models(args.results_root, modals, contact_methods,
-                                       config_ids, variant=args.variant)
-        models.extend(registry_baselines(args.results_root, registry))
+        models = []
+        selection = cli_common.split_csv_arg(args.models)
+        want_all = not selection or selection == ["all"]
+        if want_all or "anysole" in [s.lower() for s in selection]:
+            models.extend(expand_anysole_models(args.results_root, modals, contact_methods,
+                                                config_ids, variant=args.variant))
+        selected_baselines = {s.lower() for s in selection if s.lower() != "all" and s.lower() != "anysole"}
+        for entry in registry_baselines(args.results_root, registry):
+            if want_all or entry["name"].lower() in selected_baselines:
+                models.append(entry)
         refused = []
     split_csv = Path(cli_common.resolve_path(args.split_csv, ROOT))
     requested_ids = load_split_ids(split_csv, args.split)
