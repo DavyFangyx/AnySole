@@ -27,7 +27,7 @@
 results/experiments/singlemodal_eval/<model>/            # V3_3B、V3_3B_vonly、V3_3B_tonly
 results/experiments/rho_grid_eval/<model>/               # 全网格 grid_metrics + npz/ + repr/
 results_display/script/<analysis>.py
-results_display/{ATest,BTest}/<编号Test_分析名>/<model>/
+results_display/{Test1_ComplementTest,Test2_MissingTest}/<代号>/<model>/
 ```
 
 ```bash
@@ -38,8 +38,8 @@ python results_display/script/complement.py
 python results_display/script/v2t_upper.py
 ```
 
-A/B 系列分析入口为语义化脚本（`complement.py`、`dropout_ablation.py`、
-`rho_grid_analysis.py` 等），编号与产物目录的对应见下表与「目录结构」。
+C/M 系列分析入口为语义化脚本（`complement.py`、`dropout_ablation.py`、
+`rho_grid_analysis.py` 等），代号与产物目录的对应见下表与「目录结构」。
 
 ## 编号对照
 
@@ -51,18 +51,18 @@ A/B 系列分析入口为语义化脚本（`complement.py`、`dropout_ablation.p
 | D_Test4 基线触觉审计 | 四基线触觉格式审计（审计只读） | `d_test4_baseline_tactile.py`（数据源 = `build_shared.py` 产物） |
 | D_Test5 鞋垫偏移补偿（**待适配**） | 鞋垫漂移补偿器测试 | `d_test5_insole_drift.py` |
 | D_Test6 地面估计与坐标系审计 | 行走地面 ROI 审计（`AnysoleWorkspace/tool/.../floor_audit.py`） + 生产 floor 查看 | `floor_audit.py`；`d_test6_floor_view.py` |
-| R_Test1 模型可视化 | 姿态动画（选中 + 生成什么统一入口） | `r_test1_visualize.py`（缺省单独生成；`--compare` 同 mode 1×N 横排，复用单独生成中间帧） |
+| R_Test1 模型可视化 | 姿态动画（选中 + 生成什么统一入口） | `r_test1_visualize.py`（缺省单独生成；`--compare` 同 mode 1×N 横排：输入一次 + 各模型预测 + 每协议一栏 GT） |
 | R_Test2 参数对照 | 跨模型/参数对照评估 | `r_test2_compare.py`（`--by-mode` 模式分块；原生协议 + 能力门控） |
 | R_Test3 轨迹可视化 | 轨迹对比动画 | `r_test3_traj.py`（`--compare` 并排轨迹；配对协议 GT） |
 | R_Test4 触觉生成 V2T | V2T 触觉生成 | `r_test4_v2t.py`（四层层级 brief 7 + 叶 5） |
-| A0 | 专才分工 | `singlemodal_analysis.py`（→ `utils/component_analysis.py --a0`） |
-| A1 | 完整输入融合 | `complement.py`（→ `utils/component_analysis.py --a1`） |
-| A2 | 缺失分支分工 | `dropout_ablation.py`（→ `--a2`） |
-| B1 | V 分支的 T 相关能力 | `v2t_upper.py`（→ `--b1`） |
-| B2 | T 分支的 V 相关能力 | `trust.py`（→ `--b2`） |
-| B3 | 连续缺失鲁棒性 | `rho_grid_analysis.py`（→ `utils/rho_grid_display.py`） |
+| C1 | 专才分工 | `singlemodal_analysis.py`（→ `utils/component_analysis.py --c1`） |
+| C2 | 完整输入融合 | `complement.py`（→ `utils/component_analysis.py --c2`） |
+| C3 | 缺失分支分工 | `dropout_ablation.py`（→ `--c3`） |
+| M1 | V 分支的 T 相关能力 | `v2t_upper.py`（→ `--m1`） |
+| M2 | T 分支的 V 相关能力 | `trust.py`（→ `--m2`） |
+| M3 | 连续缺失鲁棒性 | `rho_grid_analysis.py`（→ `utils/rho_grid_display.py`） |
 
-任务书 = `anysole/model_fix_note/missing_rate_experiment_plan.md`（实验编号 A0–B3）。
+任务书 = `anysole/model_fix_note/missing_rate_experiment_plan.md`（实验编号 C1–M3）。
 
 ## 目录结构
 
@@ -86,7 +86,7 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   │   ├── r_test2_compare.py          # R_Test2：跨模型/参数对照评估（只出指标）
 │   │   ├── r_test3_traj.py             # R_Test3：轨迹对比动画 + 静态图
 │   │   └── r_test4_v2t.py              # R_Test4：V2T 触觉生成
-│   └── ── 任务书分析（A/B 系列，入口脚本 + utils/component_analysis.py）──
+│   └── ── 任务书分析（C/M 系列，入口脚本 + utils/component_analysis.py）──
 │       ├── singlemodal_analysis.py / complement.py / dropout_ablation.py
 │       ├── v2t_upper.py / trust.py / rho_grid_analysis.py
 │       └── utils/mpl_fonts.py          # CJK 字体公共设置（中文标注不豆腐块）
@@ -102,14 +102,14 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   ├── R2Test_compare/                 # R_Test2 输出（只出指标，不做动画 + by_mode/ 模式分块）
 │   ├── R3Test_traj/                    # R_Test3 输出（+ compare/<mode> 并排轨迹）
 │   └── R4Test_v2t/                     # R_Test4 输出（tgen 汇总 + 热力图动画）
-├── ATest/                              # A 组：V 与 T 是否互补（A0–A2，各含 <model>/ 子目录）
-│   ├── A0Test_specialist/              # A0：专才分工（a0_* 产物）
-│   ├── A1Test_complement/              # A1：完整输入融合（a1_* 产物）
-│   └── A2Test_dropout_ablation/        # A2：缺失分支分工（a2_* 产物）
-└── BTest/                              # B 组：缺失条件下能否工作（B1–B3，各含 <model>/ 子目录）
-    ├── B1Test_v2t_upper/               # B1：从 F_V 读出 T 负责分量（b1_* 产物）
-    ├── B2Test_trust/                   # B2：从 F_T 读出 V 负责分量（b2_* 产物）
-    └── B3Test_rho_grid/                # B3：ρ 网格连续缺失鲁棒性（heatmap/slices）
+├── Test1_ComplementTest/               # 实验一：V 与 T 是否互补（C1–C3，各含 <model>/ 子目录）
+│   ├── C1_specialist/                  # C1：专才分工（specialist_table.csv / specialist_forest.png / summary.json）
+│   ├── C2_fusion/                      # C2：完整输入融合（fusion_* 产物）
+│   └── C3_missing_branch/              # C3：缺失分支分工（main_branch_* 产物）
+└── Test2_MissingTest/                  # 实验二：缺一路/连续缺失下主线能否工作（M1–M3，各含 <model>/ 子目录）
+    ├── M1_v2t/                         # M1：从 F_V 读出 T 负责分量（branch_* 产物）
+    ├── M2_t2v/                         # M2：从 F_T 读出 V 负责分量（branch_* 产物）
+    └── M3_rho_grid/                    # M3：ρ 网格连续缺失鲁棒性（heatmap/slices/criteria）
 ```
 
 ## 时间对齐约定（动捕 ↔ 触觉/视频）
@@ -524,22 +524,22 @@ python results_display/script/r_test4_v2t.py --source infer --config-id VT2M,V2M
 
 > `--source infer` 是兼容性的诊断入口，不是最终跨模型评估入口。
 
-## A/B 组缺失率实验（A0–B3，注册式全链路）
+## 主线模型互补性与缺失输入实验（C1–M3，注册式全链路）
 
 正式入口见 `configs/Z_README.md`。当前由 `configs` 生成两组数据任务
 （主线模型 `V3_3B`），再由 `results_display/` 的分析脚本读取结果并出图；
-A0–B3 不再生成调度 conf。
+C1–M3 不再生成调度 conf。
 
-| 编号 | 任务书实验 | 回答的问题 | 脚本 |
+| 代号 | 任务书实验 | 回答的问题 | 脚本 |
 | --- | --- | --- | --- |
-| A0 | 专才分工 | V、T 原本是否各有所长 | `singlemodal_analysis.py` |
-| A1 | 完整输入融合 | VT 是否吸收两路优势 | `complement.py` |
-| A2 | 缺失分支分工 | 主线 V-only 与 T-only 谁负责什么 | `dropout_ablation.py` |
-| B1 | V 分支的 T 相关能力 | 从 (F_V) 能否读出 T 负责分量 | `v2t_upper.py` |
-| B2 | T 分支的 V 相关能力 | 从 (F_T) 能否读出 V 负责分量 | `trust.py` |
-| B3 | 连续缺失鲁棒性 | ρ 网格下任意缺失组合是否稳定 | `rho_grid_analysis.py` |
+| C1 | 专才分工 | V、T 原本是否各有所长 | `singlemodal_analysis.py` |
+| C2 | 完整输入融合 | VT 是否吸收两路优势 | `complement.py` |
+| C3 | 缺失分支分工 | 主线 V-only 与 T-only 谁负责什么 | `dropout_ablation.py` |
+| M1 | V 分支的 T 相关能力 | 从 (F_V) 能否读出 T 负责分量 | `v2t_upper.py` |
+| M2 | T 分支的 V 相关能力 | 从 (F_T) 能否读出 V 负责分量 | `trust.py` |
+| M3 | 连续缺失鲁棒性 | ρ 网格下任意缺失组合是否稳定 | `rho_grid_analysis.py` |
 
-### B3 ρ 网格（已实装）
+### M3 ρ 网格（已实装）
 
 在 (ρV, ρT) 保留率网格上逐一评估：每格对每一帧独立掷硬币，把该模态 token 换成 null
 token（与 config 级 null 逐字节一致；四角 = VT2M/V2M/T2M/纯先验，corner_check 自检 ≈0）。
@@ -562,34 +562,34 @@ CUDA_VISIBLE_DEVICES=4 bash configs/bg.sh
 python results_display/script/rho_grid_analysis.py --split test
 ```
 
-前端输出在 `results_display/BTest/B3Test_rho_grid/V3_3B/`（`heatmap.png` / `slices.png` /
-`corner_check.csv` / `b3_criteria.json`）。
+前端输出在 `results_display/Test2_MissingTest/M3_rho_grid/V3_3B/`（`heatmap.png` / `slices.png` /
+`corner_check.csv` / `criteria.json`）。
 
-### A0–B2 分量分析
+### C1–M2 分量分析
 
 三份明细文件（主线、V 专才、T 专才）由 `singlemodal_eval` 队列任务落盘到
 `results/experiments/singlemodal_eval/{V3_3B,V3_3B_vonly,V3_3B_tonly}/metrics/<split>.json`，
-入口脚本按 registry 自动定位，无需手工传路径；B1/B2 另读
+入口脚本按 registry 自动定位，无需手工传路径；M1/M2 另读
 `results/experiments/rho_grid_eval/V3_3B/grid_metrics[_<split>].json` 作空输入先验。
-实现收敛在 `utils/component_analysis.py`，仍可单独按 `--a0/--a1/--a2/--b1/--b2` 调用：
+实现收敛在 `utils/component_analysis.py`，仍可单独按 `--c1/--c2/--c3/--m1/--m2` 调用：
 
 ```bash
 conda activate touch_gait
-# A0
+# C1
 python results_display/script/singlemodal_analysis.py --split val
-# A1
+# C2
 python results_display/script/complement.py --split val
-# A2
+# C3
 python results_display/script/dropout_ablation.py --split val
-# B1（需 rho_grid 已跑完）
+# M1（需 rho_grid 已跑完）
 python results_display/script/v2t_upper.py --split val
-# B2（需 rho_grid 已跑完）
+# M2（需 rho_grid 已跑完）
 python results_display/script/trust.py --split val
 # --split 默认 test；--model V3_3B 限定模型
 ```
 
-输出：`results_display/{ATest,BTest}/<编号Test_分析名>/V3_3B/`（分析名 = A0Test_specialist /
-A1Test_complement / A2Test_dropout_ablation / B1Test_v2t_upper / B2Test_trust）。
+输出：`results_display/{Test1_ComplementTest,Test2_MissingTest}/<代号>/V3_3B/`（代号 =
+C1_specialist / C2_fusion / C3_missing_branch / M1_v2t / M2_t2v）。
 
 ## 附录：训练侧 dropout 开关（两个独立旋钮）
 
