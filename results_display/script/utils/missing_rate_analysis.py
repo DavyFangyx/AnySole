@@ -15,14 +15,17 @@ import numpy as np
 
 
 # component, display label, metric aliases, higher_is_better
+# 别名按新名优先、旧名兜底排序：eval 明细文件与 rho_grid 网格的指标词汇不同源
+# （eval 用 RootOrientation/foot_sliding_vertex_mm，grid 保留 root_orientation_deg/
+# foot_sliding_mm），resolve_metric 取第一个存在的键，保证两边解析到同一指标。
 COMPONENTS = {
     "upper": ("Upper body", ("PA-MPJPE_upper",), False),
     "hands": ("Hands", ("PA-MPJPE_hands",), False),
-    "global_yaw": ("Global yaw", ("root_orientation_deg",), False),
+    "global_yaw": ("Global yaw", ("RootOrientation", "root_orientation_deg"), False),
     "root_traj": ("Root trajectory", ("root_rte_percent",), False),
     "contact": ("Contact timing", ("contact_mcc", "contact_f1", "contact_acc"), True),
-    "support": ("Support foot stability", ("foot_sliding_mm",), False),
-    "foot_ground": ("Foot-ground relation", ("seam_jump_mm", "foot_sliding_mm"), False),
+    "support": ("Support foot stability", ("foot_sliding_vertex_mm", "foot_sliding_mm"), False),
+    "foot_ground": ("Foot-ground relation", ("seam_jump_mm", "foot_sliding_vertex_mm"), False),
 }
 
 V_COMPONENTS = ("upper", "hands", "global_yaw", "root_traj")
