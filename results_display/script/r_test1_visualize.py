@@ -155,6 +155,11 @@ def load_anysole_pred(model_dir: Path, run_name: str, session_id: str, mode: str
         pred_root / "eval_bvh" / f"{session_id}_{mode}.bvh",
     ):
         if cand.is_file():
+            if cand.suffix.lower() == ".npz" and mode == "V2T":
+                with np.load(cand) as data:
+                    if "joint_xyz_world" not in data.files:
+                        # V2T archive is pressure/contact generation, not motion.
+                        return None, "V2T archive 为压力/接触生成（无姿态）；压力评估见 R_Test4"
             try:
                 joints, mask, names, protocol = array_from_file(cand)
             except Exception as exc:
