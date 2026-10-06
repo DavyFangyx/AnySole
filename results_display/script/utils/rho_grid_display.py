@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""B3: continuous rho-grid missingness display."""
+"""M3: continuous rho-grid missingness display."""
 from __future__ import annotations
 
 import argparse
@@ -28,7 +28,7 @@ ORANGE = "#eb6834"
 
 
 def parse_args(argv=None):
-    p = argparse.ArgumentParser(description="B3 rho-grid display")
+    p = argparse.ArgumentParser(description="M3 rho-grid display")
     p.add_argument("--metrics", type=Path, required=True)
     p.add_argument("--metric", default="pa_mpjpe_mm")
     p.add_argument("--out-dir", type=Path, default=None)
@@ -81,7 +81,7 @@ def draw(data, mean, std, metric, out):
     ax.set_yticks(range(len(rhos)), ["%d%%" % x for x in rhos])
     ax.set_xlabel("V retention", color=MUTED)
     ax.set_ylabel("T retention", color=MUTED)
-    ax.set_title("B3 rho grid: %s" % metric, loc="left", color=INK, pad=12)
+    ax.set_title("M3 rho grid: %s" % metric, loc="left", color=INK, pad=12)
     for i in range(len(rhos)):
         for j in range(len(rhos)):
             if np.isfinite(mean[i, j]):
@@ -133,7 +133,7 @@ def criteria(data, mean, metric, out):
             a, b = mean[i, j], mean[i + 1, j]
             if np.isfinite(a) and np.isfinite(b) and (b < a if higher else b > a):
                 rows.append({"axis": "T", "fixed": rv, "from": rhos[i], "to": rhos[i + 1]})
-    (out / "b3_criteria.json").write_text(json.dumps({
+    (out / "criteria.json").write_text(json.dumps({
         "metric": metric, "higher_is_better": higher,
         "valid_cells": int(np.isfinite(mean).sum()), "total_cells": int(mean.size),
         "cells_better_than_prior": int(sum(
@@ -169,7 +169,7 @@ def main(argv=None) -> int:
     draw(data, mean, std, args.metric, out)
     criteria(data, mean, args.metric, out)
     corners(data, out)
-    print("B3 完成：%s（heatmap.png / slices.png / b3_criteria.json）" % out)
+    print("M3 完成：%s（heatmap.png / slices.png / criteria.json）" % out)
     return 0
 
 

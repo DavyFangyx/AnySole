@@ -2,7 +2,7 @@
 
 The task book compares a small, fixed set of motion components.  This module
 keeps their metric aliases and the error-direction conversion in one place so
-the A0/A1/A2 and B1/B2 front ends cannot silently use different definitions.
+the C1/C2/C3 and M1/M2 front ends cannot silently use different definitions.
 """
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""B1: V-to-T upper-branch analysis."""
+"""M1: V-to-T upper-branch analysis."""
 from __future__ import annotations
 
 import sys
@@ -17,14 +17,14 @@ from utils.display_common import common_parser, load_context, model_ids_for, mod
 
 def main(argv=None) -> int:
     args = common_parser("V-branch tactile information", "singlemodal_eval").parse_args(argv)
-    registry, spec, out_root = load_context(args.experiment, "BTest/B1Test_v2t_upper")
+    registry, spec, out_root = load_context(args.experiment, "Test2_MissingTest/M1_v2t")
     for model_id in model_ids_for(spec, args.model):
         main_root = model_output(registry, "singlemodal_eval", model_id)
         grid_root = model_output(registry, "rho_grid_eval", model_id)
         v_root = model_output(registry, "singlemodal_eval", specialist_id(model_id, "vonly"))
         out = out_root / model_run_name(registry, model_id)
         return component_main([
-            "--b1", "--split", args.split,
+            "--m1", "--split", args.split,
             "--fs-main", str(main_root / "metrics" / (args.split + ".json")),
             "--fs-vspecialist", str(v_root / "metrics" / (args.split + ".json")),
             "--prior-grid", str(grid_root / ("grid_metrics_%s.json" % args.split if args.split != "val" else "grid_metrics.json")),

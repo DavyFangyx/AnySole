@@ -211,27 +211,31 @@ K9/K10/K11/K14 多个分区文件，供 V4B 及对照使用。若文件缺失，
 python configs/z_gen/all_models.py --models V4B
 ```
 
-## 5. A0–B3 分析与数据对应关系
+## 5. C1–M3 分析与数据对应关系
 
-A0–B3 不生成 queue conf，只读取 `results/`：
+C1–M3 不生成 queue conf，只读取 `results/`：
 
-| 编号 | 分析名称 | 对比设置 | 要回答的问题 | 输出 |
+| 代号 | 分析名称 | 对比设置 | 要回答的问题 | 输出 |
 |---|---|---|---|---|
-| A0 | 单模态能力分离 | V 专才 vs T 专才 | 两路是否各自擅长不同运动分量 | 分量差值森林图 + 数值表 |
-| A1 | 融合完整性 | 主线 VT vs 最佳单模态专才 | 是否保留各自优势、产生协同或受到干扰 | 融合增益森林图 |
-| A2 | 跨模态表征对齐 | 同时刻 F_V–F_T vs 错位时刻 | 两种单模态输入是否映射到相近运动状态 | 配对胜率点图 + 相似度分布 |
-| B1 | V-only 全能性 | 主线 V vs V 专才 vs 空输入 | 主线模型只给 V 时是否仍是合格 V 模型 | 三列对比表 |
-| B2 | T-only 全能性 | 主线 T vs T 专才 vs 空输入 | 主线模型只给 T 时是否仍是合格 T 模型 | 三列对比表 |
-| B3 | 连续缺失鲁棒性 | rhoV × rhoT 全网格 | 从四个角到任意帧级缺失是否稳定 | rho 热力图 + 两条边界曲线 |
+| C1 | 专才分工 | V 专才 vs T 专才 | 两路是否各自擅长不同运动分量 | 分量差值森林图 + 数值表 |
+| C2 | 融合完整性 | 主线 VT vs 最佳单模态专才 | 是否保留各自优势、产生协同或受到干扰 | 融合增益森林图 |
+| C3 | 缺失分支分工 | 主线 V-only vs 主线 T-only | 缺一路时融合模型的两支是否仍保留分工 | 主线缺失分支差值图 |
+| M1 | V 分支的 T 相关能力 | 主线 V vs V 专才 vs 空输入 | 只给 V 时能否读出 T 负责分量 | 三列对比表 |
+| M2 | T 分支的 V 相关能力 | 主线 T vs T 专才 vs 空输入 | 只给 T 时能否读出 V 负责分量 | 三列对比表 |
+| M3 | 连续缺失鲁棒性 | rhoV × rhoT 全网格 | 从四个角到任意帧级缺失是否稳定 | rho 热力图 + 两条边界曲线 |
 
 | 分析 | 数据来源 | 脚本 |
 |---|---|---|
-| A0 | `singlemodal_eval` | `results_display/script/singlemodal_analysis.py` |
-| A1 | `singlemodal_eval` | `results_display/script/complement.py` |
-| A2 | `singlemodal_eval` | `results_display/script/dropout_ablation.py` |
-| B1 | `singlemodal_eval` + `rho_grid_eval` | `results_display/script/v2t_upper.py` |
-| B2 | `singlemodal_eval` + `rho_grid_eval` | `results_display/script/trust.py` |
-| B3 | `rho_grid_eval` | `results_display/script/rho_grid_analysis.py` |
+| C1 | `singlemodal_eval` | `results_display/script/singlemodal_analysis.py` |
+| C2 | `singlemodal_eval` | `results_display/script/complement.py` |
+| C3 | `singlemodal_eval` | `results_display/script/dropout_ablation.py` |
+| M1 | `singlemodal_eval` + `rho_grid_eval` | `results_display/script/v2t_upper.py` |
+| M2 | `singlemodal_eval` + `rho_grid_eval` | `results_display/script/trust.py` |
+| M3 | `rho_grid_eval` | `results_display/script/rho_grid_analysis.py` |
+
+> 2026-10-06 起编号为 C1–M3（实验一 `Test1_ComplementTest` / 实验二 `Test2_MissingTest`），
+> 同步自任务书 `missing_rate_experiment_plan.md`；此前的跨模态表征对齐类实验（F_V–F_T
+> 相似度、错位时刻）已取消，不在本表。
 
 ## 6. 运行命令
 

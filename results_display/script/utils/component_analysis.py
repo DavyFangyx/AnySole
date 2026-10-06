@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""A0/A1/A2/B1/B2 shared component analysis for the missing-rate task book.
+"""C1/C2/C3/M1/M2 shared component analysis for the missing-rate task book.
 
 The legacy probe and t-SNE views are intentionally not part of the main
 experiment anymore.  This module implements the contrasts used by the
-revised task book (the canonical R_TestN entry points import ``main``):
+revised task book (the canonical analysis entry points import ``main``):
 
-  --a0  V/T specialist division
-  --a1  main VT versus the best V/T specialist (fusion completeness)
-  --a2  main V-only versus main T-only (missing-condition division)
-  --b1  main V versus V specialist and prior on T-owned components
-  --b2  main T versus T specialist and prior on V-owned components
+  --c1  V/T specialist division
+  --c2  main VT versus the best V/T specialist (fusion completeness)
+  --c3  main V-only versus main T-only (missing-condition division)
+  --m1  main V versus V specialist and prior on T-owned components
+  --m2  main T versus T specialist and prior on V-owned components
 
 ``--all`` runs all shared component analyses.  ``--bar`` is retained as a
-compatibility alias for ``--a1``.
+compatibility alias for ``--c2``.
 """
 from __future__ import annotations
 
@@ -62,28 +62,28 @@ FLAT = "#8c8b84"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="A1/A2/B1/B2 missing-rate component analysis")
+    parser = argparse.ArgumentParser(description="C1-C3/M1-M2 missing-rate component analysis")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--a0", action="store_true", help="A0: V/T specialist division")
+    mode.add_argument("--c1", action="store_true", help="C1: V/T specialist division")
     mode.add_argument("--all", action="store_true", help="run all shared component analyses")
-    mode.add_argument("--a1", action="store_true", help="A1: main VT versus best specialist")
-    mode.add_argument("--a2", action="store_true", help="A2: main V-only versus main T-only")
-    mode.add_argument("--b1", action="store_true", help="B1: main V on T-owned components")
-    mode.add_argument("--b2", action="store_true", help="B2: main T on V-owned components")
-    mode.add_argument("--bar", action="store_true", help="deprecated alias for --a1")
+    mode.add_argument("--c2", action="store_true", help="C2: main VT versus best specialist")
+    mode.add_argument("--c3", action="store_true", help="C3: main V-only versus main T-only")
+    mode.add_argument("--m1", action="store_true", help="M1: main V on T-owned components")
+    mode.add_argument("--m2", action="store_true", help="M2: main T on V-owned components")
+    mode.add_argument("--bar", action="store_true", help="deprecated alias for --c2")
     parser.add_argument("--split", choices=("val", "test"), default="val")
     parser.add_argument("--fs-main", type=Path,
-                        default=REPO / "results" / "AnySole" / "V4B_joint_and" / "metrics" / "val.json")
+                        default=REPO / "results" / "experiments" / "singlemodal_eval" / "V3_3B" / "metrics" / "val.json")
     parser.add_argument("--fs-vspecialist", type=Path, default=None,
-                        help="V 专才明细文件 (metrics/<split>.json)；A1/B1 必需")
+                        help="V 专才明细文件 (metrics/<split>.json)；C2/M1 必需")
     parser.add_argument("--fs-tspecialist", type=Path, default=None,
-                        help="T 专才明细文件 (metrics/<split>.json)；A1/B2 必需")
+                        help="T 专才明细文件 (metrics/<split>.json)；C2/M2 必需")
     parser.add_argument("--prior-grid", type=Path,
                         default=REPO / "results" / "experiments" / "rho_grid_eval" / "V3_3B" / "grid_metrics.json",
-                        help="主线 rhoV0_rhoT0 先验单元，B1/B2 必需")
+                        help="主线 rhoV0_rhoT0 先验单元，M1/M2 必需")
     parser.add_argument("--prior-cell", default="rhoV0_rhoT0")
     parser.add_argument("--out", type=Path,
-                        default=REPO / "results_display" / "ATest" / "A1Test_complement")
+                        default=REPO / "results_display" / "Test1_ComplementTest" / "C2_fusion")
     parser.add_argument("--tol", type=float, default=0.0,
                         help="误差差值分类容差；混合单位时默认 0，只按方向分类")
     return parser.parse_args(argv)
@@ -156,9 +156,9 @@ def forest(path: Path, rows: list[dict[str, Any]], value_key: str, title: str,
     plt.close(fig)
 
 
-def run_a0(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
+def run_c1(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
     if "v_specialist" not in inputs or "t_specialist" not in inputs:
-        raise SystemExit("A0 需要 --fs-vspecialist 与 --fs-tspecialist")
+        raise SystemExit("C1 需要 --fs-vspecialist 与 --fs-tspecialist")
     v = metric_block(inputs["v_specialist"], "V2M")
     t = metric_block(inputs["t_specialist"], "T2M")
     rows = []
@@ -175,19 +175,19 @@ def run_a0(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
             "winner": "V specialist" if delta > args.tol else "T specialist" if delta < -args.tol else "tie",
         })
     out = args.out
-    write_rows(out / "a0_specialist_table.csv", rows)
-    forest(out / "a0_specialist_forest.png", rows, "delta_error_T_minus_V",
-           "A0 specialist division: T error minus V error",
+    write_rows(out / "specialist_table.csv", rows)
+    forest(out / "specialist_forest.png", rows, "delta_error_T_minus_V",
+           "C1 specialist division: T error minus V error",
            positive_is_better=True)
     summary = {"V_wins": [r["component_id"] for r in rows if r["winner"] == "V specialist"],
                "T_wins": [r["component_id"] for r in rows if r["winner"] == "T specialist"]}
-    (out / "a0_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"rows": rows, "summary": summary}
 
 
-def run_a1(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
+def run_c2(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
     if "v_specialist" not in inputs or "t_specialist" not in inputs:
-        raise SystemExit("A1 需要 --fs-vspecialist 与 --fs-tspecialist")
+        raise SystemExit("C2 需要 --fs-vspecialist 与 --fs-tspecialist")
     main = metric_block(inputs["main"], "VT2M")
     v = metric_block(inputs["v_specialist"], "V2M")
     t = metric_block(inputs["t_specialist"], "T2M")
@@ -208,17 +208,17 @@ def run_a1(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
             "delta_error_VT_minus_best": round(delta, 6), "category": category,
         })
     out = args.out
-    write_rows(out / "a1_fusion_table.csv", rows)
-    forest(out / "a1_fusion_forest.png", rows, "delta_error_VT_minus_best",
-           "A1 fusion: main VT minus best specialist")
+    write_rows(out / "fusion_table.csv", rows)
+    forest(out / "fusion_forest.png", rows, "delta_error_VT_minus_best",
+           "C2 fusion: main VT minus best specialist")
     summary = {"synergy": sum(r["category"] == "synergy" for r in rows),
                "selection": sum(r["category"] == "keep or select" for r in rows),
                "interference": sum(r["category"] == "interference" for r in rows)}
-    (out / "a1_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"rows": rows, "summary": summary}
 
 
-def run_a2(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
+def run_c3(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
     v = metric_block(inputs["main"], "V2M")
     t = metric_block(inputs["main"], "T2M")
     rows = []
@@ -236,22 +236,22 @@ def run_a2(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
             "matches_expected": winner == ("V-only" if component in V_COMPONENTS else "T-only"),
         })
     out = args.out
-    write_rows(out / "a2_main_branch_table.csv", rows)
-    forest(out / "a2_main_branch_forest.png", rows, "delta_error_T_minus_V",
-           "A2 main branches: T-only error minus V-only error",
+    write_rows(out / "main_branch_table.csv", rows)
+    forest(out / "main_branch_forest.png", rows, "delta_error_T_minus_V",
+           "C3 main branches: T-only error minus V-only error",
            positive_is_better=True)
     summary = {"matches_expected": sum(bool(r["matches_expected"]) for r in rows), "total": len(rows)}
-    (out / "a2_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"rows": rows, "summary": summary}
 
 
 def branch_table(args: argparse.Namespace, inputs: dict[str, Any], branch: str) -> dict[str, Any]:
-    if branch == "b1":
+    if branch == "m1":
         specialist_name, specialist_cfg, main_cfg, components = "v_specialist", "V2M", "V2M", T_COMPONENTS
-        title = "B1: main V on T-owned components"
+        title = "M1: main V on T-owned components"
     else:
         specialist_name, specialist_cfg, main_cfg, components = "t_specialist", "T2M", "T2M", V_COMPONENTS
-        title = "B2: main T on V-owned components"
+        title = "M2: main T on V-owned components"
     if specialist_name not in inputs:
         raise SystemExit("%s 需要对应专才明细文件" % branch.upper())
     main = metric_block(inputs["main"], main_cfg)
@@ -274,11 +274,11 @@ def branch_table(args: argparse.Namespace, inputs: dict[str, Any], branch: str) 
             "holds": d_spec < -args.tol and d_prior < -args.tol,
         })
     out = args.out
-    write_rows(out / (branch + "_branch_table.csv"), rows)
-    _dual_forest(out / (branch + "_branch_forest.png"), rows, title)
+    write_rows(out / "branch_table.csv", rows)
+    _dual_forest(out / "branch_forest.png", rows, title)
     summary = {"holds": [r["component_id"] for r in rows if r["holds"]],
                "total": len(rows)}
-    (out / (branch + "_summary.json")).write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"rows": rows, "summary": summary}
 
 
@@ -313,25 +313,32 @@ def main(argv=None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     inputs = load_inputs(args)
     if args.bar:
-        args.a1 = True
-    modes = {"a0": args.a0, "a1": args.a1, "a2": args.a2, "b1": args.b1, "b2": args.b2}
+        args.c2 = True
+    modes = {"c1": args.c1, "c2": args.c2, "c3": args.c3, "m1": args.m1, "m2": args.m2}
     if args.all:
         modes = {key: True for key in modes}
     elif not any(modes.values()):
         modes = {key: False for key in modes}
-        modes["a1"] = True
+        modes["c2"] = True
     results = {}
-    if modes["a0"]:
-        results["a0"] = run_a0(args, inputs)
-    if modes["a1"]:
-        results["a1"] = run_a1(args, inputs)
-    if modes["a2"]:
-        results["a2"] = run_a2(args, inputs)
-    if modes["b1"]:
-        results["b1"] = branch_table(args, inputs, "b1")
-    if modes["b2"]:
-        results["b2"] = branch_table(args, inputs, "b2")
-    (args.out / "complement_analysis_summary.json").write_text(
+    for mode_key in ("c1", "c2", "c3", "m1", "m2"):
+        if not modes[mode_key]:
+            continue
+        # --all 一次跑多模式时按模式分目录，避免去前缀后的同名文件互相覆盖
+        mode_out = args.out / mode_key if args.all else args.out
+        mode_out.mkdir(parents=True, exist_ok=True)
+        mode_args = argparse.Namespace(**{**vars(args), "out": mode_out})
+        if mode_key == "c1":
+            results[mode_key] = run_c1(mode_args, inputs)
+        elif mode_key == "c2":
+            results[mode_key] = run_c2(mode_args, inputs)
+        elif mode_key == "c3":
+            results[mode_key] = run_c3(mode_args, inputs)
+        elif mode_key == "m1":
+            results[mode_key] = branch_table(mode_args, inputs, "m1")
+        elif mode_key == "m2":
+            results[mode_key] = branch_table(mode_args, inputs, "m2")
+    (args.out / "analysis_summary.json").write_text(
         json.dumps({key: value["summary"] for key, value in results.items()}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )

@@ -1,4 +1,4 @@
-"""ρ 网格生成器（missing-rate 任务书实验 1 / B3 生成器侧）。
+"""ρ 网格生成器（missing-rate 任务书实验 1 / M3 生成器侧）。
 
 机制：V/T 保留率网格 (rV, rT) ∈ ρ×ρ，每格 = 逐帧独立掷硬币把该帧 token 换成
 null token（保留率 = 不换的概率；mask=True 的位置换 null）。config 恒为 VT，
@@ -6,7 +6,7 @@ mask 叠在 config 级替换之后 → 四角（100/100、100/0、0/100、0/0）
 VT2M/V2M/T2M/纯先验严格同机制；ρ=100%/0% 角与明细文件（metrics/<split>.json）的对应配置行一致 =
 实现自检项（grid_metrics.json 的 corner_check）。
 
-每格 × 每种子 × 每 session 落盘（默认 results_display/BTest/B3Test_rho_grid/）：
+每格 × 每种子 × 每 session 落盘（默认 results_display/Test2_MissingTest/M3_rho_grid/）：
   - grid_metrics.json：全格协议指标（与明细文件同构；复用
     eval_protocol._session_metrics，逐字节同源）
   - npz/<session>_rhoV<rV>_rhoT<rT>[_s<seed>].npz：eval_motion 同格式 SMPL npz
@@ -16,7 +16,7 @@ mask 按 (session, cell, seed) 确定性生成（crc32 混种子，同 eval 鲁�
 仅支持 anysolev2（回归式）checkpoint——mask 只接入了 v2 forward。
 
 Usage (touch_gait env, 仓库根执行):
-  python -m anysole.rho_grid --ckpt results/AnySole/V4B_joint_and/checkpoints/ckpt_last.pt \
+  python -m anysole.rho_grid --ckpt results/AnySole/V3_3B_joint_and/checkpoints/ckpt_last.pt \
       --split test --seeds 0
   python -m anysole.rho_grid --ckpt ... --split val --seeds 0,1,2
   # 冒烟：1 个 session × 粗网格
@@ -55,7 +55,7 @@ FADE = 4
 
 
 def parse_args(argv=None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ρ 网格生成器（B3 / 任务书实验 1）")
+    parser = argparse.ArgumentParser(description="ρ 网格生成器（M3 / 任务书实验 1）")
     parser.add_argument("--ckpt", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=REPO / "anysole" / "configs" / "v1.yaml")
     parser.add_argument("--split", choices=("train", "val", "test"), default="val",
@@ -69,7 +69,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--rho-t", type=int, default=None,
                         help="只运行一个 T 保留率配置；与 --rho-v 一起使用")
     parser.add_argument("--out-dir", type=Path,
-                        default=REPO / "results_display" / "BTest" / "B3Test_rho_grid",
+                        default=REPO / "results_display" / "Test2_MissingTest" / "M3_rho_grid",
                         help="产物目录（grid_metrics.json + npz/ + repr/）")
     parser.add_argument("--limit-sessions", type=int, default=None)
     parser.add_argument("--device", default="cuda")

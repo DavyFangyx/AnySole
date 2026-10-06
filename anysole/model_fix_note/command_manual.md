@@ -93,9 +93,11 @@
 - results_display 编号：D_TestN（数据检验）/ R_TestN（结果检验）；手册两条
   可视化 = R_Test1（`results_display/script/r_test1_visualize_anysole.py`）
   与 R_Test3（`results_display/script/r_test3_traj.py`）。
-- **产物目录规范（2026-09-24 改组）**：四组两级结构
-  `results_display/{DataTest,ResultTest,ATest,BTest}/`；`ridge_probe.py` 与
-  `z_note/probes/smoke_*.py` 保持原地。
+- **产物目录规范（2026-09-24 改组，2026-10-06 更新）**：四组两级结构
+  `results_display/{DataTest,ResultTest,Test1_ComplementTest,Test2_MissingTest}/`
+  （任务书 C1–M3 六实验按两个命题归档：实验一互补 = C1_specialist/C2_fusion/
+  C3_missing_branch；实验二缺失 = M1_v2t/M2_t2v/M3_rho_grid）；
+  `ridge_probe.py` 与 `z_note/probes/smoke_*.py` 保持原地。
 - 评估统一执行 canonical session metrics（`--protocol-seed 0`）；
   `--no-robustness` 关鲁棒集。每步验收读 `metrics/<split>_fseries.json` +
   `metrics/ridge_probe_<split>.json`（ridge 探针每步必跑：
