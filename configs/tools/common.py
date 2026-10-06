@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from anysole.registry import infer_anysole_paths
+from anysole.types import variant_from_config
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -304,6 +305,43 @@ def specialist_paths(registry: dict[str, Any], model_id: str) -> dict[str, Path]
     }
 
 
+def effective_variant(spec: dict[str, Any]) -> str:
+    """Variant dir a train run will write to — the exact rule train.py uses
+    (types.variant_from_config: fixed field order, every present field
+    written, no default omission)."""
+    args = dict(spec.get("train_args") or {})
+    cfg = {
+        "tw": int(args.get("tw", 20)),
+        "stride": args.get("stride"),
+        "lr": float(args.get("lr", 1e-4)),
+        "lambda_pose": float(args.get("lambda_pose", 3.0)),
+        "lambda_traj": float(args.get("lambda_traj", 1.0)),
+        "lambda_kp": float(args.get("lambda_kp", 1.0)),
+        "epochs": int(spec.get("epochs", 800)),
+        "batch_size": int(spec.get("batch_size", 256)),
+        "seed": int(spec.get("train_seed", spec.get("seed", 1))),
+    }
+    for key in ("lambda_assign", "lambda_assign_ent", "lambda_assign_conc",
+                "lambda_assign_dead", "assign_dead_beta", "assign_temp_init",
+                "assign_temp_final", "assign_anneal_frac", "assign_lock_frac",
+                "assign_lr_mult", "lambda_sigma", "sigma_freeze_frac",
+                "lr_warmup_frac", "grad_clip", "loss_cap"):
+        if key in args:
+            cfg[key] = float(args[key])
+    # V4B: the partition K is part of the run's record (train derives it from
+    # --part-json); read the file so the predicted dir matches train's.
+    part_json = args.get("part_json")
+    if part_json:
+        path = resolve_path(str(part_json))
+        if path is not None and path.is_file():
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            groups = doc["partition"] if isinstance(doc, dict) and "partition" in doc else doc
+            if isinstance(groups, dict):
+                groups = list(groups.values())
+            cfg["part_joints"] = [list(group) for group in groups]
+    return variant_from_config(cfg)
+
+
 def registry_ckpt(registry: dict[str, Any], model_id: str, which: str | None = None) -> Path | None:
     """ckpt address inferred from the anysole registry (zero handwritten paths)."""
     spec = resolved_model_spec(registry, model_id)
@@ -311,7 +349,9 @@ def registry_ckpt(registry: dict[str, Any], model_id: str, which: str | None = N
     if not name:
         return None
     contact = str(spec.get("contact_method") or registry.get("defaults", {}).get("contact_method", "joint_and"))
-    variant = spec.get("variant")
+    # Stacked-variant models address the ckpt under the variant dir train
+    # derives from its effective config; an explicit spec variant wins.
+    variant = spec.get("variant") or effective_variant(spec)
     which = str(which or spec.get("which", "last"))
     return infer_anysole_paths(name, variant=variant, contact=contact, which=which)["ckpt"]
 
