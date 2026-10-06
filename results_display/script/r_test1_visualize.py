@@ -2,25 +2,25 @@
 
 单独生成（默认）：``--models`` 选中谁出谁；AnySole 一次出四个系列 mode
 （VT2M/V2M/T2M/V2T），基线各出自己注册的那个 mode。mode 不是参数。
+每模型输出 = 输入 | 预测 | GT 三栏动画（仅 gif/mp4，无中间帧产物）。
 
     python results_display/script/r_test1_visualize.py --models anysole,motionpro --session S13011
     python results_display/script/r_test1_visualize.py          # 全部模型
 
-对比（--compare）：同 mode 模型 1×N 横排，只拼装单独生成已落的中间帧，
-不重新渲染。
+对比（--compare）：同 mode 模型 1×N 横排一行——**输入只放一次**（随 mode：
+VT2M/T2M 触觉热力图，V2M/V2T 视频帧），中间是各模型的预测骨架（各自原生
+协议 + 逐帧 MPJPE），右侧每个出现过的协议一栏 GT，不重复放输入与 GT。
 
     python results_display/script/r_test1_visualize.py --compare
 
 产物：
 
-    ResultTest/R1Test_visualize/<model>/<mode>/{gif,mp4}/<session>.{ext}     # 单独生成动画
-    ResultTest/R1Test_visualize/<model>/<mode>/frames/<session>/frame_*.png  # 中间帧 + meta.json
-    ResultTest/R1Test_visualize/compare/<mode>/{gif,mp4}/<session>_compare.{ext}
+    ResultTest/R1Test_visualize/<model>/<mode>/{gif,mp4}/<session>.{ext}          # 单独生成
+    ResultTest/R1Test_visualize/compare/<mode>/{gif,mp4}/<session>_compare.{ext}  # 1×N 横排
 """
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -239,14 +239,12 @@ def models_of_mode(models: list[dict], mode: str) -> list[dict]:
     return [m for m in models if mode in m["modes"]]
 
 
-# ---- 单独生成：输入 | 预测 | GT 三面板 + 中间帧 ----
+# ---- 单独生成：输入 | 预测 | GT 三面板动画（仅 gif/mp4） ----
 
 def render_single(model: dict, mode: str, session_id: str, row: dict,
                   seq_dir: Path, args: argparse.Namespace, out_base: Path) -> str:
-    frames_dir = out_base / model["label"] / mode / "frames" / session_id
     anim_path = cli_common.media_path(out_base / model["label"] / mode, session_id, args.gen)
-    meta_path = frames_dir / "meta.json"
-    if cli_common.outputs_ready([anim_path, meta_path]) and not args.force:
+    if cli_common.outputs_ready([anim_path]) and not args.force:
         return "skip"
 
     pred, reason = load_pred(model, mode, session_id, row)
@@ -267,7 +265,6 @@ def render_single(model: dict, mode: str, session_id: str, row: dict,
     frame_ids = list(range(0, n, max(args.stride, 1)))
     if args.max_frames > 0:
         frame_ids = frame_ids[: args.max_frames]
-    frames_dir.mkdir(parents=True, exist_ok=True)
     out_frames = []
     for t in frame_ids:
         if mode in ("V2M", "V2T"):
@@ -296,14 +293,6 @@ def render_single(model: dict, mode: str, session_id: str, row: dict,
     if not out_frames:
         raise RuntimeError(f"No frames rendered for {model['label']}_{mode}_{session_id}")
 
-    from PIL import Image
-    for t, frame in zip(frame_ids, out_frames):
-        Image.fromarray(frame).save(frames_dir / f"frame_{t:06d}.png")
-    meta_path.write_text(json.dumps({
-        "session": session_id, "mode": mode, "label": model["label"],
-        "n": n, "stride": args.stride, "fps": args.fps, "gen": args.gen,
-    }), encoding="utf-8")
-
     anim_path.parent.mkdir(parents=True, exist_ok=True)
     frame_fps = cli_common.viz_fps(args.fps, args.stride)
     if args.gen == "gif":
@@ -314,51 +303,99 @@ def render_single(model: dict, mode: str, session_id: str, row: dict,
     return "write"
 
 
-# ---- 对比：同 mode 1×N 横排，只拼装中间帧 ----
+# ---- 对比：同 mode 1×N 横排（输入一次 + 各模型预测 + 每协议一栏 GT） ----
 
-def compare_frame_files(frames_dir: Path) -> list[Path]:
-    return sorted(frames_dir.glob("frame_*.png")) if frames_dir.is_dir() else []
-
-
-def render_compare(mode: str, models: list[dict], session_id: str,
-                   args: argparse.Namespace, out_base: Path) -> str:
-    anim_path = cli_common.media_path(out_base / "compare" / mode, f"{session_id}_compare", args.gen)
+def render_compare(mode: str, models: list[dict], session_id: str, row: dict,
+                   seq_dir: Path, args: argparse.Namespace, out_base: Path) -> str:
+    anim_path = cli_common.media_path(out_base / "compare" / mode, f"{session_id}_{mode}_compare", args.gen)
     if cli_common.outputs_ready([anim_path]) and not args.force:
         return "skip"
 
-    model_frames: list[tuple[dict, list[Path]]] = []
+    pressure, fake = load_pressure(seq_dir)
+    n_ref = pressure.shape[0]
+    loaded: list[dict] = []
     for model in models:
-        frames_dir = out_base / model["label"] / mode / "frames" / session_id
-        model_frames.append((model, compare_frame_files(frames_dir)))
+        pred, path = load_pred(model, mode, session_id, row)
+        if pred is None:
+            loaded.append({
+                "label": model["label"], "color": model["color"],
+                "joints": None, "names": (), "protocol": "",
+                "edges": [], "gt": None, "gt_names": (), "gt_edges": [],
+                "reason": path,
+            })
+            continue
+        protocol = normalize_protocol(pred["protocol"])
+        gt_joints, gt_names = protocol_gt(row, protocol)
+        loaded.append({
+            "label": model["label"], "color": model["color"],
+            "joints": pred["joints"], "names": pred["names"], "protocol": protocol,
+            "edges": native_edges(pred["names"]),
+            "gt": gt_joints, "gt_names": gt_names,
+            "gt_edges": native_edges(gt_names),
+            "reason": path,
+        })
 
-    present = [(m, fs) for m, fs in model_frames if fs]
-    if not present:
-        raise RuntimeError(f"compare {mode}/{session_id}: no single frames anywhere; run single generation first")
+    lengths = [n_ref, fake.shape[0]]
+    for m in loaded:
+        if m["joints"] is not None:
+            lengths.append(m["joints"].shape[0])
+        if m["gt"] is not None:
+            lengths.append(m["gt"].shape[0])
+    n = min(lengths)
+    frames_path = video_frames(session_id) if mode in ("V2M", "V2T") else []
 
-    t_set = sorted({int(p.stem.split("_")[1]) for _m, fs in present for p in fs})
+    # One GT column per protocol present in this row (never a single shared
+    # GT panel standing for mixed SMPL/BVH predictions).
+    gt_columns: list[dict] = []
+    seen = set()
+    for m in loaded:
+        if m["gt"] is not None and m["protocol"] and m["protocol"] not in seen:
+            seen.add(m["protocol"])
+            gt_columns.append({
+                "label": f"GT — {PROTOCOL_LABELS[m['protocol']]}",
+                "joints": m["gt"][:n], "edges": m["gt_edges"],
+            })
+
+    frame_ids = list(range(0, n, max(args.stride, 1)))
+    if args.max_frames > 0:
+        frame_ids = frame_ids[: args.max_frames]
     out_frames = []
-    from PIL import Image
-    for t in t_set:
-        panels = []
-        for model, fs in model_frames:
-            hit = next((p for p in fs if int(p.stem.split("_")[1]) == t), None)
-            if hit is not None:
-                panels.append(np.asarray(Image.open(hit).convert("RGB")))
-            else:
-                panels.append(render_missing_panel(
-                    model["label"],
-                    "run single first: r_test1_visualize.py --models " + model["label"].split("/")[0],
-                ))
+    for t in frame_ids:
+        if mode in ("V2M", "V2T"):
+            input_panel = (render_video_panel(frames_path[min(t, len(frames_path) - 1)], session_id, t, n, args.fps)
+                           if frames_path else render_missing_panel("Video", "no RGB frames"))
+        else:
+            input_panel = render_foot_panel(
+                np.rot90(pressure[t, 0], k=1), np.rot90(pressure[t, 1], k=1),
+                session_id, t, n, args.fps, not bool(fake[t]),
+            )
+        panels = [input_panel]
+        for m in loaded:
+            if m["joints"] is None:
+                panels.append(render_missing_panel(m["label"], m["reason"]))
+                continue
+            marker = PROTOCOL_LABELS.get(m["protocol"], m["protocol"])
+            mpjpe = native_frame_mpjpe_mm(m["joints"][:n], m["gt"][:n], protocol=m["protocol"])
+            panels.append(render_skeleton_panel(
+                m["joints"][t], f"{m['label']} — {marker}", m["color"], t, n,
+                edges=m["edges"], mpjpe_mm=float(mpjpe[t]),
+            ))
+        for gt_col in gt_columns:
+            panels.append(render_skeleton_panel(
+                gt_col["joints"][t], gt_col["label"], GT_COLOR, t, n,
+                edges=gt_col["edges"],
+            ))
         out_frames.append(np.concatenate(panels, axis=1))
+    if not out_frames:
+        raise RuntimeError(f"No frames rendered for compare {mode}_{session_id}")
 
     anim_path.parent.mkdir(parents=True, exist_ok=True)
-    stride = max(args.stride, 1)
-    frame_fps = cli_common.viz_fps(args.fps, stride)
+    frame_fps = cli_common.viz_fps(args.fps, args.stride)
     if args.gen == "gif":
         cli_common.write_gif(out_frames, anim_path, frame_fps)
     else:
         cli_common.write_mp4(out_frames, anim_path, frame_fps)
-    log.info(f"Wrote {anim_path} ({len(out_frames)} frames, {len(models)} columns)")
+    log.info(f"Wrote {anim_path} ({len(out_frames)} frames, {len(loaded)} models)")
     return "write"
 
 
@@ -372,7 +409,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--models", type=str, default="all",
                         help="Select models: anysole and/or registry baseline names, comma-separated; default all.")
     parser.add_argument("--compare", action="store_true",
-                        help="Assemble same-mode models side by side (1xN) from single-generation frames.")
+                        help="One shared input column + one column per same-mode model + one GT column per protocol.")
     parser.add_argument("--modes-config", type=Path, default=DEFAULT_MODES_CONFIG, help="Mode registry.")
     parser.set_defaults(split="val")  # iteration split by default; pass --split test for the formal 36-session set
     return parser.parse_args()
@@ -427,7 +464,7 @@ def main() -> int:
                 if len(in_mode) < 1:
                     continue
                 try:
-                    render_compare(mode, in_mode, session_id, args, out_base)
+                    render_compare(mode, in_mode, session_id, row, seq_dir, args, out_base)
                 except Exception as exc:
                     log.error(f"compare {mode}/{session_id}: {exc}")
     return 0

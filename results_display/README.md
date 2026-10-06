@@ -340,12 +340,13 @@ python results_display/script/d_test6_floor_view.py --date 20260808 --subject S1
 
 统一入口 `r_test1_visualize.py`（2026-10-06 用户裁定：**选中 + 生成什么**）。
 `--models` 选中谁出谁（`anysole` 一次出四个系列 VT2M/V2M/T2M/V2T，基线各出自己
-注册的那个 mode；缺省 = 全部）；`--compare` 把同 mode 模型横排 1×N，只拼装
-单独生成已落的中间帧，不重新渲染。
+注册的那个 mode；缺省 = 全部）；`--compare` 同 mode 模型 1×N 横排——**输入只放
+一次**（VT2M/T2M 触觉热力图，V2M/V2T 视频帧），中间是各模型的预测骨架（各自
+原生协议 + 逐帧 MPJPE），右侧每个出现过的协议一栏 GT。
 
 | 产物 | 位置 |
 | --- | --- |
-| 单独生成（输入\|预测\|GT 三栏动画 + 中间帧） | `ResultTest/R1Test_visualize/<model>/<mode>/{gif,mp4}/` 与 `frames/<session>/` |
+| 单独生成（输入\|预测\|GT 三栏动画，仅 gif/mp4） | `ResultTest/R1Test_visualize/<model>/<mode>/{gif,mp4}/<session>.{ext}` |
 | 对比（同 mode 1×N 横排） | `ResultTest/R1Test_visualize/compare/<mode>/` |
 
 ```bash
@@ -353,7 +354,7 @@ python results_display/script/d_test6_floor_view.py --date 20260808 --subject S1
 python results_display/script/r_test1_visualize.py --models anysole,motionpro --session S13011
 python results_display/script/r_test1_visualize.py --session S13011
 
-# 对比：先跑过单独生成，再同 mode 横排
+# 对比：同 mode 横排
 python results_display/script/r_test1_visualize.py --compare --session S13011
 ```
 
@@ -506,7 +507,8 @@ V2T 指标统一到每脚 31×11 网格：AnySole 的 4×12 网格只在评估�
 | `T2M` | 零 V + 真 T | 触觉自重建（输入端 sanity） |
 
 产出（`ResultTest/R4Test_v2t/`）：`tgen_summary.csv`、`tgen_report.json`、31×11 统一网格的
-逐格误差 `cells/*.npz`/`*.png`，以及热力图动画。
+逐格误差 `cells/*.npz`/`*.png`，以及热力图动画（布局 = D4Test_baseline_tactile 口径：
+1×3 面板 GT | Generated | |GT-Gen|，每面板 L/R 鞋垫块 + 分离式双行标题，0.75 缩放）。
 
 与 `anysole.eval` 的关系：`anysole.eval` 和 FPP-Net 导出器共同写标准 V2T archive，R_Test4
 只消费这些 archive；R_Test2 与 R_Test4 使用同一套 V2T 指标定义。

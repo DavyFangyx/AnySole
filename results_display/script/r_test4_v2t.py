@@ -73,28 +73,25 @@ from utils.compare_core import (  # noqa: E402
     v2t_metrics,
 )
 from d_test3_contact import (  # noqa: E402
-    INFO_FONT,
-    INSOLE_H,
-    INSOLE_W,
-    LABEL_FONT,
     SENSOR_COLS,
     SENSOR_ROWS,
-    TITLE_FONT,
-    draw_text,
-    pressure_to_heatmap,
+)
+from d_test4_baseline_tactile import (  # noqa: E402  D4 布局口径（2026-10-06 用户裁定参照）
+    BG,
+    DOWNSCALE,
+    GAP,
+    HEADER_H,
+    OUTLINE,
+    PANEL_H,
+    PANEL_W,
+    draw_centered,
+    render_foot_blocks,
 )
 
 MODE_NAMES = CONFIG_MODE_NAMES
 _MODE_TO_CONFIG = dict(zip(CONFIG_MODE_NAMES, (CONFIG_VT, CONFIG_V, CONFIG_T)))
 
 DEFAULT_CKPT = cli_common.RESULTS_ROOT / "AnySole" / "anysolev1_joint_and" / "checkpoints" / "ckpt_last.pt"
-
-# --- Animation layout: 3 columns (GT | Generated | |GT-Gen|) x 2 rows (feet). ---
-GAP = 20
-ROW_LABEL_W = 52
-HEADER_H = 62
-CANVAS_W = ROW_LABEL_W + 3 * INSOLE_W + 4 * GAP
-CANVAS_H = HEADER_H + 2 * INSOLE_H + 3 * GAP
 
 
 def _parse_modes(value: str) -> list[str]:
@@ -124,12 +121,6 @@ def canonical_pressure_map(values: np.ndarray) -> np.ndarray:
                       mode="nearest", prefilter=False)
         return np.concatenate([values[0], values[1]], axis=1)
     raise ValueError(f"unsupported V2T display grid: {values.shape}")
-
-
-def cells_to_heatmap(cells: np.ndarray, vmax: float) -> Image.Image:
-    """Canonical 31x11-per-foot map -> insole heatmap."""
-    cells = np.asarray(cells, dtype=np.float32)
-    return Image.fromarray(pressure_to_heatmap(np.rot90(cells, k=1), vmax=vmax))
 
 
 def load_session_inputs(session_id: str, config: dict) -> dict | None:
@@ -216,35 +207,35 @@ def session_metrics(gen_t: np.ndarray, t_norm: np.ndarray) -> dict:
 
 
 def render_frame(gt_cells, gen_cells, session_id, mode, frame_idx, n_frames, fps) -> np.ndarray:
-    """One animation frame: 2 rows (feet) x 3 columns (GT | Generated | |GT-Gen|)."""
-    canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), (12, 12, 16))
+    """One animation frame, D4 layout (2026-10-06 用户裁定参照 D4Test_baseline_tactile):
+    1×3 panels (GT | Generated | |GT-Gen|), each a 360×390 panel with L/R insole
+    blocks, plus a separated two-line header. Output downscaled like D4."""
+    gt_map = canonical_pressure_map(gt_cells) * PRESSURE_CLIP
+    gen_map = canonical_pressure_map(gen_cells) * PRESSURE_CLIP
+    err_map = np.abs(gen_map - gt_map)
+    panels = [
+        render_foot_blocks(gt_map[:, :11], gt_map[:, 11:], "GT", "ground-truth tactile",
+                           (255, 170, 80), vmax=PRESSURE_CLIP),
+        render_foot_blocks(gen_map[:, :11], gen_map[:, 11:], "Generated", "generated tactile",
+                           (80, 200, 255), vmax=PRESSURE_CLIP),
+        render_foot_blocks(err_map[:, :11], err_map[:, 11:], "|GT-Gen|", "absolute error",
+                           (230, 120, 230), vmax=PRESSURE_CLIP),
+    ]
+    canvas = Image.new("RGB", (3 * PANEL_W + 2 * GAP, HEADER_H + PANEL_H), BG)
     draw = ImageDraw.Draw(canvas)
-    draw.rectangle([0, 0, CANVAS_W - 1, CANVAS_H - 1], outline=(48, 48, 56))
-    titles = ("GT", "Generated", "|GT-Gen|")
-    for col, title in enumerate(titles):
-        cx = ROW_LABEL_W + GAP + col * (INSOLE_W + GAP) + INSOLE_W // 2
-        draw_text(draw, (cx, 10), title, LABEL_FONT, fill=(220, 220, 230), anchor="mt")
-    draw_text(
+    draw.rectangle([0, 0, canvas.width - 1, canvas.height - 1], outline=OUTLINE)
+    draw_centered(
         draw,
-        (CANVAS_W // 2, 38),
         f"{session_id}  {mode}  t={frame_idx / max(fps, 1e-6):.2f}s  {frame_idx}/{n_frames - 1}",
-        INFO_FONT,
-        fill=(180, 180, 190),
-        anchor="mt",
+        12, fill=(230, 230, 235), size=30, max_width=canvas.width - 48,
     )
-    gt_map = canonical_pressure_map(gt_cells)
-    gen_map = canonical_pressure_map(gen_cells)
-    panels = (
-        (gt_map[:, :11], gen_map[:, :11], np.abs(gen_map[:, :11] - gt_map[:, :11]), "Left"),
-        (gt_map[:, 11:], gen_map[:, 11:], np.abs(gen_map[:, 11:] - gt_map[:, 11:]), "Right"),
-    )
-    for row, (gt48, gen48, err48, label) in enumerate(panels):
-        y0 = HEADER_H + row * (INSOLE_H + GAP)
-        draw_text(draw, (ROW_LABEL_W // 2, y0 + INSOLE_H // 2), label, TITLE_FONT, fill=(150, 150, 170), anchor="mm")
-        for col, cells in enumerate((gt48, gen48, err48)):
-            img = cells_to_heatmap(cells * PRESSURE_CLIP, vmax=PRESSURE_CLIP)
-            x0 = ROW_LABEL_W + GAP + col * (INSOLE_W + GAP)
-            canvas.paste(img, (x0, y0))
+    draw_centered(draw, "V2T tactile generation", 56, fill=(150, 150, 160), size=18,
+                  max_width=canvas.width - 48, min_size=13)
+    for column, panel in enumerate(panels):
+        canvas.paste(Image.fromarray(panel), (column * (PANEL_W + GAP), HEADER_H))
+    if DOWNSCALE < 1.0:
+        canvas = canvas.resize((int(canvas.width * DOWNSCALE), int(canvas.height * DOWNSCALE)),
+                               Image.BILINEAR)
     return np.asarray(canvas)
 
 
