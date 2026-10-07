@@ -88,7 +88,7 @@ def export_session(row: dict, force: bool) -> str:
     if output.is_file() and not force:
         return f"skip existing {output}"
     source = FPP_PREDICTIONS / date / subject / sid / "pred_contact_smpl"
-    if not source.is_dir():
+    if not source.is_dir() and shared_valid(row).any():
         raise FileNotFoundError(f"FPP-Net predictions missing for {sid}: {source}")
 
     pressure_pred = np.zeros((n, 31, 22), dtype=np.float32)
@@ -99,6 +99,8 @@ def export_session(row: dict, force: bool) -> str:
     contact_smpl_gt = np.zeros((n, 2, 96), dtype=np.float16)
     available = np.zeros(n, dtype=bool)
     for frame in range(n):
+        if not source.is_dir():
+            continue
         path = source / f"{frame:06d}.npy"
         if not path.is_file():
             continue
@@ -122,7 +124,34 @@ def export_session(row: dict, force: bool) -> str:
         available[frame] = True
     valid = shared_valid(row) & available
     if not valid.any():
-        raise FileNotFoundError(f"no FPP-Net V2T frames for {sid}: {source}")
+        # 2026-10-07: all-fake session (S12102) — write an empty archive
+        # (valid mask all False) instead of a gap, matching the
+        # pressure_toolkit / AnySole handling of zero-frame sessions.
+        print(f"warning: {sid}: no valid V2T frames (all-fake session); writing empty archive")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            output,
+            pressure_pred=pressure_pred,
+            pressure_gt=pressure_gt,
+            contact_smpl_pred=contact_smpl_pred,
+            contact_smpl_gt=contact_smpl_gt,
+            contact_pred=contact_pred,
+            contact_gt=contact_gt,
+            valid_mask=valid,
+            frame_indices=np.arange(n, dtype=np.int64),
+            target_fps=np.asarray(float(row.get("target_fps") or 40.0), dtype=np.float32),
+            mode=np.asarray("V2T"),
+            pressure_source_grid=np.asarray("31x11_per_foot"),
+            comparison_pressure_grid=np.asarray("31x11_per_foot"),
+            source_native_output=np.asarray(str(source)),
+            provenance_source_type=np.asarray("model_prediction"),
+            contact_gt_source=np.asarray("press2Cont_binary_vertex"),
+            contact_gt_threshold=np.asarray(CONTACT_GT_THRESHOLD, dtype=np.float32),
+            pixel_weight_revision=np.asarray(PIXEL_WEIGHT_REVISION),
+            formal_contact_metrics=np.asarray("contact_smpl_mse/contact_smpl_bce"),
+            empty_all_fake_session=np.asarray("true"),
+        )
+        return f"wrote {output} V2T frames=0/{n} (all-fake empty archive)"
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         output,

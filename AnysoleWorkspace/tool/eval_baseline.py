@@ -83,29 +83,6 @@ def eval_pressure_toolkit(args: argparse.Namespace) -> None:
          "pressure_toolkit", "--split", args.split, "--force"], cwd=ROOT)
 
 
-def fpp_exportable_sessions(split: str) -> list[str]:
-    """Split sessions that actually have pred_contact_smpl outputs.
-
-    Sessions without a temporal-5 window (S12102) produce no predictions and
-    the canonical exporter fails loud on them, so they are skipped here.
-    """
-    rows = {}
-    with (WORKSPACE / "protocol/manifests/session_manifest.jsonl").open(encoding="utf-8") as f:
-        for line in f:
-            row = json.loads(line)
-            rows[row["session_id"]] = row
-    out = []
-    for sid in split_sessions(split):
-        row = rows[sid]
-        date = row["video_path"].split("/")[3]
-        root = WORKSPACE / "work/VP-MoCap/v1/fpp_predictions" / date / row["subject_id"] / sid / "pred_contact_smpl"
-        if root.is_dir():
-            out.append(sid)
-        else:
-            print(f"skip {sid}: no pred_contact_smpl (no temporal-5 window)", flush=True)
-    return out
-
-
 def eval_fpp_v2t(args: argparse.Namespace) -> None:
     cfg = "configs/temporalKPSMPLCont_series5_mlp.yaml"
     phases = ("train", "val", "test") if args.split == "all" else (args.split,)
@@ -116,7 +93,7 @@ def eval_fpp_v2t(args: argparse.Namespace) -> None:
         run([TOUCH_GAIT, "-m", "app.infer_smplcont", "--config", cfg, "--phase", phase,
              "--batch_size", "32", "--num_threads", "4", "--no_visualization", "--gpus",
              str(args.gpu)], cwd=cwd, env=env)
-    exportable = fpp_exportable_sessions(args.split)
+    exportable = split_sessions(args.split)
     run([TOUCH_GAIT, str(WORKSPACE / "tool/adapters/mmvp_series/fpp/export_v2t.py"),
          "--sessions", ",".join(exportable), "--force"], cwd=ROOT)
 
