@@ -389,7 +389,6 @@ config-id，无需声明；基线必须声明，解析不出模式的行不进�
 
 # ① 选定主模型 + 全部基线（主模型缺省 V3_3B，基线缺省全部）
 python results_display/script/r_test2_compare.py --model-name V3_4b --by-mode
-python results_display/script/r_test2_compare.py --model-name V3_4b,V3_4c,F0b --by-mode
 
 # ② 只要基线（不要主模型）
 python results_display/script/r_test2_compare.py --models motionpro,step2motion --by-mode
@@ -397,7 +396,7 @@ python results_display/script/r_test2_compare.py --models motionpro,step2motion 
 # ③ 选定主模型 + 指定基线
 python results_display/script/r_test2_compare.py --model-name V3_4b --models anysole,motionpro --by-mode
 
-# 全部主模型 + 全部基线（全量 sweep 表）
+# 全部主模型 + 全部基线（--models 缺省 all = anysole + 注册表全部 5 个基线，无需再写）
 python results_display/script/r_test2_compare.py \
   --model-name F0b,F4a,F2,F2p4,V3_2,V3_3A,V3_3B,V3_4a,V3_4b,V3_4c,V4A --by-mode
 
