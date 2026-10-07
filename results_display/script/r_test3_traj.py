@@ -803,6 +803,9 @@ def main() -> int:
             for modal in cli_common.split_csv_arg(args.modal):
                 for contact_method in cli_common.split_csv_arg(args.contact_method):
                     model_dir = PRED_ROOT / cli_common.anysole_model_dir(modal, contact_method)
+                    if not model_dir.is_dir():
+                        log.warning(f"模型目录不存在（无训练产物）: {model_dir}")
+                        continue
                     variant = pick_run_dir(model_dir, getattr(args, "variant", None))
                     model_rel = cli_common.anysole_model_dir(modal, contact_method, variant)
                     for config_id in cli_common.split_csv_arg(args.config_id):
