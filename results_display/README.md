@@ -375,13 +375,13 @@ config-id，无需声明；基线必须声明，解析不出模式的行不进�
 
 ## R_Test2 参数对照
 
-`r_test2_compare.py` 是 R_Test 的统一数值评估入口（不是模型推理入口）。它对 AnySole、MotionPRO、Step2Motion 和 MMVP 按 VT2M/V2M/T2M/V2T 分块评估。Motion 模式按**各模型原生协议**计算完整骨架指标（SMPL-24 对 SMPL GT、BVH-23 对 BVH GT），
-指标适用性由注册表能力门控；V2T 单独评估压力/接触重建指标（表列 brief 7 键，叶 5 键留在明细，见 `README_metrics.md` §4）。
+`r_test2_compare.py` = 统一数值评估入口：把选中的主模型与基线按 VT2M/V2M/T2M/V2T
+四个配置各算一列指标，出一张模型 × 指标汇总表。
+
 产出（`ResultTest/R2Test_compare/`）：
-`comparison_per_session.csv`（逐会话明细，含 `protocol`/`gt_source`/`metric_reasons` 列）、
-`comparison_summary.csv`（精简表：模型 × 指标，含 `protocol` 列）、
-`comparison_summary.png`（精简表的表格图，缺失项显示 `—`）、`evaluation.log`
-（split/manifest hash + 每模型 protocol/ok/missing/invalid 统计）。
+`comparison_summary.{csv,png}`（模型 × 指标汇总表，看这个就够）、
+`comparison_per_session.csv`（逐会话明细）、`evaluation.log`（过程日志）。
+加 `--by-mode` 额外输出：`by_mode/<mode>/` 四个模式分块表 + `mode_overview.png` 总览图。
 
 ```bash
 # 三个选择维度：--models 顶层选中（anysole + 各基线注册名）、
@@ -402,45 +402,15 @@ python results_display/script/r_test2_compare.py \
   --model-name F0b,F4a,F2,F2p4,V3_2,V3_3A,V3_3B,V3_4a,V3_4b,V3_4c,V4A --by-mode
 
 # 正式 36-session test 集（缺省 val 迭代集）
-python results_display/script/r_test2_compare.py --split test --by-mode --write-model-metrics --surface-metrics --force
+python results_display/script/r_test2_compare.py --split test --by-mode --force
 ```
 
-基线模型清单来自 `models_modes.yaml`（协议/能力唯一声明点），AnySole 行按
-model/contact-method/run（`--variant`）/config 展开；无法解析协议或能力的行被
-拒绝并记入 `evaluation.log`（绝不猜测）。`--models-config <yaml|json>` 可指定外部
-固定清单（条目必须自带 `protocol`/`capabilities`）。
+其他参数：`--contact-method`（缺省 joint_and）、`--variant`（缺省自动取最新 run，
+`all` = 全部历史 run）、`--write-model-metrics`（指标另存一份到各模型 metrics/）、
+`--surface-metrics`（额外算 PVE，慢）、`--force`（覆盖已有产物）。
 
-### 状态与缺失值约定
-
-- `missing`：预测文件不存在；`invalid`：声明协议与文件不符 / 缺统一契约 /
-  帧数不符 / 声明为真但必要字段缺失；`not_applicable`（指标级）：模型没有该
-  能力或来源为 GT 回填/模板重建。
-- 不可用指标 CSV 留空、表格显示 `—`；逐会话 `metric_reasons` 列记录每项缺失原因。
-- `--surface-metrics`：仅对声明 surface 能力的模型（MotionPRO / MMVP_VP-MoCap）
-  计算 PVE；AnySole 按任务 01 已批准的 SMPL pose-only 协议（GT beta）例外启用；
-  pressure_toolkit 与 Step2Motion 的 PVE 恒为 `—`。不传该 flag 时 PVE 列留空并
-  记录 `not_computed` 原因。
-
-### R_Test2 模式分块（--by-mode）
-
-按 `results_display/models_modes.yaml` 把汇总表拆成 VT2M/V2M/T2M/V2T 四块，每块只含同模式行
-（V2T 块表列严格 6 个 brief 键）；无法解析模式的行不进任何块并记入 `evaluation.log`（绝不猜测）。
-基线未导出统一 predictions 时行状态为 missing（显式占位行）。没有 checkpoints 的
-优化型基线也会正常注册；`checkpoints/` 只对训练型模型有意义。没有有效帧的 session
-会记录为 `excluded_no_valid_frames`，不计入模型聚合。
-
-`--write-model-metrics` 会把同一套指标写入各模型的
-`results/<Model>/metrics/<split>_comparison.json`（schema
-`mmvp_native_metrics_v2`，含 evaluation_protocol/capabilities/GT source/split 与
-manifest hash/metric 缺失原因）；旧 `mmvp_common_metrics_v1`（common19）文件
-不会被当作新结果读取，重跑时被 v2 取代。原生模型日志保留不改。
-
-```bash
-python results_display/script/r_test2_compare.py --model-name V3_4b --split test --by-mode --force
-```
-
-产出（`ResultTest/R2Test_compare/by_mode/`）：`mode_overview.png`（四块堆叠总览）、
-`<mode>/comparison_summary.{csv,png}`。
+表里的 `—` 表示该模型没有这项能力或该项不适用（如 Step2Motion 的 PVE）；预测文件
+缺失时该行标 `missing`，格式不符标 `invalid`，原因都写在 `evaluation.log`。
 
 ## R_Test3 轨迹可视化
 
@@ -485,13 +455,9 @@ baseline 模型输出在 `ResultTest/R3Test_traj/<model>/gen/`。
 
 ### R_Test3 并排轨迹对比（--compare，配对协议 GT）
 
-每模式一行轨迹面板：所有面板共享同一 `TrajProjector`（union 全部预测 + GT 定相机），
-可直接目测各模型的轨迹偏差；主模型蓝 / GT 橙 / 基线注册表配色，footer 显示各模型
-整段 ATE。**每个模型只画自己配对协议的 GT**（SMPL 模型配 SMPL root GT，BVH 模型配
-BVH/Hips root GT），ATE 对各自配对 GT 计算；面板标题与静态图图例标协议。
-只纳入 `root_translation=true` 且轨迹来源不是 GT 回填/模板重建的正式模型；被拒模型
-记录原因到日志。缺预测的模型在行内跳过并记 warning（行内其余模型照常渲染）。
-静态图按协议分组：SMPL 模型和 BVH 模型各画在自协议 GT 的坐标轴上。
+每模式一行轨迹面板：所有面板共享同一投影（全部预测 + GT 取并集定相机），可直接
+目测各模型的轨迹偏差；footer 显示各模型整段 ATE（对各自配对协议的 GT 计算）。
+缺预测的模型在行内跳过并记 warning（行内其余模型照常渲染）。
 
 ```bash
 # 选中口径与 Test1/Test2 相同：--models 顶层选中、--model-name 选主模型
@@ -508,13 +474,10 @@ python results_display/script/r_test3_traj.py --compare --model-name V3_4b --mod
 `r_test4_v2t.py` 默认只读取已经导出的标准 V2T archive，不重新推理模型。它展示
 **视觉→触觉（V2T）生成器**的结果；旧的即时推理诊断保留为显式 `--source infer`。
 
-V2T 指标统一到每脚 31×11 网格：AnySole 的 4×12 网格只在评估层双线性重采样，FPP-Net 的
-31×11 网格直接使用。正式 V2T 指标为**四层层级（brief 7 + 叶 5，见
-`README_metrics.md` §4）**：表列只含 `T_corr`、`T_rmse`、`pressure_force_rmse`、
-`pressure_force_r2`、`pressure_cop_error_left`、`pressure_cop_error_right`；
-叶键 `T_mse`、`T_mae`、`pressure_force_mae`、`pressure_cop_error_mean` 只进
-逐会话明细。contact 不再是正式 V2T 指标
-（archive 中的 contact 字段仅为诊断保留，不输出、不消费）。
+V2T 指标统一到每脚 31×11 网格（AnySole 的 4×12 在评估层重采样，FPP-Net 直接使用）。
+正式指标为四层层级：表列 brief 7 键（`T_corr`、`T_rmse`、`pressure_force_rmse`、
+`pressure_force_r2`、`pressure_cop_error_left/right`），其余叶 5 键只进逐会话明细
+（定义见 `README_metrics.md` §4）；contact 非正式指标（仅诊断保留）。
 
 三种条件（与 eval.py 的 `--config-id` 同名）：
 
@@ -528,8 +491,8 @@ V2T 指标统一到每脚 31×11 网格：AnySole 的 4×12 网格只在评估�
 逐格误差 `cells/*.npz`/`*.png`，以及热力图动画（布局 = D4Test_baseline_tactile 口径：
 1×3 面板 GT | Generated | |GT-Gen|，每面板 L/R 鞋垫块 + 分离式双行标题，0.75 缩放）。
 
-与 `anysole.eval` 的关系：`anysole.eval` 和 FPP-Net 导出器共同写标准 V2T archive，R_Test4
-只消费这些 archive；R_Test2 与 R_Test4 使用同一套 V2T 指标定义。
+数据源 = `anysole.eval` 与 FPP-Net 导出的标准 V2T archive；R_Test2 与 R_Test4 用同一套
+V2T 指标定义。
 
 ```bash
 conda activate touch_gait
