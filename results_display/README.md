@@ -523,6 +523,7 @@ token（与 config 级 null 逐字节一致；四角 = VT2M/V2M/T2M/纯先验，
 **生产**（148 个任务 = train 2×2 + val 6×6×3 种子 + test 6×6，`--reuse` 断点续跑）：
 
 ```bash
+conda activate touch_gait
 python configs/z_gen/rho_grid_eval.py --models V3_3B
 CUDA_VISIBLE_DEVICES=4 bash configs/bg.sh
 ```
@@ -535,6 +536,7 @@ CUDA_VISIBLE_DEVICES=4 bash configs/bg.sh
 **出图**（热力图 + 切片 + 自检表）：
 
 ```bash
+conda activate touch_gait
 python results_display/script/rho_grid_analysis.py --split test
 ```
 
