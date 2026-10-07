@@ -139,87 +139,92 @@ def _fmt(row: dict[str, Any], value: float) -> str:
 def region_bars(path: Path, rows: list[dict[str, Any]], series: list[str],
                 colors: dict[str, str], title: str, layout: str = "columns",
                 label_colors: dict[str, str] | None = None) -> None:
-    """按行面板图，细线端点风格（构图学自经典森林图，非粗柱）。
+    """面板图，细线端点构图（学自经典森林图，非粗柱）。
 
-    每行一个迷你横向轴（混合单位各轴独立），行内画细横线 + 小端点 +
-    数值标注。layout="columns"：每个 series 一列面板（1×N）；layout=
-    "grouped"：单列，每行并排各 series 的细线端点。组标题标在每组第一行
-    上方；行标签画在左缘，可经 label_colors 按域着色。
+    layout="columns"：1×N 面板（每面板一个 series、一个轴）；layout=
+    "grouped"：单面板三序列并排。每行按该行各 series 的最大值归一
+    （0..1 相对刻度，面板间共享），细横线 + 小端点 + 原生单位数值标注；
+    行标签在左面板（按域着色），组分隔虚线与组名在每面板，组名标于
+    最右面板右缘。
     """
     if not rows:
         return
     label_colors = label_colors or {}
-    n_cols = len(series) if layout == "columns" else 1
-    row_h = 0.42
-    fig = plt.figure(figsize=(3.0 * n_cols + 0.8, row_h * len(rows) + 1.0), dpi=220)
+    n_panels = len(series) if layout == "columns" else 1
+    n = len(rows)
+    fig, axes = plt.subplots(1, n_panels, figsize=(4.6 * n_panels + 0.6, 0.30 * n + 1.6),
+                             dpi=220, squeeze=False, sharey=True)
     fig.patch.set_facecolor(SURFACE)
-    fig.text(0.02, 0.985, title, fontsize=12, color=INK, ha="left", va="top")
-    grid = fig.add_gridspec(len(rows), n_cols, hspace=0.30, wspace=0.50,
-                            left=0.26 if layout == "columns" else 0.34,
-                            right=0.985, top=0.925, bottom=0.02)
-    for i, row in enumerate(rows):
-        for j in range(n_cols):
-            ax = fig.add_subplot(grid[i, j])
-            ax.set_facecolor(SURFACE)
-            for spine in ax.spines.values():
-                spine.set_visible(False)
-            ax.set_yticks([])
-            ax.set_xticks([])
-            if layout == "columns":
-                sname = series[j]
+    axes = axes[0]
+    refs = []
+    for row in rows:
+        vals = [v for v in row["values"].values() if v is not None]
+        refs.append(max(vals) if vals else 1.0)
+    y = np.arange(n)[::-1]
+    for p, ax in enumerate(axes):
+        ax.set_facecolor(SURFACE)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        for spine in ("left", "bottom"):
+            ax.spines[spine].set_color(AXIS)
+        ax.tick_params(colors=INK2, labelsize=9, length=0)
+        ax.set_yticks(y)
+        if p == 0:
+            ax.set_yticklabels([r["label"] for r in rows], fontsize=9)
+            for tick_label, row in zip(ax.get_yticklabels(), rows):
+                tick_label.set_color(label_colors.get(row["row_id"], INK))
+        else:
+            ax.set_yticklabels([])
+        ax.set_xlim(0, 1.0)
+        ax.set_xticks([])
+        for i in range(n - 1):
+            if rows[i]["region"] != rows[i + 1]["region"]:
+                ax.axhline((y[i] + y[i + 1]) / 2, color=GRID, linewidth=0.8,
+                           linestyle="--", zorder=1)
+        if p == n_panels - 1:
+            for i in range(n):
+                if i == 0 or rows[i]["region"] != rows[i - 1]["region"]:
+                    ax.text(1.02, y[i], rows[i]["region_label"],
+                            transform=ax.get_yaxis_transform(), ha="left",
+                            va="center", fontsize=8, color=MUTED)
+        if layout == "columns":
+            sname = series[p]
+            color = colors.get(sname, INK2)
+            for i, row in enumerate(rows):
                 val = row["values"].get(sname)
                 if val is None:
-                    ax.text(0.5, 0.5, "—", ha="center", va="center",
-                            color=MUTED, fontsize=9, transform=ax.transAxes)
-                else:
-                    color = colors.get(sname, INK2)
-                    if row.get("source_color") and j == 0:
-                        color = row["source_color"]
-                    ax.hlines(0.0, 0, val, color=color, linewidth=2.2, zorder=3)
-                    ax.scatter([val], [0.0], s=20, color=color, edgecolors="white",
+                    ax.text(0.5, y[i], "—", ha="center", va="center",
+                            color=MUTED, fontsize=8)
+                    continue
+                x = val / refs[i]
+                ax.hlines(y[i], 0, x, color=color, linewidth=2.2, zorder=3)
+                ax.scatter([x], [y[i]], s=20, color=color, edgecolors="white",
+                           linewidths=0.5, zorder=4)
+                ax.text(x, y[i] + 0.20, _fmt(row, val),
+                        ha="left" if x < 0.82 else "right",
+                        va="bottom", fontsize=8, color=INK2)
+            ax.set_title(sname, loc="left", fontsize=11, color=INK, pad=10)
+        else:
+            n_s = len(series)
+            for k, sname in enumerate(series):
+                color = colors.get(sname, INK2)
+                for i, row in enumerate(rows):
+                    val = row["values"].get(sname)
+                    if val is None:
+                        continue
+                    yy = y[i] + 0.16 * (k - (n_s - 1) / 2)
+                    x = val / refs[i]
+                    ax.hlines(yy, 0, x, color=color, linewidth=1.8, zorder=3)
+                    ax.scatter([x], [yy], s=16, color=color, edgecolors="white",
                                linewidths=0.5, zorder=4)
-                    ax.text(val, 0.16, _fmt(row, val), ha="left", va="bottom",
-                            fontsize=8, color=INK2)
-                    ax.set_xlim(0, max(val * 1.28, 1e-6))
-                if j == 0:
-                    ax.text(-0.06, 0.5, row["label"], ha="right", va="center",
-                            transform=ax.transAxes, fontsize=8.5,
-                            color=label_colors.get(row["row_id"], INK))
-            else:
-                vals = [row["values"].get(s) for s in series]
-                known = [v for v in vals if v is not None]
-                if not known:
-                    ax.text(0.5, 0.5, "—", ha="center", va="center",
-                            color=MUTED, fontsize=9, transform=ax.transAxes)
-                else:
-                    ax.set_xlim(0, max(known) * 1.30 or 1e-6)
-                    n = len(series)
-                    for k, sname in enumerate(series):
-                        v = vals[k]
-                        if v is None:
-                            continue
-                        y = 0.5 - 0.16 * (k - (n - 1) / 2)
-                        ax.hlines(y, 0, v, color=colors.get(sname, INK2),
-                                  linewidth=1.8, zorder=3)
-                        ax.scatter([v], [y], s=16, color=colors.get(sname, INK2),
-                                   edgecolors="white", linewidths=0.5, zorder=4)
-                        ax.text(v, y + 0.075, _fmt(row, v), ha="left", va="bottom",
-                                fontsize=7, color=INK2)
-                ax.text(-0.06, 0.5, row["label"], ha="right", va="center",
-                        transform=ax.transAxes, fontsize=8.5,
-                        color=label_colors.get(row["row_id"], INK))
-            if j == 0 and (i == 0 or rows[i - 1]["region"] != row["region"]):
-                ax.set_title(row["region_label"], loc="left", fontsize=9,
-                             color=MUTED, pad=16)
-    if layout == "columns":
-        for j, sname in enumerate(series):
-            x0 = grid[0, j].get_position(fig).x0
-            x1 = grid[-1, j].get_position(fig).x1
-            fig.text((x0 + x1) / 2, 0.965, sname, ha="center", va="bottom",
-                     fontsize=11, color=INK)
-    else:
-        handles = [plt.Rectangle((0, 0), 1, 1, color=colors.get(s, INK2)) for s in series]
-        fig.legend(handles, series, loc="upper right", frameon=False, fontsize=8.5)
+                    ax.text(x, yy + 0.07, _fmt(row, val),
+                            ha="left" if x < 0.82 else "right",
+                            va="bottom", fontsize=7, color=INK2)
+            handles = [plt.Rectangle((0, 0), 1, 1, color=colors.get(s, INK2)) for s in series]
+            ax.legend(handles, series, loc="lower left", bbox_to_anchor=(0, 1.02),
+                      ncol=n_s, frameon=False, fontsize=9)
+    fig.suptitle(title, x=0.02, ha="left", fontsize=12, color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     fig.savefig(path, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
 
