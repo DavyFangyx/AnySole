@@ -12,9 +12,11 @@ revised task book (the canonical analysis entry points import ``main``):
   --m2  main T versus T specialist and prior on V-domain rows
 
 2026-10-07 起对比行集由 7 分量表改为区域分组（上半身/下半身/全身/足-地，
-见 utils/missing_rate_analysis.py REGION_GROUPS），图型保持经典差值森林图
-（零线 + 细线端点 + 数值标注）：C1/C3 单差值森林图（行标签按 V/T 域着色），
-C2 单差值森林图（VT − 最佳专才），M1/M2 双差值森林图（主线−专才 / 主线−先验）。
+见 utils/missing_rate_analysis.py REGION_GROUPS）。表现结构按 2026-10-07
+裁定：C1/C3 = 1×2 面板（左 V 右 T）、C2 = 最佳专才 vs 主线 1×2 + 三色合图、
+M1/M2 = 三色合图 + 1×3 面板（M1 行 = T 域 9、M2 行 = V 域 10）；
+构图风格为经典森林图的细线端点（细横线 + 小端点 + 数值标注），每行一个
+迷你轴（混合单位各轴独立）。
 
 ``--all`` runs all shared component analyses.  ``--bar`` is retained as a
 compatibility alias for ``--c2``.
@@ -61,9 +63,9 @@ GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
 V_COLOR = "#2a78d6"
 T_COLOR = "#eb6834"
-GOOD = "#1baf7a"
-BAD = "#e34948"
-FLAT = "#8c8b84"
+MAIN_COLOR = "#1baf7a"
+SPEC_COLOR = "#8c8b84"
+PRIOR_COLOR = "#b9b7ae"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -111,15 +113,9 @@ def load_inputs(args: argparse.Namespace) -> dict[str, Any]:
     return out
 
 
-def style_ax(ax) -> None:
-    """Minimal academic axis: only the bottom spine, dashed x grid."""
-    ax.set_facecolor(SURFACE)
-    for spine in ("top", "right", "left"):
-        ax.spines[spine].set_visible(False)
-    ax.spines["bottom"].set_color(AXIS)
-    ax.tick_params(colors=INK2, labelsize=9.5, length=0)
-    ax.xaxis.grid(True, color=GRID, linewidth=0.8, linestyle="--")
-    ax.set_axisbelow(True)
+def _csv_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """CSV 行（去掉渲染用的 values/aliases/higher 键）。"""
+    return [{k: v for k, v in row.items() if k not in ("values", "aliases", "higher")} for row in rows]
 
 
 def domain_label_colors(rows: list[dict[str, Any]]) -> dict[str, str]:
@@ -128,98 +124,102 @@ def domain_label_colors(rows: list[dict[str, Any]]) -> dict[str, str]:
             for row in rows}
 
 
-def _csv_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """CSV 行（去掉渲染用的 aliases/higher 键）。"""
-    return [{k: v for k, v in row.items() if k not in ("aliases", "higher")} for row in rows]
+def _fmt(row: dict[str, Any], value: float) -> str:
+    if row["row_id"] == "contact":
+        return "%.3f" % value
+    if row["row_id"] == "accel":
+        return "%.2f" % value
+    if row["row_id"] == "root_traj":
+        return "%.1f%%" % value
+    if row["row_id"] == "root_orient":
+        return "%.1f°" % value
+    return "%.1f" % value
 
 
-def _forest_color(value: float, positive_is_better: bool) -> str:
-    good = value > 0 if positive_is_better else value < 0
-    bad = value < 0 if positive_is_better else value > 0
-    return GOOD if good else BAD if bad else FLAT
+def region_bars(path: Path, rows: list[dict[str, Any]], series: list[str],
+                colors: dict[str, str], title: str, layout: str = "columns",
+                label_colors: dict[str, str] | None = None) -> None:
+    """按行面板图，细线端点风格（构图学自经典森林图，非粗柱）。
 
-
-def _group_lines(ax, rows: list[dict[str, Any]], y: np.ndarray) -> None:
-    """组分隔虚线 + 右缘组名（rows 已倒序）。"""
-    xlim = ax.get_xlim()
-    for i in range(len(rows) - 1):
-        if rows[i]["region"] != rows[i + 1]["region"]:
-            ax.axhline((y[i] + y[i + 1]) / 2, color=GRID, linewidth=0.8,
-                       linestyle="--", zorder=1)
-            ax.text(xlim[1], y[i], rows[i]["region_label"], ha="left", va="center",
-                    fontsize=8, color=MUTED)
-
-
-def _label_tick_colors(ax, rows: list[dict[str, Any]], label_colors: dict[str, str] | None) -> None:
-    if not label_colors:
-        return
-    for tick_label, row in zip(ax.get_yticklabels(), rows):
-        tick_label.set_color(label_colors.get(row["row_id"], INK))
-
-
-def delta_forest(path: Path, rows: list[dict[str, Any]], value_key: str, title: str,
-                 positive_is_better: bool = False, zero_text: str = "0 = no difference",
-                 label_colors: dict[str, str] | None = None) -> None:
-    """经典差值森林图：零线 + 每行一根细线端点 + 数值标注（构图保持旧版）。"""
+    每行一个迷你横向轴（混合单位各轴独立），行内画细横线 + 小端点 +
+    数值标注。layout="columns"：每个 series 一列面板（1×N）；layout=
+    "grouped"：单列，每行并排各 series 的细线端点。组标题标在每组第一行
+    上方；行标签画在左缘，可经 label_colors 按域着色。
+    """
     if not rows:
         return
-    rows = list(reversed(rows))
-    fig, ax = plt.subplots(figsize=(7.6, max(2.9, 0.44 * len(rows) + 1.4)), dpi=220)
+    label_colors = label_colors or {}
+    n_cols = len(series) if layout == "columns" else 1
+    row_h = 0.42
+    fig = plt.figure(figsize=(3.0 * n_cols + 0.8, row_h * len(rows) + 1.0), dpi=220)
     fig.patch.set_facecolor(SURFACE)
-    style_ax(ax)
-    y = np.arange(len(rows))
-    vals = np.array([float(row[value_key]) for row in rows])
-    colors = [_forest_color(value, positive_is_better) for value in vals]
-    ax.axvline(0, color=AXIS, linewidth=1.0, zorder=2)
-    ax.hlines(y, 0, vals, colors=colors, linewidth=2.6, zorder=3)
-    ax.scatter(vals, y, s=26, c=colors, edgecolors="white", linewidths=0.6, zorder=4)
-    span = float(np.max(np.abs(vals))) if len(vals) else 0.0
-    dx = max(span * 0.035, 0.01)
-    for yi, value in zip(y, vals):
-        ax.text(value + (dx if value >= 0 else -dx), yi, "%+.3g" % value,
-                ha="left" if value >= 0 else "right", va="center",
-                fontsize=8.5, color=INK2)
-    ax.set_yticks(y)
-    ax.set_yticklabels([row["label"] for row in rows], fontsize=9.5)
-    _label_tick_colors(ax, rows, label_colors)
-    _group_lines(ax, rows, y)
-    direction = "positive" if positive_is_better else "negative"
-    ax.set_xlabel("Error difference (%s = favorable direction)" % direction,
-                  color=INK2, fontsize=10, labelpad=8)
-    ax.set_title(title, color=INK, fontsize=12, loc="left", pad=14)
-    ax.text(0.99, -0.14, zero_text, transform=ax.transAxes, ha="right", va="top",
-            fontsize=8, color=MUTED)
-    fig.tight_layout()
-    fig.savefig(path, facecolor=SURFACE, bbox_inches="tight")
-    plt.close(fig)
-
-
-def dual_forest(path: Path, rows: list[dict[str, Any]], title: str) -> None:
-    """双差值森林图（M1/M2）：主线−专才 与 主线−先验 两枚端点，均需位于 0 左侧。"""
-    if not rows:
-        return
-    rows = list(reversed(rows))
-    fig, ax = plt.subplots(figsize=(7.6, max(2.9, 0.5 * len(rows) + 1.5)), dpi=220)
-    fig.patch.set_facecolor(SURFACE)
-    style_ax(ax)
-    y = np.arange(len(rows))
-    d1 = np.array([r["delta_error_main_minus_specialist"] for r in rows])
-    d2 = np.array([r["delta_error_main_minus_prior"] for r in rows])
-    ax.axvline(0, color=AXIS, linewidth=1.0, zorder=2)
-    ax.hlines(y + 0.1, 0, d1, colors=V_COLOR, linewidth=2.2, zorder=3)
-    ax.hlines(y - 0.1, 0, d2, colors=T_COLOR, linewidth=2.2, zorder=3)
-    ax.scatter(d1, y + 0.1, s=22, color=V_COLOR, edgecolors="white", linewidths=0.5,
-               label="main − specialist", zorder=4)
-    ax.scatter(d2, y - 0.1, s=22, color=T_COLOR, edgecolors="white", linewidths=0.5,
-               label="main − prior", zorder=4)
-    ax.set_yticks(y)
-    ax.set_yticklabels([r["label"] for r in rows], fontsize=9.5)
-    _group_lines(ax, rows, y)
-    ax.set_xlabel("Error difference (negative = main is better)", color=INK2,
-                  fontsize=10, labelpad=8)
-    ax.set_title(title, color=INK, fontsize=12, loc="left", pad=14)
-    ax.legend(frameon=False, fontsize=9, loc="best")
-    fig.tight_layout()
+    fig.text(0.02, 0.985, title, fontsize=12, color=INK, ha="left", va="top")
+    grid = fig.add_gridspec(len(rows), n_cols, hspace=0.30, wspace=0.50,
+                            left=0.26 if layout == "columns" else 0.34,
+                            right=0.985, top=0.925, bottom=0.02)
+    for i, row in enumerate(rows):
+        for j in range(n_cols):
+            ax = fig.add_subplot(grid[i, j])
+            ax.set_facecolor(SURFACE)
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            ax.set_yticks([])
+            ax.set_xticks([])
+            if layout == "columns":
+                sname = series[j]
+                val = row["values"].get(sname)
+                if val is None:
+                    ax.text(0.5, 0.5, "—", ha="center", va="center",
+                            color=MUTED, fontsize=9, transform=ax.transAxes)
+                else:
+                    color = colors.get(sname, INK2)
+                    if row.get("source_color") and j == 0:
+                        color = row["source_color"]
+                    ax.hlines(0.0, 0, val, color=color, linewidth=2.2, zorder=3)
+                    ax.scatter([val], [0.0], s=20, color=color, edgecolors="white",
+                               linewidths=0.5, zorder=4)
+                    ax.text(val, 0.16, _fmt(row, val), ha="left", va="bottom",
+                            fontsize=8, color=INK2)
+                    ax.set_xlim(0, max(val * 1.28, 1e-6))
+                if j == 0:
+                    ax.text(-0.06, 0.5, row["label"], ha="right", va="center",
+                            transform=ax.transAxes, fontsize=8.5,
+                            color=label_colors.get(row["row_id"], INK))
+            else:
+                vals = [row["values"].get(s) for s in series]
+                known = [v for v in vals if v is not None]
+                if not known:
+                    ax.text(0.5, 0.5, "—", ha="center", va="center",
+                            color=MUTED, fontsize=9, transform=ax.transAxes)
+                else:
+                    ax.set_xlim(0, max(known) * 1.30 or 1e-6)
+                    n = len(series)
+                    for k, sname in enumerate(series):
+                        v = vals[k]
+                        if v is None:
+                            continue
+                        y = 0.5 - 0.16 * (k - (n - 1) / 2)
+                        ax.hlines(y, 0, v, color=colors.get(sname, INK2),
+                                  linewidth=1.8, zorder=3)
+                        ax.scatter([v], [y], s=16, color=colors.get(sname, INK2),
+                                   edgecolors="white", linewidths=0.5, zorder=4)
+                        ax.text(v, y + 0.075, _fmt(row, v), ha="left", va="bottom",
+                                fontsize=7, color=INK2)
+                ax.text(-0.06, 0.5, row["label"], ha="right", va="center",
+                        transform=ax.transAxes, fontsize=8.5,
+                        color=label_colors.get(row["row_id"], INK))
+            if j == 0 and (i == 0 or rows[i - 1]["region"] != row["region"]):
+                ax.set_title(row["region_label"], loc="left", fontsize=9,
+                             color=MUTED, pad=16)
+    if layout == "columns":
+        for j, sname in enumerate(series):
+            x0 = grid[0, j].get_position(fig).x0
+            x1 = grid[-1, j].get_position(fig).x1
+            fig.text((x0 + x1) / 2, 0.965, sname, ha="center", va="bottom",
+                     fontsize=11, color=INK)
+    else:
+        handles = [plt.Rectangle((0, 0), 1, 1, color=colors.get(s, INK2)) for s in series]
+        fig.legend(handles, series, loc="upper right", frameon=False, fontsize=8.5)
     fig.savefig(path, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
 
@@ -240,12 +240,15 @@ def run_c1(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
             "metric": v_key if v_key == t_key else "%s / %s" % (v_key, t_key),
             "V_specialist": round(v_raw, 6), "T_specialist": round(t_raw, 6),
             "delta_error_T_minus_V": round(delta, 6), "winner": winner,
+            "values": {"V specialist": v_raw, "T specialist": t_raw},
         })
     out = args.out
     write_rows(out / "specialist_table.csv", _csv_rows(rows))
-    delta_forest(out / "specialist_forest.png", rows, "delta_error_T_minus_V",
-                 "C1 specialist division: T error minus V error",
-                 positive_is_better=True, label_colors=domain_label_colors(rows))
+    region_bars(out / "specialist_panels.png", rows,
+                ["V specialist", "T specialist"],
+                {"V specialist": V_COLOR, "T specialist": T_COLOR},
+                "C1 specialist division by region", layout="columns",
+                label_colors=domain_label_colors(rows))
     summary = {"V_wins": [r["row_id"] for r in rows if r["winner"] == "V specialist"],
                "T_wins": [r["row_id"] for r in rows if r["winner"] == "T specialist"]}
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -275,11 +278,20 @@ def run_c2(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
             "T_specialist": round(t_raw, 6), "best_specialist": round(best_raw, 6),
             "best_source": best_src,
             "delta_error_VT_minus_best": round(delta, 6), "category": category,
+            "values": {"V specialist": v_raw, "T specialist": t_raw, "Main VT": main_raw,
+                       "Best specialist": best_raw},
+            "source_color": V_COLOR if v_err <= t_err else T_COLOR,
         })
     out = args.out
     write_rows(out / "fusion_table.csv", _csv_rows(rows))
-    delta_forest(out / "fusion_forest.png", rows, "delta_error_VT_minus_best",
-                 "C2 fusion: main VT minus best specialist")
+    region_bars(out / "fusion_best_panels.png", rows,
+                ["Best specialist", "Main VT"],
+                {"Best specialist": SPEC_COLOR, "Main VT": MAIN_COLOR},
+                "C2 fusion: best specialist vs main VT", layout="columns")
+    region_bars(out / "fusion_series.png", rows,
+                ["V specialist", "T specialist", "Main VT"],
+                {"V specialist": V_COLOR, "T specialist": T_COLOR, "Main VT": MAIN_COLOR},
+                "C2 fusion: specialists vs main VT", layout="grouped")
     summary = {"synergy": sum(r["category"] == "synergy" for r in rows),
                "selection": sum(r["category"] == "keep or select" for r in rows),
                "interference": sum(r["category"] == "interference" for r in rows)}
@@ -303,12 +315,15 @@ def run_c3(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
             "main_V": round(v_raw, 6), "main_T": round(t_raw, 6),
             "delta_error_T_minus_V": round(delta, 6), "winner": winner,
             "expected_winner": expected, "matches_expected": winner == expected,
+            "values": {"Main V-only": v_raw, "Main T-only": t_raw},
         })
     out = args.out
     write_rows(out / "main_branch_table.csv", _csv_rows(rows))
-    delta_forest(out / "main_branch_forest.png", rows, "delta_error_T_minus_V",
-                 "C3 main branches: T-only error minus V-only error",
-                 positive_is_better=True, label_colors=domain_label_colors(rows))
+    region_bars(out / "main_branch_panels.png", rows,
+                ["Main V-only", "Main T-only"],
+                {"Main V-only": V_COLOR, "Main T-only": T_COLOR},
+                "C3 main branches by region", layout="columns",
+                label_colors=domain_label_colors(rows))
     summary = {"matches_expected": sum(bool(r["matches_expected"]) for r in rows), "total": len(rows)}
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"rows": rows, "summary": summary}
@@ -318,10 +333,14 @@ def branch_table(args: argparse.Namespace, inputs: dict[str, Any], branch: str) 
     if branch == "m1":
         specialist_name, specialist_cfg, main_cfg = "v_specialist", "V2M", "V2M"
         domain_rows = T_DOMAIN_ROWS
+        main_label, spec_label = "Main V", "V specialist"
+        main_color = V_COLOR
         title = "M1: main V on T-domain rows"
     else:
         specialist_name, specialist_cfg, main_cfg = "t_specialist", "T2M", "T2M"
         domain_rows = V_DOMAIN_ROWS
+        main_label, spec_label = "Main T", "T specialist"
+        main_color = T_COLOR
         title = "M2: main T on V-domain rows"
     if specialist_name not in inputs:
         raise SystemExit("%s 需要对应专才明细文件" % branch.upper())
@@ -344,10 +363,14 @@ def branch_table(args: argparse.Namespace, inputs: dict[str, Any], branch: str) 
             "beats_specialist": d_spec < -args.tol,
             "beats_prior": d_prior < -args.tol,
             "holds": d_spec < -args.tol and d_prior < -args.tol,
+            "values": {main_label: m_raw, spec_label: s_raw, "Prior": p_raw},
         })
     out = args.out
     write_rows(out / "branch_table.csv", _csv_rows(rows))
-    dual_forest(out / "branch_forest.png", rows, title)
+    series = [main_label, spec_label, "Prior"]
+    colors = {main_label: main_color, spec_label: SPEC_COLOR, "Prior": PRIOR_COLOR}
+    region_bars(out / "branch_series.png", rows, series, colors, title, layout="grouped")
+    region_bars(out / "branch_panels.png", rows, series, colors, title, layout="columns")
     summary = {"holds": [r["row_id"] for r in rows if r["holds"]],
                "total": len(rows)}
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
