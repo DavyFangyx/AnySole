@@ -117,7 +117,11 @@ def canonical_pressure_map(values: np.ndarray) -> np.ndarray:
         return np.concatenate([values[0], values[1]], axis=1)
     if values.ndim == 3 and values.shape == (2, 4, 12):
         from scipy.ndimage import zoom
-        values = zoom(values, (1, 31 / 4, 11 / 12), order=1,
+        # 4×12 = 内外侧×脚跟脚尖（4 行 = 内外侧短轴、12 列 = 脚跟到脚尖长轴，
+        # 实测：L 脚 12 轴激活跨 10 格、4 轴各行均有）。先转置成 (12,4) 再
+        # zoom 到 31×11，使 31 = 脚跟到脚尖长轴、11 = 内外侧短轴，
+        # 与 FPP 原生 31×11 同向；直接 zoom 会把长短轴互换（脚变矮胖畸变）。
+        values = zoom(values.transpose(0, 2, 1), (1, 31 / 12, 11 / 4), order=1,
                       mode="nearest", prefilter=False)
         return np.concatenate([values[0], values[1]], axis=1)
     raise ValueError(f"unsupported V2T display grid: {values.shape}")
@@ -507,7 +511,8 @@ def main_archives(args: argparse.Namespace) -> int:
                         render_frame(archive["pressure_gt"][t], archive["pressure_pred"][t], session_id, "V2T", t, len(pred_maps), args.fps)
                         for t in range(0, n, max(args.stride, 1))
                     ]
-                    media = cli_common.media_path(out_dir, f"{session_id}_{safe_model}_V2T", args.gen)
+                    suffix = "" if safe_model.endswith("_V2T") else "_V2T"
+                    media = cli_common.media_path(out_dir, f"{session_id}_{safe_model}{suffix}", args.gen)
                     media.parent.mkdir(parents=True, exist_ok=True)
                     if args.gen == "gif":
                         cli_common.write_gif(frames, media, cli_common.viz_fps(args.fps, args.stride))
