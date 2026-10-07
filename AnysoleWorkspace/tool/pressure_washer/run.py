@@ -53,13 +53,22 @@ def main() -> int:
     elif args.stage == "encode" and args.input:
         command += ["-input", str(args.input)]
     elif args.stage == "clean-fault-cell":
-        # Operates in place on the final fake-marked tree by default.
+        # Operates in place on the final fake-marked tree by default and is
+        # idempotent by construction (re-runs find no criterion hits), so it
+        # has no --force flag.
         if args.input:
             command += ["-input", str(args.input)]
-        if args.force:
-            command.append("--force")
     elif args.stage in ("mark-fake", "encode"):
         output_root = PRESSURE_DATA_ROOT / ("reconstructed" if args.stage == "mark-fake" else "final_fake_marked")
+        if args.stage == "encode":
+            # final_fake_marked is a flat tree (date dirs at the top): feed the
+            # whole tree, not the newest timestamped wrapper subdirectory.
+            command += ["-input", str(output_root)]
+            if not output_root.is_dir():
+                raise FileNotFoundError("No fake-marked dataset under %s" % output_root)
+            if args.force:
+                command.append("--overwrite")
+            return subprocess.call(command, cwd=REPO_ROOT)
         candidates = sorted(path for path in output_root.iterdir() if path.is_dir()) if output_root.is_dir() else []
         if not candidates:
             raise FileNotFoundError("No input dataset found under %s" % output_root)

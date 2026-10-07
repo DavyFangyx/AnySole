@@ -33,7 +33,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[5]
 WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 TOOLKIT = REPO_ROOT / "Baselines" / "pressure_tookit"
 for path in (REPO_ROOT, TOOLKIT):

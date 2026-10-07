@@ -244,6 +244,6 @@ cd /data/fangyuxuan/projects/gait
 python configs/z_gen/all_models.py
 python configs/z_gen/singlemodal_eval.py --models V3_3B
 python configs/z_gen/rho_grid_eval.py --models V3_3B
-CUDA_VISIBLE_DEVICES=6 bash configs/bg.sh
+CUDA_VISIBLE_DEVICES=3 bash configs/bg.sh
 python configs/tools/status.py
 ```

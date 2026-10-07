@@ -285,11 +285,11 @@ def build_one(sid: str, row: dict, *, force: bool = False) -> Path:
             "left_source": left_uri, "right_source": right_uri,
             "shared_alignment": (
                 "values and quality flags nearest-neighbour mapped by absolute wall-clock time "
-                "(video frames: first cam3 jpeg name + i/fps; pressure rows: started_at_iso + raw source_t_us; "
+                "(video frames: first cam3 jpeg name + i/fps; pressure rows: started_at_iso + raw_t_us column; "
                 "same clock per S2 ruling Baselines/决策/05_R1-R3_风险裁定.md §三 证据 C); "
                 "rows without a raw timestamp are never selected; out-of-span video frames clamp to the edge sample"
                 if resample_meta["absolute"] else
-                "legacy normalized grid, nearest-row values (no raw source_t_us / wall-clock anchors available)"
+                "legacy normalized grid, nearest-row values (no selectable raw_t_us rows available)"
             ),
             "video_frame0_wall_s": resample_meta["video_frame0_wall_s"],
             "pressure_epoch_wall_s": resample_meta["pressure_epoch_wall_s"],

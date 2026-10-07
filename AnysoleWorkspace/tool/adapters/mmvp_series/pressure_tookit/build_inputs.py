@@ -123,9 +123,20 @@ def prepare_session(row: dict, args: argparse.Namespace,
 
     fitting_ids = frame_ids[valid & ~fake]
     if fitting_ids.size == 0:
-        # 全 fake session 不得产生伪正式结果
-        raise ValueError(f"{session}: every frame is fake/invalid; "
-                         "no formal fitting task can be produced")
+        # 全 fake session（如 S12102）不产生伪正式结果：跳过并登记，不中断批量
+        return {
+            "session_id": session,
+            "date": date,
+            "subject": subject,
+            "n_manifest": int(row["n_frames"]),
+            "n_shared_frames": int(len(frame_ids)),
+            "n_fitting": 0,
+            "n_skipped_fake": int(np.count_nonzero(fake)),
+            "n_skipped_invalid": int(np.count_nonzero(~valid & ~fake)),
+            "fitting_frame_ids": [],
+            "errors": ["every frame is fake/invalid; no formal fitting task"],
+            "skipped": True,
+        }
 
     session_dir = common.ADAPTER_ROOT / "images" / date / subject / session
     session_dir.mkdir(parents=True, exist_ok=True)

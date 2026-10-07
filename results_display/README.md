@@ -390,7 +390,7 @@ conda activate touch_gait
 # --model-name 主模型清单、--config-id 配置（缺省 VT2M,V2M,T2M,V2T）
 
 # ① 选定主模型 + 全部基线（主模型缺省 V3_3B，基线缺省全部）
-python results_display/script/r_test2_compare.py --model-name V3_4b --by-mode
+python results_display/script/r_test2_compare.py --model-name V3_4b --models motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion,mmvp_fpp-net --by-mode
 
 # ② 只要基线（不要主模型）
 python results_display/script/r_test2_compare.py --models motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion,mmvp_fpp-net --by-mode
@@ -435,7 +435,7 @@ R_Test3 只读这些文件，不重新推理；请先重跑 eval 刷新产物：
 conda activate touch_gait
 
 # R_Test3 渲染（默认 主模型 + 全部 config × test split）
-python results_display/script/r_test3_traj.py --model-name V3_4b --gen gif --contact-method joint_and
+python results_display/script/r_test3_traj.py --model-name V3_4b --models motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion,mmvp_fpp-net --gen gif --contact-method joint_and
 # 单 session / 单 config
 python results_display/script/r_test3_traj.py --session S7013 --config-id VT2M
 # 只要基线（--models 与 Test1/2 同口径）

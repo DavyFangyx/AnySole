@@ -149,19 +149,26 @@
 
 # ② 评估（协议 seed0 + 导出 SMPL NPZ，R_Test1/R_Test3 依赖此步）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.eval \
-  --model-name F0b \
-  --contact-method joint_and \
+  --model-name V3_4b \
+  --sweep \
   --split val \
   --protocol-seed 0 --no-robustness --device cuda:4
 
+# 这样指示单次运行
+  --model-name V3_4b \
+  --contact-method joint_and \
+  --variant tw20_st20_lr0.0001_lp3_lt1_lk1_la0.05_wu0.05_gc5_ep740_bs256_sd1 \
+# ckpt指示单次运行也可以
+  --ckpt results/AnySole/V3_2_joint_and/tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/checkpoints/ckpt_best.pt \
+
 # ③ 可视化 R_Test1（骨架动画 → results_display/ResultTest/R1Test_visualize/AnySole/F0b/）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test1_visualize_anysole.py \
-  --model-name F0b --contact-method joint_and --split val \
+  --model-name V3_4b --sweep --split val \
   --config-id VT2M,V2M,T2M --gen gif --force
 
 # ④ 可视化 R_Test3（轨迹对比 → results_display/ResultTest/R3Test_traj/AnySole/F0b/）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python results_display/script/r_test3_traj.py \
-  --model-name F0b --contact-method joint_and --split val \
+  --model-name V3_4b --sweep --split val \
   --config-id VT2M,V2M,T2M --gen gif --force
 ```
 
