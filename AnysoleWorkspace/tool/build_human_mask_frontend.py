@@ -138,9 +138,19 @@ def main() -> int:
     wanted = [item.strip() for item in args.sessions.split(",") if item.strip()] or sorted(manifest)
     FRONTEND_ROOT.mkdir(parents=True, exist_ok=True)
     index_path = FRONTEND_ROOT / "index.jsonl"
+    # 2026-10-07 fix: a --sessions subset run used to clobber the whole global
+    # index, silently dropping every other session's rows (observed: 52,612 ->
+    # 4,504 rows after a 10-session run).  Subset mode now merges: rows for the
+    # requested sessions are replaced, all other sessions' rows are preserved.
+    keep_rows: list[str] = []
+    if args.sessions and index_path.is_file():
+        with index_path.open(encoding="utf-8") as handle:
+            keep_rows = [line for line in handle
+                         if json.loads(line).get("session") not in set(wanted)]
     total = valid_total = 0
     index_handle = index_path.open("w", encoding="utf-8")
     try:
+        index_handle.writelines(keep_rows)
         for session in wanted:
             if session not in manifest:
                 raise SystemExit(f"session not eligible or missing from manifest: {session}")
