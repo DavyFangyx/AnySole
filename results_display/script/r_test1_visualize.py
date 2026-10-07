@@ -250,6 +250,7 @@ def render_single(model: dict, mode: str, session_id: str, row: dict,
                   seq_dir: Path, args: argparse.Namespace, out_base: Path) -> str:
     anim_path = cli_common.media_path(out_base / model["label"] / mode, session_id, args.gen)
     if cli_common.outputs_ready([anim_path]) and not args.force:
+        log.info(f"Skip {model['label']}_{mode}_{session_id}: already exists under {out_base / model['label'] / mode}")
         return "skip"
 
     pred, reason = load_pred(model, mode, session_id, row)
@@ -314,6 +315,7 @@ def render_compare(mode: str, models: list[dict], session_id: str, row: dict,
                    seq_dir: Path, args: argparse.Namespace, out_base: Path) -> str:
     anim_path = cli_common.media_path(out_base / "compare" / mode, f"{session_id}_{mode}_compare", args.gen)
     if cli_common.outputs_ready([anim_path]) and not args.force:
+        log.info(f"Skip compare {mode}/{session_id}: already exists under {out_base / 'compare' / mode}")
         return "skip"
 
     pressure, fake = load_pressure(seq_dir)

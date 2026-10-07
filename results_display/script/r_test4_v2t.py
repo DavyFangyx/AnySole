@@ -451,6 +451,10 @@ def main_archives(args: argparse.Namespace) -> int:
             manifest_rows = {row["session_id"]: row for row in csv.DictReader(handle)}
     entries = archive_entries(args)
     out_dir = Path(cli_common.resolve_path(args.out_dir, os.getcwd()))
+    summary_outputs = [out_dir / name for name in ("tgen_summary.csv", "tgen_report.json")]
+    if cli_common.outputs_ready(summary_outputs) and not args.force:
+        print(f"Skip Test4: outputs already exist under {out_dir} (use --force to overwrite)")
+        return 0
     cells_dir = out_dir / "cells"
     cells_dir.mkdir(parents=True, exist_ok=True)
     rows = []
