@@ -350,11 +350,16 @@ python results_display/script/d_test6_floor_view.py --date 20260808 --subject S1
 | 对比（同 mode 1×N 横排） | `ResultTest/R1Test_visualize/compare/<mode>/` |
 
 ```bash
-# 单独生成：选中谁出谁；缺省全部模型
-python results_display/script/r_test1_visualize.py --models anysole,motionpro --session S13011
+# 单独生成：--models 顶层选中（anysole + 各基线名）、--model-name 选主模型
+
+# ① 选定主模型 + 指定基线（缺省主模型 V3_3B、基线全部）
+python results_display/script/r_test1_visualize.py --model-name V3_4b --models anysole,motionpro --session S13011
+# ② 只要基线
+python results_display/script/r_test1_visualize.py --models motionpro,step2motion --session S13011
+# ③ 缺省 = 主模型 V3_3B + 全部基线
 python results_display/script/r_test1_visualize.py --session S13011
 
-# 对比：同 mode 横排
+# 对比：同 mode 1×N 横排（选中口径同上）
 python results_display/script/r_test1_visualize.py --compare --session S13011
 ```
 
@@ -379,10 +384,24 @@ config-id，无需声明；基线必须声明，解析不出模式的行不进�
 （split/manifest hash + 每模型 protocol/ok/missing/invalid 统计）。
 
 ```bash
-# 默认全模型 × val（--models 选中谁评估谁，anysole 一次四个 config）
-python results_display/script/r_test2_compare.py --by-mode
+# 三个选择维度：--models 顶层选中（anysole + 各基线注册名）、
+# --model-name 主模型清单、--config-id 配置（缺省 VT2M,V2M,T2M,V2T）
+
+# ① 选定主模型 + 全部基线（主模型缺省 V3_3B，基线缺省全部）
+python results_display/script/r_test2_compare.py --model-name V3_4b --by-mode
+python results_display/script/r_test2_compare.py --model-name V3_4b,V3_4c,F0b --by-mode
+
+# ② 只要基线（不要主模型）
 python results_display/script/r_test2_compare.py --models motionpro,step2motion --by-mode
-# 正式 36-session 集
+
+# ③ 选定主模型 + 指定基线
+python results_display/script/r_test2_compare.py --model-name V3_4b --models anysole,motionpro --by-mode
+
+# 全部主模型 + 全部基线（全量 sweep 表）
+python results_display/script/r_test2_compare.py \
+  --model-name F0b,F4a,F2,F2p4,V3_2,V3_3A,V3_3B,V3_4a,V3_4b,V3_4c,V4A --by-mode
+
+# 正式 36-session test 集（缺省 val 迭代集）
 python results_display/script/r_test2_compare.py --split test --by-mode --write-model-metrics --surface-metrics --force
 ```
 
@@ -417,9 +436,7 @@ manifest hash/metric 缺失原因）；旧 `mmvp_common_metrics_v1`（common19�
 不会被当作新结果读取，重跑时被 v2 取代。原生模型日志保留不改。
 
 ```bash
-python results_display/script/r_test2_compare.py \
-  --model-name V3_4b --contact-method joint_and \
-  --config-id VT2M,V2M,T2M,V2T --split test --by-mode --force
+python results_display/script/r_test2_compare.py --model-name V3_4b --split test --by-mode --force
 ```
 
 产出（`ResultTest/R2Test_compare/by_mode/`）：`mode_overview.png`（四块堆叠总览）、
@@ -477,10 +494,11 @@ BVH/Hips root GT），ATE 对各自配对 GT 计算；面板标题与静态图�
 静态图按协议分组：SMPL 模型和 BVH 模型各画在自协议 GT 的坐标轴上。
 
 ```bash
+# 选中口径与 Test1/Test2 相同：--models 顶层选中、--model-name 选主模型
 # 冒烟
 python results_display/script/r_test3_traj.py --compare --session S13013 --mode VT2M
-# 三模式全出（默认 val，--split test 换正式 36 集）
-python results_display/script/r_test3_traj.py --compare --models anysole,motionpro
+# 选定主模型 + 指定基线（默认 val，--split test 换正式 36 集）
+python results_display/script/r_test3_traj.py --compare --model-name V3_4b --models anysole,motionpro
 ```
 
 产出（`ResultTest/R3Test_traj/compare/`）：`<mode>/{gif,png}/<session>_<mode>_traj_compare.{gif,png}`。
