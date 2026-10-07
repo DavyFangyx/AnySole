@@ -794,6 +794,19 @@ def main() -> int:
                     model_rel = cli_common.anysole_model_dir(modal, contact_method, run)
                     for config_id in config_ids:
                         jobs.append((PRED_ROOT / model_rel / "predictions", out_dir / model_rel / config_id, config_id))
+    # 基线单视图任务：注册表选中（--models），config_id "" = baseline。
+    registry = load_mode_registry(args.modes_config)
+    for mode, entries in registry.items():
+        for entry in entries:
+            name = str(entry.get("name") or "")
+            if not (want_all or name.lower() in selected):
+                continue
+            if not dict(entry.get("capabilities") or {}).get("root_translation", True):
+                log.info(f"Skip {name}: no root_translation (no trajectory)")
+                continue
+            pred_root = Path(cli_common.resolve_path(entry.get("prediction_root", "")))
+            jobs.append((pred_root, out_dir.parent / name / "gen", ""))
+            log.info(f"baseline job: {name} <- {pred_root}")
 
     for pred_root, session_out, config_id in jobs:
         if not pred_root.is_dir():
