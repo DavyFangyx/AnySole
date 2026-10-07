@@ -151,7 +151,10 @@ def write_archive(path: Path, joints: np.ndarray, valid: np.ndarray,
 
 
 def pressure_frame_paths(root: Path, date: str, subject: str, session: str) -> list[Path]:
-    directory = root / "results" / date / subject / session
+    # run_full_mmvp writes per-frame results under <run root>/fitting/results/
+    # (the plan prints "output dir == run root/fitting"); --pressure-root names
+    # the run root.
+    directory = root / "fitting" / "results" / date / subject / session
     paths = sorted(directory.glob("smpl_*.npz"))
     if not paths:
         raise FileNotFoundError(f"pressure_toolkit frame outputs missing: {directory}")
@@ -162,7 +165,27 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
     date, subject = session_parts(row)
     session = row["session_id"]
     gender = "female" if session in split_ids(args.female) or subject in split_ids(args.female) else "male"
-    frame_paths = pressure_frame_paths(resolve_uri(args.pressure_root), date, subject, session)
+    n = int(row["n_frames"])
+    try:
+        frame_paths = pressure_frame_paths(resolve_uri(args.pressure_root), date, subject, session)
+    except FileNotFoundError:
+        if valid_frames(row, n).any():
+            raise
+        # S12102: all-fake session, zero fittable frames — export an empty
+        # archive (valid mask all False) so the per-model contract stays whole.
+        print(f"warning: {session}: no fittable frames (all-fake session); writing empty archive")
+        write_archive(output, np.zeros((n, 24, 3), dtype=np.float32),
+                      np.zeros(n, dtype=bool), str(resolve_uri(args.pressure_root)), session,
+                      vertices=np.zeros((n, 6890, 3), dtype=np.float32),
+                      poses=np.zeros((n, 72), dtype=np.float32),
+                      source_type="method_optimization",
+                      extra_meta={
+                          "surface_source": "method_optimization",
+                          "shape_source": "method_optimization",
+                          "public_surface_metrics": "true",
+                          "empty_all_fake_session": "true",
+                      })
+        return
     if str(ROOT / "Baselines" / "pressure_tookit") not in sys.path:
         sys.path.insert(0, str(ROOT / "Baselines" / "pressure_tookit"))
     from lib.core.smpl_mmvp import SMPL_MMVP
@@ -170,7 +193,6 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
 
     essential = WORKSPACE / "assets/third_party" / "pressure_toolkit" / "essential"
     model = SMPL_MMVP(str(essential), gender=gender, stage="tracking").cpu()
-    n = int(row["n_frames"])
     joints = np.zeros((n, 24, 3), dtype=np.float32)
     vertices = np.zeros((n, 6890, 3), dtype=np.float32)
     poses = np.zeros((n, 72), dtype=np.float32)
