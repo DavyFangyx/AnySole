@@ -355,7 +355,8 @@ conda activate touch_gait
 
 # ① 选定主模型 + 指定基线（缺省主模型 V3_3B、基线全部）
 python results_display/script/r_test1_visualize.py --model-name V3_4b --models anysole,motionpro --session S13011
-# ② 只要基线
+# ② 只要基线（Test1 可用的全部基线 = motionpro / mmvp_pressure_toolkit /
+#    mmvp_vp-mocap / step2motion；FPP-Net 无姿态输出，不进 Test1）
 python results_display/script/r_test1_visualize.py --models motionpro,step2motion --session S13011
 # ③ 缺省 = 主模型 V3_3B + 全部基线
 python results_display/script/r_test1_visualize.py --session S13011
