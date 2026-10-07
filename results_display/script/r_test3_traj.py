@@ -461,7 +461,9 @@ def render_session(traj_path: Path, session_id: str, config_id: str, row: dict,
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize root trajectories (pred vs GT) as Test3 outputs, SMPL/BVH auto-detected.")
-    cli_common.add_common_args(parser, seq_root=True, modal=True, variant=True, contact_method=True, sweep=True, config_id=True, out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R3Test_traj" / "AnySole")
+    cli_common.add_common_args(parser, seq_root=True, modal=True, variant=True, contact_method=True, sweep=True,
+                               config_id=True, config_default="VT2M,V2M,T2M",
+                               out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R3Test_traj" / "AnySole")
     parser.add_argument("--no-png", action="store_true", help="Skip the static per-session figure (not controlled by --gen).")
     parser.add_argument(
         "--auto",
@@ -791,13 +793,16 @@ def main() -> int:
     }
 
     want_all, selected = selected_models(args)
+    config_ids = [c for c in cli_common.split_csv_arg(args.config_id) if c.upper() != "V2T"]
+    if any(c.upper() == "V2T" for c in cli_common.split_csv_arg(args.config_id)):
+        log.warning("V2T 为压力生成归档、无轨迹，Test3 跳过（压力可视化见 R_Test4）")
     # Jobs: (pred_root, session_out_root, config_id); config_id "" = baseline.
     jobs: list[tuple[Path, Path, str]] = []
     if want_all or "anysole" in selected:
         if getattr(args, "sweep", False):
             model_dirs = cli_common.sweep_anysole_model_dirs(args.modal)
             for model_dir in model_dirs:
-                for config_id in cli_common.split_csv_arg(args.config_id):
+                for config_id in config_ids:
                     jobs.append((PRED_ROOT / model_dir / "predictions", out_dir / model_dir / config_id, config_id))
         else:
             for modal in cli_common.split_csv_arg(args.modal):
@@ -808,7 +813,7 @@ def main() -> int:
                         continue
                     variant = pick_run_dir(model_dir, getattr(args, "variant", None))
                     model_rel = cli_common.anysole_model_dir(modal, contact_method, variant)
-                    for config_id in cli_common.split_csv_arg(args.config_id):
+                    for config_id in config_ids:
                         jobs.append((PRED_ROOT / model_rel / "predictions", out_dir / model_rel / config_id, config_id))
     if args.auto:
         for rel in discover_baseline_dirs(cli_common.RESULTS_ROOT):
