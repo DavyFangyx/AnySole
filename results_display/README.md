@@ -353,11 +353,10 @@ python results_display/script/d_test6_floor_view.py --date 20260808 --subject S1
 conda activate touch_gait
 # 单独生成：--models 顶层选中（anysole + 各基线名）、--model-name 选主模型
 
-# ① 选定主模型 + 指定基线（缺省主模型 V3_3B、基线全部）
-python results_display/script/r_test1_visualize.py --model-name V3_4b --models anysole,motionpro --session S13011
-# ② 只要基线（Test1 可用的全部基线 = motionpro / mmvp_pressure_toolkit /
-#    mmvp_vp-mocap / step2motion；FPP-Net 无姿态输出，不进 Test1）
-python results_display/script/r_test1_visualize.py --models motionpro,step2motion --session S13011
+# ① 选定主模型 + 全部基线（缺省主模型 V3_3B、基线全部）
+python results_display/script/r_test1_visualize.py --model-name V3_4b --models anysole,motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion --session S13011
+# ② 只要基线（不要主模型）
+python results_display/script/r_test1_visualize.py --models motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion --session S13011
 # ③ 缺省 = 主模型 V3_3B + 全部基线
 python results_display/script/r_test1_visualize.py --session S13011
 
@@ -394,10 +393,10 @@ conda activate touch_gait
 python results_display/script/r_test2_compare.py --model-name V3_4b --by-mode
 
 # ② 只要基线（不要主模型）
-python results_display/script/r_test2_compare.py --models motionpro,step2motion --by-mode
+python results_display/script/r_test2_compare.py --models motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion,mmvp_fpp-net --by-mode
 
-# ③ 选定主模型 + 指定基线
-python results_display/script/r_test2_compare.py --model-name V3_4b --models anysole,motionpro --by-mode
+# ③ 选定主模型 + 全部基线
+python results_display/script/r_test2_compare.py --model-name V3_4b --models anysole,motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion,mmvp_fpp-net --by-mode
 
 # 全部主模型 + 全部基线（--models 缺省 all = anysole + 全部 5 个基线，无需再写）
 python results_display/script/r_test2_compare.py \
@@ -463,7 +462,7 @@ baseline 模型输出在 `ResultTest/R3Test_traj/<model>/gen/`。
 ```bash
 conda activate touch_gait
 # 选定主模型 + 指定基线（默认 val，--split test 换正式 36 集）
-python results_display/script/r_test3_traj.py --compare --model-name V3_4b --models anysole,motionpro
+python results_display/script/r_test3_traj.py --compare --model-name V3_4b --models anysole,motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion
 ```
 
 产出（`ResultTest/R3Test_traj/compare/`）：`<mode>/{gif,png}/<session>_<mode>_traj_compare.{gif,png}`。
