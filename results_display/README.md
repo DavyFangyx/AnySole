@@ -350,6 +350,7 @@ python results_display/script/d_test6_floor_view.py --date 20260808 --subject S1
 | 对比（同 mode 1×N 横排） | `ResultTest/R1Test_visualize/compare/<mode>/` |
 
 ```bash
+conda activate touch_gait
 # 单独生成：--models 顶层选中（anysole + 各基线名）、--model-name 选主模型
 
 # ① 选定主模型 + 指定基线（缺省主模型 V3_3B、基线全部）
@@ -384,6 +385,7 @@ config-id，无需声明；基线必须声明，解析不出模式的行不进�
 加 `--by-mode` 额外输出：`by_mode/<mode>/` 四个模式分块表 + `mode_overview.png` 总览图。
 
 ```bash
+conda activate touch_gait
 # 三个选择维度：--models 顶层选中（anysole + 各基线注册名）、
 # --model-name 主模型清单、--config-id 配置（缺省 VT2M,V2M,T2M,V2T）
 
@@ -396,7 +398,7 @@ python results_display/script/r_test2_compare.py --models motionpro,step2motion 
 # ③ 选定主模型 + 指定基线
 python results_display/script/r_test2_compare.py --model-name V3_4b --models anysole,motionpro --by-mode
 
-# 全部主模型 + 全部基线（--models 缺省 all = anysole + 注册表全部 5 个基线，无需再写）
+# 全部主模型 + 全部基线（--models 缺省 all = anysole + 全部 5 个基线，无需再写）
 python results_display/script/r_test2_compare.py \
   --model-name F0b,F4a,F2,F2p4,V3_2,V3_3A,V3_3B,V3_4a,V3_4b,V3_4c,V4A --by-mode
 
@@ -431,7 +433,6 @@ R_Test3 只读这些文件，不重新推理；请先重跑 eval 刷新产物：
 
 ```bash
 conda activate touch_gait
-
 # 重新 eval（自动推导 ckpt/metrics 路径，同时刷新标准 SMPL motion NPZ）
 python -m anysole.eval \
   --model-name V4A \
@@ -459,9 +460,7 @@ baseline 模型输出在 `ResultTest/R3Test_traj/<model>/gen/`。
 缺预测的模型在行内跳过并记 warning（行内其余模型照常渲染）。
 
 ```bash
-# 选中口径与 Test1/Test2 相同：--models 顶层选中、--model-name 选主模型
-# 冒烟
-python results_display/script/r_test3_traj.py --compare --session S13013 --mode VT2M
+conda activate touch_gait
 # 选定主模型 + 指定基线（默认 val，--split test 换正式 36 集）
 python results_display/script/r_test3_traj.py --compare --model-name V3_4b --models anysole,motionpro
 ```
@@ -478,6 +477,15 @@ V2T 指标统一到每脚 31×11 网格（AnySole 的 4×12 在评估层重采�
 `pressure_force_r2`、`pressure_cop_error_left/right`），其余叶 5 键只进逐会话明细
 （定义见 `README_metrics.md` §4）；contact 非正式指标（仅诊断保留）。
 
+```bash
+conda activate touch_gait
+# 默认 anysole(V3_3B) + FPP-Net，全部 test 会话；--models 选中谁评估谁
+python results_display/script/r_test4_v2t.py --source archives --split test
+python results_display/script/r_test4_v2t.py --source archives --session S10103
+# 仅运行旧的模型即时推理诊断：
+python results_display/script/r_test4_v2t.py --source infer --config-id VT2M,V2M --export-sessions 2
+```
+
 三种条件（与 eval.py 的 `--config-id` 同名）：
 
 | 条件 | 输入 | 意义 |
@@ -490,19 +498,7 @@ V2T 指标统一到每脚 31×11 网格（AnySole 的 4×12 在评估层重采�
 逐格误差 `cells/*.npz`/`*.png`，以及热力图动画（布局 = D4Test_baseline_tactile 口径：
 1×3 面板 GT | Generated | |GT-Gen|，每面板 L/R 鞋垫块 + 分离式双行标题，0.75 缩放）。
 
-数据源 = `anysole.eval` 与 FPP-Net 导出的标准 V2T archive；R_Test2 与 R_Test4 用同一套
-V2T 指标定义。
-
-```bash
-conda activate touch_gait
-# 默认 anysole(V3_3B) + FPP-Net，全部 test 会话；--models 选中谁评估谁
-python results_display/script/r_test4_v2t.py --source archives --split test
-python results_display/script/r_test4_v2t.py --source archives --session S10103
-# 仅运行旧的模型即时推理诊断：
-python results_display/script/r_test4_v2t.py --source infer --config-id VT2M,V2M --export-sessions 2
-```
-
-> `--source infer` 是兼容性的诊断入口，不是最终跨模型评估入口。
+数据源 = `anysole.eval` 与 FPP-Net 导出的标准 V2T archive；R_Test2 与 R_Test4 用同一套V2T 指标定义。
 
 ## 主线模型互补性与缺失输入实验（C1–M3，注册式全链路）
 
