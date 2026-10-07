@@ -151,24 +151,6 @@ def find_traj_file(pred_root: Path, session_id: str, config_id: str) -> Path | N
     return matches[0] if matches else None
 
 
-def discover_baseline_dirs(results_root: Path) -> list[Path]:
-    """Self-contained non-AnySole model dirs under results/ (Test2 口径).
-
-    Archived ``*_backup*`` trees are excluded; AnySole models are addressed
-    through ``--model-name`` (legacy alias: ``--modal``).
-    """
-    found = []
-    for root in sorted(p for p in results_root.rglob("*") if p.is_dir()):
-        if root.name in {"checkpoints", "predictions", "metrics", "logs", "tensorboard"}:
-            continue
-        rel = root.relative_to(results_root)
-        if any("backup" in part.lower() for part in rel.parts) or "AnySole" in rel.parts:
-            continue
-        if (root / "predictions").is_dir():
-            found.append(rel)
-    return found
-
-
 class TrajProjector:
     """Fixed oblique orthographic camera (azimuth/elevation) fit to the data."""
 
@@ -461,16 +443,10 @@ def render_session(traj_path: Path, session_id: str, config_id: str, row: dict,
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize root trajectories (pred vs GT) as Test3 outputs, SMPL/BVH auto-detected.")
-    cli_common.add_common_args(parser, seq_root=True, modal=True, variant=True, contact_method=True, sweep=True,
+    cli_common.add_common_args(parser, seq_root=True, modal=True, variant=True, contact_method=True,
                                config_id=True, config_default="VT2M,V2M,T2M",
                                out_dir_default=cli_common.DISPLAY_ROOT / "ResultTest/R3Test_traj" / "AnySole")
     parser.add_argument("--no-png", action="store_true", help="Skip the static per-session figure (not controlled by --gen).")
-    parser.add_argument(
-        "--auto",
-        action="store_true",
-        help="Also scan results/ for self-contained non-AnySole model dirs "
-        "(e.g. Step2Motion predictions/<run>/<session>_gen.bvh); *_backup* trees are excluded.",
-    )
     parser.add_argument(
         "--compare",
         action="store_true",
@@ -479,7 +455,6 @@ def parse_args() -> argparse.Namespace:
         "(AnySole + registry baselines). Output under "
         "r_test3_traj/compare/<mode>/; per-model visualization is unaffected.",
     )
-    parser.add_argument("--mode", default="all", help="Generation mode(s) for --compare: VT2M,V2M,T2M or 'all'.")
     parser.add_argument("--models", default="all", help="Select models: anysole and/or registry baseline names, comma-separated; default all.")
     parser.add_argument("--modes-config", type=Path, default=Path(__file__).resolve().parent.parent / "models_modes.yaml",
                         help="Mode registry (--compare only).")
@@ -595,10 +570,10 @@ def run_compare(args: argparse.Namespace) -> int:
     each panel draws the model's paired protocol GT.
     """
     registry = load_mode_registry(args.modes_config)
-    modes = list(MODES) if args.mode == "all" else cli_common.split_csv_arg(args.mode)
+    modes = [c.upper() for c in cli_common.split_csv_arg(args.config_id)]
     unknown = sorted(set(modes) - set(MODES))
     if unknown:
-        raise SystemExit(f"Unknown --mode: {unknown}; choices={list(MODES)} or 'all'")
+        raise SystemExit(f"Unknown --config-id for compare: {unknown}; choices={list(MODES)}")
     # Compare runs default to the val split (fast iteration); --split test opts
     # into the formal 36-session set.  The single-model path keeps its default.
     split = "val" if "--split" not in sys.argv else args.split
@@ -617,14 +592,12 @@ def run_compare(args: argparse.Namespace) -> int:
 
     want_all, selected = selected_models(args)
     if want_all or "anysole" in selected:
-        if getattr(args, "sweep", False):
-            model_dirs = cli_common.sweep_anysole_model_dirs(args.modal)
-        else:
-            model_dirs = [
-                cli_common.anysole_model_dir(modal, contact_method, pick_run_dir(PRED_ROOT / cli_common.anysole_model_dir(modal, contact_method), getattr(args, "variant", None)))
-                for modal in cli_common.split_csv_arg(args.modal)
-                for contact_method in cli_common.split_csv_arg(args.contact_method)
-            ]
+        model_dirs = [
+            cli_common.anysole_model_dir(modal, contact_method, run)
+            for modal in cli_common.split_csv_arg(args.modal)
+            for contact_method in cli_common.split_csv_arg(args.contact_method)
+            for run in resolve_run_names(PRED_ROOT / cli_common.anysole_model_dir(modal, contact_method), getattr(args, "variant", None))
+        ]
     else:
         model_dirs = []
     for mode in modes:
@@ -753,7 +726,7 @@ def selected_models(args: argparse.Namespace) -> tuple[bool, set]:
 
 def pick_run_dir(model_dir: Path, variant: str | None) -> str | None:
     """AnySole variant rule: omitted --variant picks the single run dir, or
-    the newest by mtime when several; ``all`` is handled by --sweep upstream."""
+    the newest by mtime when several."""
     if variant:
         return variant
     if not model_dir.is_dir():
@@ -766,9 +739,21 @@ def pick_run_dir(model_dir: Path, variant: str | None) -> str | None:
         return None
     if len(runs) > 1:
         newest = max(runs, key=lambda p: p.stat().st_mtime)
-        log.warning(f"{model_dir.name}: {len(runs)} run dirs; picking newest: {newest.name} (--variant to choose, --sweep for every run)")
+        log.warning(f"{model_dir.name}: {len(runs)} run dirs; picking newest: {newest.name} (--variant to choose, 'all' for every run)")
         return newest.name
     return runs[0].name
+
+
+def resolve_run_names(model_dir: Path, variant: str | None) -> list[str]:
+    """--variant 统一规则：缺省取单个/最新（pick_run_dir）；'all' = 全部 run。"""
+    if variant == "all":
+        runs = sorted(
+            p for p in model_dir.iterdir()
+            if p.is_dir() and ((p / "checkpoints").is_dir() or (p / "predictions").is_dir())
+        )
+        return [p.name for p in runs]
+    name = pick_run_dir(model_dir, variant)
+    return [name] if name else []
 
 
 def main() -> int:
@@ -799,26 +784,16 @@ def main() -> int:
     # Jobs: (pred_root, session_out_root, config_id); config_id "" = baseline.
     jobs: list[tuple[Path, Path, str]] = []
     if want_all or "anysole" in selected:
-        if getattr(args, "sweep", False):
-            model_dirs = cli_common.sweep_anysole_model_dirs(args.modal)
-            for model_dir in model_dirs:
-                for config_id in config_ids:
-                    jobs.append((PRED_ROOT / model_dir / "predictions", out_dir / model_dir / config_id, config_id))
-        else:
-            for modal in cli_common.split_csv_arg(args.modal):
-                for contact_method in cli_common.split_csv_arg(args.contact_method):
-                    model_dir = PRED_ROOT / cli_common.anysole_model_dir(modal, contact_method)
-                    if not model_dir.is_dir():
-                        log.warning(f"模型目录不存在（无训练产物）: {model_dir}")
-                        continue
-                    variant = pick_run_dir(model_dir, getattr(args, "variant", None))
-                    model_rel = cli_common.anysole_model_dir(modal, contact_method, variant)
+        for modal in cli_common.split_csv_arg(args.modal):
+            for contact_method in cli_common.split_csv_arg(args.contact_method):
+                model_dir = PRED_ROOT / cli_common.anysole_model_dir(modal, contact_method)
+                if not model_dir.is_dir():
+                    log.warning(f"模型目录不存在（无训练产物）: {model_dir}")
+                    continue
+                for run in resolve_run_names(model_dir, getattr(args, "variant", None)):
+                    model_rel = cli_common.anysole_model_dir(modal, contact_method, run)
                     for config_id in config_ids:
                         jobs.append((PRED_ROOT / model_rel / "predictions", out_dir / model_rel / config_id, config_id))
-    if args.auto:
-        for rel in discover_baseline_dirs(cli_common.RESULTS_ROOT):
-            jobs.append((cli_common.RESULTS_ROOT / rel / "predictions", out_dir.parent / rel / "gen", "gen"))
-            log.info(f"Discovered baseline model: {rel}")
 
     for pred_root, session_out, config_id in jobs:
         if not pred_root.is_dir():

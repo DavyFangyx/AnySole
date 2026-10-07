@@ -354,7 +354,7 @@ conda activate touch_gait
 # 单独生成：--models 顶层选中（anysole + 各基线名）、--model-name 选主模型
 
 # ① 选定主模型 + 全部基线（缺省主模型 V3_3B、基线全部）
-python results_display/script/r_test1_visualize.py --model-name V3_4b --models anysole,motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion --session S13011
+python results_display/script/r_test1_visualize.py --model-name V3_4b --models anysole,motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion
 # ② 只要基线（不要主模型）
 python results_display/script/r_test1_visualize.py --models motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion --session S13011
 # ③ 缺省 = 主模型 V3_3B + 全部基线
@@ -433,17 +433,18 @@ R_Test3 只读这些文件，不重新推理；请先重跑 eval 刷新产物：
 
 ```bash
 conda activate touch_gait
-# 重新 eval（自动推导 ckpt/metrics 路径，同时刷新标准 SMPL motion NPZ）
-python -m anysole.eval \
-  --model-name V4A \
-  --contact-method joint_and
 
-# R_Test3 渲染（默认 主模型 + 消融 × 全部 config × test split）
-python results_display/script/r_test3_traj.py --model-name V4B --gen gif --contact-method joint_and
+# R_Test3 渲染（默认 主模型 + 全部 config × test split）
+python results_display/script/r_test3_traj.py --model-name V3_4b --gen gif --contact-method joint_and
 # 单 session / 单 config
 python results_display/script/r_test3_traj.py --session S7013 --config-id VT2M
-# baseline 模型（扫描 results/ 下自包含模型目录，排除 *_backup*）
-python results_display/script/r_test3_traj.py --auto
+# 只要基线（--models 与 Test1/2 同口径）
+python results_display/script/r_test3_traj.py --models motionpro,step2motion
+
+# R_Test3 并排轨迹对比（--compare，配对协议 GT）
+conda activate touch_gait
+# 选定主模型 + 全部基线（默认 val，--split test 换正式 36 集）
+python results_display/script/r_test3_traj.py --compare --model-name V3_4b --models anysole,motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion
 ```
 
 输出：`ResultTest/R3Test_traj/AnySole/<model-name>/<config>/{gif,mp4,png}/<session>_<config>_traj.{gif,mp4,png}`；
@@ -452,18 +453,6 @@ baseline 模型输出在 `ResultTest/R3Test_traj/<model>/gen/`。
 > 注意：eval 生成的 motion NPZ 必须与 checkpoint 配套。若重新训练了模型，
 > 旧的 `eval_motion/` 产物会与新 metrics 不一致，
 > 需重跑上述 eval 命令再渲染 R_Test1/R_Test3。
-
-### R_Test3 并排轨迹对比（--compare，配对协议 GT）
-
-每模式一行轨迹面板：所有面板共享同一投影（全部预测 + GT 取并集定相机），可直接
-目测各模型的轨迹偏差；footer 显示各模型整段 ATE（对各自配对协议的 GT 计算）。
-缺预测的模型在行内跳过并记 warning（行内其余模型照常渲染）。
-
-```bash
-conda activate touch_gait
-# 选定主模型 + 指定基线（默认 val，--split test 换正式 36 集）
-python results_display/script/r_test3_traj.py --compare --model-name V3_4b --models anysole,motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion
-```
 
 产出（`ResultTest/R3Test_traj/compare/`）：`<mode>/{gif,png}/<session>_<mode>_traj_compare.{gif,png}`。
 
@@ -482,8 +471,6 @@ conda activate touch_gait
 # 默认 anysole(V3_3B) + FPP-Net，全部 test 会话；--models 选中谁评估谁
 python results_display/script/r_test4_v2t.py --source archives --split test
 python results_display/script/r_test4_v2t.py --source archives --session S10103
-# 仅运行旧的模型即时推理诊断：
-python results_display/script/r_test4_v2t.py --source infer --config-id VT2M,V2M --export-sessions 2
 ```
 
 三种条件（与 eval.py 的 `--config-id` 同名）：
