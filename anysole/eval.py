@@ -52,86 +52,15 @@ def _smpl_yup_to_display(points: np.ndarray) -> np.ndarray:
 
 
 def _pack_motion_export(session: dict, windows: list[tuple], pos_mode: bool) -> dict:
-    """Place window predictions back on the original session frame grid.
-
-    Dataset windows are intentionally skipped when they contain fake frames.
-    Concatenating those windows would silently shift every later prediction in
-    time.  The unified archive therefore always has the original ``n_frames``
-    length and carries ``valid_mask``/``frame_indices`` explicitly.
-    """
-    n_frames = int(np.asarray(session["V_feat"]).shape[0])
-    pose_dim = int(windows[0][1].shape[-1]) if windows else POSE_DIM
-    identity = np.tile(
-        np.asarray([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=np.float32),
-        N_JOINTS,
-    )
-    pose = np.repeat(identity[None], n_frames, axis=0)
-    if pose_dim != pose.shape[1]:
-        pose = np.zeros((n_frames, pose_dim), dtype=np.float32)
-    trans = np.zeros((n_frames, 3), dtype=np.float32)
-    seen = np.zeros((n_frames,), dtype=bool)
-    ordered = sorted(windows, key=lambda item: int(item[0]))
-
-    # Preserve the historical crossfade only across genuinely adjacent
-    # prediction ranges.  Never crossfade over a skipped/fake-frame gap.
-    fade = 0 if pos_mode else 4
-    if fade > 0:
-        for previous, current in zip(ordered, ordered[1:]):
-            previous_start = int(previous[0])
-            current_start = int(current[0])
-            previous_len = int(np.asarray(previous[1]).shape[0])
-            current_len = int(np.asarray(current[1]).shape[0])
-            if current_start != previous_start + previous_len:
-                continue
-            if previous_len < fade or current_len < fade:
-                continue
-            previous_pose = np.asarray(previous[1])
-            current_pose = np.asarray(current[1])
-            previous_trans = np.asarray(previous[2])
-            current_trans = np.asarray(current[2])
-            for j in range(fade):
-                alpha = (j + 1) / (fade + 1)
-                a = previous_len - fade + j
-                b = j
-                old_a, old_b = previous_pose[a].copy(), current_pose[b].copy()
-                previous_pose[a] = (1 - alpha) * old_a + alpha * old_b
-                current_pose[b] = (1 - alpha) * old_b + alpha * old_a
-                old_a, old_b = previous_trans[a].copy(), current_trans[b].copy()
-                previous_trans[a] = (1 - alpha) * old_a + alpha * old_b
-                current_trans[b] = (1 - alpha) * old_b + alpha * old_a
-
-    for start, window_pose, window_trans, _window_gt_trans in ordered:
-        start = int(start)
-        window_pose = np.asarray(window_pose, dtype=np.float32)
-        window_trans = np.asarray(window_trans, dtype=np.float32)
-        if start >= n_frames:
-            continue
-        length = min(len(window_pose), len(window_trans), n_frames - start)
-        if length <= 0:
-            continue
-        pose[start:start + length] = window_pose[:length]
-        trans[start:start + length] = window_trans[:length]
-        seen[start:start + length] = True
-
-    fake_mask = np.asarray(
-        session.get("fake_mask", np.zeros(n_frames, dtype=np.uint8))
-    ).reshape(-1)
-    valid = seen.copy()
-    if len(fake_mask) == n_frames:
-        valid &= fake_mask == 0
-
-    pose_tensor = torch.from_numpy(pose).float().unsqueeze(0)
-    trans_tensor = torch.from_numpy(trans).float().unsqueeze(0)
-    offsets = torch.from_numpy(np.asarray(session["offsets"])).float()
-    parents = torch.from_numpy(np.asarray(session["parents"])).long()
-    joints_native = fk_pose6d(pose_tensor, trans_tensor, offsets, parents)[0].numpy()
-    return {
-        "pose": pose,
-        "trans": trans,
-        "gt_trans": np.asarray(session["trans_global"], dtype=np.float32),
-        "valid": valid,
-        "joint_xyz_world": _smpl_yup_to_display(joints_native),
-    }
+    """Compatibility surface over the shared session-frame postprocessor."""
+    from anysole.utils.session_motion import pack_motion_windows
+    packed = pack_motion_windows(session, windows, fade=0 if pos_mode else 4)
+    joints = fk_pose6d(
+        torch.from_numpy(packed["pose"])[None], torch.from_numpy(packed["trans"])[None],
+        torch.as_tensor(session["offsets"]).float(), torch.as_tensor(session["parents"]).long(),
+    )[0].numpy()
+    packed["joint_xyz_world"] = _smpl_yup_to_display(joints)
+    return packed
 
 
 def _tactile_corr(pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -624,7 +553,9 @@ def _evaluate_one(
         pin_memory=device.type == "cuda",
     )
 
-    for config_value in config_values:
+    # Native 6D models are inferred, postprocessed, scored and exported once
+    # by run_protocol. Preserve the archived position-model export path here.
+    for config_value in (config_values if pos_mode else []):
         exports = {}
         with torch.inference_mode():
             if pos_mode:

@@ -144,9 +144,40 @@ class ModalEncoders(nn.Module):
             self.t_enc = LinearTemporalEncoder(in_dim, embeddings, 1)
 
     def forward(self, V_feat, T_tac, config_id, V_hmr=None, mask_v=None, mask_t=None):
-        """``mask_v/mask_t`` (bool, B×tw)：逐帧 null-token mask（missing-rate
-        实验 1 / ρ 网格）。True 的位置把该帧 token 换成 null token，叠加在
-        config 级替换之后；None = 不 mask（旧路径逐字节一致，零重训）。"""
+        """``mask_v/mask_t`` (bool, B×tw)：逐帧观测缺失（missing-rate / ρ 网格）。
+        True 的位置先擦除输入，再把输出 token 换成 null token；同时重算
+        依赖邻帧的压力特征。None 或全 False 保留原来的完整输入路径。"""
+        def masked_input(values, mask):
+            if mask is None:
+                return values
+            mask = torch.as_tensor(mask, device=values.device, dtype=torch.bool)
+            if tuple(mask.shape) != tuple(values.shape[:2]):
+                raise ValueError("frame mask must have shape (B, tw)")
+            return torch.where(mask[..., None], torch.zeros_like(values), values)
+
+        # Erase observations before any temporal mixing. Replacing only the
+        # final token leaves the erased pressure visible in other frames.
+        V_feat = masked_input(V_feat, mask_v)
+        if V_hmr is not None:
+            V_hmr = masked_input(V_hmr, mask_v)
+        T_tac = masked_input(T_tac, mask_t)
+        if mask_t is not None and self.tactile_input == "raw108":
+            # The envelope and force derivative in T_phys also use adjacent
+            # observations. Recompute those channels from erased raw pressure
+            # inside each window, including its edges: cached edge features
+            # may otherwise carry an erased observation from another window.
+            mask = torch.as_tensor(mask_t, device=T_tac.device, dtype=torch.bool)
+            if bool(mask.any()):
+                T_tac = T_tac.clone()
+                for foot in range(2):
+                    force = T_tac[..., foot * 48:(foot + 1) * 48].clamp_min(0).sum(-1)
+                    before = torch.cat([force[:, :1], force[:, :-1]], dim=1)
+                    after = torch.cat([force[:, 1:], force[:, -1:]], dim=1)
+                    base = T_RAW_DIM + foot * 6
+                    T_tac[..., base + 3] = torch.stack([before, force, after]).amax(0)
+                    T_tac[..., base + 5] = force - before
+                T_tac = masked_input(T_tac, mask)
+
         if self.v_input == "hmr_gvhmr":
             if V_hmr is None:
                 raise ValueError("V_hmr is required when v_input='hmr_gvhmr'")

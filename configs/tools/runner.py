@@ -175,6 +175,8 @@ def _train_command(registry: dict[str, Any], model_id: str) -> list[str]:
         # paths); the structure comes from the model's entry script and every
         # run trains from random init.
         command += ["--model-name", str(spec["name"])]
+        if spec.get("variant"):
+            command += ["--variant", str(spec["variant"])]
     _append_train_args(command, spec)
     # V4B guard: the learned partition is structural data.  It is derived
     # from RAW training-data kinematics (no trained model — 2026-09-24);

@@ -310,24 +310,35 @@ def effective_variant(spec: dict[str, Any]) -> str:
     (types.variant_from_config: fixed field order, every present field
     written, no default omission)."""
     args = dict(spec.get("train_args") or {})
-    cfg = {
-        "tw": int(args.get("tw", 20)),
-        "stride": args.get("stride"),
-        "lr": float(args.get("lr", 1e-4)),
-        "lambda_pose": float(args.get("lambda_pose", 3.0)),
-        "lambda_traj": float(args.get("lambda_traj", 1.0)),
-        "lambda_kp": float(args.get("lambda_kp", 1.0)),
+    from anysole.train import load_config
+    config_file = resolve_path(str(spec.get("config") or "anysole/configs/v1.yaml"))
+    cfg = load_config(config_file)
+    cfg["split_hash"] = sha256_file(Path(cfg["split_csv"]))
+    cfg.update({
+        "tw": int(args.get("tw", cfg["tw"])),
+        "stride": args.get("stride", cfg.get("stride")),
+        "lr": float(args.get("lr", cfg["lr"])),
+        "lambda_pose": float(args.get("lambda_pose", cfg["lambda_pose"])),
+        "lambda_traj": float(args.get("lambda_traj", cfg["lambda_traj"])),
+        "lambda_kp": float(args.get("lambda_kp", cfg["lambda_kp"])),
         "epochs": int(spec.get("epochs", 800)),
         "batch_size": int(spec.get("batch_size", 256)),
         "seed": int(spec.get("train_seed", spec.get("seed", 1))),
-    }
+    })
+    cfg.update({key: value for key, value in args.items()
+                if key in TRAIN_ARG_FLAG_MAP and value is not None
+                and key not in ("part_json", "assign_cluster")})
     for key in ("lambda_assign", "lambda_assign_ent", "lambda_assign_conc",
                 "lambda_assign_dead", "assign_dead_beta", "assign_temp_init",
                 "assign_temp_final", "assign_anneal_frac", "assign_lock_frac",
                 "assign_lr_mult", "lambda_sigma", "sigma_freeze_frac",
-                "lr_warmup_frac", "grad_clip", "loss_cap"):
-        if key in args:
+                "lr_warmup_frac", "grad_clip", "loss_cap", "dropout", "lr",
+                "lambda_pose", "lambda_traj", "lambda_kp", "lambda_trec",
+                "lambda_vrec", "lambda_con"):
+        if args.get(key) is not None:
             cfg[key] = float(args[key])
+    if args.get("config_probs") is not None:
+        cfg["config_probs"] = [float(value) for value in args["config_probs"]]
     # V4B: the partition K is part of the run's record (train derives it from
     # --part-json); read the file so the predicted dir matches train's.
     part_json = args.get("part_json")
@@ -337,14 +348,17 @@ def effective_variant(spec: dict[str, Any]) -> str:
             doc = json.loads(path.read_text(encoding="utf-8"))
             groups = doc["partition"] if isinstance(doc, dict) and "partition" in doc else doc
             if isinstance(groups, dict):
-                groups = list(groups.values())
-            cfg["part_joints"] = [list(group) for group in groups]
+                from anysole.types import JOINT_NAMES
+                name_to_idx = {name: i for i, name in enumerate(JOINT_NAMES)}
+                groups = [[name_to_idx[name] for name in group] for group in groups.values()]
+            cfg["part_joints"] = [[int(joint) for joint in group] for group in groups]
     return variant_from_config(cfg)
 
 
 def registry_ckpt(registry: dict[str, Any], model_id: str, which: str | None = None) -> Path | None:
     """ckpt address inferred from the anysole registry (zero handwritten paths)."""
-    spec = resolved_model_spec(registry, model_id)
+    spec = dict(registry.get("defaults", {}))
+    spec.update(resolved_model_spec(registry, model_id))
     name = spec.get("name")
     if not name:
         return None

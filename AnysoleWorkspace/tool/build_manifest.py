@@ -127,34 +127,22 @@ def pressure_files(recording_name: str, pressure_uri: str | None = None) -> tupl
     return left[-1], right[-1]
 
 
-def pressure_flags(recording_name: str, n_frames: int, pressure_uri: str | None = None) -> tuple[list[int], list[int], str]:
+def pressure_flags(recording_name: str, n_frames: int, pressure_uri: str | None = None,
+                   *, recording_path: Path | None = None,
+                   fps: float = 40.0) -> tuple[list[int], list[int], str]:
     files = pressure_files(recording_name, pressure_uri)
     if files is None:
         return [], [], "missing_pressure_final"
     import numpy as np
 
-    columns = []
-    for path in files:
-        with path.open(encoding="utf-8-sig", newline="") as handle:
-            values = list(csv.DictReader(handle))
-        if not values:
+    from AnysoleWorkspace.tool.build_shared import recording_pressure
+    try:
+        _, _, valid, fake, _, _ = recording_pressure(recording_path, files, n_frames, fps)
+    except ValueError as exc:
+        if "empty pressure CSV" in str(exc):
             return [], [], "empty_pressure_final"
-        fake = np.asarray([int(float(row.get("fake", 0))) for row in values], dtype=np.uint8)
-        valid = np.asarray([int(float(row.get("valid_mask", 1))) for row in values], dtype=np.uint8)
-        columns.append((fake, valid))
-    target = np.linspace(0.0, 1.0, n_frames)
-    flags = []
-    valids = []
-    for fake_left, valid_left in columns[:1]:
-        fake_right, valid_right = columns[1]
-        left_index = np.rint(target * max(len(fake_left) - 1, 0)).astype(int)
-        right_index = np.rint(target * max(len(fake_right) - 1, 0)).astype(int)
-        fake = np.maximum(fake_left[left_index], fake_right[right_index])
-        valid = np.minimum(valid_left[left_index], valid_right[right_index])
-        valid = np.minimum(valid, 1 - fake)
-        flags = np.flatnonzero(fake).astype(int).tolist()
-        valids = np.flatnonzero(valid).astype(int).tolist()
-    return flags, valids, ""
+        raise
+    return np.flatnonzero(fake).astype(int).tolist(), np.flatnonzero(valid).astype(int).tolist(), ""
 
 
 def ood_split(subjects: list[str]) -> dict[str, str]:
@@ -241,7 +229,9 @@ def build(fps: float, camera: str, output: Path,
         bvh = resolve_uri(meta["bvh_uri"])
         smpl = resolve_uri(meta["smpl_uri"]) if meta.get("smpl_uri") else Path("__missing_smpl__")
         recording = resolve_uri(meta["recording_uri"], must_exist=True)
-        fake, valid, pressure_issue = pressure_flags(recording.name, n, meta.get("pressure_uri"))
+        fake, valid, pressure_issue = pressure_flags(
+            recording.name, n, meta.get("pressure_uri"), recording_path=recording,
+            fps=float(meta.get("target_fps", fps)))
         names, parents = parse_bvh_header(bvh)
         quality = []
         for label, path in (("bvh", bvh), ("smpl", smpl)):

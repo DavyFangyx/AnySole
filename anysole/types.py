@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 
-GAIT_ROOT = Path("/data/fangyuxuan/projects/gait")
+GAIT_ROOT = Path(__file__).resolve().parents[1]
 ANYSOLE_ROOT = Path(__file__).resolve().parents[1]
 # Default training config lives with the package, not at the repo root.
 # (ANYSOLE_ROOT above is the repo root for historical reasons; anchor this
@@ -103,7 +103,23 @@ def variant_from_config(config: dict) -> str:
         elif isinstance(value, (list, tuple)):
             value = len(value)
         parts.append(fmt % (int(value) if "d" in fmt else float(value)))
-    return "_".join(parts) if parts else "default"
+    # Human-readable fields alone omit training conditions and round floats.
+    # Fingerprint exact effective values so distinct runs cannot share a path.
+    extra_keys = (
+        "d_model", "dropout", "pose_layers", "config_probs", "lambda_trec",
+        "lambda_vrec", "lambda_con", "lambda_pose_vel", "lambda_bone",
+        "pose_repr", "traj_velocity_w", "traj_delta_w", "traj_delta_weight_power",
+        "traj_deltas", "lr_schedule", "tau_max", "tau_fixed", "noise_scaled",
+        "continuation", "warm_start", "split_hash",
+    )
+    identity = {key: config[key] for key in
+                tuple(key for key, _ in VARIANT_FIELDS) + extra_keys if key in config}
+    if "stride" in identity and identity["stride"] is None:
+        identity["stride"] = config["tw"]
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+    name = "_".join(parts) if parts else "default"
+    # A component must fit within ordinary filesystem NAME_MAX (255 bytes).
+    return name[:230] + "_cfg" + digest
 
 
 def anysole_model_dir(modal: str, contact_method: str, variant: Optional[str] = None) -> Path:

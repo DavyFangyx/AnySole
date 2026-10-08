@@ -1,7 +1,7 @@
 """ρ 网格生成器（missing-rate 任务书实验 1 / M3 生成器侧）。
 
 机制：V/T 保留率网格 (rV, rT) ∈ ρ×ρ，每格 = 逐帧独立掷硬币把该帧 token 换成
-null token（保留率 = 不换的概率；mask=True 的位置换 null）。config 恒为 VT，
+null token（保留率 = 不换的概率；mask=True 先擦除观测及邻帧派生信息，再换 null）。config 恒为 VT，
 mask 叠在 config 级替换之后 → 四角（100/100、100/0、0/100、0/0）与现有
 VT2M/V2M/T2M/纯先验严格同机制；ρ=100%/0% 角与明细文件（metrics/<split>.json）的对应配置行一致 =
 实现自检项（grid_metrics.json 的 corner_check）。
@@ -38,20 +38,13 @@ import numpy as np
 import torch
 
 from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
-from anysole.data.smpl_io import (
-    pelvis_to_smpl_trans,
-    smpl24_pose6d_to_poses,
-    smpl_archive_metadata,
-)
 from anysole.eval import _load_model
 from anysole.models import MODEL_ANYSOLEV2
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device
-from anysole.types import CONFIG_T, CONFIG_V, CONFIG_VT, FPS, N_JOINTS, POSE_DIM
-from anysole.utils.eval_protocol import _Accum, _pick_forward_axis, _session_metrics
-from anysole.utils.geometry import f2_to_world, rot6d_to_rotmat, rotmat_to_6d
-
-# 窗口缝 crossfade（同 eval.py 口径；回归式 FADE=4）
-FADE = 4
+from anysole.types import CONFIG_T, CONFIG_V, CONFIG_VT, N_JOINTS
+from anysole.utils.eval_protocol import _Accum, _pick_forward_axis, _session_metrics, INVERSE_DISPLAY_NAMES, finalize_metrics
+from anysole.utils.session_motion import PIPELINE_VERSION, prepare_session_sequence, write_motion_archive
+from anysole.utils.geometry import f2_to_world
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -188,7 +181,8 @@ def main(argv=None) -> int:
             prev = json.loads(metrics_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             prev = {}
-    cells: Dict[str, dict] = prev.get("cells", {}) if isinstance(prev, dict) else {}
+    compatible = isinstance(prev, dict) and prev.get("evaluation_pipeline") == PIPELINE_VERSION
+    cells: Dict[str, dict] = prev.get("cells", {}) if compatible else {}
 
     n_cells = len(rho_vs) * len(rho_ts) * len(seeds)
     done = 0
@@ -218,6 +212,9 @@ def main(argv=None) -> int:
                          metrics.get("contact_f1", float("nan"))))
 
     payload = {
+        "evaluation_pipeline": PIPELINE_VERSION,
+        "prediction_postprocess": "adjacent_window_crossfade_4",
+        "trajectory_anchor_source": "ground_truth_previous_frame_per_window",
         "checkpoint": str(args.ckpt),
         "modal": str(saved.get("modal")),
         "contact_method": contact_method,
@@ -251,7 +248,7 @@ def _locked_merge_write(metrics_path: Path, payload: dict, args,
                 prev = json.loads(metrics_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 prev = {}
-        prev = prev if isinstance(prev, dict) else {}
+        prev = prev if isinstance(prev, dict) and prev.get("evaluation_pipeline") == PIPELINE_VERSION else {}
         prev_cells = prev.get("cells", {}) if isinstance(prev.get("cells"), dict) else {}
         merged_cells: Dict[str, dict] = {key: dict(value)
                                          for key, value in prev_cells.items()}
@@ -291,7 +288,11 @@ def _corner_check(cells: dict, seeds: List[int], args) -> dict:
     detail_path = model_root_of(args.ckpt) / "metrics" / ("%s.json" % args.split)
     if not detail_path.is_file():
         return {"note": "明细文件缺失，跳过自检：%s" % detail_path}
-    detail = json.loads(detail_path.read_text(encoding="utf-8"))["metrics"]
+    payload = json.loads(detail_path.read_text(encoding="utf-8"))
+    if payload.get("evaluation_pipeline") != PIPELINE_VERSION:
+        return {"note": "detail uses an older pipeline; rerun anysole.eval before comparing corners"}
+    detail = {name: {INVERSE_DISPLAY_NAMES.get(key, key): value for key, value in row.items()}
+              for name, row in payload["metrics"].items()}
     check = {}
     if args.limit_sessions is not None:
         check["note"] = "--limit-sessions=%d 冒烟口径：diff 非 0 属预期" % args.limit_sessions
@@ -318,10 +319,7 @@ def _run_cell_inference(model, dataset, groups, device, tw, forward_axis,
     accum = _Accum()
     contact = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
     metric_config = metric_config_of(rV, rT)
-    beta_by_session = {
-        s["session_id"]: np.asarray(s.get("betas", np.zeros(10)), dtype=np.float32)
-        for s in dataset.sessions
-    }
+    session_by_id = {s["session_id"]: s for s in dataset.sessions}
     with torch.inference_mode():
         for session_id, idxs in groups.items():
             raw = [dataset[i] for i in idxs]
@@ -364,87 +362,37 @@ def _run_cell_inference(model, dataset, groups, device, tw, forward_axis,
                 "parents": batch["parents"][0],
                 "betas": batch["betas"][0],
             }
+            session = session_by_id[session_id]
+            seq, packed = prepare_session_sequence(seq, raw, session)
             _session_metrics(seq, tw, forward_axis, metric_config, accum, contact)
             _write_session_artifacts(npz_dir, repr_dir, session_id, rV, rT,
                                      seed, batch, pred_pose_w, pred_trans_w,
-                                     gt_trans_w, beta_by_session.get(session_id),
-                                     out, args)
+                                     gt_trans_w, session.get("betas"),
+                                     out, args, session=session, packed=packed)
 
-    result = accum.means()
-    p = contact["tp"] / max(contact["tp"] + contact["fp"], 1)
-    r = contact["tp"] / max(contact["tp"] + contact["fn"], 1)
-    result["contact_f1"] = 2.0 * p * r / max(p + r, 1e-8)
-    result["contact_acc"] = (contact["tp"] + contact["tn"]) / max(
-        contact["tp"] + contact["fp"] + contact["fn"] + contact["tn"], 1
-    )
-    result["contact_recall"] = contact["tp"] / max(contact["tp"] + contact["fn"], 1)
-    result["air_recall"] = contact["tn"] / max(contact["tn"] + contact["fp"], 1)
-    result["contact_balanced_acc"] = 0.5 * (
-        result["contact_recall"] + result["air_recall"]
-    )
-    if "accel_mag_upper_ms2" in result:
-        result["accel_dist_err_upper_ms2"] = abs(
-            result["accel_mag_upper_ms2"] - result["accel_mag_upper_gt_ms2"]
-        )
-    return result
+    return finalize_metrics(accum, contact)
 
 
 def _write_session_artifacts(npz_dir: Optional[Path], repr_dir: Optional[Path],
                              session_id: str, rV: int, rT: int, seed: int,
                              batch: dict, pred_pose_w, pred_trans_w, gt_trans_w,
-                             betas, out: dict, args) -> None:
-    """每 session：聚合窗口 → crossfade → 写 eval_motion 同格式 npz + repr dump。"""
-    tw = batch["pose_gt"].shape[1]
-    pose = pred_pose_w.reshape(-1, pred_pose_w.shape[-1]).cpu().numpy()
-    trans = pred_trans_w.reshape(-1, 3).cpu().numpy()
-    gt_trans = gt_trans_w.reshape(-1, 3).cpu().numpy()
-
+                             betas, out: dict, args, *, session: dict, packed: dict) -> None:
+    """Write the same full-frame motion used by metrics and indexed token dumps."""
     if npz_dir is not None and not args.skip_npz:
-        n_windows = pose.shape[0] // tw
-        if n_windows > 1 and FADE > 0:
-            for w in range(1, n_windows):
-                seam = w * tw
-                if seam + FADE > pose.shape[0]:
-                    break
-                for j in range(FADE):
-                    alpha = (j + 1) / (FADE + 1)
-                    a, b = seam - FADE + j, seam + j
-                    old_a, old_b = pose[a].copy(), pose[b].copy()
-                    pose[a] = (1 - alpha) * old_a + alpha * old_b
-                    pose[b] = (1 - alpha) * old_b + alpha * old_a
-                    old_ta, old_tb = trans[a].copy(), trans[b].copy()
-                    trans[a] = (1 - alpha) * old_ta + alpha * old_tb
-                    trans[b] = (1 - alpha) * old_tb + alpha * old_ta
-        R = rot6d_to_rotmat(torch.from_numpy(pose.reshape(-1, N_JOINTS, 6)).float())
-        pose = rotmat_to_6d(R).reshape(-1, POSE_DIM).numpy()
-        smpl_poses = smpl24_pose6d_to_poses(pose)
-        np.savez_compressed(
-            npz_dir / ("%s_%s%s.npz" % (session_id, cell_key(rV, rT), seed_suffix(seed))),
-            poses=smpl_poses,
-            trans=pelvis_to_smpl_trans(pose, trans, betas),
-            pred_pelvis_trans=trans.astype(np.float32),
-            gt_pelvis_trans=gt_trans.astype(np.float32),
-            gt_trans=gt_trans.astype(np.float32),
-            betas=betas if betas is not None else np.zeros((10,), dtype=np.float32),
-            betas_source=np.asarray("ground_truth_session"),
-            root_orient=smpl_poses[:, :3],
-            pose_body=smpl_poses[:, 3:],
-            mocap_frame_rate=np.asarray(FPS, dtype=np.float32),
-            source_frame_times_s=np.arange(len(pose), dtype=np.float32) / float(FPS),
-            **smpl_archive_metadata(),
-        )
-
+        path = npz_dir / ("%s_%s%s.npz" % (session_id, cell_key(rV, rT), seed_suffix(seed)))
+        write_motion_archive(path, session, packed)
     if repr_dir is not None and not args.skip_repr:
         dump = {}
         for name in ("F", "v_tok", "t_tok"):
             tensor = out.get(name)
             if tensor is not None:
                 dump[name] = tensor.reshape(-1, tensor.shape[-1]).cpu().numpy()
+        dump["window_starts"] = batch["frame_start"].detach().cpu().numpy()
+        dump["window_length"] = np.asarray(batch["pose_gt"].shape[1])
+        dump["evaluation_pipeline"] = np.asarray(PIPELINE_VERSION)
         np.savez_compressed(
-            repr_dir / ("%s_%s%s_repr.npz" % (session_id, cell_key(rV, rT),
-                                              seed_suffix(seed))),
-            **dump,
-        )
+            repr_dir / ("%s_%s%s_repr.npz" % (session_id, cell_key(rV, rT), seed_suffix(seed))),
+            **dump)
 
 
 if __name__ == "__main__":

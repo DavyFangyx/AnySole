@@ -171,6 +171,24 @@ def sole_positions(foot: str) -> np.ndarray:
     return np.stack((xmin + xn * (xmax - xmin), zmax - yn * (zmax - zmin)), axis=1)
 
 
+def recording_pressure(recording: Path | None, files: tuple[Path, Path],
+                       n_frames: int, fps: float = 40.0) -> tuple:
+    """One value/quality mapping shared by manifest and facts builders."""
+    video_start = pressure_epoch = None
+    if recording is not None:
+        images = sorted((recording / "3").glob("*.jpg"))
+        if not images:
+            raise ValueError(f"{recording}: raw RGB has no extracted frames")
+        meta_path = recording / "meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
+        video_start = day_seconds_from_jpeg_name(images[0].name)
+        if meta.get("started_at_iso"):
+            pressure_epoch = day_seconds_from_iso(meta["started_at_iso"])
+    return resample_pressure(
+        read_pressure(files[0]), read_pressure(files[1]), n_frames,
+        video_start_day_s=video_start, pressure_epoch_day_s=pressure_epoch, fps=fps)
+
+
 _TEMPLATE: np.ndarray | None = None
 
 
@@ -212,21 +230,13 @@ def build_one(sid: str, row: dict, *, force: bool = False) -> Path:
     left_csv, right_csv = source_csvs(pressure_dir)
     left_uri = row["pressure_path"].rstrip("/") + "/pressure_left.csv"
     right_uri = row["pressure_path"].rstrip("/") + "/pressure_right.csv"
-    left_raw, right_raw = read_pressure(left_csv), read_pressure(right_csv)
     n = int(row["n_frames"])
     rgb_source = recording / "3"
     images = sorted(rgb_source.glob("*.jpg"))
     if not images:
         raise ValueError(f"{sid}: raw RGB has no extracted frames")
-    meta_path = recording / "meta.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
-    video_start_day_s = day_seconds_from_jpeg_name(images[0].name)
-    pressure_epoch_day_s = day_seconds_from_iso(meta["started_at_iso"]) if meta.get("started_at_iso") else None
-    left48, right48, valid, fake, frame_times, resample_meta = resample_pressure(
-        left_raw, right_raw, n,
-        video_start_day_s=video_start_day_s,
-        pressure_epoch_day_s=pressure_epoch_day_s,
-        fps=float(row["target_fps"]))
+    left48, right48, valid, fake, frame_times, resample_meta = recording_pressure(
+        recording, (left_csv, right_csv), n, fps=float(row["target_fps"]))
     date, subject = recording.parts[-3], recording.parts[-2]
     session_root = FACTS_ROOT / row["camera"] / date / subject / sid
     if session_root.exists() and not force and all((session_root / name).is_file() for name in ("session.json", "frames.npz", "pressure_48.npz")):

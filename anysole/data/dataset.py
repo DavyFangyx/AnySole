@@ -418,6 +418,7 @@ class AnySoleDataset(Dataset):
                 traj_f2 = None
 
             session = {
+                "frame_times_s": np.asarray(t_mocap, dtype=np.float64),
                 "session_id": session_id,
                 "motion_format": "smpl",
                 "smpl_path": str(smpl_path),

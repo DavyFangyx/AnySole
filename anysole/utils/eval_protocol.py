@@ -79,6 +79,7 @@ from anysole.utils.metrics import (
     windowed_world_mpjpe,
 )
 from anysole.train import condition_inputs, move_batch
+from anysole.utils.session_motion import PIPELINE_VERSION, prepare_session_sequence, write_motion_archive
 from anysole.types import (
     ANKLE_FOOT_JOINTS,
     CONFIG_MODE_NAMES,
@@ -322,6 +323,8 @@ class _Accum:
         self.counts[name] = self.counts.get(name, 0.0) + float(values.numel())
 
     def add_scalar(self, name: str, value: float, weight: float = 1.0) -> None:
+        if not math.isfinite(float(value)) or weight <= 0:
+            return
         self.sums[name] = self.sums.get(name, 0.0) + float(value) * weight
         self.counts[name] = self.counts.get(name, 0.0) + weight
 
@@ -333,6 +336,25 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
                      accum: _Accum, contact: Dict[str, int]) -> None:
     """All protocol metrics of one session's full-sequence prediction."""
     T = seq["pred_pose"].shape[0]
+    if T == 0:
+        return
+    frame_ids = np.asarray(seq.get("frame_indices", np.arange(T)), dtype=np.int64)
+    times = np.asarray(seq.get("times", frame_ids / float(FPS)), dtype=np.float64)
+    if frame_ids.shape != (T,) or times.shape != (T,) or np.any(np.diff(frame_ids) <= 0):
+        raise ValueError("metric frame indices and times must match the ordered predictions")
+    breaks = np.flatnonzero(np.diff(frame_ids) != 1) + 1
+    if breaks.size:
+        # No derivative, contact transition, alignment window or root path
+        # may cross an unobserved interval. Evaluate each continuous range.
+        temporal_fields = ("pred_pose", "pred_trans", "gt_pose", "gt_trans", "kp_gt",
+                           "contact_gt", "pressure_gt", "pressure_pred", "frame_indices", "times")
+        for start, end in zip(np.r_[0, breaks], np.r_[breaks, T]):
+            segment = dict(seq)
+            for key in temporal_fields:
+                if seq.get(key) is not None:
+                    segment[key] = seq[key][int(start):int(end)]
+            _session_metrics(segment, tw, forward_axis, config_value, accum, contact)
+        return
     kp_gt = seq["kp_gt"]
     pred_kp = fk_pose6d(
         seq["pred_pose"][None], seq["pred_trans"][None], seq["offsets"], seq["parents"]
@@ -341,7 +363,7 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     # ---- canonical metrics.py definitions ----
     pred_np = pred_kp.detach().cpu().numpy()
     gt_np = kp_gt.detach().cpu().numpy()
-    times_np = np.arange(T, dtype=np.float64) / float(FPS)
+    times_np = times
     pred_aligned, _ = pelvis_align(pred_np)
     gt_aligned, _ = pelvis_align(gt_np)
     accum.add_scalar("mpjpe_mm", float(mean_point_error(pred_aligned, gt_aligned, scale=1000.0).mean()), T)
@@ -354,7 +376,8 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     accum.add_scalar("root_rte_percent", root["root_rte_percent"], T)
     temporal = temporal_metrics(pred_np, gt_np, times_np)
     for key in ("accel_error_m_s2", "jitter_pred_m_s3", "jitter_gt_m_s3"):
-        accum.add_scalar(key, float(temporal[key]), T)
+        count = temporal["acceleration_samples" if key == "accel_error_m_s2" else "jerk_samples"]
+        accum.add_scalar(key, float(temporal[key]), count)
     pred_rot = rot6d_to_rotmat(seq["pred_pose"].reshape(T, N_JOINTS, 6)).detach().cpu().numpy()
     gt_rot = rot6d_to_rotmat(seq["gt_pose"].reshape(T, N_JOINTS, 6)).detach().cpu().numpy()
     accum.add_scalar("mpjae_deg", float(matrix_rotation_error_degrees(pred_rot, gt_rot).mean()), T)
@@ -437,7 +460,8 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
         accum.add("accel_mag_upper_ms2", torch.linalg.vector_norm(a_pred[:, UPPER_JOINTS], dim=-1))
         accum.add("accel_mag_upper_gt_ms2", torch.linalg.vector_norm(a_gt[:, UPPER_JOINTS], dim=-1))
     if T > tw:
-        seams = torch.arange(tw, T, tw, device=pred_kp.device)
+        seams = torch.as_tensor(np.flatnonzero((frame_ids % tw == 0) & (np.arange(T) > 0)),
+                                device=pred_kp.device)
         accum.add("seam_jump_mm", torch.linalg.vector_norm(pred_kp[seams] - pred_kp[seams - 1], dim=-1), 1000.0)
         accum.add("seam_jump_gt_mm", torch.linalg.vector_norm(kp_gt[seams] - kp_gt[seams - 1], dim=-1), 1000.0)
 
@@ -608,7 +632,13 @@ def _evaluate_config(
                     "parents": batch["parents"][0],
                     "betas": batch["betas"][0],
                 }
+            session = session_by_id[session_id]
+            seq, packed = prepare_session_sequence(seq, raw, session)
             _session_metrics(seq, tw, forward_axis, config_value, accum, contact)
+            if v2t_out_dir is not None and degrade is None:
+                output_path = v2t_out_dir / ("%s_%s.npz" % (session_id, CONFIG_MODE_NAMES[config_value]))
+                write_motion_archive(output_path, session, packed)
+                print("wrote %s" % output_path)
             if (config_value == CONFIG_V and v2t_out_dir is not None
                     and seq.get("pressure_pred") is not None):
                 pred_kp = fk_pose6d(
@@ -656,6 +686,11 @@ def _evaluate_config(
                     pressure_source_grid=np.asarray("4x12_per_foot"),
                     comparison_pressure_grid=np.asarray("31x11_per_foot_linear_resample"),
                 )
+    return finalize_metrics(accum, contact)
+
+
+def finalize_metrics(accum: _Accum, contact: dict) -> dict:
+    """Identical aggregate/contact/pressure finalization for eval and rho cells."""
     result = accum.means()
     p = contact["tp"] / max(contact["tp"] + contact["fp"], 1)
     r = contact["tp"] / max(contact["tp"] + contact["fn"], 1)
@@ -746,6 +781,9 @@ def run_protocol(
         if prev_cuda is not None:
             torch.cuda.set_rng_state_all(prev_cuda)
     payload = {
+        "evaluation_pipeline": PIPELINE_VERSION,
+        "prediction_postprocess": "adjacent_window_crossfade_4",
+        "trajectory_anchor_source": "ground_truth_previous_frame_per_window",
         "checkpoint": checkpoint_path,
         "modal": str(checkpoint.get("config", {}).get("modal", "anysolev1")),
         "contact_method": contact_method,

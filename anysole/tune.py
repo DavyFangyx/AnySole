@@ -154,7 +154,8 @@ def parse_val_metrics(out_dir: Path) -> dict:
     if not path.is_file():
         raise FileNotFoundError("trial eval wrote no metrics: %s" % path)
     metrics = json.loads(path.read_text())["metrics"]
-    return {config: float(metrics[config]["mpjpe_mm"]) for config in CONFIGS}
+    return {config: float(metrics[config]["MPJPE"] if "MPJPE" in metrics[config]
+                          else metrics[config]["mpjpe_mm"]) for config in CONFIGS}
 
 
 def run_trial(args, study_name: str, trial_number: int, params: dict) -> dict:
