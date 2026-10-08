@@ -539,6 +539,16 @@ def run_c1(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
         panel_title_markers=[V_COLOR, T_COLOR],
         label_colors=domain_label_colors(rows),
     )
+    render_figure(
+        out / "specialist_series.png", rows,
+        ["V specialist", "T specialist"],
+        {"V specialist": V_COLOR, "T specialist": T_COLOR},
+        "C1 · modality-specialist division across body-region rows",
+        footnote=[UNIT_NOTE],
+        layout="stacked",
+        label_colors=domain_label_colors(rows),
+        panel_titles=["V vs T specialist"],
+    )
     summary = {"V_wins": [r["row_id"] for r in rows if r["winner"] == "V specialist"],
                "T_wins": [r["row_id"] for r in rows if r["winner"] == "T specialist"]}
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -631,6 +641,16 @@ def run_c3(args: argparse.Namespace, inputs: dict[str, Any]) -> dict[str, Any]:
         panel_titles=["Main V-only", "Main T-only"],
         panel_title_markers=[V_COLOR, T_COLOR],
         label_colors=domain_label_colors(rows),
+    )
+    render_figure(
+        out / "main_branch_series.png", rows,
+        ["Main V-only", "Main T-only"],
+        {"Main V-only": V_COLOR, "Main T-only": T_COLOR},
+        "C3 · main model on V-only vs T-only input",
+        footnote=[UNIT_NOTE],
+        layout="stacked",
+        label_colors=domain_label_colors(rows),
+        panel_titles=["Main V-only vs Main T-only"],
     )
     summary = {"matches_expected": sum(bool(r["matches_expected"]) for r in rows), "total": len(rows)}
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
