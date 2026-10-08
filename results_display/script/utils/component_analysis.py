@@ -50,6 +50,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.font_manager import FontProperties
 from matplotlib.lines import Line2D
+from matplotlib.patches import FancyBboxPatch
 from matplotlib.transforms import offset_copy
 
 from utils.missing_rate_analysis import (
@@ -82,6 +83,24 @@ T_COLOR = "#eb6834"
 MAIN_COLOR = "#1baf7a"
 SPEC_COLOR = "#8c8b84"
 PRIOR_COLOR = "#b9b7ae"
+WIN_V_COLOR = "#e34948"   # 胜者框：V 侧胜者红框（用户裁定）
+WIN_T_COLOR = "#2a78d6"   # 胜者框：T 侧胜者蓝框（用户裁定）
+
+V_SIDE_NAMES = ("V specialist", "Main V", "Main V-only")
+T_SIDE_NAMES = ("T specialist", "Main T", "Main T-only")
+
+
+def _winner_box_color(row: dict[str, Any], name: str) -> str:
+    """胜者框颜色：V 侧胜者红框、T 侧胜者蓝框、主线 VT 绿框、其余（先验）灰框。"""
+    if name == "Best specialist":
+        name = row.get("best_source") or name
+    if name in V_SIDE_NAMES:
+        return WIN_V_COLOR
+    if name in T_SIDE_NAMES:
+        return WIN_T_COLOR
+    if name == "Main VT":
+        return MAIN_COLOR
+    return PRIOR_COLOR
 
 # ---------------------------------------------------------------- 版面几何
 # 全部单位英寸；画布尺寸 = 各预留区之和，因此内容天然占满整幅、四周无空带。
@@ -226,10 +245,11 @@ def _series_color(colors: ColorSpec, row: dict[str, Any], name: str) -> str:
 
 
 def _draw_value(ax, row: dict[str, Any], value: float, y: float, ref: float,
-                color: str, label_fs: float = VALUE_FS, fig=None) -> None:
+                color: str, label_fs: float = VALUE_FS, fig=None):
     """一行：细横线 0→x、白边端点圆、端点原生单位数值（经典森林图）。
 
     数值标签用点偏移（不随面板宽度变化），故面板加宽后间距仍稳定。
+    返回数值标签 Text 艺术家，供胜者框使用。
     """
     x = value / ref
     ax.hlines(y, 0.0, x, color=color, linewidth=LINE_W, zorder=3)
@@ -240,9 +260,9 @@ def _draw_value(ax, row: dict[str, Any], value: float, y: float, ref: float,
     transform = offset_copy(ax.transData, fig=fig,
                             x=-VALUE_DX if right else VALUE_DX, y=VALUE_DY,
                             units="points")
-    ax.text(x, y, text, transform=transform,
-            ha="right" if right else "left", va="bottom",
-            fontsize=label_fs, color=INK, zorder=6)
+    return ax.text(x, y, text, transform=transform,
+                   ha="right" if right else "left", va="bottom",
+                   fontsize=label_fs, color=INK, zorder=6)
 
 
 def _as_lines(value: str | Sequence[str] | None) -> list[str]:
@@ -352,6 +372,20 @@ def build_figure(rows: list[dict[str, Any]], series: Sequence[str], colors: Colo
     ax_b = bottom / height
     ax_h = n_levels * row_h / height
     refs = _row_refs(rows)
+    # 每行胜者 = 各序列中误差最小者（越高越好的行取最大原值）
+    winner_of: dict[str, str | None] = {}
+    for row in rows:
+        best_err: float | None = None
+        best_name: str | None = None
+        for name in series:
+            value = row["values"].get(name)
+            if value is None or not np.isfinite(float(value)):
+                continue
+            err = -float(value) if row["higher"] else float(value)
+            if best_err is None or err < best_err:
+                best_err, best_name = err, name
+        winner_of[row["row_id"]] = best_name
+    value_texts: dict[tuple[str, str], Any] = {}
     ylim = (-0.5, n_levels - 0.5)
     y_of = {index: n_levels - 1 - index for index in range(n_levels)}
     separators = [index for index, (kind, _) in enumerate(levels) if kind == "group" and index > 0]
@@ -432,7 +466,8 @@ def build_figure(rows: list[dict[str, Any]], series: Sequence[str], colors: Colo
                     if value is None:
                         continue
                     y = y_of[index] + STACK_STEP * (slot - (n_series - 1) / 2.0)
-                    _draw_value(ax, row, value, y, ref, _series_color(colors, row, name), fig=fig)
+                    value_texts[(row["row_id"], name)] = _draw_value(
+                        ax, row, value, y, ref, _series_color(colors, row, name), fig=fig)
             else:
                 name = series[panel]
                 value = row["values"].get(name)
@@ -440,9 +475,27 @@ def build_figure(rows: list[dict[str, Any]], series: Sequence[str], colors: Colo
                     ax.text(0.03, y_of[index], "—", ha="left", va="center",
                             fontsize=VALUE_FS, color=MUTED)
                     continue
-                _draw_value(ax, row, value, y_of[index], ref, _series_color(colors, row, name), fig=fig)
+                value_texts[(row["row_id"], name)] = _draw_value(
+                    ax, row, value, y_of[index], ref, _series_color(colors, row, name), fig=fig)
 
         _panel_title(ax, fig, panel_titles[panel], panel_title_markers[panel])
+
+    # ---- 每行胜者框（用户裁定：V 侧胜者红框、T 侧胜者蓝框、主线绿、先验灰）
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    for row in rows:
+        name = winner_of.get(row["row_id"])
+        if not name:
+            continue
+        artist = value_texts.get((row["row_id"], name))
+        if artist is None:
+            continue
+        bbox = artist.get_window_extent(renderer)
+        fig.add_artist(FancyBboxPatch(
+            (bbox.x0 - 4, bbox.y0 - 2), bbox.width + 8, bbox.height + 4,
+            boxstyle="round,pad=0,rounding_size=3", transform=None, clip_on=False,
+            linewidth=1.8, edgecolor=_winner_box_color(row, name), facecolor="none",
+            zorder=8))
 
     return fig
 
