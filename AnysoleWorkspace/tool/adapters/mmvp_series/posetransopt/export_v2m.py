@@ -104,6 +104,17 @@ def export_session(row: dict, force: bool) -> str:
     pose = pose.float()
     beta = beta.float()
     trans = trans.float()
+    # 2026-10-08 漂移点 m：原生输出在 cam3 相机锚定系（x 右/y 上/z 前、原点=相机中心），
+    # 先经标定链旋转 + 逐日期拟合平移转到 mocap 世界系（y-up m），再按世界系导出。
+    # 与 export_baseline_motion.py::export_vp_mocap 同源同改。
+    # 向量 p_w = A p_n + b；global_orient 是"身体局部系→环境系"映射，R_w = A R_n（无共轭）。
+    from AnysoleWorkspace.tool.adapters.mmvp_series.posetransopt.native_to_mocap import load_artifact
+    transform = load_artifact(date)
+    world_a = torch.from_numpy(transform["A"].astype(np.float32))
+    world_b = torch.from_numpy(transform["b"].astype(np.float32))
+    trans = trans @ world_a.T + world_b
+    pose = pose.clone()
+    pose[:, 0] = world_a @ pose[:, 0]
     frame_ids = np.asarray(data["frame_ids"], dtype=np.int64).reshape(-1)
     if pose.ndim != 4 or tuple(pose.shape[1:]) != (24, 3, 3):
         raise ValueError(f"{native_path}: expected pose (T,24,3,3), got {tuple(pose.shape)}")
@@ -122,8 +133,18 @@ def export_session(row: dict, force: bool) -> str:
             transl=trans,
             pose2rot=False,
         )
-    native = result.joints[:, :24].detach().cpu().numpy()
     native_vertices = result.vertices.detach().cpu().numpy()
+    # 关节用 GT 链同款 anysole FK 计算（漂移点 m 执行，2026-10-08）：smplx joints
+    # 与协议 GT 的 FK 关节定义相差 ~0.22m（实测同一 pose 下逐关节差 215–317mm）；
+    # 协议 GT 的 pelvis = transl（根）、其余关节 = 父相对 offset 的 FK——用同一
+    # 函数对象保证与 protocol_gt 关节定义完全一致。
+    from anysole.data.smpl_io import load_smpl
+    from anysole.utils.geometry import fk_pose6d_np
+    gt_motion = load_smpl(resolve_uri(row["smpl_path"]))
+    rotmats = pose.detach().cpu().numpy()  # (T,24,3,3)，已转世界基
+    pose_6d = rotmats[..., :, :2].reshape(len(rotmats), -1)
+    native = fk_pose6d_np(pose_6d, trans.detach().cpu().numpy(),
+                          gt_motion["offsets_m"], gt_motion["parents"])
     from scipy.spatial.transform import Rotation
     poses_aa = Rotation.from_matrix(pose.numpy().reshape(-1, 3, 3)).as_rotvec().reshape(len(pose), 72)
 
@@ -163,6 +184,9 @@ def export_session(row: dict, force: bool) -> str:
         surface_source=np.asarray("method_optimization"),
         shape_source=np.asarray("method_optimization"),
         public_surface_metrics=np.asarray("true"),
+        # 漂移点 m（2026-10-08）：原生相机系 → mocap 世界系的变换 provenance。
+        coordinate_transform=np.asarray("cam3_native_to_mocap_world"),
+        coordinate_transform_source=np.asarray(str(transform["source"])),
     )
     return f"wrote {output} frames={int(valid.sum())}/{n}"
 

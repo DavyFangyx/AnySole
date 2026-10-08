@@ -263,6 +263,17 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
         beta = beta.reshape(1, -1).repeat(len(pose), 1)
     # PoseTransOpt saves float64 tensors; smplx's lbs matmul requires float32.
     pose, beta, trans = pose.float(), beta.float(), trans.float()
+    # 2026-10-08 漂移点 m：原生输出在 cam3 相机锚定系（x 右/y 上/z 前、原点=相机中心），
+    # 先经标定链旋转 + 逐日期拟合平移转到 mocap 世界系（y-up m），再按世界系导出。
+    # 向量 p_w = A p_n + b；global_orient 是"身体局部系→环境系"的映射（v_n = R_n v_b），
+    # 合成基变换得 R_w = A R_n（无共轭，实测朝向残差 13.8°）。
+    from AnysoleWorkspace.tool.adapters.mmvp_series.posetransopt.native_to_mocap import load_artifact
+    transform = load_artifact(date)
+    world_a = torch.from_numpy(transform["A"].astype(np.float32))
+    world_b = torch.from_numpy(transform["b"].astype(np.float32))
+    trans = trans @ world_a.T + world_b
+    pose = pose.clone()
+    pose[:, 0] = world_a @ pose[:, 0]
     smpl_path = WORKSPACE / "assets/third_party" / "smpl" / "SMPL_NEUTRAL.pkl"
     model = smplx.create(str(smpl_path), "smpl", gender="neutral", batch_size=len(pose), num_betas=10)
     with torch.no_grad():
@@ -273,8 +284,18 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
             transl=trans,
             pose2rot=False,
         )
-    native = result.joints[:, :24].detach().cpu().numpy()
     native_vertices = result.vertices.detach().cpu().numpy()
+    # 关节用 GT 链同款 anysole FK 计算（漂移点 m 执行，2026-10-08）：
+    # smplx 的 joints 与协议 GT 的 FK 关节定义相差 ~0.22m（实测同一 pose 下
+    # 逐关节差 215–317mm）。协议 GT 的 pelvis = transl（根），其余关节 =
+    # 父相对 offset 的 FK——这里用同一函数对象，关节定义与 protocol_gt 完全一致。
+    from anysole.data.smpl_io import load_smpl
+    from anysole.utils.geometry import fk_pose6d_np
+    gt_motion = load_smpl(resolve_uri(row["smpl_path"]))
+    rotmats = pose.detach().cpu().numpy()  # (T,24,3,3)，已转世界基
+    pose_6d = rotmats[..., :, :2].reshape(len(rotmats), -1)
+    native = fk_pose6d_np(pose_6d, trans.detach().cpu().numpy(),
+                          gt_motion["offsets_m"], gt_motion["parents"])
     from scipy.spatial.transform import Rotation
     poses_aa = Rotation.from_matrix(pose.numpy().reshape(-1, 3, 3)).as_rotvec().reshape(len(pose), 72)
     n = int(row["n_frames"])
@@ -297,6 +318,9 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
                       "surface_source": "method_optimization",
                       "shape_source": "method_optimization",
                       "public_surface_metrics": "true",
+                      # 漂移点 m（2026-10-08）：原生相机系 → mocap 世界系的变换 provenance。
+                      "coordinate_transform": "cam3_native_to_mocap_world",
+                      "coordinate_transform_source": str(transform["source"]),
                   })
 
 

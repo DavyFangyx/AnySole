@@ -58,3 +58,24 @@ def build_calibration_npy(cal: dict) -> dict:
         "depth_source": "DepthPro on cam3 RGB; depth and color share the cam3 frame",
         "checkerboard_used_for_floor": False,
     }
+
+
+def cam3_pinhole_to_mocap_world(protocol_json: Path) -> dict:
+    """cam3 针孔相机系 → mocap 世界系刚体变换（p_mocap[m] = A @ p_cam3[m] + b）。
+
+    标定链（单位 cm，口径与证据见 `Baselines/决策/05_R1-R3_风险裁定.md` §三）：
+        X_checkerboard[cm] = Rm @ (100 * J_mocap[m]) + tm   # mocap_raw_to_checkerboard_world
+        X_cam3[cm]          = Rc @ X_checkerboard + tc      # world_to_camera
+    反解 J_mocap。2026-10-08 漂移点 m/n 执行（MMVP 相机系导出修复）时新增。
+    """
+    data = json.loads(protocol_json.read_text(encoding="utf-8"))
+    Rc = np.asarray(data["cameras"]["cam3"]["R"], dtype=np.float64)
+    tc = np.asarray(data["cameras"]["cam3"]["t"], dtype=np.float64).reshape(3)
+    mc = data["mocap_raw_to_checkerboard_world"]
+    Rm = np.asarray(mc["R"], dtype=np.float64)
+    tm = np.asarray(mc["t"], dtype=np.float64).reshape(3)
+    if not np.allclose(Rc.T @ Rc, np.eye(3), atol=2e-3):
+        raise ValueError(f"cam3 R is not orthonormal: {protocol_json}")
+    A = Rm.T @ Rc.T
+    b = -Rm.T @ (Rc.T @ tc + tm) / 100.0
+    return {"A": A, "b": b, "source": str(protocol_json)}
