@@ -190,12 +190,26 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
         sys.path.insert(0, str(ROOT / "Baselines" / "pressure_tookit"))
     from lib.core.smpl_mmvp import SMPL_MMVP
     import torch
+    from scipy.spatial.transform import Rotation as SciRotation
+
+    # 2026-10-08 漂移点 n/p：原生输出在 cam3 相机锚定系（x 右/y 上[地面归一化]/
+    # z 指向相机），经标定链旋转 + 逐日期拟合平移转 mocap 世界系；关节用协议 FK
+    # （与 VP-MoCap 同一函数对象，漂移点 p）。向量 p_w = A p_n + b；旋转 R_w = A R_n。
+    from AnysoleWorkspace.tool.adapters.mmvp_series.pressure_tookit.native_to_mocap import load_artifact
+    from anysole.data.smpl_io import load_smpl
+    from anysole.utils.geometry import fk_pose6d_np
+    transform = load_artifact(date)
+    world_a = transform["A"]
+    world_b = transform["b"]
+    gt_motion = load_smpl(resolve_uri(row["smpl_path"]))
 
     essential = WORKSPACE / "assets/third_party" / "pressure_toolkit" / "essential"
     model = SMPL_MMVP(str(essential), gender=gender, stage="tracking").cpu()
     joints = np.zeros((n, 24, 3), dtype=np.float32)
     vertices = np.zeros((n, 6890, 3), dtype=np.float32)
     poses = np.zeros((n, 72), dtype=np.float32)
+    transls_world = np.zeros((n, 3), dtype=np.float64)
+    rotmats_world = np.zeros((n, 24, 3, 3), dtype=np.float64)
     available = np.zeros(n, dtype=bool)
     for path in frame_paths:
         frame = int(path.stem.split("_")[-1])
@@ -221,12 +235,22 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
         model.update_shape()
         model.init_plane()
         model_output = model.update_pose()
-        native = model_output.smpl_joints[0].detach().cpu().numpy()
-        joints[frame] = smpl_yup_to_display(native)
-        vertices[frame] = smpl_yup_to_display(model_output.vertices[0].detach().cpu().numpy())
-        pose_aa = np.concatenate([global_rot.reshape(-1), body_pose.reshape(-1)])
+        # 原生表面 → mocap 世界系（点变换）。
+        verts_native = model_output.vertices[0].detach().cpu().numpy()
+        vertices[frame] = smpl_yup_to_display(verts_native @ world_a.T + world_b)
+        # 骨盆位置（pressure_tookit 的 transl 即骨盆，SMPLify 式）→ 世界系；
+        # 根朝向基变换 R_w = A R_n；关节由协议 FK 统一计算。
+        transl_world = world_a @ np.asarray(transl, dtype=np.float64).reshape(3) + world_b
+        R_n = SciRotation.from_rotvec(np.asarray(global_rot, dtype=np.float64).reshape(3)).as_matrix()
+        R_w = world_a @ R_n
+        transls_world[frame] = transl_world
+        rotmats_world[frame, 0] = R_w
+        pose_aa = np.concatenate([SciRotation.from_matrix(R_w).as_rotvec(), body_pose.reshape(-1)])
         poses[frame, :min(72, pose_aa.size)] = pose_aa[:72]
         available[frame] = True
+    pose_6d = rotmats_world[..., :, :2].reshape(n, -1)
+    joints_world = fk_pose6d_np(pose_6d, transls_world, gt_motion["offsets_m"], gt_motion["parents"])
+    joints[:] = smpl_yup_to_display(joints_world)
     valid = valid_frames(row, n) & available
     if not np.all(available[valid_frames(row, n)]):
         missing = np.flatnonzero(valid_frames(row, n) & ~available)
@@ -240,6 +264,9 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
                       "surface_source": "method_optimization",
                       "shape_source": "method_optimization",
                       "public_surface_metrics": "true",
+                      # 漂移点 n/p（2026-10-08）：原生相机系 → mocap 世界系的变换 provenance。
+                      "coordinate_transform": "cam3_native_to_mocap_world",
+                      "coordinate_transform_source": str(transform["source"]),
                   })
 
 
