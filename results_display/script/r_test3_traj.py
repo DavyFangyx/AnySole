@@ -103,7 +103,11 @@ def load_traj(path: Path, row: dict, seq_dir: Path | None = None, fps: float = 4
         pred = joints[:, 0]
         gt = protocol_gt(row, "bvh23")[0][:, 0]
         n = min(pred.shape[0], gt.shape[0])
-        return pred[:n], gt[:n]
+        pred, gt = pred[:n], gt[:n]
+        # bvh23 无世界锚（上游设计，漂移点 o，2026-10-08）：根轨迹 =
+        # cumsum(位移) 从原点出发，逐序列平移对齐后比形状；smpl24 保持绝对世界。
+        pred = pred - (pred - gt).mean(axis=0)
+        return pred, gt
     data = np.load(path)
     if "AnySole" in path.as_posix() and "joint_xyz_world" not in data:
         raise ValueError(
@@ -667,6 +671,9 @@ def run_compare(args: argparse.Namespace) -> int:
                         gt_columns[protocol] = protocol_gt(row, protocol)[0][:, 0]
                     gt = gt_columns[protocol]
                     n = min(pred.shape[0], gt.shape[0])
+                    # bvh23 无世界锚（漂移点 o，2026-10-08）：逐序列平移对齐后比形状。
+                    if protocol == "bvh23":
+                        pred = pred - (pred[:n] - gt[:n]).mean(axis=0)
                     loaded.append({**m, "pred": pred[:n], "gt": gt[:n]})
                     log.info(
                         f"{session_id}_{mode}: {m['label']} protocol="
@@ -693,7 +700,8 @@ def run_compare(args: argparse.Namespace) -> int:
                 np.concatenate([
                     render_traj_panel(
                         projector, m["pred"], m["gt"][:n], t, session_id,
-                        f"{m['label']} — {PROTOCOL_LABELS.get(m['protocol'], m['protocol'])}",
+                        f"{m['label']} — {PROTOCOL_LABELS.get(m['protocol'], m['protocol'])}"
+                        + ("（平移对齐）" if m["protocol"] == "bvh23" else ""),
                         n, args.fps, m["ate_mm"], color=m["color"], legend=m["label"],
                     )
                     for m in loaded
