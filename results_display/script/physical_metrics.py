@@ -109,8 +109,8 @@ class Target:
         session_path = detail_path.with_name("session_detail_%s.json" % detail_path.stem)
         if session_path.is_file():
             doc = json.loads(session_path.read_text(encoding="utf-8"))
-            cond = doc.get("conditions", {}).get(group, {})
-            self.sessions = cond.get("sessions", [])
+            cond = doc.get("conditions", {}).get(group, [])
+            self.sessions = cond if isinstance(cond, list) else cond.get("sessions", [])
         if not self.sessions:
             print("[warn] %s: no session rows at %s — CI unavailable" % (name, session_path))
 
@@ -264,10 +264,11 @@ def main(argv=None) -> int:
             if a.size < 5:
                 continue
             delta, lo, hi = paired_cluster_bootstrap(b, a)
-            sign = 1.0 if display in HIGHER_IS_BETTER else -1.0
-            # 误差类指标：VT 差 = delta>0；contact_f1 反之。
-            worse = (delta * sign) > 0.0 and lo * sign > 0.0
-            better = (delta * sign) < 0.0 and hi * sign < 0.0
+            # 误差类指标（低好）sign=+1：delta>0 ⇒ VT worse；
+            # higher-is-better（contact_f1）sign=-1 反向。
+            sign = -1.0 if display in HIGHER_IS_BETTER else 1.0
+            worse = (delta * sign) > 0.0 and (lo * sign) > 0.0
+            better = (delta * sign) < 0.0 and (hi * sign) < 0.0
             verdicts.setdefault("%s_vs_%s" % (name_vt, name_v), {})[display] = {
                 "delta": delta, "ci_lo": lo, "ci_hi": hi,
                 "verdict": "VT worse" if worse else ("VT better" if better else "within CI"),
