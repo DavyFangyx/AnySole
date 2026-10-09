@@ -41,6 +41,11 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "VAL_SEEDS": "0,1,2",
         "TEST_SEEDS": "0",
     },
+    "residual_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3C"],
+        "REQUIRES": [],
+    },
 }
 
 

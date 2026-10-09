@@ -25,6 +25,7 @@ CONFIG_DIR = Path(__file__).resolve().parents[1]
 TRAIN_ARG_FLAG_MAP = {
     "part_json": "--part-json",
     "assign_cluster": "--assign-cluster",
+    "init_from": "--init-from",
     "lambda_assign": "--lambda-assign",
     "lambda_assign_ent": "--lambda-assign-ent",
     "lambda_assign_conc": "--lambda-assign-conc",

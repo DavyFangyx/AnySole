@@ -102,6 +102,17 @@ def _append_train_args(command: list[str], spec: dict[str, Any]) -> None:
 
 def _write_initial_manifest(registry: dict[str, Any], experiment_id: str, model_id: str, root: Path) -> Path:
     spec = _merge_model_spec(registry, model_id)
+    # V3_3C fine-tune: the sanctioned provenance is the BASE ckpt passed to
+    # --init-from (deliberate exception to the 2026-09-24 no-warm-start
+    # independence rule; see z_note/multimodal_fusion/后续实验设计.md).
+    init_from = (spec.get("train_args") or {}).get("init_from")
+    if init_from:
+        source = resolve_path(str(init_from))
+        if source is None or not source.is_file():
+            raise FileNotFoundError(
+                "init_from base checkpoint missing for %s: %s" % (model_id, init_from))
+    else:
+        source = source_checkpoint(registry, model_id)
     manifest = {
         "version": 1,
         "experiment_id": experiment_id,
@@ -110,10 +121,9 @@ def _write_initial_manifest(registry: dict[str, Any], experiment_id: str, model_
         "git_sha": git_sha(),
         "status": "running",
         "model_spec": spec,
-        "checkpoint_source": str(source_checkpoint(registry, model_id) or ""),
-        "checkpoint_source_sha256": sha256_file(source_checkpoint(registry, model_id))
-        if source_checkpoint(registry, model_id)
-        else None,
+        "checkpoint_source": str(source or ""),
+        "checkpoint_source_sha256": sha256_file(source) if source else None,
+        "fine_tune_base": bool(init_from),
     }
     path = root / "run_manifest.json"
     write_json(path, manifest)

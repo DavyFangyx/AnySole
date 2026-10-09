@@ -42,6 +42,19 @@ MODELS = {
                   train_args={"lambda_assign": 0.05, "lambda_sigma": 0.01,
                               "sigma_freeze_frac": 0.1,
                               "lr_warmup_frac": 0.05, "grad_clip": 5.0}),
+    # V3_3C: frozen-V + zero-init T-residual fine-tune on the V3_3B_vonly
+    # specialist (VT-only windows, 200ep).  Deliberate, sanctioned exception
+    # to the 2026-09-24 no-warm-start independence rule — the base ckpt is the
+    # run's provenance (runner writes it into run_manifest.json with sha256).
+    # See z_note/multimodal_fusion/后续实验设计.md.
+    "V3_3C": dict(label="V3-3C", name="V3_3C", which="best", train=True, epochs=200,
+                  provides=("base", "foot_conv", "pose_parts9", "soft_parts",
+                            "gate_sigma", "residual_t"),
+                  train_args={"init_from": "results/AnySole/V3_3B_vonly_joint_and/checkpoints/ckpt_best.pt",
+                              "config_probs": [1.0, 0.0, 0.0],
+                              "lambda_assign": 0.0, "lambda_sigma": 0.0,
+                              "sigma_freeze_frac": 0.0,
+                              "lr_warmup_frac": 0.05, "grad_clip": 5.0}),
     "V3_4a": dict(label="V3-4a", name="V3_4a", which="last", train=True, epochs=740,
                   provides=("base", "foot_conv", "f2_repr", "pose_parts9"),
                   train_args={"lr_warmup_frac": 0.05, "grad_clip": 5.0}),
