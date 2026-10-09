@@ -43,6 +43,7 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V3_2": ModelEntry("V3_2", "v3_2", "9-part pose head"),
     "V3_3A": ModelEntry("V3_3A", "v3_3a", "9-part + soft A"),
     "V3_3B": ModelEntry("V3_3B", "v3_3b", "9-part + soft A + sigma gate"),
+    "V3_3C": ModelEntry("V3_3C", "v3_3c", "frozen-V (V3_3B_vonly base) + zero-init T-residual"),
     "V3_4a": ModelEntry("V3_4a", "v3_4a", "9-part on f2"),
     "V3_4b": ModelEntry("V3_4b", "v3_4b", "9-part soft A on f2"),
     "V3_4c": ModelEntry("V3_4c", "v3_4c", "9-part soft A + sigma gate on f2"),

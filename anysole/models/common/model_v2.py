@@ -22,8 +22,9 @@ from anysole.models.common.embeddings import SharedEmbeddings
 from anysole.models.common.encoders import ModalEncoders
 from anysole.models.common.fusion import FusionTransformer
 from anysole.models.common.pose_head import PoseHead
+from anysole.models.common.t_residual import TResidualBranch
 from anysole.models.common.traj_head import TrajHead
-from anysole.types import D_MODEL, TW
+from anysole.types import CONFIG_VT, D_MODEL, POSE_DIM, TW
 
 
 MODEL_ANYSOLEV2 = "anysolev2"
@@ -34,7 +35,8 @@ class AnySoleModelV2(nn.Module):
                  pose_layers=6, tactile_input="raw108",
                  tactile_direct=False, no_imu=False, v_input="hrnet",
                  t_encoder="linear", f2_repr=False, pose_parts=3,
-                 soft_parts=False, gate="none", part_joints=None):
+                 soft_parts=False, gate="none", part_joints=None,
+                 residual_t=False):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -48,6 +50,7 @@ class AnySoleModelV2(nn.Module):
         self.pose_parts = int(pose_parts)
         self.soft_parts = bool(soft_parts)
         self.gate = str(gate)
+        self.residual_t = bool(residual_t)
         if self.v_input not in ("hrnet", "hmr_gvhmr"):
             raise ValueError("v_input must be 'hrnet' or 'hmr_gvhmr', got %r" % self.v_input)
         if self.tactile_input not in ("raw108", "s2m50"):
@@ -76,6 +79,8 @@ class AnySoleModelV2(nn.Module):
         self.traj_head = TrajHead(dim=d, tw=tw, nhead=nhead, dropout=dropout,
                                   out_dim=4 if self.f2_repr else 3)
         self.aux_heads = AuxHeads(dim=d, tw=tw)
+        # V3_3C: frozen-V corrector reading the tactile stream only.
+        self.t_residual = TResidualBranch(d, POSE_DIM) if self.residual_t else None
 
     def forward(self, V_feat, T_raw, T_phys, config_id, subject_ids=None, T_s2m=None,
                 V_hmr=None, mask_v=None, mask_t=None):
@@ -107,6 +112,17 @@ class AnySoleModelV2(nn.Module):
         # Regression head: the fused memory is the only pose source.  Keyword
         # call — the pose head rejects positional diffusion-style arguments.
         x0_hat = self.pose_head(F=memory)
+        residual = None
+        if self.t_residual is not None:
+            # V3_3C: frozen-base corrector reading t_tok only.  The mask
+            # zeroes the correction under V-only/T-only, so those outputs stay
+            # bit-identical to the frozen base; at init the zeroed final layer
+            # makes the VT output identical to the base as well (VT == V).
+            residual = self.t_residual(t_tok)
+            t_present = (
+                config_id.to(device=x0_hat.device, dtype=torch.long).reshape(-1) == CONFIG_VT
+            ).to(x0_hat.dtype).view(-1, 1, 1)
+            x0_hat = x0_hat + t_present * residual
         v_hat, trans_hat = self.traj_head(fused)
         pressure_hat, vfeat_hat = self.aux_heads(fused)
         out = {
@@ -124,6 +140,9 @@ class AnySoleModelV2(nn.Module):
             # actually used by the forward (None for every other config).
             "part_logits": self.pose_head.part_logits if self.soft_parts else None,
             "part_assignment": self.pose_head.part_assignment() if self.soft_parts else None,
+            # V3_3C: detached tactile correction (zero under V-only/T-only;
+            # smoke tests and probes read this).
+            "x0_residual": residual.detach() if residual is not None else None,
         }
         if self.gate == "sigma":
             # Beta-NLL sigma supervision inputs (losses.py): the last layer's
