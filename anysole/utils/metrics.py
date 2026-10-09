@@ -44,6 +44,9 @@ METRIC_UNITS = {
     "root_orientation_deg": "degree",
     "root_orientation_drift_deg": "degree",
     "foot_sliding_mm": "mm/contact transition",
+    "global_mpjpe_mm": "mm",
+    "ground_pen_mm": "mm",
+    "ground_pen_frac": "fraction",
 }
 
 # Public motion metric set (formal tables).  ``shape_vertex_std_mm`` and the
@@ -451,3 +454,56 @@ def paired_cluster_bootstrap(
     distribution = np.concatenate(means)
     low, high = np.percentile(distribution, [2.5, 97.5])
     return float(difference.mean()), float(low), float(high)
+
+
+def cluster_bootstrap_ci(
+    values: np.ndarray,
+    *,
+    samples: int = 10_000,
+    seed: int = 20260923,
+) -> tuple[float, float, float]:
+    """Return (mean, 2.5th, 97.5th) of a cluster (session) bootstrap.
+
+    Resamples session indices with replacement; the per-draw mean of the
+    resampled sessions estimates the sampling distribution of the pooled
+    session mean.  Companion of :func:`paired_cluster_bootstrap` for
+    single-condition confidence intervals.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return float("nan"), float("nan"), float("nan")
+    generator = np.random.default_rng(seed)
+    chunk = 512
+    means: list[np.ndarray] = []
+    for start in range(0, samples, chunk):
+        count = min(chunk, samples - start)
+        indices = generator.integers(0, values.size, size=(count, values.size))
+        means.append(values[indices].mean(axis=1))
+    distribution = np.concatenate(means)
+    low, high = np.percentile(distribution, [2.5, 97.5])
+    return float(values.mean()), float(low), float(high)
+
+
+def ground_penetration(
+    joints: np.ndarray,
+    floor_y: float,
+    *,
+    threshold_mm: float = 1.0,
+) -> dict[str, float]:
+    """Ground penetration of a joint trajectory below the session floor.
+
+    ``joints`` is ``(T,J,3)`` in native Y-up meters; ``floor_y`` is the
+    session floor height in the same frame.  Per frame the deepest joint below
+    the floor is the penetration; returns its mean over frames (mm) and the
+    fraction of frames penetrating more than ``threshold_mm``.
+    """
+    joints = np.asarray(joints, dtype=np.float64)
+    if joints.ndim != 3 or joints.shape[-1] != 3:
+        raise ValueError("joints must have shape [T,J,3]")
+    pen = np.maximum(0.0, float(floor_y) - joints[..., 1]).max(axis=-1)
+    threshold_m = threshold_mm / 1000.0
+    return {
+        "ground_pen_mean_mm": float(pen.mean() * 1000.0),
+        "ground_pen_frac": float((pen > threshold_m).mean()),
+    }
