@@ -12,9 +12,12 @@ small T-residual branch on VT windows.
 - build() freezes every base parameter (requires_grad_(False)) and unfreezes
   only ``t_residual``; train.py constructs the optimizer after ``--init-from``,
   so the optimizer contains branch parameters only.
-- The branch's zero-initialized final layer guarantees VT == V at init; the
-  config_id mask bypasses the branch under V-only, so V2M output stays
-  bit-identical to the frozen base.
+- The frozen base runs in its V-only regime under every condition (model_v2
+  feeds the fusion a null tactile stream whenever the branch exists), so the
+  real tactile stream reaches the model only through the branch.
+- The branch's zero-initialized final layer guarantees VT == V at init (== the
+  base's V-only output bitwise); the config_id mask bypasses the branch under
+  V-only/T-only, so those outputs stay bit-identical to the frozen base.
 - This fine-tune is a deliberate, sanctioned exception to the 2026-09-24
   independence rule (no warm-start lineage): the base checkpoint is recorded
   in the run manifest (checkpoint_source + sha256).

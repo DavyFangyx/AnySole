@@ -103,7 +103,16 @@ class AnySoleModelV2(nn.Module):
             raise ValueError("V_hmr is required when v_input='hmr_gvhmr'")
         v_tok, t_tok = self.encoders(V_feat, T_tac, config_id, V_hmr=V_hmr,
                                      mask_v=mask_v, mask_t=mask_t)
-        fused = self.fusion(v_tok, t_tok)
+        if self.t_residual is not None:
+            # V3_3C: the frozen base never sees the real tactile stream — it
+            # runs in its V-only regime under every condition (the fused F is
+            # bit-identical to its V-only F), and the real t_tok reaches the
+            # model only through the residual branch.  This is what makes the
+            # init-time guarantee exact: out == base V-only output, and the
+            # branch can only add what the tactile stream carries.
+            fused = self.fusion(v_tok, self.embeddings.null_t.expand_as(t_tok))
+        else:
+            fused = self.fusion(v_tok, t_tok)
         memory = fused
         if self.tactile_direct:
             # E6.6b-style direct tactile memory next to the fused F (the null
@@ -114,10 +123,11 @@ class AnySoleModelV2(nn.Module):
         x0_hat = self.pose_head(F=memory)
         residual = None
         if self.t_residual is not None:
-            # V3_3C: frozen-base corrector reading t_tok only.  The mask
-            # zeroes the correction under V-only/T-only, so those outputs stay
-            # bit-identical to the frozen base; at init the zeroed final layer
-            # makes the VT output identical to the base as well (VT == V).
+            # V3_3C: the real tactile stream feeds only this branch; the
+            # mask zeroes the correction under V-only/T-only (outputs stay
+            # bit-identical to the frozen base's V-only regime), and at init
+            # the zeroed final layer makes the VT output identical to the
+            # frozen base's V-only output (the exact VT == V guarantee).
             residual = self.t_residual(t_tok)
             t_present = (
                 config_id.to(device=x0_hat.device, dtype=torch.long).reshape(-1) == CONFIG_VT
