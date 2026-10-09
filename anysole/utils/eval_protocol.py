@@ -67,6 +67,7 @@ from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.utils.metrics import (
     foot_sliding_joints,
     foot_sliding_vertices,
+    ground_penetration,
     matrix_rotation_error_degrees,
     mean_point_error,
     pa_mpjpe,
@@ -147,6 +148,9 @@ METRIC_DISPLAY_NAMES = {
     "foot_sliding_mm": "FootSliding",
     "jitter_gt_m_s3": "Jitter_gt",
     "jitter_pred_m_s3": "Jitter_pred",
+    "global_mpjpe_mm": "GlobalMPJPE",
+    "ground_pen_mm": "GroundPen",
+    "ground_pen_frac": "GroundPenFrac",
 }
 INVERSE_DISPLAY_NAMES = {
     display: internal for internal, display in METRIC_DISPLAY_NAMES.items()
@@ -154,9 +158,9 @@ INVERSE_DISPLAY_NAMES = {
 # Whole-body brief keys in their fixed JSON order — PA-MPJPE first so the
 # primary metric is visible at a glance; doubles as the brief whitelist.
 BRIEF_MOTION_KEYS = (
-    "pa_mpjpe_mm", "mpjpe_mm", "mpjae_deg", "w_mpjpe100_mm",
+    "pa_mpjpe_mm", "mpjpe_mm", "global_mpjpe_mm", "mpjae_deg", "w_mpjpe100_mm",
     "root_ate_mm", "root_orientation_drift_deg", "foot_sliding_mm",
-    "jitter_gt_m_s3", "jitter_pred_m_s3",
+    "ground_pen_mm", "jitter_gt_m_s3", "jitter_pred_m_s3",
 )
 # Keys the detail file reports but that are diagnostics, not formal metrics
 # (kept for training monitoring and history; excluded from brief by the
@@ -167,6 +171,10 @@ DIAGNOSTIC_KEYS = (
     # GT-beta pose-only PVE: AnySole 不生成 shape，此值仅诊断，不进 brief、
     # 不进正式表。
     "pve_mm",
+    # GT ground-penetration reference: the floor estimate is the 5th
+    # percentile of the GT joint heights, so GT penetrates slightly by
+    # construction — its value contextualizes the prediction rows only.
+    "ground_pen_gt_mm",
 )
 # Fixed group order of the brief file (json.dump sort_keys=False keeps it);
 # V2T is always fourth, absent groups are skipped rather than invented.
@@ -346,6 +354,9 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     gt_aligned, _ = pelvis_align(gt_np)
     accum.add_scalar("mpjpe_mm", float(mean_point_error(pred_aligned, gt_aligned, scale=1000.0).mean()), T)
     accum.add_scalar("pa_mpjpe_mm", float(pa_mpjpe(pred_np, gt_np).mean()), T)
+    # Global (unaligned) MPJPE over the protocol world frame — the only
+    # definition untouched by any alignment, complementary to PA-MPJPE.
+    accum.add_scalar("global_mpjpe_mm", float(mean_point_error(pred_np, gt_np, scale=1000.0).mean()), T)
     w_mpjpe, wa_mpjpe = windowed_world_mpjpe(pred_np, gt_np, window=100)
     accum.add_scalar("w_mpjpe100_mm", w_mpjpe, T)
     accum.add_scalar("wa_mpjpe100_mm", wa_mpjpe, T)
@@ -450,6 +461,18 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     contact["fp"] += int((pred_contact & ~gt_contact).sum().item())
     contact["fn"] += int((~pred_contact & gt_contact).sum().item())
     contact["tn"] += int((~pred_contact & ~gt_contact).sum().item())
+    # ---- ground penetration (native Y-up; floor = the dataset's GT
+    # 5th-percentile estimate).  The GT reference row penetrates slightly by
+    # construction and is a diagnostic, not a comparison metric. ----
+    floor_y = float(seq["floor_y"].reshape(1)[0].detach().cpu().item())
+    accum.add_scalar("ground_pen_mm", ground_penetration(pred_np, floor_y)["ground_pen_mean_mm"], T)
+    accum.add_scalar("ground_pen_frac", ground_penetration(pred_np, floor_y)["ground_pen_frac"], T)
+    accum.add_scalar(
+        "ground_pen_foot_mm",
+        ground_penetration(pred_np[:, ANKLE_FOOT_JOINTS], floor_y)["ground_pen_mean_mm"],
+        T,
+    )
+    accum.add_scalar("ground_pen_gt_mm", ground_penetration(gt_np, floor_y)["ground_pen_mean_mm"], T)
     # ---- joint limits (elbow/knee bone angle on the PREDICTED pose: the
     # plausibility check is that generated upper bodies don't fold joints
     # past what anatomy allows) ----
@@ -500,6 +523,53 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
             accum.add("T_corr", corr[corr_valid])
 
 
+def _window_detail_rows(seq: dict, tw: int) -> dict:
+    """Per-window pose errors of one session's full-sequence prediction.
+
+    Windows mirror the eval loop's non-overlapping layout (stride == tw); the
+    final window may be shorter when the session length is not a multiple of
+    ``tw``.  Overall PA uses the canonical per-frame similarity alignment
+    (metrics.py); part/region PA uses the protocol's ``_pa_align`` on the
+    window-local frames, matching the pooled per-part diagnostics.  Keys are
+    snake_case, matching the formulas.
+    """
+    T = seq["pred_pose"].shape[0]
+    kp_gt = seq["kp_gt"]
+    pred_kp = fk_pose6d(
+        seq["pred_pose"][None], seq["pred_trans"][None], seq["offsets"], seq["parents"]
+    )[0]
+    pred_np = pred_kp.detach().cpu().numpy()
+    gt_np = kp_gt.detach().cpu().numpy()
+    part_keys = ["PA-MPJPE_part_%s" % pname for pname in PART_NAMES]
+    region_keys = ["PA-MPJPE_upper", "PA-MPJPE_lower", "PA-MPJPE_anklefoot", "PA-MPJPE_hands"]
+    rows: dict = {
+        "frame_starts": [],
+        "n_frames": [],
+        "metrics": {key: [] for key in
+                    ["pa_mpjpe_mm", "mpjpe_mm", "global_mpjpe_mm"] + part_keys + region_keys},
+    }
+    for start in range(0, T, tw):
+        end = min(start + tw, T)
+        p, g = pred_np[start:end], gt_np[start:end]
+        rows["frame_starts"].append(int(start))
+        rows["n_frames"].append(int(end - start))
+        rows["metrics"]["pa_mpjpe_mm"].append(float(pa_mpjpe(p, g).mean()))
+        p_al, _ = pelvis_align(p)
+        g_al, _ = pelvis_align(g)
+        rows["metrics"]["mpjpe_mm"].append(float(mean_point_error(p_al, g_al, scale=1000.0).mean()))
+        rows["metrics"]["global_mpjpe_mm"].append(float(mean_point_error(p, g, scale=1000.0).mean()))
+        pa_w = _pa_align(pred_kp[start:end], kp_gt[start:end])
+        pa_err_w = torch.linalg.vector_norm(pa_w - kp_gt[start:end], dim=-1)
+        for pname, joints in zip(PART_NAMES, PART_JOINTS):
+            rows["metrics"]["PA-MPJPE_part_%s" % pname].append(
+                float(pa_err_w[:, joints].mean() * 1000.0))
+        rows["metrics"]["PA-MPJPE_upper"].append(float(pa_err_w[:, UPPER_JOINTS].mean() * 1000.0))
+        rows["metrics"]["PA-MPJPE_lower"].append(float(pa_err_w[:, LOWER_JOINTS].mean() * 1000.0))
+        rows["metrics"]["PA-MPJPE_anklefoot"].append(float(pa_err_w[:, ANKLE_FOOT_JOINTS].mean() * 1000.0))
+        rows["metrics"]["PA-MPJPE_hands"].append(float(pa_err_w[:, HAND_JOINTS].mean() * 1000.0))
+    return rows
+
+
 def _degrade_inputs(v_feat, t_raw, t_phys, t_s2m, tw: int, kind: str, rng: np.random.RandomState):
     """Zero one contiguous 20-40% span of frames on the V or T stream
     (robustness set).  Windows are non-overlapping, so window w covers session
@@ -525,15 +595,24 @@ def _evaluate_config(
     sample_steps: int, warm_start: bool, tw: int, forward_axis: int,
     degrade: Optional[str] = None, seed: int = 0,
     v2t_out_dir: Optional[Path] = None,
-) -> Dict[str, float]:
+    dump_detail: bool = False,
+) -> Tuple[Dict[str, float], dict, List[dict]]:
     """Full-session inference for one conditioning config, then all protocol
-    metrics.  ``degrade`` in ("v", "t") adds the robustness span dropout."""
+    metrics.  ``degrade`` in ("v", "t") adds the robustness span dropout.
+
+    With ``dump_detail`` the per-session rows and per-window pose errors are
+    collected alongside the pooled result (the pooled accumulation sequence is
+    unchanged, so the pooled numbers are bit-identical either way).  Returns
+    ``(result, window_rows, session_rows)``.
+    """
     # F1: hmr_gvhmr checkpoints consume the GVHMR channel.
     v_hmr_mode = str(getattr(model, "v_input", "hrnet")) == "hmr_gvhmr"
     # F2a: heading/tilt representation.
     f2_repr = bool(getattr(model, "f2_repr", False))
     accum = _Accum()
     contact = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
+    window_rows = {"session_ids": [], "frame_starts": [], "n_frames": [], "metrics": {}}
+    session_rows: List[dict] = []
     groups = _session_window_groups(dataset)
     session_by_id = {s["session_id"]: s for s in dataset.sessions}
     with torch.inference_mode():
@@ -608,7 +687,41 @@ def _evaluate_config(
                     "parents": batch["parents"][0],
                     "betas": batch["betas"][0],
                 }
-            _session_metrics(seq, tw, forward_axis, config_value, accum, contact)
+            if dump_detail:
+                # Per-session accumulation, merged into the pooled accum in the
+                # same summation sequence as the direct path, so the pooled
+                # result stays bit-identical with or without the dump.
+                sess_accum = _Accum()
+                sess_contact = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
+                _session_metrics(seq, tw, forward_axis, config_value, sess_accum, sess_contact)
+                for name, value in sess_accum.sums.items():
+                    accum.sums[name] = accum.sums.get(name, 0.0) + value
+                    accum.counts[name] = accum.counts.get(name, 0.0) + sess_accum.counts[name]
+                for key in contact:
+                    contact[key] += sess_contact[key]
+                sess_metrics = sess_accum.means()
+                p_c = sess_contact["tp"] / max(sess_contact["tp"] + sess_contact["fp"], 1)
+                r_c = sess_contact["tp"] / max(sess_contact["tp"] + sess_contact["fn"], 1)
+                sess_metrics["contact_f1"] = 2.0 * p_c * r_c / max(p_c + r_c, 1e-8)
+                sess_metrics["contact_acc"] = (sess_contact["tp"] + sess_contact["tn"]) / max(
+                    sess_contact["tp"] + sess_contact["fp"] + sess_contact["fn"] + sess_contact["tn"], 1)
+                sess_metrics["contact_recall"] = sess_contact["tp"] / max(sess_contact["tp"] + sess_contact["fn"], 1)
+                sess_metrics["air_recall"] = sess_contact["tn"] / max(sess_contact["tn"] + sess_contact["fp"], 1)
+                sess_metrics["contact_balanced_acc"] = 0.5 * (
+                    sess_metrics["contact_recall"] + sess_metrics["air_recall"])
+                session_rows.append({
+                    "session_id": str(session_id),
+                    "n_frames": int(seq["pred_pose"].shape[0]),
+                    "metrics": sess_metrics,
+                })
+                w_rows = _window_detail_rows(seq, tw)
+                window_rows["session_ids"].extend([str(session_id)] * len(w_rows["frame_starts"]))
+                window_rows["frame_starts"].extend(w_rows["frame_starts"])
+                window_rows["n_frames"].extend(w_rows["n_frames"])
+                for key, values in w_rows["metrics"].items():
+                    window_rows["metrics"].setdefault(key, []).extend(values)
+            else:
+                _session_metrics(seq, tw, forward_axis, config_value, accum, contact)
             if (config_value == CONFIG_V and v2t_out_dir is not None
                     and seq.get("pressure_pred") is not None):
                 pred_kp = fk_pose6d(
@@ -676,7 +789,7 @@ def _evaluate_config(
         result["accel_dist_err_upper_ms2"] = abs(
             result["accel_mag_upper_ms2"] - result["accel_mag_upper_gt_ms2"]
         )
-    return result
+    return result, window_rows, session_rows
 
 
 def run_protocol(
@@ -700,15 +813,24 @@ def run_protocol(
     out_path: Path,
     brief_out: Optional[Path] = None,
     v2t_out_dir: Optional[Path] = None,
+    dump_detail: bool = False,
 ) -> Dict[str, Dict[str, float]]:
     """Run the full F0a protocol and write metrics/<split>.json (detail) and,
-    when brief_out is given, metrics/<split>_brief.json (whole-body brief)."""
+    when brief_out is given, metrics/<split>_brief.json (whole-body brief).
+
+    ``dump_detail`` additionally writes the per-window pose errors and
+    per-session metric rows next to ``out_path``
+    (window_detail_<split>.json / session_detail_<split>.json, snake_case keys);
+    the pooled files are bit-identical either way.
+    """
     if dataset.stride != dataset.window_length:
         print("protocol skipped: dataset stride %d != window %d (E6.4 continuation eval)"
               % (dataset.stride, dataset.window_length))
         return {}
     forward_axis = _pick_forward_axis(dataset, device)
     metrics: Dict[str, Dict[str, float]] = {}
+    window_conditions: Dict[str, dict] = {}
+    session_conditions: Dict[str, dict] = {}
     # Deterministic protocol runs.  Sigma-seed for diffusion models comes from
     # three runs with --protocol-seed 0/1/2; regression models have no
     # sampling randomness (dropout is off in eval mode).
@@ -718,20 +840,24 @@ def run_protocol(
         torch.manual_seed(seed)
         for config_value in config_values:
             name = CONFIG_MODE_NAMES[config_value]
-            metrics[name] = _evaluate_config(
+            metrics[name], window_rows, session_rows = _evaluate_config(
                 dataset, model, device, config_value, regress_mode, diffusion,
                 sample_steps, warm_start, tw, forward_axis,
                 v2t_out_dir=v2t_out_dir,
+                dump_detail=dump_detail,
             )
+            if dump_detail:
+                window_conditions[name] = window_rows
+                session_conditions[name] = session_rows
             print("protocol %s: mpjpe=%.3fmm pa_mpjpe=%.3fmm w_mpjpe100=%.3fmm"
                   % (name, metrics[name]["mpjpe_mm"], metrics[name]["pa_mpjpe_mm"],
                      metrics[name].get("w_mpjpe100_mm", float("nan"))))
         if robustness and CONFIG_VT in config_values:
-            metrics["robust_vdrop"] = _evaluate_config(
+            metrics["robust_vdrop"], _, _ = _evaluate_config(
                 dataset, model, device, CONFIG_VT, regress_mode, diffusion,
                 sample_steps, warm_start, tw, forward_axis, degrade="v", seed=seed,
             )
-            metrics["robust_tdrop"] = _evaluate_config(
+            metrics["robust_tdrop"], _, _ = _evaluate_config(
                 dataset, model, device, CONFIG_VT, regress_mode, diffusion,
                 sample_steps, warm_start, tw, forward_axis, degrade="t", seed=seed,
             )
@@ -786,4 +912,28 @@ def run_protocol(
         print("wrote %s (+ %s)" % (out_path, brief_out.name))
     else:
         print("wrote %s" % out_path)
+    if dump_detail:
+        # Per-window / per-session detail dumps next to the pooled detail
+        # file; keys stay snake_case (formula names).  Written compact
+        # (no indent) — these files carry hundreds of thousands of values.
+        common = {
+            "checkpoint": checkpoint_path,
+            "split": split,
+            "tw": tw,
+            "contact_method": contact_method,
+            "dump_version": 1,
+        }
+        window_path = out_path.with_name("window_detail_%s.json" % split)
+        window_path.write_text(
+            json.dumps({**common, "conditions": window_conditions},
+                       sort_keys=False, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        session_path = out_path.with_name("session_detail_%s.json" % split)
+        session_path.write_text(
+            json.dumps({**common, "conditions": session_conditions},
+                       sort_keys=False, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print("wrote detail dumps (+ %s, %s)" % (window_path.name, session_path.name))
     return metrics

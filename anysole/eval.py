@@ -237,6 +237,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="F0a: skip the protocol robustness rows (contiguous 20-40%% V / T frame "
         "dropout under VT2M).",
     )
+    parser.add_argument(
+        "--dump-detail",
+        action="store_true",
+        help="Also write per-window and per-session metric detail JSONs next to the "
+        "protocol file (window_detail_<split>.json / session_detail_<split>.json).",
+    )
     return parser.parse_args(argv)
 
 
@@ -863,6 +869,7 @@ def _evaluate_one(
         out_path=protocol_out,
         brief_out=metrics_out,
         v2t_out_dir=motion_out,
+        dump_detail=args.dump_detail,
     )
     if not final_metrics:
         raise RuntimeError(
