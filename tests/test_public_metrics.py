@@ -266,7 +266,7 @@ def test_common19_deleted():
                  "select_common_joints", "select_common_rotations", "common_edges_for",
                  "frame_mpjpe_mm"):
         check("compare_core has no %s" % name, not hasattr(cc, name))
-    check("pve_t_mm gone", "pve_t_mm" not in canonical.METRIC_UNITS)
+    check("pve_t_mm restored for predicted shapes", "pve_t_mm" in canonical.METRIC_UNITS)
     check("native protocol labels", hasattr(cc, "PROTOCOL_LABELS"))
     check("smpl24-native label", cc.PROTOCOL_LABELS.get("smpl24") == "smpl24-native")
     check("bvh23-native label", cc.PROTOCOL_LABELS.get("bvh23") == "bvh23-native")
