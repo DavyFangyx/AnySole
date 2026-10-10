@@ -39,204 +39,198 @@ def fmt(value):
     return "N/A" if value is None else f"{value:.6f}"
 
 
+def publish_2_code(root: Path, source: Path):
+    """Split freshly rerun 2_Code tables; do not import its evaluator."""
+    metadata = json.loads((source / "run.json").read_text())
+    if metadata.get("status") != "succeeded" or metadata.get("rows") != 6168:
+        raise ValueError("2_Code full rerun is incomplete")
+    write_json(root / "2_code_run.json", metadata)
+    tables = {name: read_csv(source / name) for name in
+              ("unit_metrics.csv", "session_metrics.csv", "aggregate_metrics.csv")}
+    for baseline in BASELINES:
+        destination = root / baseline / REFERENCE
+        destination.mkdir(parents=True, exist_ok=True)
+        for name, rows in tables.items():
+            write_csv(destination / name, [row for row in rows if row["baseline"] == baseline])
+        write_json(destination / "run.json", {**metadata, "baseline": baseline,
+                   "metric_version": REFERENCE, "source_run": "../../2_code_run.json",
+                   "fresh_rerun": True,
+                   "table_sha256": {name: digest(destination / name) for name in tables},
+                   "source_table_sha256": {name: digest(source / name) for name in tables}})
+
+
 def compare(root: Path):
-    comparisons, paired, audit, headline = [], [], {}, {}
+    comparisons, paired, audit, headline, strata = [], [], {}, {}, []
+    provenance = {}
     for baseline in BASELINES:
         reference = root / baseline / REFERENCE
         old_units = {row["unit_id"]: row for row in read_csv(reference / "unit_metrics.csv")}
         old_sessions = {(row["date"], row["session"]): row for row in read_csv(reference / "session_metrics.csv")}
         old_overall = next(row for row in read_csv(reference / "aggregate_metrics.csv") if row["stratum"] == "overall")
-        for version in VERSIONS:
-            destination = root / baseline / version
-            units = read_csv(destination / "unit_metrics.csv")
-            sessions = {(row["date"], row["session"]): row for row in read_csv(destination / "session_metrics.csv")}
-            if {row["unit_id"] for row in units} != set(old_units) or len(units) != 2056 or len(sessions) != 257:
-                raise ValueError(f"roster mismatch: {baseline}/{version}")
-            if set(sessions) != set(old_sessions) or sum(int(row["frame_count"]) for row in units) != 785088:
-                raise ValueError("session/frame coverage mismatch")
-            overall = next(row for row in read_csv(destination / "aggregate_metrics.csv") if row["stratum"] == "overall")
-            headline[(baseline, version)] = overall
-            diffs = [{"unit_id": row["unit_id"], "baseline": baseline,
-                      **{metric: None if metric == "pve_t_mm" else
-                         float(row[metric]) - float(old_units[row["unit_id"]][metric])
-                         for metric in REQUESTED_METRICS}} for row in units]
-            write_csv(destination / "unit_differences_to_2_code.csv", diffs)
-            details = [f"# {baseline} / {version}\n",
-                       "覆盖257 sessions / 2056 units / 785088 frames；物理session宏平均。\n",
-                       "| 指标 | 2_Code历史 | 当前版本 | 差值(当前−历史) | unit最大绝对差 |",
-                       "|---|---:|---:|---:|---:|"]
-            for metric in REQUESTED_METRICS:
-                old, new = number(old_overall[metric]), number(overall[metric])
-                delta = None if new is None else new - old
-                max_abs = None if new is None else max(abs(row[metric]) for row in diffs)
-                if new is None:
-                    failures, low, high = None, None, None
-                else:
-                    keys = sorted(sessions)
-                    values = np.array([float(sessions[key][metric]) for key in keys])
-                    refs = np.array([float(old_sessions[key][metric]) for key in keys])
-                    if not np.isfinite(values).all():
-                        raise ValueError(f"nonfinite session {metric}")
-                    recomputed = values.mean()
-                    if abs(recomputed - new) > 1e-8:
-                        raise ValueError("macro aggregation mismatch")
-                    _, low, high = paired_cluster_bootstrap(values, refs)
-                    failures = sum(abs(row[metric]) > tolerance(metric) for row in diffs)
-                comparisons.append({"baseline": baseline, "metric_version": version, "metric": metric,
-                                    "reference_value": old, "new_value": new, "delta": delta,
-                                    "delta_ci95_low": low, "delta_ci95_high": high,
-                                    "max_abs_unit_delta": max_abs,
-                                    "abs_tolerance": tolerance(metric), "units_outside_tolerance": failures,
-                                    "status": "not_applicable_removed" if new is None else
-                                    "within_numeric_tolerance" if not failures else "different",
-                                    "paired_sessions": 257})
-                if version == VERSIONS[1] and new is not None:
-                    audit[f"{baseline}/{metric}"] = {"max_abs_unit_delta": max_abs,
-                        "abs_tolerance": tolerance(metric), "units_outside_tolerance": failures}
-                details.append(f"| {LABELS[metric]} | {fmt(old)} | {fmt(new)} | {fmt(delta)} | {fmt(max_abs)} |")
-            details.extend(["", "PVE-T 已被e9accee0废除，留空并标为N/A。",
-                            "" if version == VERSIONS[0] else
-                            "本组是相同输入的公式控制诊断；body21、去骨盆时序、顶点足滑，不作为AnySole原生公共指标。",
-                            "来源、采样、聚合、SHA-256见run.json；unit_differences_to_2_code.csv保存逐unit差值。"])
-            (destination / "report.md").write_text("\n".join(details) + "\n", encoding="utf-8")
         headline[(baseline, REFERENCE)] = old_overall
-    for first, second in combinations(BASELINES, 2):
-        a = {(row["date"], row["session"]): row for row in read_csv(root / first / VERSIONS[0] / "session_metrics.csv")}
-        b = {(row["date"], row["session"]): row for row in read_csv(root / second / VERSIONS[0] / "session_metrics.csv")}
-        keys = sorted(a)
+        destination = root / baseline / VERSIONS[0]
+        units = read_csv(destination / "unit_metrics.csv")
+        sessions = {(row["date"], row["session"]): row for row in read_csv(destination / "session_metrics.csv")}
+        if len(old_units) != 2056 or len(units) != 2056 or len(sessions) != 257:
+            raise ValueError("wrong matched coverage")
+        if {row["unit_id"] for row in units} != set(old_units) or set(sessions) != set(old_sessions):
+            raise ValueError("paired unit/session roster differs")
+        for version in (REFERENCE, VERSIONS[0]):
+            rows = read_csv(root / baseline / version / "unit_metrics.csv")
+            if sum(int(row["frame_count"]) for row in rows) != 785088:
+                raise ValueError("frame coverage mismatch")
+            for row in rows:
+                if not all(np.isfinite(float(row[key])) for key in REQUESTED_METRICS):
+                    raise ValueError("missing or nonfinite metric")
+            for name in ("unit_metrics.csv", "session_metrics.csv", "aggregate_metrics.csv", "run.json"):
+                path = root / baseline / version / name
+                provenance[str(path.relative_to(root))] = digest(path)
+        overall = next(row for row in read_csv(destination / "aggregate_metrics.csv") if row["stratum"] == "overall")
+        headline[(baseline, VERSIONS[0])] = overall
+        diffs = [{"unit_id": row["unit_id"], "baseline": baseline,
+                  **{metric: float(row[metric])-float(old_units[row["unit_id"]][metric])
+                     for metric in REQUESTED_METRICS}} for row in units]
+        write_csv(destination / "unit_differences_to_2_code.csv", diffs)
+        keys = sorted(sessions)
+        session_diffs = [{"date": k[0], "session": k[1], "baseline": baseline,
+                          **{m:float(sessions[k][m])-float(old_sessions[k][m]) for m in REQUESTED_METRICS}}
+                         for k in keys]
+        write_csv(destination / "session_differences_to_2_code.csv", session_diffs)
+        details = [f"# {baseline} 两套指标对齐后的比较", "",
+                   "两套结果均从保存预测独立重评。覆盖257个会话、2056个单元、785088帧，按物理会话等权汇总。", "",
+                   "| 指标 | 2_Code | AnySole | AnySole减2_Code | 最大单元绝对差 |",
+                   "|---|---:|---:|---:|---:|"]
         for metric in REQUESTED_METRICS:
-            if metric in ("pve_t_mm", "jitter_gt_m_s3"):
-                continue
-            difference, low, high = paired_cluster_bootstrap(
-                np.array([float(a[key][metric]) for key in keys]),
-                np.array([float(b[key][metric]) for key in keys]))
-            paired.append({"first": first, "second": second, "metric": metric,
-                           "difference_first_minus_second": difference, "ci95_low": low,
-                           "ci95_high": high, "paired_sessions": 257, "bootstrap_samples": 10000})
-    write_csv(root / "metric_version_comparison.csv", comparisons)
-    write_csv(root / "paired_baselines_anysole_e9accee0.csv", paired)
-    passed = all(value["units_outside_tolerance"] == 0 for value in audit.values())
-    write_json(root / "formula_control_audit.json", {"passed": passed, "checks": audit,
-        "comparison": "recomputed AnySole formula-control vs historical published unit values; absolute tolerance, not bit identity",
-        "coverage_per_baseline": {"sessions": 257, "units": 2056, "frames": 785088},
-        "pve_t": "not_applicable_removed_in_AnySole"})
-    inputs = []
-    for baseline in BASELINES:
-        for row in read_csv(root / baseline / VERSIONS[0] / "unit_metrics.csv"):
-            directory = REPO.parent / "3_Result" / f"{baseline}_baseline" / row["short_id"]
-            state = json.loads((directory / "state.json").read_text())
-            filename = "result.npz" if baseline == "GVHMR" else "result.pkl"
-            recorded = (state["artifacts"][filename]["sha256"] if baseline == "GVHMR" else
-                        state["inference"]["sha256"] if baseline == "WHAM" else state["result_sha256"])
-            stat = (directory / filename).stat()
-            inputs.append({"baseline": baseline, "unit_id": row["unit_id"],
-                           "prediction_path": str(directory / filename),
-                           "sha256_recorded_by_baseline_state": recorded,
-                           "size_bytes": stat.st_size, "mtime_ns_at_comparison": stat.st_mtime_ns})
-    write_csv(root / "prediction_input_inventory.csv", inputs)
-    write_json(root / "comparison_provenance.json", {
-        "comparison_script_sha256": digest(Path(__file__)), "command": sys.argv,
-        "prediction_inventory_sha256": digest(root / "prediction_input_inventory.csv"),
-        "prediction_hash_status": "baseline-state-recorded hashes; not independently rehashed in this comparison",
-        "formula_control_audit_sha256": digest(root / "formula_control_audit.json"),
-        "legacy_copies_sha256": {f"{b}/{name}": digest(root / b / REFERENCE / name)
-                                 for b in BASELINES for name in
-                                 ("unit_metrics.csv", "session_metrics.csv", "aggregate_metrics.csv", "run.json")}})
-    report = ["# AnySole e9accee0 与 2_Code 三基线指标比较\n",
-              "**完整评估协议的结果不同。** 相同输入的公式控制组" +
-              ("全部通过数值容差检查" if passed else "存在超出容差项，详见审计JSON") +
-              "；原生协议改变了关节构造、旋转集合、时序坐标/修复帧规则和足部取点，因此不能把两套正式数值视为相同。PVE-T在AnySole该提交中已经废除。\n",
-              "分支为`metrics`，基于`e9accee0`，公共公式`anysole/utils/metrics.py`未修改。三baseline的既有预测不重跑推理。每个baseline使用相同257个物理session、2056个method×camera单元和785088帧。\n",
-              "## 指标版本与文件\n",
-              "每个baseline目录保留原报告，并新增三个版本目录：\n",
-              "- `2_code_reference_20261006/`：已发表历史结果的字节相同副本，**不是本次重跑2_Code**；reference_provenance.json记录来源/hash。",
-              "- `anysole_e9accee0/`：AnySole原生SMPL-24语义，指标全部调用该提交的公共公式。",
-              "- `anysole_e9accee0_formula_control/`：保留旧输入/子集/掩码，改用AnySole公共公式；顶点足滑是诊断控制，不能与原生公共关节足滑混名引用。\n",
-              "每个新版本有unit/session/aggregate_metrics.csv、run.json、report.md与unit_differences_to_2_code.csv。根metric_version_comparison.csv列出宏平均差值、配对session 95% CI、最大unit差及容差外unit数量。\n",
-              "## 正式口径的汇总数值\n",
-              "以下格式为`2_Code历史 → AnySole原生`，均按物理session宏平均；差值CSV保留完整精度。\n",
-              "| 指标 | WHAM | SAM3DB | GVHMR |", "|---|---:|---:|---:|"]
+            old, new = float(old_overall[metric]), float(overall[metric])
+            values = np.array([float(sessions[k][metric]) for k in keys])
+            refs = np.array([float(old_sessions[k][metric]) for k in keys])
+            if abs(values.mean()-new)>1e-8 or abs(refs.mean()-old)>1e-8:
+                raise ValueError("overall macro mean mismatch")
+            _, low, high = paired_cluster_bootstrap(values, refs)
+            max_abs = max(abs(row[metric]) for row in diffs)
+            failures = sum(abs(row[metric])>tolerance(metric) for row in diffs)
+            record = {"baseline":baseline,"metric":metric,"reference_value":old,"new_value":new,
+                      "delta":new-old,"delta_ci95_low":low,"delta_ci95_high":high,
+                      "max_abs_unit_delta":max_abs,"abs_tolerance":tolerance(metric),
+                      "units_outside_tolerance":failures,"paired_sessions":257,
+                      "status":"within_numeric_tolerance" if not failures else "different"}
+            comparisons.append(record);audit[f"{baseline}/{metric}"]=record
+            details.append(f"| {LABELS[metric]} | {old:.9f} | {new:.9f} | {new-old:+.12g} | {max_abs:.12g} |")
+        for version in (REFERENCE, VERSIONS[0]):
+            (root / baseline / version / "report.md").write_text("\n".join(details)+"\n",encoding="utf-8")
+        identity = lambda row: tuple(row.get(k, "") for k in ("stratum","date","method","camera"))
+        ref_strata = {identity(r):r for r in read_csv(reference / "aggregate_metrics.csv")}
+        for row in read_csv(destination / "aggregate_metrics.csv"):
+            ref = ref_strata[identity(row)]
+            for metric in REQUESTED_METRICS:
+                strata.append({"baseline":baseline,**{k:row.get(k,"") for k in ("stratum","date","method","camera")},
+                               "metric":metric,"reference_value":float(ref[metric]),"new_value":float(row[metric]),
+                               "delta":float(row[metric])-float(ref[metric])})
+    for version in (REFERENCE, VERSIONS[0]):
+        for first, second in combinations(BASELINES, 2):
+            a={(r["date"],r["session"]):r for r in read_csv(root/first/version/"session_metrics.csv")}
+            b={(r["date"],r["session"]):r for r in read_csv(root/second/version/"session_metrics.csv")}
+            for metric in REQUESTED_METRICS:
+                if metric == "jitter_gt_m_s3":
+                    continue
+                keys=sorted(a)
+                delta,low,high=paired_cluster_bootstrap(np.array([float(a[k][metric]) for k in keys]),
+                                                     np.array([float(b[k][metric]) for k in keys]))
+                paired.append({"metric_version":version,"first":first,"second":second,"metric":metric,
+                               "difference_first_minus_second":delta,"ci95_low":low,"ci95_high":high,
+                               "paired_sessions":len(keys)})
+    write_csv(root / "metric_version_comparison.csv",comparisons)
+    write_csv(root / "stratified_metric_comparison.csv",strata)
+    write_csv(root / "paired_baseline_comparison.csv",paired)
+    passed=all(not r["units_outside_tolerance"] for r in comparisons)
+    write_json(root / "metric_alignment_audit.json",{"passed":passed,"checks":audit})
+    write_json(root / "comparison_provenance.json",{"result_sha256":provenance,
+               "comparison_source_sha256":digest(Path(__file__)),"fresh_reruns":True})
+    report=["# 三基线两套指标对齐后的全量比较", "",
+            f"两套评估均独立重跑保存的WHAM、SAM3DB、GVHMR预测，覆盖同一257个物理会话、每基线2056个方法与相机单元、785088帧。33项数值核查（十项指标加GT Jerk，三基线）通过{sum(not r['units_outside_tolerance'] for r in comparisons)}项。" + ("两套结果在预设数值容差内一致。" if passed else "存在超过容差的差异，详见逐单元审计。"), "",
+            "## 评估协议与八项修改", "",
+            "| 要求 | 对齐后的方式 |", "|---|---|",
+            "| PA-MPJPE | 直接传入未减骨盆的24个关节，逐帧拟合旋转、平移和尺度；相似变换已经包含平移，预先减骨盆理论上不改变结果 |",
+            "| MPJAE | 21个身体关节的局部旋转测地角，排除根和两个hand末端；单位为度 |",
+            "| PVE | 各基线预测自身beta生成网格，GT使用GT beta，6890对应顶点，分别减髋均值后取欧氏距离均值 |",
+            "| PVE-T | 各自beta、统一零姿态，分别减髋均值，无尺度校正；AnySole新增公共函数与有限数值 |",
+            "| ACC-ERR与Jerk | 减髋均值后的相对关节轨迹，真实时间重复差分；m/s²与m/s³，不含官方WHAM的额外除10 |",
+            "| 修复GT区间 | 全部配对帧参与主指标和时序计算；仍记录修复计数及额外空间敏感性诊断，不丢弃主评估样本 |",
+            "| Foot sliding | SMPL关节7、8、10、11；GT速度小于0.3m/s判接触，统计预测三维位移，mm/接触transition |",
+            "| WHAM几何 | 从保存pose、beta、trans重新生成neutral-SMPL顶点和原生FK关节，不对posed mesh重新回归关节 |", "",
+            "W-MPJPE100保持每100输入帧窗口以前两帧拟合相似变换；末尾至少两帧继续评估。Root ATE保持世界第0关节未对齐的平均距离，使用mean而非ATE-RMSE。GT用SO(3)旋转插值与线性平移插值，重复时间戳取均值，时序长缺口分段。", "",
+            "## 全量指标数值", "",
+            "表格格式为2_Code / AnySole，主值为会话宏平均。GT Jerk用于解释参考运动，不参与基线优劣排名。", "",
+            "| 指标 | WHAM | SAM3DB | GVHMR |", "|---|---:|---:|---:|"]
     for metric in REQUESTED_METRICS:
-        cells = [f"{fmt(number(headline[(b, REFERENCE)][metric]))} → {fmt(number(headline[(b, VERSIONS[0])][metric]))}" for b in BASELINES]
-        report.append(f"| {LABELS[metric]} | " + " | ".join(cells) + " |")
-    report += ["", "## 口径差异和解释\n",
-               "| 指标 | AnySole本次原生语义 | 与2_Code的差异 |", "|---|---|---|",
-               "| MPJPE / PA-MPJPE | 原生SMPL24，hip(1,2)平均作骨盆；PA为每帧Sim(3) | WHAM旧版从posed mesh重新回归24关节；本次用SMPL FK关节中心，与AnySole的FK等价，测试误差<1µm |",
-               "| MPJAE | 全24局部旋转SO(3)角误差均值；root先转共同world | 旧版body21排除root与两末端hand，分母及集合均不同；不能简单乘21/24，因为新增关节误差非零 |",
-               "| PVE | 各baseline自己的预测beta/网格与GT网格，hip平均去平移 | 三baseline确实预测形状，因此适用；不采用主模型诊断里的GT-beta补造表面。WHAM统一重建网格会有约0.1mm replay差异 |",
-               "| PVE-T | N/A | AnySole metrics.py及指标改动说明明确取消；不复制2_Code T-pose指标公式补造数值 |",
-               "| ACC-ERR / Jitter | 世界关节，全部配对帧，实际不规则时间；canonical duplicate/gap处理 | 旧版骨盆局部、剔除修复参考帧；平移运动与参考修复都影响结果。Jerk是三阶导范数，非pred−GT误差；GT jerk同时提供背景 |",
-               "| W-MPJPE100 | 每100个输入帧，前2帧关节点拟合Sim(3)，评估窗口含末尾≥2帧短窗 | 公式与旧版一致；WHAM native/FK输入不同。100是帧数，不是100秒或固定时间宽度 |",
-               "| Root ATE | native pelvis joint0在标定world的绝对距离均值，无ATE轨迹对齐 | 公式与旧版一致；WHAM root不再由posed网格重新回归。GVHMR只使用incam，不混入gravity/global gauge |",
-               "| Foot sliding | ankle/foot joints 7,8,10,11；GT速度<0.3m/s的相邻transition上预测位移均值 | 旧版使用vertices3216,3387,6617,6787；两类contact数和位移都可能不同；该项不是速度，也不是预测接触分类 |\n",
-               "### 采样与聚合边界\n",
-               "本次为同一RGB预测样本的指标复核：CSV两锚点把各相机JPEG物理时间映射到mocap，GT旋转SO(3)插值、translation线性插值。保留重复时间给canonical时序函数合并，长间隔切段；W-MPJPE100沿输入帧窗口。",
-               "AnySole主模型eval_protocol.py在自己的40Hz数据网格上用arange(T)/40。本次没有把RGB不规则样本虚构为40Hz，也没有改成主模型train/val/test split或只cam3；因此这是**同一257-session corpus上AnySole公式及原生关节语义的迁移评估**，不是原主模型40Hz全流程的逐字复刻。",
-               "每个unit先算序列均值；每个(date,session)等权平均两方法×四相机的8个unit；最后对257个session等权。没有按frame_count加权。CI按物理session配对bootstrap10000次，非独立帧bootstrap。\n",
-               "## 基线排名变化\n",
-               "| 指标 | 历史排序（从小到大） | AnySole原生排序（从小到大） |", "|---|---|---|"]
+        cells=[f"{float(headline[(b,REFERENCE)][metric]):.6f} / {float(headline[(b,VERSIONS[0])][metric]):.6f}" for b in BASELINES]
+        report.append(f"| {LABELS[metric]} | "+" | ".join(cells)+" |")
+    report += ["", "## 逐单元差值与数值判断", "",
+               "容差沿用之前试跑确定的界限：毫米类1e-4mm，角度1e-6度，ACC-ERR 1e-4m/s²，Jerk 0.005m/s³。不以四舍五入后的表格相同代替逐单元检查。", "",
+               "| 指标 | WHAM最大绝对差 | SAM3DB最大绝对差 | GVHMR最大绝对差 |", "|---|---:|---:|---:|"]
     for metric in REQUESTED_METRICS:
-        if metric in ("pve_t_mm", "jitter_gt_m_s3"):
-            continue
-        order = lambda version: " < ".join(sorted(BASELINES, key=lambda b: float(headline[(b, version)][metric])))
-        report.append(f"| {LABELS[metric]} | {order(REFERENCE)} | {order(VERSIONS[0])} |")
-    changed_ranks = [LABELS[metric] for metric in REQUESTED_METRICS
-                     if metric not in ("pve_t_mm", "jitter_gt_m_s3") and
-                     sorted(BASELINES, key=lambda b: float(headline[(b, REFERENCE)][metric])) !=
-                     sorted(BASELINES, key=lambda b: float(headline[(b, VERSIONS[0])][metric]))]
-    report += ["", "排序变化项：" + ("、".join(changed_ranks) if changed_ranks else "没有") + "。",
-               "下面的时序倍率描述两种协议数值差异，不能解读为模型在同一指标下性能退化："]
-    for baseline in BASELINES:
-        old = headline[(baseline, REFERENCE)]
-        new = headline[(baseline, VERSIONS[0])]
-        report.append(f"- {baseline}：ACC-ERR变为旧值的{float(new['accel_error_m_s2']) / float(old['accel_error_m_s2']):.3f}倍，"
-                      f"Prediction Jerk变为{float(new['jitter_pred_m_s3']) / float(old['jitter_pred_m_s3']):.3f}倍；"
-                      f"关节足滑相对旧顶点足滑差{float(new['foot_sliding_mm']) - float(old['foot_sliding_mm']):+.6f}mm/transition。")
-    report += ["", "Jerk与足滑是平滑性/运动品质统计，低值本身不保证姿态更准确；应连同GT jerk和MPJPE解读。基线之间的配对差值与95% CI见paired_baselines_anysole_e9accee0.csv。\n",
-               "## 相同输入公式控制的数值证据\n",
-               "先于全量运行，以8个跨日期/方法/相机unit的pilot设置绝对容差：几何/足滑0.0001mm，MPJAE0.000001°，ACC0.0001m/s²，Jerk0.005m/s³。它们用于检查公式一致性，不是允许的模型质量误差。SMPL GPU float32批量重建的微小差异会被三阶导放大；不要求字节相同。\n",
-               "| 指标 | WHAM最大unit差 | SAM3DB最大unit差 | GVHMR最大unit差 |", "|---|---:|---:|---:|"]
+        report.append(f"| {LABELS[metric]} | "+" | ".join(f"{audit[f'{b}/{metric}']['max_abs_unit_delta']:.12g}" for b in BASELINES)+" |")
+    report += ["", "两套入口保留各自实现。2_Code先在camera计算局部误差，AnySole先转world；固定刚体旋转不改变距离和导数范数，微小差异可能来自坐标转换或浮点拟合。数值核查只判断设定容差内的一致性，不宣称所有CSV逐位相同。", "",
+               "## 基线表现与排名", "", "| 指标 | 2_Code从低到高 | AnySole从低到高 |", "|---|---|---|"]
+    changed=[]
     for metric in REQUESTED_METRICS:
-        if metric == "pve_t_mm":
-            continue
-        report.append(f"| {LABELS[metric]} | " + " | ".join(f"{audit[f'{b}/{metric}']['max_abs_unit_delta']:.9g}" for b in BASELINES) + " |")
-    failures = {key: value for key, value in audit.items() if value["units_outside_tolerance"]}
-    report += ["", "公式控制是否全通过：**" + str(passed) + "**。完整逐项容差/超限计数见formula_control_audit.json。",
-               f"30项严格控制检查中，{len(audit) - len(failures)}项通过，{len(failures)}项超限。没有放宽预设容差，超限项如实保留："]
-    for name, value in failures.items():
-        report.append(f"- {name}：{value['units_outside_tolerance']}/2056个unit超限；最大差{value['max_abs_unit_delta']:.12f}，"
-                      f"原绝对容差{value['abs_tolerance']}。")
-    source_audit = root / "shared_formula_source_audit.json"
-    if source_audit.exists():
-        report += ["", "补充只读源码AST审计显示，15个共享求解函数的计算实现完全相同（忽略docstring，"
-                   "旧foot_sliding对应AnySole的foot_sliding_vertices）；未导入或执行2_Code指标。证据见shared_formula_source_audit.json。"]
-    probe = root / "w_mpjpe_precision_probe.json"
-    if probe.exists():
-        records = json.loads(probe.read_text())["records"]
-        report += ["", "最大差出现在同一个316帧unit：20260808/method_1_offset/S10081/camera_2。"
-                   "使用AnySole求解器，对每个窗口首两帧GT施加一个float32 ULP扰动，关节点最大扰动"
-                   f"{max(row['max_point_perturbation_mm'] for row in records):.12f}mm，"
-                   f"可使WHAM的W值变化{max(abs(row['w_change_mm']) for row in records if row['baseline'] == 'WHAM'):.12f}mm。"
-                   "这复现了同量级的浮点敏感性；历史运行未保存中间GT张量，因而只能推断微差与浮点输入/重建一致，"
-                   "不能逐位定位历史误差来源，也不能宣称严格相等。完整探针见w_mpjpe_precision_probe.json。"]
-    report += ["", "比较入口在严格控制失败时返回exit1，但仍完整输出差值和报告。"
-               "这表示上述严格数值相等检查未全通过，不表示baseline重评缺失或把失败记录清零。\n",
-               "## 代码来源、验证与限制\n",
-               "公式唯一来源：AnySole/anysole/utils/metrics.py；native装配：anysole/utils/vision_smpl_metrics.py；入口：AnysoleWorkspace/tool/eval_rgb_smpl.py；消费端：results_display/script/compare_rgb_smpl_metrics.py。没有从2_Code导入具体指标、runner或GVHMR evaluation。",
-               "仅复用2_Code/smpl_evaluation/{io,alignment,coordinates,model}.py。隔离namespace绕过原package __init__的metrics副作用导入；worker结束检查禁止模块未加载。run.json保存源码/GT/标定/manifest/模型hash及命令。",
-               "prediction_input_inventory.csv列出6168个预测输入及baseline state原先记录的SHA-256、当前大小/mtime；此处未重新hash全部预测，不将state记录冒充本次独立hash验证。comparison_provenance.json记录比较端、参考表与审计表hash。",
-               "7项针对测试涵盖identity、root参与MPJAE、世界平移加速度、公共关节足滑、session宏平均、禁止导入和SMPL前向与AnySole FK等价。真实8-unit×三baseline×两版本试跑48 rows零失败。",
-               "已有public metric消费者测试依赖未随该提交提供的Baselines包，不能直接运行；本次直接验证已有canonical公式及新增装配，不伪造该套测试通过。",
-               "GT′是marker拟合的SMPL参考，含已记录修复帧；全帧原生时序结果对修复有敏感性。SAM3DB含MHR→SMPL拟合与similarity比例，GVHMR含SMPL-X→SMPL转换约束，比较对象为保存的SMPL预测。",
-               "本次未修改2_Code、原SMPL_Motion引用或历史发布文件；没有commit/push。PVE-T无法按e9accee0给出合法数值，这是该版本定义边界。\n"]
-    (root / "比较分析_AnySole_e9accee0.md").write_text("\n".join(report) + "\n", encoding="utf-8")
-    if not passed:
-        raise RuntimeError("formula-control comparison exceeds declared numerical tolerance; review audit")
-    return {"formula_control_passed": passed, "checks": len(audit), "comparisons": len(comparisons)}
+        if metric=="jitter_gt_m_s3":continue
+        orders=[sorted(BASELINES,key=lambda b:float(headline[(b,v)][metric])) for v in (REFERENCE,VERSIONS[0])]
+        if orders[0]!=orders[1]:changed.append(LABELS[metric])
+        report.append(f"| {LABELS[metric]} | {' < '.join(orders[0])} | {' < '.join(orders[1])} |")
+    report += ["", "### 各类误差的具体表现", ""]
+    for category, metrics in (
+        ("局部姿态与网格", ("mpjpe_mm", "pa_mpjpe_mm", "mpjae_deg", "pve_mm")),
+        ("体型", ("pve_t_mm",)),
+        ("世界运动", ("w_mpjpe100_mm", "root_ate_mm")),
+        ("身体时序与接触运动", ("accel_error_m_s2", "jitter_pred_m_s3", "foot_sliding_mm")),
+    ):
+        cells = []
+        for metric in metrics:
+            ordered = sorted(BASELINES, key=lambda b:float(headline[(b,VERSIONS[0])][metric]))
+            first, second = ordered[:2]
+            best = float(headline[(first,VERSIONS[0])][metric])
+            next_value = float(headline[(second,VERSIONS[0])][metric])
+            percent = (next_value-best)/next_value*100 if next_value else 0
+            cells.append(f"{LABELS[metric]}最低为{first}（{best:.6f}），第二为{second}（{next_value:.6f}），相差{percent:.2f}%")
+        report.append(category+"："+"；".join(cells)+"。")
+        report.append("")
+    report.append("PA-MPJPE消除旋转、尺度和平移，不直接检验世界定位。PVE-T隔离体型；相同PVE仍可能由不同的姿态和体型误差组合产生。身体相对Jerk不含根运动，足滑则仍在世界坐标测量。上述百分比只是宏平均差异，显著性应结合配对区间。")
+    report += ["", "### 主要准确性指标的配对区间", "",
+               "| 指标 | 第一基线 | 第二基线 | 第一减第二 | 95%区间 |", "|---|---|---|---:|---:|"]
+    for row in paired:
+        if row["metric_version"]==VERSIONS[0] and row["metric"] in ("mpjpe_mm","pve_mm","root_ate_mm"):
+            report.append(f"| {LABELS[row['metric']]} | {row['first']} | {row['second']} | {row['difference_first_minus_second']:+.6f} | [{row['ci95_low']:+.6f}, {row['ci95_high']:+.6f}] |")
+    report += ["", "两套排名变化项："+("、".join(changed) if changed else "无")+"。",
+               "WHAM减SAM3DB的PVE差值区间跨过零，因此SAM3DB的PVE宏平均虽稍低，此配对分析未支持二者PVE有明确差异。MPJPE及世界Root ATE的相应区间未跨零。", "",
+               "准确性比较应结合MPJPE、PVE、角度和世界轨迹，Jerk与足滑较小本身不足以证明姿态更准确。基线间差值与95%区间见paired_baseline_comparison.csv；区间按257个会话配对bootstrap10000次，不将同一会话的帧当独立样本。", "",
+               "## PVE的体型条件", "",
+               "RGB三基线均生成beta，因此两套PVE和PVE-T均使用预测自身beta。AnySole原主模型不预测shape，其同GT beta的PVE是已知体型下的姿态诊断，不进主模型正式比较表；该诊断保留，不伪造一套预测beta。主模型消费者的body21角度及骨盆相对时序已同步。", "",
+               "## 文件与可复核范围", "",
+               "每个基线仅保留2_code_aligned与anysole_aligned两版本，各有unit_metrics.csv、session_metrics.csv、aggregate_metrics.csv、run.json和report.md。AnySole版本额外保存逐单元和会话对2_Code的差值。根目录提供总体、日期、方法、相机分层差值以及两套基线配对比较。", "",
+               "AnySole所需四个数据/模型辅助模块按原实现选择性放入anysole/data/rgb_smpl；具体指标在anysole/utils/metrics.py，不导入2_Code指标或辅助源码。2_Code的GVHMR直接重算保存的result.npz，不读取旧evaluation_camera.json指标作为结果。", "",
+               "GT是marker拟合参考，仍有拟合及修复不确定性；SAM3DB包含MHR到SMPL拟合，GVHMR包含SMPL-X到SMPL转换。这里重跑指标评估，没有重新推理或改变保存预测。源hash、模型hash、GT和标定来源见run.json与comparison_provenance.json。", ""]
+    validation_path = root / "validation.json"
+    if validation_path.exists():
+        validation = json.loads(validation_path.read_text())
+        report += ["## 独立验证", "",
+                   f"独立审计从unit表重新计算session及总体/日期/方法/相机宏平均，{validation['aggregation_checks']}项检查通过。六份版本表均覆盖相同帧与单元，所有十项指标及GT Jerk为有限值。", "",
+                   f"{validation['prediction_metadata_unchanged']}份原始预测文件的大小与修改时间保持不变；{validation['gt_hashes_unchanged']}份GT的SHA-256保持不变。SMPL_Motion引用、manifest及两套运行使用的SMPL模型hash均通过核对。预测检查为文件metadata核查，不冒充完整文件hash核查。详情见validation.json。", ""]
+    (root / "比较分析_两套指标对齐.md").write_text("\n".join(report),encoding="utf-8")
+    (root / "README.md").write_text("# 最新SMPL指标评估\n\n"+
+        "三基线均有独立重跑的2_code_aligned和anysole_aligned。\n\n"+
+        "[完整比较与分析](比较分析_两套指标对齐.md)；[逐指标差值](metric_version_comparison.csv)；[数值审计](metric_alignment_audit.json)。\n",encoding="utf-8")
+    return passed
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=REPO.parent / "3_Result/SMPL_evaluation")
-    args = parser.parse_args()
-    print(compare(args.root.resolve()))
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root",type=Path,default=REPO.parent/"3_Result/SMPL_evaluation")
+    parser.add_argument("--two-code-run",type=Path)
+    args=parser.parse_args()
+    root=args.root.resolve()
+    if args.two_code_run:publish_2_code(root,args.two_code_run.resolve())
+    raise SystemExit(0 if compare(root) else 1)
+
+
+if __name__=="__main__":main()

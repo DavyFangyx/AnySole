@@ -1,67 +1,52 @@
-# 本地 RGB→SMPL 三基线指标复核
+# RGB SMPL 三基线两套指标对齐评估
 
-本入口在 `metrics` 分支，基于 `e9accee0`。读取已有 WHAM、SAM3DB、GVHMR
-预测及 marker 拟合 GT′，不运行基线推理。公共指标公式仍以
-`anysole/utils/metrics.py` 为唯一来源，未修改该文件。
+metrics分支保留AnySole公共公式，并按当前协议对齐2_Code。两套评估从保存的
+WHAM、SAM3DB和GVHMR预测独立重算，不读取旧评估值或重新运行基线推理。
 
-从 `/private/Tactile/AnySole` 执行，使用 Tactile 环境：
+## 指标协议
 
-```bash
-export PYTHONDONTWRITEBYTECODE=1
-export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-mkdir -p /private/Tactile/.ai/tmp/anysole-e9accee0-eval
-export TMPDIR=/private/Tactile/.ai/tmp/anysole-e9accee0-eval
-/opt/conda/bin/conda run --no-capture-output --prefix /opt/conda/envs/Tactile \
-  python AnysoleWorkspace/tool/eval_rgb_smpl.py --workers 7
-/opt/conda/bin/conda run --no-capture-output --prefix /opt/conda/envs/Tactile \
-  python results_display/script/compare_rgb_smpl_metrics.py
-```
+- MPJPE：24个原生FK关节，分别减去关节1、2的髋均值。
+- PA-MPJPE：未减骨盆的关节逐帧相似变换对齐，包含尺度、旋转和平移。
+- MPJAE：21个局部body旋转测地角，排除root和hand末端。
+- PVE：预测自身beta与GT beta的6890顶点，分别减髋均值。
+- PVE-T：各自beta的零姿态网格，髋均值对齐，无尺度校正。
+- ACC-ERR和Jerk：骨盆相对轨迹，全部配对帧，实际时间差分；不额外除10。
+- W-MPJPE100：100输入帧窗口，前两帧拟合相似变换。
+- Root ATE：世界关节0的未对齐平均距离，不是ATE-RMSE。
+- Foot sliding：关节7、8、10、11；GT速度小于0.3m/s时，预测三维位移均值。
 
-入口拒绝覆盖已有版本目录。再次完整复核应通过 `--output` 指向
-`/private/Tactile/3_Result/SMPL_evaluation/` 下新的子目录，并将同一目录
-传给比较脚本的 `--root`。`--limit 8 --workers 2 --output <pilot>` 可做跨日期、
-方法、相机的有限试跑；有限试跑不满足完整比较脚本的 2056-unit 验收条件。
+GT旋转使用SO(3)插值，translation线性插值；重复时间取均值，时序长缺口分段。
+先取单位均值，再在同一物理会话内等权，最后按257个会话宏平均。
+AnySole原主模型不预测beta，同GT beta的PVE仍为已知体型诊断；RGB三基线
+都有预测beta，其PVE和PVE-T评价预测体型。
 
-结果按 `3_Result/SMPL_evaluation/<baseline>/<metric_version>/` 保存：
+## 代码位置
 
-| 版本 | 含义 |
-|---|---|
-| `2_code_reference_20261006` | 原有发布表格的字节相同副本；非重跑 |
-| `anysole_e9accee0` | 原生 SMPL-24 关节、全部24局部旋转、世界关节时序、公共关节足滑 |
-| `anysole_e9accee0_formula_control` | 旧输入/掩码的公式控制；body21、局部时序、顶点足滑是诊断控制 |
+公共公式：anysole/utils/metrics.py。指标装配：anysole/utils/vision_smpl_metrics.py。
+数据和SMPL辅助：anysole/data/rgb_smpl，选择性移植原Tactile四模块，运行时
+不导入2_Code。并行入口：AnysoleWorkspace/tool/eval_rgb_smpl.py。
+结果消费：results_display/script/compare_rgb_smpl_metrics.py，仅读取CSV/JSON。
 
-新增指标装配代码在 `anysole/utils/vision_smpl_metrics.py`；数据读取、坐标变换、
-SMPL 前向与并行控制入口在 `AnysoleWorkspace/tool/eval_rgb_smpl.py`；
-`results_display/script/compare_rgb_smpl_metrics.py` 只消费评估结果。
-仅只读复用 `2_Code/smpl_evaluation/{io,alignment,coordinates,model}.py`，
-通过隔离 namespace 避免其 package 初始化时引入旧 metrics；没有导入旧具体
-指标、runner 或 GVHMR evaluation。底层工具没有再复制一份。
+## 运行与输出
 
-每个新版本有 unit/session/aggregate CSV、run.json 和比较报告；比较端另写
-逐 unit 差值、根版本比较 CSV、基线配对 bootstrap CSV、公式控制审计 JSON
-与 `比较分析_AnySole_e9accee0.md`。run.json 保存基底提交、分支、源码、模型、
-GT、标定与 manifest SHA-256，以及采样与聚合策略。完整运行的 worker
-进度、失败表与运行汇总位于结果根的 `.rgb_smpl_run_<pid>/`。
+所有Python命令使用Tactile Conda prefix，并配置工作区内TMPDIR。
+在AnySole目录运行python AnysoleWorkspace/tool/eval_rgb_smpl.py --workers 7
+--output /private/Tactile/3_Result/SMPL_evaluation/.aligned_latest。
+2_Code目录运行python -m smpl_evaluation.cli --workers 7
+--output /private/Tactile/3_Result/SMPL_evaluation/.aligned_latest/.2_code_run。
+两套入口拒绝覆盖已有运行目标，先完成全量验证再发布，避免暴露部分结果。
 
-比较入口严格控制检查失败时退出1，但仍完整输出报告与差值。本次30项控制
-中28项通过；WHAM/SAM3DB的W-MPJPE100各17个unit超过0.0001mm预设容差，
-最大差0.000256/0.000181mm。没有放宽容差；源码AST与ULP敏感性证据另保留
-在结果根。它们不改变完整原生协议“结果不同”的结论。
+在AnySole目录运行python results_display/script/compare_rgb_smpl_metrics.py
+--root /private/Tactile/3_Result/SMPL_evaluation/.aligned_latest
+--two-code-run /private/Tactile/3_Result/SMPL_evaluation/.aligned_latest/.2_code_run。
+消费端从本次2_Code重跑拆分版本，并检查两套逐单元差值和覆盖。
 
-PVE-T 在 e9accee0 已明确废除，因此为 null/CSV空值/N/A；不能移植旧 T-pose
-指标补造。三基线生成 beta 和表面，所以 PVE 使用各自预测形状。
+正式结果每个baseline仅保留2_code_aligned和anysole_aligned；版本内含
+unit/session/aggregate_metrics.csv、run.json、report.md。根目录保存总体及
+分层差值、基线配对bootstrap、数值审计、来源与比较分析_两套指标对齐.md。
+发布验收后清除旧历史/旧版本，只保留最新评估结果。
 
-采样继续使用相同 RGB 帧与 CSV 锚定的真实 mocap 时间；不将不规则帧假定
-为40Hz，也不切换主模型的split/cam3。AnySole主模型自己的40Hz网格、
-训练/推理与触觉流程不在此次复核范围。时序函数沿用原实现的重复时间合并、
-长间隔分段；原生协议保留全部配对帧，公式控制按历史规则剔除修复参考帧。
-
-针对验证：
-
-```bash
-/opt/conda/bin/conda run --no-capture-output --prefix /opt/conda/envs/Tactile \
-  python -m pytest tests/test_rgb_smpl_metrics.py -q -s -p no:cacheprovider
-```
-
-已有依赖 `Baselines` 包的消费者测试需要完整上游包；该提交本地不包含它。
-本次使用 canonical 公式、真实数据试跑和针对协议测试验收，不伪造原测试通过。
+数值容差：毫米类1e-4mm，MPJAE 1e-6度，ACC 1e-4m/s²，Jerk 0.005m/s³。
+比较失败返回1并保留报告，不用显示精度或放宽容差掩盖差异。
+针对回归：python -m pytest tests/test_rgb_smpl_metrics.py -q -s -p no:cacheprovider。
+依赖未提供Baselines包的旧消费者测试仍不能直接运行；新增协议有独立测试。
