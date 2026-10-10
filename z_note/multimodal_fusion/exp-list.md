@@ -23,14 +23,14 @@ C1–M3 不生成 queue conf，只读取 `results/`：
 | M2 | T 分支的 V 相关能力 | 主线 T vs T 专才 vs 空输入 | 只给 T 时能否读出 V 负责分量 | 三列对比表 |
 | M3 | 连续缺失鲁棒性 | rhoV × rhoT 全网格 | 从四个角到任意帧级缺失是否稳定 | rho 热力图 + 两条边界曲线 |
 
-## 6. T 信息量判定 → 后续三实验（2026-10-09，见 后续实验设计.md）
+## 6. T 信息量判定 → 后续三实验（2026-10-09，见 T信息量判定实验.md §5）
 
 | 代号 | 实验名称 | 对比设置 | 要回答的问题 | 输出 |
 |---|---|---|---|---|
-| Test3_ResidualTest | 冻结残差 | V3_3C（冻结 V3_3B_vonly + 零初始化 T 残差，VT-only 200ep）vs V 专才 vs 主线 VT | 结构保证 VT ≥ V 下，T 能否修正 V 的错误（可实现互补下界） | 三列对比表 + 森林图（`results_display/script/residual_test.py`） |
-| Test4_PhysicalTest | 物理指标面板 | 主线三条件 + 两专才（+ V3_3C）全物理指标 | PA 之外的尺子（全局 MPJPE/穿透/接触/根轨迹/滑步）能否测出 T 的价值 | 面板 + per-session bootstrap CI（`results_display/script/physical_metrics.py`） |
-| Test5_OracleTest | oracle 分层 | 主线 V2M vs VT2M 逐窗口配对 | 完美开关下的互补上限 + 难例（V 误差 decile）上 T 的贡献 + VT 胜率 | oracle 表 + decile 曲线（`results_display/script/oracle_analysis.py`） |
+| Test3_ResidualTest | 冻结残差 | V3_3C（冻结 V3_3B_vonly + 零初始化 T 残差，VT-only 200ep）vs V 专才 vs 主线 VT | 结构保证 VT ≥ V 下，T 能否修正 V 的错误（可实现互补下界） | 三列对比表 + 森林图 |
+| Test4_PhysicalTest | 物理指标面板 | 主线三条件 + 两专才 + V3_3C 全物理指标 | PA 之外的尺子（全局 MPJPE/穿透/接触/根轨迹/滑步）能否测出 T 的价值 | 面板 + per-session bootstrap CI |
+| Test5_OracleTest | oracle 分层 | 主线 V2M vs VT2M 逐窗口配对 | 完美开关下的互补上限 + 难例（V 误差 decile）上 T 的贡献 + VT 胜率 | oracle 表 + decile 曲线 |
 
-前置基建：eval `--dump-detail`（window_detail_/session_detail_<split>.json）、
-新指标 GlobalMPJPE/GroundPen、cluster_bootstrap_ci（commits 5d210b0/36d25cb）。
-V3_3C 模型与队列注册：commits dd27f2f/d3197f6。
+前置基建：评估协议逐窗口/逐会话明细导出、新指标（全局 MPJPE/地面穿透）、
+会话簇 bootstrap 置信区间；V3_3C 模型与训练注册。分析与判读见
+T信息量判定实验.md §5。
