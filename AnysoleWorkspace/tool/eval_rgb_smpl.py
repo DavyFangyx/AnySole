@@ -5,9 +5,8 @@ Run from AnySole, in the Tactile environment:
   python AnysoleWorkspace/tool/eval_rgb_smpl.py --workers 7
   python AnysoleWorkspace/tool/eval_rgb_smpl.py --workers 2 --limit 8 --output <pilot>
 
-Reuses only read-only Tactile I/O, alignment, calibration and SMPL helpers.
-The isolated namespace intentionally bypasses smpl_evaluation/__init__.py,
-which imports the forbidden historical metrics module as a side effect.
+Uses locally adapted I/O, alignment, calibration and SMPL helpers under
+anysole/data/rgb_smpl; importing or reading 2_Code source is unnecessary.
 """
 from __future__ import annotations
 
@@ -22,10 +21,8 @@ import json
 import multiprocessing as mp
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
-import types
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -33,21 +30,16 @@ from scipy.spatial.transform import Rotation
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from anysole.utils.vision_smpl_metrics import (  # noqa: E402
-    PVE_T_REASON, REQUESTED_METRICS, evaluate_formula_control, evaluate_motion,
+    REQUESTED_METRICS, evaluate_motion,
 )
 
 BASELINES = ("WHAM", "SAM3DB", "GVHMR")
-VERSIONS = ("anysole_e9accee0", "anysole_e9accee0_formula_control")
-REFERENCE = "2_code_reference_20261006"
+VERSIONS = ("anysole_aligned",)
+REFERENCE = "2_code_aligned"
 
 
-def helpers(workspace: Path):
-    name = "_anysole_tactile_helpers"
-    if name not in sys.modules:
-        package = types.ModuleType(name)
-        package.__path__ = [str(workspace / "2_Code/smpl_evaluation")]
-        sys.modules[name] = package
-    return tuple(importlib.import_module(f"{name}.{part}")
+def helpers(workspace: Path | None = None):
+    return tuple(importlib.import_module(f"anysole.data.rgb_smpl.{part}")
                  for part in ("io", "alignment", "coordinates", "model"))
 
 
@@ -90,7 +82,9 @@ def target_geometry(workspace, unit, gt_path, model, calibration, io, alignment,
     repaired = io.repaired_frames(gt_path)
     safe = np.asarray([int(lo) not in repaired and int(hi) not in repaired
                        for lo, hi in zip(brackets.lower, brackets.upper)])
-    return {"joints": coords.gt_smpl_to_checkerboard(joints, calibration),
+    tverts, tjoints = model.tpose(source["betas"])
+    return {"tpose_joints": tjoints, "tpose_vertices": tverts,
+            "joints": coords.gt_smpl_to_checkerboard(joints, calibration),
             "vertices": coords.gt_smpl_to_checkerboard(vertices, calibration),
             "rotations": rotations, "poses": poses}, times, safe
 
@@ -106,8 +100,6 @@ def predicted_geometry(workspace, baseline, unit, model, camera, io, coords):
         if not np.isfinite(replay) or replay > 0.2:
             raise ValueError(f"WHAM vertex replay RMS {replay} mm")
         # Native protocol uses FK joint centres, not J_regressor @ posed mesh.
-        control_joints = model.regress_joints(raw["verts"])
-        control_vertices = raw["verts"].astype(np.float64)
         poses = raw["pose"]
     elif baseline == "SAM3DB":
         raw = io.load_sam(path / "result.pkl", unit)
@@ -119,7 +111,6 @@ def predicted_geometry(workspace, baseline, unit, model, camera, io, coords):
         translation = raw["similarity_translation"].astype(np.float64) + raw["camera_translation"].astype(np.float64)
         vertices = scale[:, None, None] * np.einsum("tvi,tij->tvj", vertices, rotation) + translation[:, None]
         joints = scale[:, None, None] * np.einsum("tji,tik->tjk", joints, rotation) + translation[:, None]
-        control_vertices, control_joints = vertices, joints
         replay = 0.0
     else:
         with np.load(path / "result.npz", allow_pickle=False) as archive:
@@ -134,7 +125,6 @@ def predicted_geometry(workspace, baseline, unit, model, camera, io, coords):
         replay = float(np.sqrt(np.mean((joints - raw["joints_camera"]) ** 2)) * 1000)
         if not np.isfinite(replay) or replay > 0.001:
             raise ValueError(f"GVHMR joint replay RMS {replay} mm")
-        control_vertices, control_joints = vertices, joints
     rotations = Rotation.from_rotvec(poses.reshape(-1, 3)).as_matrix().reshape(-1, 24, 3, 3)
     if baseline == "SAM3DB":
         rotations[:, 0] = np.einsum("tji,tjk->tik", rotation, rotations[:, 0])
@@ -142,9 +132,9 @@ def predicted_geometry(workspace, baseline, unit, model, camera, io, coords):
     native = {"joints": coords.camera_to_checkerboard(joints, camera),
               "vertices": coords.camera_to_checkerboard(vertices, camera),
               "rotations": rotations, "poses": poses}
-    control = {**native, "joints": coords.camera_to_checkerboard(control_joints, camera),
-               "vertices": coords.camera_to_checkerboard(control_vertices, camera)}
-    return native, control, replay
+    tverts, tjoints = model.tpose(raw["betas"])
+    native.update(tpose_joints=tjoints, tpose_vertices=tverts)
+    return native, replay
 
 
 def shard(workspace: Path, units, index: int, batch_size: int, device: str, checkpoint: Path):
@@ -166,21 +156,18 @@ def shard(workspace: Path, units, index: int, batch_size: int, device: str, chec
             target, times, safe = target_geometry(workspace, unit, inventory[(unit.date, unit.session)],
                                                  model, calibration, io, alignment, coords)
             for baseline in BASELINES:
-                native, control, replay = predicted_geometry(workspace, baseline, unit, model, camera, io, coords)
-                for version, measured in zip(VERSIONS, (
-                    evaluate_motion(native, target, times),
-                    evaluate_formula_control(control, target, times, safe),
-                )):
-                    if any(value is not None and not np.isfinite(value) for value in measured.values()):
-                        raise ValueError(f"nonfinite metric {baseline}/{version}")
-                    rows.append({"baseline": baseline, "metric_version": version,
-                                 "unit_id": unit.unit_id, "short_id": unit.short_id,
-                                 "date": unit.date, "session": unit.session,
-                                 "method": unit.method, "camera": unit.camera,
-                                 "frame_count": int(unit.frame_numbers.size),
-                                 "repaired_reference_frames": int((~safe).sum()),
-                                 "geometry_replay_rms_mm": replay, **measured})
-                del native, control
+                native, replay = predicted_geometry(workspace, baseline, unit, model, camera, io, coords)
+                measured = evaluate_motion(native, target, times)
+                if any(not np.isfinite(value) for value in measured.values()):
+                    raise ValueError(f"nonfinite metric {baseline}/{VERSIONS[0]}")
+                rows.append({"baseline": baseline, "metric_version": VERSIONS[0],
+                             "unit_id": unit.unit_id, "short_id": unit.short_id,
+                             "date": unit.date, "session": unit.session,
+                             "method": unit.method, "camera": unit.camera,
+                             "frame_count": int(unit.frame_numbers.size),
+                             "repaired_reference_frames": int((~safe).sum()),
+                             "geometry_replay_rms_mm": replay, **measured})
+                del native
         except Exception as exc:
             failures.append({"unit_id": unit.unit_id, "error": f"{type(exc).__name__}: {exc}"})
         if count % 25 == 0 or count == len(units):
@@ -201,8 +188,7 @@ def aggregate(rows: list[dict]):
     for row in rows:
         groups[(row["date"], row["session"])].append(row)
     sessions = [{"baseline": rows[0]["baseline"], "date": date, "session": session,
-                 "unit_count": len(group), **{key: None if key == "pve_t_mm" else
-                 float(np.mean([row[key] for row in group])) for key in REQUESTED_METRICS}}
+                 "unit_count": len(group), **{key: float(np.mean([row[key] for row in group])) for key in REQUESTED_METRICS}}
                 for (date, session), group in sorted(groups.items())]
     summaries = []
     for stratum, field in (("overall", None), ("date", "date"), ("method", "method"), ("camera", "camera")):
@@ -218,7 +204,7 @@ def aggregate(rows: list[dict]):
             if field:
                 summary[field] = value
             for metric in REQUESTED_METRICS:
-                summary[metric] = None if metric == "pve_t_mm" else float(np.mean([
+                summary[metric] = float(np.mean([
                     np.mean([row[metric] for row in group]) for group in subgroup.values()]))
             summaries.append(summary)
     return sessions, summaries
@@ -232,13 +218,8 @@ def run(args):
     manifest = workspace / "3_Result/SAM3DB_baseline/.run/manifest.jsonl"
     units = sorted(io.matched_units(manifest, set(inventory)), key=lambda unit: unit.unit_id)
     historical = workspace / "3_Result/SMPL_evaluation"
-    roster = {row["unit_id"]: row for row in read_csv(historical / "WHAM/unit_metrics.csv")}
-    if set(roster) != {unit.unit_id for unit in units}:
-        raise ValueError("current manifest and historical reference roster differ")
-    for unit in units:
-        if unit.frame_numbers.size != int(roster[unit.unit_id]["frame_count"]):
-            raise ValueError("current and historical frame counts differ")
-    if len(units) != 2056 or len({(u.date, u.session) for u in units}) != 257:
+    if (len(units) != 2056 or len({(u.date, u.session) for u in units}) != 257
+            or sum(u.frame_numbers.size for u in units) != 785088):
         raise ValueError("matched corpus changed")
     if args.limit:
         # Evenly cover dates/methods/cameras instead of taking adjacent units.
@@ -246,14 +227,14 @@ def run(args):
     if output != historical and historical not in output.parents:
         if not args.limit:
             raise ValueError("full-run output must be below 3_Result/SMPL_evaluation")
-    targets = [output / baseline / version for baseline in BASELINES for version in (*VERSIONS, REFERENCE)]
+    targets = [output / baseline / version for baseline in BASELINES for version in VERSIONS]
     if any(path.exists() for path in targets):
         raise FileExistsError("version destination exists; choose a new output root")
     output.mkdir(parents=True, exist_ok=True)
     run_dir = output / f".rgb_smpl_run_{os.getpid()}"
     run_dir.mkdir()
     source_paths = [REPO / "anysole/utils/metrics.py", REPO / "anysole/utils/vision_smpl_metrics.py", Path(__file__)]
-    source_paths += [workspace / "2_Code/smpl_evaluation" / f"{part}.py" for part in
+    source_paths += [REPO / "anysole/data/rgb_smpl" / f"{part}.py" for part in
                      ("io", "alignment", "coordinates", "model")]
     provenance = {"created_utc": datetime.now(timezone.utc).isoformat(),
                   "anysole_base_commit": subprocess.check_output(["git", "-C", str(REPO), "rev-parse", "HEAD"], text=True).strip(),
@@ -266,10 +247,8 @@ def run(args):
                   "units": len(units), "sessions": len({(u.date, u.session) for u in units}),
                   "frames_per_baseline": sum(u.frame_numbers.size for u in units),
                   "aggregation": "unit means -> 8 equal method-camera units per physical session -> session macro mean",
-                  "pve_t_na_reason": PVE_T_REASON,
                   "sampling": "matched RGB frames; CSV-anchored actual mocap times, SO(3)/translation GT interpolation; no resampling to 40Hz",
-                  "native_protocol": "native SMPL24 FK; 24 local rotations with root in common checkerboard world; world temporal all frames; four ankle/foot joints",
-                  "control_protocol": "historical geometry/masks; body21; pelvis-local temporal unrepaired; vertex-foot diagnostic from AnySole canonical implementation",
+                  "native_protocol": "native SMPL24 FK; body21 local rotations; pelvis-local temporal all paired frames; own beta PVE/PVE-T; joint feet",
                   "forbidden_metric_imports": [], "status": "running"}
     write_json(run_dir / "run.json", provenance)
     rows, failures = [], []
@@ -300,14 +279,6 @@ def run(args):
             write_csv(destination / "aggregate_metrics.csv", summaries)
             write_json(destination / "run.json", {**provenance, "status": "completed", "baseline": baseline,
                                                   "metric_version": version, "failures": 0})
-        reference = output / baseline / REFERENCE
-        reference.mkdir(parents=True)
-        for name in ("unit_metrics.csv", "session_metrics.csv", "aggregate_metrics.csv", "run.json", "report.md"):
-            shutil.copyfile(historical / baseline / name, reference / name)
-        write_json(reference / "reference_provenance.json", {
-            "status": "historical_reference_copy_not_rerun", "source": str(historical / baseline),
-            "sha256": {name: digest(reference / name) for name in
-                       ("unit_metrics.csv", "session_metrics.csv", "aggregate_metrics.csv", "run.json", "report.md")}})
     provenance["status"] = "completed"
     write_json(run_dir / "run.json", provenance)
     print(json.dumps({"status": "completed", "rows": len(rows), "output": str(output)}, ensure_ascii=False), flush=True)
