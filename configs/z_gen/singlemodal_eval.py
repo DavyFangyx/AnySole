@@ -11,9 +11,11 @@ from common import emit_experiment
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models", default="", help="comma-separated main model IDs")
+    parser.add_argument("--experiment", default="singlemodal_eval",
+                        help="experiment table entry (singlemodal_eval_cams = four-camera)")
     args = parser.parse_args()
     models = [item.strip() for item in args.models.split(",") if item.strip()]
-    count = emit_experiment("singlemodal_eval", models or None)
+    count = emit_experiment(args.experiment, models or None)
     print(f"generated {count} queue task(s)")
     return 0
 

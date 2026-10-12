@@ -32,6 +32,15 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "SPECIALISTS": ["vonly", "tonly"],
         "REQUIRES": [],
     },
+    # 四相机扩展 D2 (2026-10-12): same protocol on the three new cameras.
+    # tonly is deliberately absent -- the T stream is camera-independent and
+    # the shared V3_3B_tonly specialist serves all four cameras.
+    "singlemodal_eval_cams": {
+        "KIND": "singlemodal_compare",
+        "MODEL_IDS": ["V3_3B_cam1", "V3_3B_cam2", "V3_3B_cam4"],
+        "SPECIALISTS": ["vonly"],
+        "REQUIRES": [],
+    },
     "rho_grid_eval": {
         "KIND": "rho_grid",
         "MODEL_IDS": ["V3_3B"],
