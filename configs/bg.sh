@@ -3,7 +3,7 @@
 # 用法: CUDA_VISIBLE_DEVICES=N bash bg.sh
 # 所有 worker 共享同一个 configs/queue/，通过原子 mv 抢任务；GPU 归属由
 # 本进程的 CUDA_VISIBLE_DEVICES 决定。重复执行会给同一张卡追加一个 worker，
-# 各自持有独立日志 GPU{N}_worker{M}.log。
+# 各自持有独立日志 configs/logs/GPU{N}_worker{M}.log。
 set -euo pipefail
 
 # 每张卡可能有多个训练进程，绑定原生数学线程池，避免 CPU 超订。
@@ -17,11 +17,12 @@ export BLIS_NUM_THREADS=1
 gpu="${CUDA_VISIBLE_DEVICES:-}"
 [[ "$gpu" =~ ^[0-9]+$ ]] || { echo 'set CUDA_VISIBLE_DEVICES=N' >&2; exit 2; }
 root="$(cd "$(dirname "$0")" && pwd)"
+logs_dir="$root/logs"; mkdir -p "$logs_dir"
 
 # 扫描既有 worker 日志，取下一个空闲编号
 shopt -s nullglob
 next_worker=1
-for f in "$root"/GPU"${gpu}"_worker*.log; do
+for f in "$logs_dir"/GPU"${gpu}"_worker*.log; do
   name="$(basename "$f")"
   if [[ "$name" =~ ^GPU${gpu}_worker_?([0-9]+)\.log$ ]]; then
     id="${BASH_REMATCH[1]}"
@@ -31,6 +32,6 @@ for f in "$root"/GPU"${gpu}"_worker*.log; do
   fi
 done
 
-log="$root/GPU${gpu}_worker${next_worker}.log"
+log="$logs_dir/GPU${gpu}_worker${next_worker}.log"
 nohup bash "$root/scheduler.sh" "$root/queue" "$log" >>"$log" 2>&1 < /dev/null &
 echo "PID: $!"; echo "log: $log"; echo "停止: kill $!"

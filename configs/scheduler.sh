@@ -3,7 +3,7 @@
 #
 # 每张卡可由 bg.sh 启动一个或多个 worker（CUDA_VISIBLE_DEVICES=N），所有 worker
 # 从同一个 configs/queue/ 原子 mv 抢任务，互不重复；bg.sh 会把独立日志路径作为
-# $2 传入（缺省仍为 scheduler_GPU{N}.log）。取件规则：
+# $2 传入（缺省仍为 configs/logs/scheduler_GPU{N}.log）。取件规则：
 #   * 优先取非 display 任务（字典序最早者，seq 前缀 = 拓扑序）；
 #   * display 任务只在 running 清空后才可取件，保证依赖产物齐全；
 #   * 队列空且 running 非空时等待（可能有其他 worker 还在跑）。
@@ -14,7 +14,7 @@ queue="${1:-$root/queue}"
 running_dir="$root/running"
 done_dir="$root/done"
 failed="$root/failed"
-mkdir -p "$queue" "$running_dir" "$done_dir" "$failed"
+mkdir -p "$queue" "$running_dir" "$done_dir" "$failed" "$root/logs"
 shopt -s nullglob
 
 while true; do
@@ -48,7 +48,7 @@ while true; do
     continue
   fi
   gpu="${CUDA_VISIBLE_DEVICES:-shared}"
-  log="${2:-$root/scheduler_GPU${gpu}.log}"
+  log="${2:-$root/logs/scheduler_GPU${gpu}.log}"
   echo "START $(date -Is) $name" >> "$log"
   if bash "$root/run.sh" "$running_dir/$name" >> "$log" 2>&1; then
     mv "$running_dir/$name" "$done_dir/$name"

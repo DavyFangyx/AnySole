@@ -331,3 +331,50 @@ E 系列关键数：tau0 145（起点）→ 66（E2）→ 23-31（E3）→ 12（
 - torso/headneck/arms 仍是常数 [0,0,1]；T-only 时 root 仍给 V 流 0.58（V 已置零）。
 
 机制上：β-NLL 这次确实把 σ收不到梯度"），但它校准到的是静态答案——"手臂两流都不可信 → 贴先验"。V/T 区分的梯度根本不存在：T-only 时注入 null-V 内容并不伤 L_pose（decoder 把它当常数偏置用了），所以  成立，"错误使用缺失流"必须付出代价——这是下一个坑（比如缺失流注入显式置零而非可学习 null token，或加差分损失）。
+
+3.5 T 信息量判定实验（零训练，2026-10-08，V3_3B 生产 ckpt_best）：
+
+问题：C1–M3 六实验显示 V-only > V+T、T-only 86.4（test PA）——「T 无互补」
+是信息论事实还是模型未兑现？三探针零训练判定：
+
+1. 跨条件 ridge 信息天花板（z_note/probes/probe_v33b_info_ceiling.py；预注册
+   判据：脚/下肢 ≥3mm PA=可追、1~3=边际、<1=噪声；lam=1.0、train 拟合/val 评
+   估、GT 轨迹口径；与正式 ridge_probe 交叉校验逐位一致，实现无误）：
+   读出行（PA, mm）        all    lower  anklefoot  l_foot  r_foot  upper
+   v_tok | VT（256d）     50.6    61.6    76.8     77.3    76.2    45.1
+   vt | VT（512d）        51.7    60.8    75.0     76.2    73.7    47.1
+   F | V（T=null_t）      48.3    57.8    71.9     73.1    70.7    43.6
+   F | VT                 61.4    66.6    80.9     82.5    79.4    58.8
+   t_tok | T              87.8    86.5   100.0    101.9    98.1    88.4
+   Δ_input = PA(vt)−PA(v_tok)：all +1.14 / lower −0.78 / anklefoot −1.82 /
+     l_foot −1.07 / r_foot −2.56（T 对脚/踝有 1~2.6mm 边际信息，上身 +2.0 为负）
+   Δ_fusion = PA(F|VT)−PA(F|V)：all +3.37 / lower +2.98 / anklefoot +3.09 /
+     l_foot +3.19 / r_foot +2.98（T 存在使融合表征全线受损 ~3mm）
+   → 判定落「边际」档：两条同时成立——①输入级 T 对脚/踝有少量信息（<3mm 门槛，
+     不足以支撑"追互补精度"）；②融合 encoder 把 T 存在变成 ~3mm 读出损失，
+     模型非线性头部分补偿（VT2M 49.1 vs ridge 61.4）后仍 VT > V 2~7mm
+     （val 49.1/42.0，test 43.4/41.4）——即 C2「interference 17/19」的机制。
+
+2. 门控差分探针（probe_v33b_gates.py，生产 ckpt 首跑）：
+   - 上身 torso/headneck/l·r_arm 三条件恒 [0,0,1]（贴先验，τ_p 饱和 +4.0）；
+   - root/legs/feet 三条件 ~50/50 不路由：T-only 时 V 流（已置零）仍拿 0.39–0.41、
+     V-only 时 T 流（null）仍拿 0.47–0.51；三配置最大差 root 0.116 / legs 0.112
+     / feet 0.107（vs V3-3B 二轮 0.018 有进步，仍非路由）；
+   - 旧 F4 静态判据 pass 但 §2.3 已判不充分。
+   → 与 V3_4c FAIL 同族（静态答案 + 缺失流照拿权重），生产口径复现。
+
+3. null-V 免费搭车（probe_v33b_nullv_sensitivity.py）：T-only 下 null_v 换零
+   向量/随机向量，PA 82.6 → 80.5 / 81.6（不降反微升）、L_pose ±0.007 内——
+   「错误使用缺失流零代价」实锤（3.4 段假说在生产 ckpt 复现）。
+
+结论与后续：T 相对 V 的额外信息是边际的（脚/踝 1~2.6mm），不支撑「追互补精度」；
+但当前融合连这都不兑现且净亏 2~4mm——机制链已闭环（门控不路由 + 免费搭车 +
+融合污染），修复方向即 3.4 段既定「缺失流显式零注入 + 门控差分损失」。下一坑
+定位为：修到「T 不拖后腿」（VT ≈ V、脚部微利），而非「T 提升精度」。是否立项
+V3_3C 重训待裁定。落盘：<variant>/metrics/{info_ceiling_val,nullv_sensitivity_val,
+ridge_probe_val}.json。
+
+2026-10-09 裁定：V3_3C 立项，实现方式改为**冻结 V3_3B_vonly 专才 + 零初始化
+T 残差分支**（VT-only 微调 200ep，结构保证 VT ≥ V），替代原从零重训修门控方案；
+配套三实验（冻结残差/物理指标/oracle 分层）设计与判读见
+z_note/multimodal_fusion/T信息量判定实验.md §5。

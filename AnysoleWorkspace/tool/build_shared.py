@@ -100,6 +100,32 @@ def nearest_indices(times_s: np.ndarray, targets_s: np.ndarray) -> np.ndarray:
     return np.where(np.abs(times_s[left] - targets_s) <= np.abs(times_s[idx] - targets_s), left, idx)
 
 
+def fake_gap_frame_marks(raw_rows: np.ndarray, row_fake: np.ndarray,
+                         t_sub: np.ndarray, targets: np.ndarray) -> np.ndarray:
+    """Frames whose nearest pressure row is a fake row, nearest-value semantics.
+
+    The absolute nearest-row selection only sees rows with a wall-clock
+    timestamp, so fake rows inside a dropout span never land on any frame.
+    Each run of such rows sits between two real rows (or before the first /
+    after the last real row); every frame whose wall time falls inside that
+    run's span is marked fake.  No timeline reconstruction, no interpolation:
+    the span is bounded by the two neighbouring real rows, and boundary frames
+    stay with their real row (conservative at ±1 frame).
+    """
+    marks = np.zeros(len(targets), dtype=bool)
+    if raw_rows.size == 0:
+        return marks
+    for k in range(len(raw_rows) - 1):
+        lo, hi = raw_rows[k], raw_rows[k + 1]
+        if hi - lo > 1 and row_fake[lo + 1:hi].any():
+            marks |= (targets > t_sub[k]) & (targets < t_sub[k + 1])
+    if raw_rows[0] > 0 and row_fake[:raw_rows[0]].any():
+        marks |= targets < t_sub[0]
+    if raw_rows[-1] < len(row_fake) - 1 and row_fake[raw_rows[-1] + 1:].any():
+        marks |= targets > t_sub[-1]
+    return marks
+
+
 def resample_pressure(left: tuple, right: tuple, n_frames: int, *,
                       video_start_day_s: float | None = None,
                       pressure_epoch_day_s: float | None = None,
@@ -113,6 +139,9 @@ def resample_pressure(left: tuple, right: tuple, n_frames: int, *,
     raw ``time.monotonic`` bridge -- the same clock, S2 §三 证据 C).  Values and
     quality flags are taken from the nearest row; no interpolation.  Video
     frames outside the source span clamp to the edge row and are counted.
+    Fake rows that carry no raw timestamp (dropout spans) are invisible to
+    that selection; their flags are propagated onto the frame span between the
+    neighbouring real rows (see ``fake_gap_frame_marks``).
 
     Legacy mode (no anchors or no raw timestamps): the previous normalized
     grid, with nearest-row values instead of linear interpolation.
@@ -134,10 +163,13 @@ def resample_pressure(left: tuple, right: tuple, n_frames: int, *,
             idx = raw_rows[nearest_indices(t_sub, targets)]
             n_clamp_start = int((targets < t_sub[0]).sum())
             n_clamp_end = int((targets > t_sub[-1]).sum())
+            frame_fake = fake[idx].astype(np.uint8)
+            frame_fake |= fake_gap_frame_marks(raw_rows, fake, t_sub, targets).astype(np.uint8)
         else:
             idx = np.rint(target * max(len(time) - 1, 0)).astype(int)
             n_clamp_start = n_clamp_end = 0
-        return values[idx], valid[idx], fake[idx], n_clamp_start, n_clamp_end
+            frame_fake = fake[idx].astype(np.uint8)
+        return values[idx], valid[idx], frame_fake, n_clamp_start, n_clamp_end
 
     left48, left_valid, left_fake, lc0, lc1 = map_foot(left)
     right48, right_valid, right_fake, rc0, rc1 = map_foot(right)

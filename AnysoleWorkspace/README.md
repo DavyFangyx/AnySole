@@ -45,7 +45,7 @@ python3 AnysoleWorkspace/tool/workspace.py init
 #   raw/bvh/<date>/mocap_ori_bvh/<sid>/*.bvh (+ 0804 *.avi, calibration_Skeleton0.bvh)
 #   raw/smpl/<MMDD>/<MMDD>smpl/mocap_ori_c3d/<sid>/motion_neutral_smpl.npz
 # 上游新增日期/改名 rec 目录后，重建并校验农场（幂等，原子替换）：
-python3 AnysoleWorkspace/tool/relink_raw.py build --dates 20260804,20260807,20260808,20260810 --cam 3
+python3 AnysoleWorkspace/tool/relink_raw.py build --dates 20260804,20260807,20260808,20260810 --cam 1,2,3,4
 python3 AnysoleWorkspace/tool/relink_raw.py verify
 # 方案与回滚快照：reports/raw_relink_plan_20261001.md、reports/raw_relink_rollback_20261002.txt
 

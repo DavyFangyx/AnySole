@@ -117,6 +117,64 @@ def test_bridge_rows_never_selected():
     assert np.allclose(r48[:, 0], [1.0, 1.0, 3.0, 3.0, 3.0])
 
 
+def test_fake_gap_rows_mark_middle_span():
+    epoch = 1000.0
+    rows = 41
+    raw = np.arange(rows, dtype=np.float64) * 25000.0
+    raw[20:30] = np.nan  # dropout span: rows 20..29 have no wall time
+    fake = np.zeros(rows, np.uint8)
+    fake[20:30] = 1
+    values = np.tile(np.arange(rows, dtype=np.float32)[:, None], (1, 48))
+    foot = pack(raw, values, raw_us=raw, fake=fake)
+    l48, r48, valid, fake_frames, times, meta = resample_pressure(
+        foot, foot, 40, video_start_day_s=epoch, pressure_epoch_day_s=epoch, fps=40.0)
+    # frames 0..19 / 30..39 map 1:1 onto real rows; frames 20..29 sit inside the
+    # dropout span and must be marked fake with valid=0
+    assert list(np.flatnonzero(fake_frames)) == list(range(20, 30))
+    assert list(np.flatnonzero(valid)) == [i for i in range(40) if i < 20 or i >= 30]
+    # values keep nearest-real-row semantics (edge hold), never the fake rows
+    assert np.allclose(r48[20:25, 0], 19.0) and np.allclose(r48[25:30, 0], 30.0)
+    assert meta["out_of_span_frames_left"] == (0, 0)
+
+
+def test_fake_gap_rows_mark_leading_and_trailing_spans():
+    epoch = 1000.0
+    rows = 20
+    raw = np.arange(rows, dtype=np.float64) * 25000.0
+    raw[:3] = np.nan
+    raw[-2:] = np.nan
+    fake = np.zeros(rows, np.uint8)
+    fake[:3] = 1
+    fake[-2:] = 1
+    values = np.tile(np.arange(rows, dtype=np.float32)[:, None], (1, 48))
+    foot = pack(raw, values, raw_us=raw, fake=fake)
+    l48, r48, valid, fake_frames, times, meta = resample_pressure(
+        foot, foot, 22, video_start_day_s=epoch - 0.05, pressure_epoch_day_s=epoch, fps=40.0)
+    # real rows 3..17 span 0.075..0.425s; frames outside that span clamp to the
+    # edge real row but their true nearest rows are the leading/trailing fakes.
+    # Frame 19 lands epsilon past the last real row (same float as the clamp
+    # count below) and is marked with the trailing run.
+    assert list(np.flatnonzero(fake_frames)) == [0, 1, 2, 3, 4, 19, 20, 21]
+    assert meta["out_of_span_frames_left"] == (5, 3)
+    assert r48[0, 0] == 3.0 and r48[21, 0] == 17.0  # edge-held values
+
+
+def test_fake_gap_rows_mark_whole_span_conservatively():
+    epoch = 1000.0
+    rows = 41
+    raw = np.arange(rows, dtype=np.float64) * 25000.0
+    raw[20:30] = np.nan
+    fake = np.zeros(rows, np.uint8)
+    fake[20:25] = 1  # only the first half of the gap is fake-marked
+    foot = pack(raw, None, raw_us=raw, fake=fake)
+    l48, r48, valid, fake_frames, times, meta = resample_pressure(
+        foot, foot, 40, video_start_day_s=epoch, pressure_epoch_day_s=epoch, fps=40.0)
+    # gap rows have no wall time, so the fake/non-fake split inside the gap is
+    # not resolvable per frame: mark the whole span (conservative, never lets
+    # a fake row's pressure into a window that trains)
+    assert list(np.flatnonzero(fake_frames)) == list(range(20, 30))
+
+
 if __name__ == "__main__":
     test_day_seconds_parsers()
     test_nearest_indices()
@@ -125,4 +183,7 @@ if __name__ == "__main__":
     test_quality_flags_combine_across_feet()
     test_legacy_fallback_without_raw_timestamps()
     test_bridge_rows_never_selected()
-    print("build_shared resample tests: 7/7 passed")
+    test_fake_gap_rows_mark_middle_span()
+    test_fake_gap_rows_mark_leading_and_trailing_spans()
+    test_fake_gap_rows_mark_whole_span_conservatively()
+    print("build_shared resample tests: 10/10 passed")
