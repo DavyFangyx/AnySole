@@ -67,17 +67,15 @@ python3 AnysoleWorkspace/tool/pressure_washer/run.py encode --force
 
 # 从 raw、session 索引和 PressureWasher 最终记录构建公共 manifest
 python3 AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3 --cam 1,2,3,4
-# --cam 1,2,3,4（或 all）在主 manifest 旁另写 per-camera jsonl（session_manifest_cam{N}.jsonl，
-# camera 字段=camN，其余字段与主 manifest 相同；四相机决策记录 §4-1）
+# --cam 1,2,3,4（或 all）：另写 per-camera jsonl（session_manifest_cam{N}.jsonl）
 # 生成 split，默认 val=test（当前冻结文件为 train/val/test = 104/36/36）
 python3 AnysoleWorkspace/tool/build_manifest.py split \
   --manifest AnysoleWorkspace/protocol/manifests/session_manifest.jsonl \
   --test S13,S14
 
-# 构建公共 shared facts（cam3 读主 manifest；cam1/2/4 读对应 session_manifest_cam{N}.jsonl）
+# 构建公共 shared facts
 python3 AnysoleWorkspace/tool/build_shared.py --facts-only --cam 1,2,3,4 --force
-# MMVP 31x11 表示层维持单棵 cam3 源（T 流跨相机一致，四相机决策记录 §4-3），
-# --mmvp-only 仅支持 cam3；per-camera facts 构建跳过 mmvp 步
+# --cam 1,2,3,4：cam3 读主 manifest，其余读 session_manifest_cam{N}.jsonl；--mmvp-only 仅支持 cam3
 # 校验 shared facts 和目录依赖边界
 python3 AnysoleWorkspace/tool/validate_shared.py \
   --facts AnysoleWorkspace/shared/facts/sessions
@@ -85,7 +83,7 @@ python3 AnysoleWorkspace/tool/validate_shared.py \
 # 检查 canonical Workspace、raw 链接和必需 artifact
 python3 AnysoleWorkspace/tool/workspace.py doctor
 
-# 四相机帧轴统计表（JPEG 文件名只读扫描，复核 D1 帧轴裁定）落 reports/
+# 四相机帧轴统计表落 reports/（只读扫描 JPEG 文件名）
 python3 AnysoleWorkspace/tool/frame_stats.py --dates 20260804,20260807,20260808,20260810
 ```
 
@@ -100,17 +98,16 @@ split 由 `build_manifest.py split` 生成，默认 `val=test`；manifest 只登
 ### AnySole
 
 ```bash
-# 生成 AnySole HRNet 视觉特征缓存（--cam-id 单个/逗号列表/all；seq/bbox/cache 根按相机解析）
+# 生成 AnySole HRNet 视觉特征缓存
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/generate_hrnet_cache.py --cam-id 1,2,3,4 --skip-existing
 
-# 生成 AnySole bbox shim（cam3=CLIFF 源不变；cam1/2/4=per-camera SAM3.1 mask 前端行直接派生，无 cam3 泄漏）
+# 生成 AnySole bbox shim
 python3 AnysoleWorkspace/tool/adapters/AnySole/build_hrnet_bbox.py --cam 1,2,3,4 --skip-existing
 
 # 生成 AnySole 接触标签（10 方法 × 140 session；读 facts 的 pressure_48.npz + BVH；
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.data.contact_adapter --split test --methods all --force
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/AnySole/write_label_artifacts.py
 # 查看 AnySole HMR/HRNet adapter 参数
-# extract_hmr --cam-id 支持单个/逗号列表/all，缓存按 visual/hmr/<model>/cam{N}/ 落盘
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python anysole/data/extract_hmr.py --help
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python anysole/data/extract_hrnet.py --help
 ```
@@ -126,8 +123,7 @@ python3 AnysoleWorkspace/tool/adapters/AnySole/build_hrnet_bbox.py --cam 1,2,3,4
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m lib.util.gen_image_feature --cam-id 3 --skip-existing
 # 生成 MotionPRO 私有关键点缓存
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m lib.util.gen_kps --cam-id 3 --skip-existing
-# 推荐：一条命令跑完三步链（bbox 子进程自动切 bbox_scan 解释器；
-# --cam-id 支持单个/逗号列表/all，逐相机顺序跑 bbox→kps→feature）
+# 推荐：一条命令跑完三步链（bbox 子进程自动切 bbox_scan 解释器）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/MotionPRO/run_visual_chain.py --cuda-device 6 --cam-id 1,2,3,4
 
 # 触觉依赖产物：虚拟毯 pressure.npz + soft-f6 contact.npy
@@ -156,27 +152,22 @@ python3 AnysoleWorkspace/tool/adapters/AnySole/build_hrnet_bbox.py --cam 1,2,3,4
 # 生成 pressure_toolkit/FPP-Net 共用的 MMVP 31×11 过程表示
 python3 AnysoleWorkspace/tool/build_shared.py --mmvp-only --force
 # 提取 HALPE-26 关键点（写 shared/frontends/rtmpose_halpe26/v1，刷新两模型树软链接）
-# --cam 1,2,3,4：cam3 目录名冻结 keypoints，其余相机 keypoints_cam{N}；消费端链接仅 cam3
 /data/fangyuxuan/miniconda3/envs/bbox_scan/bin/python AnysoleWorkspace/tool/adapters/mmvp_series/keypoints/run_rtmpose.py --split all --cam 1,2,3,4
 # 生成 CLIFF 视觉初始化（写 shared/frontends/cliff_hr48/v1 + pressure_tookit 初值）
-# --cam 1,2,3,4：cam3 文件名冻结 CLIFF_results.npz，其余相机 CLIFF_results_cam{N}.npz
 /data/fangyuxuan/miniconda3/envs/mmvp/bin/python AnysoleWorkspace/tool/adapters/mmvp_series/cliff/run_cliff.py --split all --backbone hr48 --cam 1,2,3,4
 
 # 用 DepthPro 生成深度图（写 shared/frontends/depthpro/v1）
-# --cam 1,2,3,4：cam3 目录名冻结 depth，其余相机 depth_cam{N}
 CUDA_VISIBLE_DEVICES=3 /data/fangyuxuan/miniconda3/envs/depthpro/bin/python -m AnysoleWorkspace.tool.adapters.mmvp_series.depth.rgb2depth --batch-size 4 --skip-existing --cam 1,2,3,4
 
 # 生成 FPP-Net 模型输入树（RGB 链接 + adapter manifest）
-# --cam 1,2,3,4：cam3 树冻结 adapter_v1/<date>/...，其余相机 adapter_v1/cam{N}/...
 python3 AnysoleWorkspace/tool/adapters/mmvp_series/fpp/build_inputs.py --split all --cam 1,2,3,4
 # 生成 FPP-Net temporal-5 split 和 subject metadata
 python3 AnysoleWorkspace/tool/adapters/mmvp_series/fpp/build_metadata.py --force
 
-# 生成 PoseTransOpt 模型输入树（join manifest 为对齐权威；per-camera 内参键
-# cam{N}_fx/fy，cam3 冻结 cam3_fx/fy）
+# 生成 PoseTransOpt 模型输入树（join manifest 为对齐权威）
 python3 AnysoleWorkspace/tool/adapters/mmvp_series/posetransopt/build_inputs.py --split all --cam 1,2,3,4
 
-# 生成 pressure_toolkit 上游原生目录契约（per-camera 标定/深度/mask/关键点/CLIFF）
+# 生成 pressure_toolkit 上游原生目录契约
 conda activate mmvp
 python3 AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/build_inputs.py --split all --cam 1,2,3,4
 
@@ -194,7 +185,7 @@ python3 AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/build_inputs.
 # 质量在 session_reports/<date>/<subject>/<session>.json 的 floor.residual_mm看
 ```
 
-输出分别位于 `model_inputs/FPP-Net/adapter_v1/`、`model_inputs/PoseTransOpt/adapter_v1/`、`model_inputs/pressure_toolkit/v1/` 和 `shared/frontends/`（`rtmpose_halpe26/v1`、`cliff_hr48/v1`、`depthpro/v1`、`human_masks/sam31/v1`）；31×11 压力统一读取 `shared/representations/tactile/mmvp_31x11/v1/`。cam1/2/4 的中间量一律以 `cam{N}` 子目录/`_cam{N}` 文件名落同层（cam3 路径与文件名全部冻结零改动）。
+输出分别位于 `model_inputs/FPP-Net/adapter_v1/`、`model_inputs/PoseTransOpt/adapter_v1/`、`model_inputs/pressure_toolkit/v1/` 和 `shared/frontends/`（`rtmpose_halpe26/v1`、`cliff_hr48/v1`、`depthpro/v1`、`human_masks/sam31/v1`）；31×11 压力统一读取 `shared/representations/tactile/mmvp_31x11/v1/`。cam1/2/4 的中间量以 `cam{N}` 子目录或 `_cam{N}` 文件名落同层，cam3 路径与文件名不变。
 
 MMVP 31×11 是 pressure_toolkit/FPP-Net 共用的过程表示，不被 AnySole 或 Step2Motion 读取。
 
@@ -206,8 +197,6 @@ D_Test4 读取 shared representation 和各模型已经生成的 `model_inputs`�
 
 ```bash
 # 将外部 SAM3.1 masks_index.csv 以只读链接方式登记，并生成独立 bbox artifact
-# 上游 csv 本身每帧四行（camera=1,2,3,4 齐全）；--cam 选择要建索引行的相机，
-# cam3 输出文件名（bbox.npz/source.json）冻结，cam1/2/4 为 bbox_cam{N}.npz/source_cam{N}.json
 python3 AnysoleWorkspace/tool/build_human_mask_frontend.py --cam 1,2,3,4 --force
 # 校验 frontend session 数量、bbox shape 和 artifact
 python3 AnysoleWorkspace/tool/validate_shared.py \
