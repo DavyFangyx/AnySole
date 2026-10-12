@@ -231,8 +231,10 @@ def write_splits(rows: list[dict], output: Path, *, exclude: set[str] | None = N
 
 
 def build(fps: float, camera: str, output: Path,
-          index_path: Path | None = None, split_path: Path | None = None) -> tuple[list[dict], list[str]]:
+          index_path: Path | None = None, split_path: Path | None = None,
+          jsonl_only: bool = False) -> tuple[list[dict], list[str]]:
     index_path = index_path or WORKSPACE / "protocol/manifests/raw_session_index.jsonl"
+    cam_dir = str(camera).removeprefix("cam")  # QC per camera (四相机决策记录 §4-1)
     rows, issues = [], []
     for meta in raw_index(index_path):
         sid = str(meta["session_id"])
@@ -247,7 +249,7 @@ def build(fps: float, camera: str, output: Path,
         for label, path in (("bvh", bvh), ("smpl", smpl)):
             if not path.is_file():
                 quality.append(f"missing_{label}")
-        if not recording.is_dir() or not any(recording.glob("3/*.jpg")):
+        if not recording.is_dir() or not any(recording.glob(f"{cam_dir}/*.jpg")):
             quality.append("missing_video_source")
         if pressure_issue:
             quality.append(pressure_issue)
@@ -279,9 +281,10 @@ def build(fps: float, camera: str, output: Path,
     join_pressure_quality(rows)
     rows.sort(key=lambda row: row["session_id"])
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDS); writer.writeheader(); writer.writerows(rows)
-    jsonl = output.with_suffix(".jsonl")
+    if not jsonl_only:
+        with output.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=FIELDS); writer.writeheader(); writer.writerows(rows)
+    jsonl = output if output.suffix == ".jsonl" else output.with_suffix(".jsonl")
     with jsonl.open("w", encoding="utf-8") as f:
         for row in rows: f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
     return rows, issues
@@ -306,12 +309,31 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--fps", type=float, default=40)
     p.add_argument("--camera", default="cam3")
+    p.add_argument("--cam", default="",
+                   help="per-camera manifests to write next to the main one: 'all' or "
+                        "comma list of camera ids -> session_manifest_cam{N}.jsonl "
+                        "(四相机决策记录 §4-1); default none")
     p.add_argument("--output", type=Path, default=WORKSPACE / "protocol/manifests/session_manifest.csv")
     p.add_argument("--index", type=Path, default=WORKSPACE / "protocol/manifests/raw_session_index.jsonl")
     build_args = argv[1:] if argv and argv[0] == "build" else argv
     a = p.parse_args(build_args)
     rows, _ = build(a.fps, a.camera, a.output, a.index)
     print(f"wrote {a.output} and {a.output.with_suffix('.jsonl')} ({len(rows)} sessions); split file unchanged")
+    if a.cam:
+        if a.cam.strip() == "all":
+            cams = (1, 2, 3, 4)
+        else:
+            try:
+                cams = tuple(int(item.strip()) for item in a.cam.split(",") if item.strip())
+            except ValueError:
+                raise SystemExit(f"--cam expects a comma list or 'all', got {a.cam!r}")
+            unknown = set(cams) - {1, 2, 3, 4}
+            if unknown:
+                raise SystemExit(f"unknown camera(s): {sorted(unknown)}")
+        for cam in cams:
+            per_output = a.output.with_name(f"session_manifest_cam{cam}.jsonl")
+            per_rows, _ = build(a.fps, f"cam{cam}", per_output, a.index, jsonl_only=True)
+            print(f"wrote {per_output} ({len(per_rows)} sessions, camera=cam{cam})")
     return 0 if rows else 1
 
 
