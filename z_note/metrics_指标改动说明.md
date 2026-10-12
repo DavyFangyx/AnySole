@@ -3,7 +3,8 @@
 > 本文为评估整改任务 01 终态（2026-09-26 定版，a5a8acb）；原配套任务书 `z_note/评估/01_统一指标求解器与模型能力任务书.md` 已随 2026-10-01 U10 废止删除，现行说明见 `z_note/评估/评估配置说明书.md`。
 > 旧版（v2）中的 brief 含 `contact_f1`、foot sliding 顶点版等描述已按新裁定废弃。
 > 键名与唯一实现以 `anysole/utils/metrics.py`（主模型自持 utils）为准；基线侧
-> 数据协议/评估协议统一放在 `Baselines/utils/`（2026-09-26 用户裁定结构），
+> 数据协议/评估协议统一放在 `Baselines/utils/`（2026-09-26 用户裁定结构；
+> 2026-10-12 H13 执行后成为 Baselines 库内真实目录（`Baselines/utils` 入库）），
 > 公式一律从 anysole 侧唯一实现引用，任何位置不得存在第二份公式。
 
 ## 1. 目标与锁定口径
@@ -204,8 +205,8 @@ GT translation fallback 不参与轨迹/世界系指标。
   读取已导出 predictions + 配对 GT（同一会话网格、同一 manifest/split），用
   `Baselines/utils/solver.py`（公式全部来自 anysole 侧唯一实现）计算并落盘
   `results/baselines/<Model>/metrics/<split>_comparison.json`（schema v2：逐
-  session + 加权汇总 + protocol/capabilities/denied/applicable + split/manifest
-  hash）+ `_comparison.csv`。
+  session + 加权汇总 + protocol/capabilities/denied/applicable）
+  + `_comparison.csv`。
 - 数值与 R_Test2 参考行实现逐位一致（`tests/test_baseline_utils.py` 有真实
   数据交叉锁）；R_Test2/R_Test4 定位为消费端。
 - 各模型短别名：motionpro / pressure_toolkit / vp_mocap / step2motion / fpp_v2t。

@@ -7,7 +7,8 @@ Baselines/
 /Baselines_Backup/
 
 # Baselines 已独立成库（remote: Anysole_Baselines）；旧改动树仅本地存档
-Baselines_old/
+# （2026-10-12 第 4 步迁移执行后 Baselines_old/ 已删除，历史在
+#  Baselines/Baselines_old.zip 与 Baselines/archive/）
 
 # anysole 内的参考实现（半注册 gitlink，本地参考用，不进 git）
 /anysole/ReferenceWorks/*/

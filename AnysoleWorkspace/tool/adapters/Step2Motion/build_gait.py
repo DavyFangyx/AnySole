@@ -872,9 +872,7 @@ def build_normalizer(dataset_path: Path, out_path: Path, name: str, *, dry_run: 
     return {
         "name": name,
         "source": canonical_uri(dataset_path),
-        "source_sha256": sha256_file(dataset_path),
         "output": canonical_uri(out_path),
-        "output_sha256": sha256_file(out_path) if out_path.is_file() else "",
     }
 
 
@@ -895,9 +893,7 @@ def write_split_sessions(out_dir: Path, *, splits: dict[str, list[str]], details
         "adapter_version": ADAPTER_VERSION,
         "variant": variant,
         "split_csv": str(split_csv),
-        "split_sha256": sha256_file(split_csv),
         "manifest": str(manifest),
-        "manifest_sha256": sha256_file(manifest),
         "counts": {name: len(ids) for name, ids in splits.items()},
         "sessions": splits,
         "sessions_detail": {

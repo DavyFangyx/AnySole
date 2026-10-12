@@ -67,10 +67,9 @@ from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 # ---------------------------------------------------------------------------
 # BVH reader (local, in-repo)
 #
-# ``Baselines/utils/motion_io.load_motion`` was the canonical motion reader, but
-# the 2026-09-28 two-repo split halted the utils migration: ``Baselines.utils``
-# is absent from the workspace, so importing it here would break the metadata
-# build for reasons unrelated to the adapter.  ``build_metadata`` needs only the
+# ``Baselines/utils/motion_io.load_motion`` is the canonical motion reader; this
+# adapter keeps its own local BVH branch (in-repo parser below) so the metadata
+# build stays independent of the Baselines repo tree.  ``build_metadata`` needs only the
 # BVH branch of that reader (joint positions resampled onto the canonical frame
 # grid), which is reproduced below with the in-repo BVH parser
 # ``AnysoleWorkspace/tool/_bvh_aligner_pose.py``.  The three steps (parse with

@@ -2,7 +2,7 @@
 """T1-A V5 wrapper: run the native MotionPRO visual chain over adapter sessions.
 
 The three upstream scripts are the frozen reference implementations in
-``Baselines_old/MotionPRO/lib/util/`` (read-only; this wrapper never edits them,
+``Baselines/MotionPRO/lib/util/`` (read-only; this wrapper never edits them,
 it only invokes them as subprocesses):
 
   1. ``gen_bbox.py``           -- mmdet YOLOX-X on ``color/*.jpg``  -> ``bbox.npy`` (T, 8)
@@ -12,7 +12,7 @@ it only invokes them as subprocesses):
 Two environment facts drive the subprocess setup (verified on this host):
 
   * The scripts do ``os.chdir(Path(__file__).resolve().parents[2])`` at import
-    time, so the cwd is forced to ``Baselines_old/MotionPRO``; the wrapper sets
+    time, so the cwd is forced to ``Baselines/MotionPRO``; the wrapper sets
     it explicitly anyway and exports ``ANYSOLE_WORKSPACE`` so
     ``lib/util/workspace.py`` resolves the same workspace as the adapter.
   * ``gen_bbox.py`` imports mmdet/mmcv, which only exist in the ``bbox_scan``
@@ -57,8 +57,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from AnysoleWorkspace.tool.adapters.MotionPRO import adapter as A  # noqa: E402
 
-BASELINES_OLD = REPO_ROOT / "Baselines_old"
-UTIL_DIR = BASELINES_OLD / "MotionPRO" / "lib" / "util"
+BASELINES_REPO = REPO_ROOT / "Baselines"
+UTIL_DIR = BASELINES_REPO / "MotionPRO" / "lib" / "util"
 WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 DEFAULT_TOUCH_PYTHON = "/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python"
 DEFAULT_BBOX_PYTHON = "/data/fangyuxuan/miniconda3/envs/bbox_scan/bin/python"
@@ -110,13 +110,13 @@ def run_step(step: str, seq_root: Path, python: str, cuda_device: str | None,
     else:
         env["CUDA_VISIBLE_DEVICES"] = ""  # gen_kps is CPU-only by design
     print(f"\n=== [{step}] {SCRIPTS[step]} ===")
-    print("  cwd :", BASELINES_OLD / "MotionPRO")
+    print("  cwd :", BASELINES_REPO / "MotionPRO")
     print("  env : ANYSOLE_WORKSPACE=%s CUDA_VISIBLE_DEVICES=%r"
           % (env["ANYSOLE_WORKSPACE"], env["CUDA_VISIBLE_DEVICES"]))
     print("  cmd :", " ".join(command))
     if dry_run:
         return 0
-    completed = subprocess.run(command, cwd=str(BASELINES_OLD / "MotionPRO"),
+    completed = subprocess.run(command, cwd=str(BASELINES_REPO / "MotionPRO"),
                                env=env, check=False)
     if completed.returncode != 0:
         print(f"  !! {SCRIPTS[step]} exited {completed.returncode}")

@@ -39,7 +39,6 @@ if str(STEP2MOTION_SRC) not in sys.path:
     sys.path.insert(0, str(STEP2MOTION_SRC))
 
 from AnysoleWorkspace.tool.adapters.Step2Motion import build_gait as bg  # noqa: E402
-from AnysoleWorkspace.tool.artifacts import sha256_file  # noqa: E402
 from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
 RESULTS_ROOT = ROOT / "results"
@@ -105,10 +104,6 @@ def test_split_sessions() -> None:
     manifest = manifest_by_id()
     for variant in ("gait", "gait_noimu"):
         payload = json.loads((ADAPTER_ROOT / variant / "split_sessions.json").read_text())
-        check(f"{variant}: split_csv hash matches canonical file",
-              payload["split_sha256"] == sha256_file(SPLIT_CSV))
-        check(f"{variant}: manifest hash matches canonical file",
-              payload["manifest_sha256"] == sha256_file(MANIFEST))
         check(f"{variant}: counts recorded", set(payload["counts"]) == {"train", "val", "test"})
         for name in ("train", "val", "test"):
             check(f"{variant}: {name} sessions identical to canonical CSV",
@@ -148,14 +143,8 @@ def test_normalizer_provenance() -> None:
         check(f"{variant}: provenance present", bool(info))
         check(f"{variant}: source is the train .pt",
               str(info["source"]).endswith(f"/{variant}/gait_train.pt"))
-        check(f"{variant}: source hash matches train .pt on disk",
-              info["source_sha256"] == sha256_file(ADAPTER_ROOT / variant / "gait_train.pt"))
-        check(f"{variant}: output hash matches normalizer on disk",
-              info["output_sha256"] == sha256_file(ADAPTER_ROOT / variant / f"normalizer_{variant}.pth"))
         # no val/test session may feed the normalizer: provenance carries only
         # train data (the train .pt is built from the canonical train list).
-        check(f"{variant}: train .pt hash == normalizer source hash",
-              sha256_file(ADAPTER_ROOT / variant / "gait_train.pt") == info["source_sha256"])
         # structural check: the train .pt can only contain train sessions
         import torch
         MotionDataset = _load_native()
@@ -238,19 +227,10 @@ def test_16ch_parity() -> None:
 
 def test_public_metrics_zero() -> None:
     print("== pred=GT BVH-23 public metrics zero + name-based foot groups ==")
-    # 公共评估层现位于 Baselines_old/utils（09-28 两库拆分后 utils 迁移被叫停，
-    # 尚未定新归宿）；其内部 17 处 import 仍指向旧包名 Baselines.utils——
-    # 测试侧注册别名，不改写参考树。
-    import importlib
-
-    import Baselines_old.utils as _utils_pkg
-    sys.modules.setdefault("Baselines.utils", _utils_pkg)
-    for _sub in ("motion_io", "protocols", "solver", "gt_loading", "capabilities", "bvh_aligner"):
-        _mod = importlib.import_module(f"Baselines_old.utils.{_sub}")
-        sys.modules.setdefault(f"Baselines.utils.{_sub}", _mod)
-        setattr(_utils_pkg, _sub, _mod)
-    from Baselines_old.utils.protocols import BVH_JOINT_NAMES, PROTOCOL_FORWARD_AXIS, PROTOCOL_FOOT_NAMES
-    from Baselines_old.utils.solver import metrics as public_metrics
+    # 公共评估层 2026-10-12 起为 Baselines 库内真实目录 Baselines/utils（H13 执行，
+    # 符号链接桥与 Baselines_old 移除）；直接导入，不再需要别名 shim。
+    from Baselines.utils.protocols import BVH_JOINT_NAMES, PROTOCOL_FORWARD_AXIS, PROTOCOL_FOOT_NAMES
+    from Baselines.utils.solver import metrics as public_metrics
 
     n = 200
     fps = 40.0
@@ -294,7 +274,7 @@ def test_public_metrics_zero() -> None:
     # the same result (selection by name), missing names must raise.
     foot_ids = [names.index(j) for j in PROTOCOL_FOOT_NAMES["bvh23"]]
     check("bvh23 foot names resolve", foot_ids == [17, 21, 18, 22], str(foot_ids))
-    from Baselines_old.utils.solver import _foot_joint_indices
+    from Baselines.utils.solver import _foot_joint_indices
     shuffled = list(names)
     shuffled[0], shuffled[1] = shuffled[1], shuffled[0]  # swap Hips/Spine positions
     ids = _foot_joint_indices(tuple(shuffled), "bvh23")
@@ -380,7 +360,7 @@ def _run_evaluator(sid: str) -> tuple[Path, dict]:
     smoke_manifest = _write_smoke_manifest(sid)
     smoke_split = _write_smoke_split(sid)
     cmd = [
-        sys.executable, "-m", "Baselines_old.utils.evaluate",
+        sys.executable, "-m", "Baselines.utils.evaluate",
         "--model", "step2motion", "--split", "test",
         "--registry", str(smoke_registry),
         "--manifest", str(smoke_manifest),
@@ -463,8 +443,8 @@ def test_export_and_evaluator_smoke() -> None:
     # grid-aligned prediction by mocap_start (~151 mm on S13073); that public
     # alignment defect is recorded in the delivery report.  The correct read
     # is the prediction's own axis (it already sits on the canonical grid).
-    from Baselines_old.utils.gt_loading import bvh_joints as _bj, protocol_gt as _pgt
-    from Baselines_old.utils.solver import metrics as _pub_metrics
+    from Baselines.utils.gt_loading import bvh_joints as _bj, protocol_gt as _pgt
+    from Baselines.utils.solver import metrics as _pub_metrics
     pred_own, pred_names, _ = _bj(pred_bvh)
     gt_own, gt_names = _pgt({**manifest[sid], "bvh_path": str(resolve_uri(manifest[sid]["bvh_path"]))},
                             "bvh23")

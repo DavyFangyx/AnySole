@@ -9,7 +9,7 @@ producer 归入 ``mmvp_series/depth/``，一次生产、消费端符号链接采
     ├── <frame_id:06d>.png     16 位毫米刻度（SCALE=1000，MAX_M=65.535m 截断）
     └── meta.json              逐帧 src/focal_px/fov_deg/w/h/scale/unit/depth_min/max
 
-相对 ``Baselines_old/pressure_tookit/data_prep/rgb2depth.py`` 的改动：
+相对 ``Baselines/pressure_tookit/data_prep/rgb2depth.py`` 的改动：
 
 1. **输出位置**：不再直接写 pressure_toolkit 的 model_inputs 树，改写成
    ``shared/frontends/depthpro/v1`` 前端树（消费端以符号链接映射）。
