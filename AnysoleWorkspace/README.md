@@ -40,7 +40,7 @@ python3 AnysoleWorkspace/tool/workspace.py init
 # raw/calibration  -> /data/lizhe/projects/Tactile/0_Calibration
 # raw/human_masks  -> /data/lizhe/projects/Tactile/3_Result/processed/rgb_human_masks
 # init 构建的模态链接农场（raw/rgb raw/pressure raw/bvh raw/smpl，路径形状与 manifest URI 逐段一致）：
-#   raw/rgb/<date>/<S#>/<rec>/{meta.json, <cam>/}          相机目录软链（默认 --cam 3）
+#   raw/rgb/<date>/<S#>/<rec>/{meta.json, <cam>/}          相机目录软链（--cam 默认 3；四相机用 1,2,3,4 或 all）
 #   raw/pressure/<date>/<S#>/<rec>/pressure_{left,right}.csv
 #   raw/bvh/<date>/mocap_ori_bvh/<sid>/*.bvh (+ 0804 *.avi, calibration_Skeleton0.bvh)
 #   raw/smpl/<MMDD>/<MMDD>smpl/mocap_ori_c3d/<sid>/motion_neutral_smpl.npz
@@ -66,20 +66,27 @@ python3 AnysoleWorkspace/tool/pressure_washer/run.py clean-fault-cell
 python3 AnysoleWorkspace/tool/pressure_washer/run.py encode --force
 
 # 从 raw、session 索引和 PressureWasher 最终记录构建公共 manifest
-python3 AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3
+python3 AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3 --cam 1,2,3,4
+# --cam 1,2,3,4（或 all）在主 manifest 旁另写 per-camera jsonl（session_manifest_cam{N}.jsonl，
+# camera 字段=camN，其余字段与主 manifest 相同；四相机决策记录 §4-1）
 # 生成 split，默认 val=test（当前冻结文件为 train/val/test = 104/36/36）
 python3 AnysoleWorkspace/tool/build_manifest.py split \
   --manifest AnysoleWorkspace/protocol/manifests/session_manifest.jsonl \
   --test S13,S14
 
-# 构建公共 shared facts
-python3 AnysoleWorkspace/tool/build_shared.py --facts-only --force
+# 构建公共 shared facts（cam3 读主 manifest；cam1/2/4 读对应 session_manifest_cam{N}.jsonl）
+python3 AnysoleWorkspace/tool/build_shared.py --facts-only --cam 1,2,3,4 --force
+# MMVP 31x11 表示层维持单棵 cam3 源（T 流跨相机一致，四相机决策记录 §4-3），
+# --mmvp-only 仅支持 cam3；per-camera facts 构建跳过 mmvp 步
 # 校验 shared facts 和目录依赖边界
 python3 AnysoleWorkspace/tool/validate_shared.py \
   --facts AnysoleWorkspace/shared/facts/sessions
 
 # 检查 canonical Workspace、raw 链接和必需 artifact
 python3 AnysoleWorkspace/tool/workspace.py doctor
+
+# 四相机帧轴统计表（JPEG 文件名只读扫描，复核 D1 帧轴裁定）落 reports/
+python3 AnysoleWorkspace/tool/frame_stats.py --dates 20260804,20260807,20260808,20260810
 ```
 
 split 由 `build_manifest.py split` 生成，默认 `val=test`；manifest 只登记 session 元数据，模型直接读取 `protocol/splits/default/splits.csv`。
@@ -93,8 +100,11 @@ split 由 `build_manifest.py split` 生成，默认 `val=test`；manifest 只登
 ### AnySole
 
 ```bash
-# 生成 AnySole HRNet 视觉特征缓存
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/generate_hrnet_cache.py --cam-id 3 --skip-existing
+# 生成 AnySole HRNet 视觉特征缓存（--cam-id 单个/逗号列表/all；seq/bbox/cache 根按相机解析）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/generate_hrnet_cache.py --cam-id 1,2,3,4 --skip-existing
+
+# 生成 AnySole bbox shim（cam3=CLIFF 源不变；cam1/2/4=per-camera SAM3.1 mask 前端行直接派生，无 cam3 泄漏）
+python3 AnysoleWorkspace/tool/adapters/AnySole/build_hrnet_bbox.py --cam 1,2,3,4 --skip-existing
 
 # 生成 AnySole 接触标签（10 方法 × 140 session；读 facts 的 pressure_48.npz + BVH；
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.data.contact_adapter --split test --methods all --force
@@ -189,7 +199,9 @@ D_Test4 读取 shared representation 和各模型已经生成的 `model_inputs`�
 
 ```bash
 # 将外部 SAM3.1 masks_index.csv 以只读链接方式登记，并生成独立 bbox artifact
-python3 AnysoleWorkspace/tool/build_human_mask_frontend.py --force
+# 上游 csv 本身每帧四行（camera=1,2,3,4 齐全）；--cam 选择要建索引行的相机，
+# cam3 输出文件名（bbox.npz/source.json）冻结，cam1/2/4 为 bbox_cam{N}.npz/source_cam{N}.json
+python3 AnysoleWorkspace/tool/build_human_mask_frontend.py --cam 1,2,3,4 --force
 # 校验 frontend session 数量、bbox shape 和 artifact
 python3 AnysoleWorkspace/tool/validate_shared.py \
   --facts AnysoleWorkspace/shared/facts/sessions \
