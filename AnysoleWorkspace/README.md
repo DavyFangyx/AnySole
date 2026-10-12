@@ -110,6 +110,7 @@ python3 AnysoleWorkspace/tool/adapters/AnySole/build_hrnet_bbox.py --cam 1,2,3,4
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.data.contact_adapter --split test --methods all --force
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/AnySole/write_label_artifacts.py
 # 查看 AnySole HMR/HRNet adapter 参数
+# extract_hmr --cam-id 支持单个/逗号列表/all，缓存按 visual/hmr/<model>/cam{N}/ 落盘
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python anysole/data/extract_hmr.py --help
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python anysole/data/extract_hrnet.py --help
 ```
@@ -125,8 +126,9 @@ python3 AnysoleWorkspace/tool/adapters/AnySole/build_hrnet_bbox.py --cam 1,2,3,4
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m lib.util.gen_image_feature --cam-id 3 --skip-existing
 # 生成 MotionPRO 私有关键点缓存
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m lib.util.gen_kps --cam-id 3 --skip-existing
-# 推荐：一条命令跑完三步链（bbox 子进程自动切 bbox_scan 解释器）
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/MotionPRO/run_visual_chain.py --cuda-device 6
+# 推荐：一条命令跑完三步链（bbox 子进程自动切 bbox_scan 解释器；
+# --cam-id 支持单个/逗号列表/all，逐相机顺序跑 bbox→kps→feature）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/MotionPRO/run_visual_chain.py --cuda-device 6 --cam-id 1,2,3,4
 
 # 触觉依赖产物：虚拟毯 pressure.npz + soft-f6 contact.npy
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/MotionPRO/adapter.py --split train --force
@@ -154,24 +156,29 @@ python3 AnysoleWorkspace/tool/adapters/AnySole/build_hrnet_bbox.py --cam 1,2,3,4
 # 生成 pressure_toolkit/FPP-Net 共用的 MMVP 31×11 过程表示
 python3 AnysoleWorkspace/tool/build_shared.py --mmvp-only --force
 # 提取 HALPE-26 关键点（写 shared/frontends/rtmpose_halpe26/v1，刷新两模型树软链接）
-/data/fangyuxuan/miniconda3/envs/bbox_scan/bin/python AnysoleWorkspace/tool/adapters/mmvp_series/keypoints/run_rtmpose.py --split all
+# --cam 1,2,3,4：cam3 目录名冻结 keypoints，其余相机 keypoints_cam{N}；消费端链接仅 cam3
+/data/fangyuxuan/miniconda3/envs/bbox_scan/bin/python AnysoleWorkspace/tool/adapters/mmvp_series/keypoints/run_rtmpose.py --split all --cam 1,2,3,4
 # 生成 CLIFF 视觉初始化（写 shared/frontends/cliff_hr48/v1 + pressure_tookit 初值）
-/data/fangyuxuan/miniconda3/envs/mmvp/bin/python AnysoleWorkspace/tool/adapters/mmvp_series/cliff/run_cliff.py --split all --backbone hr48
+# --cam 1,2,3,4：cam3 文件名冻结 CLIFF_results.npz，其余相机 CLIFF_results_cam{N}.npz
+/data/fangyuxuan/miniconda3/envs/mmvp/bin/python AnysoleWorkspace/tool/adapters/mmvp_series/cliff/run_cliff.py --split all --backbone hr48 --cam 1,2,3,4
 
 # 用 DepthPro 生成深度图（写 shared/frontends/depthpro/v1）
-CUDA_VISIBLE_DEVICES=3 /data/fangyuxuan/miniconda3/envs/depthpro/bin/python -m AnysoleWorkspace.tool.adapters.mmvp_series.depth.rgb2depth --batch-size 4 --skip-existing
+# --cam 1,2,3,4：cam3 目录名冻结 depth，其余相机 depth_cam{N}
+CUDA_VISIBLE_DEVICES=3 /data/fangyuxuan/miniconda3/envs/depthpro/bin/python -m AnysoleWorkspace.tool.adapters.mmvp_series.depth.rgb2depth --batch-size 4 --skip-existing --cam 1,2,3,4
 
 # 生成 FPP-Net 模型输入树（RGB 链接 + adapter manifest）
-python3 AnysoleWorkspace/tool/adapters/mmvp_series/fpp/build_inputs.py --split all
+# --cam 1,2,3,4：cam3 树冻结 adapter_v1/<date>/...，其余相机 adapter_v1/cam{N}/...
+python3 AnysoleWorkspace/tool/adapters/mmvp_series/fpp/build_inputs.py --split all --cam 1,2,3,4
 # 生成 FPP-Net temporal-5 split 和 subject metadata
 python3 AnysoleWorkspace/tool/adapters/mmvp_series/fpp/build_metadata.py --force
 
-# 生成 PoseTransOpt 模型输入树（join manifest 为对齐权威）
-python3 AnysoleWorkspace/tool/adapters/mmvp_series/posetransopt/build_inputs.py --split all
+# 生成 PoseTransOpt 模型输入树（join manifest 为对齐权威；per-camera 内参键
+# cam{N}_fx/fy，cam3 冻结 cam3_fx/fy）
+python3 AnysoleWorkspace/tool/adapters/mmvp_series/posetransopt/build_inputs.py --split all --cam 1,2,3,4
 
-# 生成 pressure_toolkit 上游原生目录契约
+# 生成 pressure_toolkit 上游原生目录契约（per-camera 标定/深度/mask/关键点/CLIFF）
 conda activate mmvp
-python3 AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/build_inputs.py --split all
+python3 AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/build_inputs.py --split all --cam 1,2,3,4
 
 # 行走地面 ROI 审计（输出 results_display/DataTest/D6Test_floor/）
 python3 AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/floor_audit.py
@@ -187,7 +194,7 @@ python3 AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/build_inputs.
 # 质量在 session_reports/<date>/<subject>/<session>.json 的 floor.residual_mm看
 ```
 
-输出分别位于 `model_inputs/FPP-Net/adapter_v1/`、`model_inputs/PoseTransOpt/adapter_v1/`、`model_inputs/pressure_toolkit/v1/` 和 `shared/frontends/`（`rtmpose_halpe26/v1`、`cliff_hr48/v1`、`depthpro/v1`、`human_masks/sam31/v1`）；31×11 压力统一读取 `shared/representations/tactile/mmvp_31x11/v1/`。
+输出分别位于 `model_inputs/FPP-Net/adapter_v1/`、`model_inputs/PoseTransOpt/adapter_v1/`、`model_inputs/pressure_toolkit/v1/` 和 `shared/frontends/`（`rtmpose_halpe26/v1`、`cliff_hr48/v1`、`depthpro/v1`、`human_masks/sam31/v1`）；31×11 压力统一读取 `shared/representations/tactile/mmvp_31x11/v1/`。cam1/2/4 的中间量一律以 `cam{N}` 子目录/`_cam{N}` 文件名落同层（cam3 路径与文件名全部冻结零改动）。
 
 MMVP 31×11 是 pressure_toolkit/FPP-Net 共用的过程表示，不被 AnySole 或 Step2Motion 读取。
 
