@@ -69,9 +69,21 @@ from scipy.ndimage import median_filter  # noqa: E402
 
 ADAPTER_VERSION = "adapter_v1"
 WORKSPACE_ROOT = REPO_ROOT / "AnysoleWorkspace"
-SHARED_SESSION_ROOT = WORKSPACE_ROOT / "shared/facts/sessions/cam3"
+
+
+def shared_session_root(cam: int = 3) -> Path:
+    """Per-camera shared-facts root (四相机扩展 D2, 2026-10-12); cam3 = frozen default."""
+    return WORKSPACE_ROOT / "shared" / "facts" / "sessions" / f"cam{cam}"
+
+
+def model_input_root(cam: int = 3) -> Path:
+    """Per-camera adapter output root (四相机扩展 D2); cam3 = frozen default."""
+    return WORKSPACE_ROOT / "model_inputs" / "MotionPRO" / ADAPTER_VERSION / f"cam{cam}"
+
+
+SHARED_SESSION_ROOT = shared_session_root(3)
 PROTOCOL_SPLIT = WORKSPACE_ROOT / "protocol/splits/default/splits.csv"
-MODEL_INPUT_ROOT = WORKSPACE_ROOT / "model_inputs" / "MotionPRO" / ADAPTER_VERSION / "cam3"
+MODEL_INPUT_ROOT = model_input_root(3)
 REPORT_ROOT = WORKSPACE_ROOT / "reports" / "MotionPRO_insole_adapted"
 
 # ---------------------------------------------------------------- frozen raster
@@ -313,21 +325,22 @@ def virtual_carpet(ctx: dict, left48: np.ndarray, right48: np.ndarray, *,
 
 # ---------------------------------------------------------------- shared facts
 
-def shared_session_dir(session_id: str) -> Path:
+def shared_session_dir(session_id: str, cam: int = 3) -> Path:
+    root = shared_session_root(cam)
     matches = sorted(
         path.parent
-        for path in SHARED_SESSION_ROOT.glob(f"*/*/{session_id}/session.json")
+        for path in root.glob(f"*/*/{session_id}/session.json")
         if path.is_file()
     )
     if not matches:
-        raise FileNotFoundError(f"shared session {session_id!r} not found under {SHARED_SESSION_ROOT}")
+        raise FileNotFoundError(f"shared session {session_id!r} not found under {root}")
     if len(matches) > 1:
         raise ValueError(f"session id is ambiguous in shared facts: {session_id}: {matches}")
     return matches[0]
 
 
-def load_shared_session(session_id: str) -> dict:
-    session_dir = shared_session_dir(session_id)
+def load_shared_session(session_id: str, cam: int = 3) -> dict:
+    session_dir = shared_session_dir(session_id, cam)
     meta = json.loads((session_dir / "session.json").read_text(encoding="utf-8"))
     frames = dict(np.load(session_dir / "frames.npz", allow_pickle=True))
     pressure = dict(np.load(session_dir / "pressure_48.npz", allow_pickle=True))
@@ -533,7 +546,7 @@ def _interp_to_grid(source_times: np.ndarray, values: np.ndarray,
     return out.reshape((len(query_times),) + values.shape[1:]), out_of_span
 
 
-def build_smpl_npy(session: dict) -> dict:
+def build_smpl_npy(session: dict, cam: int = 3) -> dict:
     """Write ``smpl.npy`` next to the other model inputs.
 
     Four-key contract consumed by ``lib/dataset/image_pressure.py`` (and
@@ -541,7 +554,7 @@ def build_smpl_npy(session: dict) -> dict:
     ``global_orient`` (T,3), ``transl`` (T,3), T == len(frame_id).  Kept
     independent of the carpet so it can be produced even where painting fails.
     """
-    out_dir = model_input_dir(session["session_id"])
+    out_dir = model_input_dir(session["session_id"], cam)
     out_dir.mkdir(parents=True, exist_ok=True)
     source = load_smpl_source(session)
     query = np.asarray(session["frames"]["mocap_time_s"], dtype=np.float64)
@@ -573,10 +586,10 @@ def build_smpl_npy(session: dict) -> dict:
 
 # ---------------------------------------------------------------- output paths
 
-def model_input_dir(session_id: str) -> Path:
-    session_dir = shared_session_dir(session_id)
+def model_input_dir(session_id: str, cam: int = 3) -> Path:
+    session_dir = shared_session_dir(session_id, cam)
     date, subject = session_dir.parts[-3], session_dir.parts[-2]
-    return MODEL_INPUT_ROOT / date / subject / session_id
+    return model_input_root(cam) / date / subject / session_id
 
 
 def color_dir_for(session: dict) -> Path:
@@ -621,13 +634,13 @@ def write_color_symlinks(session: dict, out_dir: Path) -> dict:
 
 
 def build_one(session_id: str, *, force: bool = False, legacy_raster: bool = False,
-              color: bool = True) -> Path:
+              color: bool = True, cam: int = 3) -> Path:
     """Generate the model input pieces owned by this adapter: pressure.npz
     (virtual carpet by default, legacy dual-sole raster with ``legacy_raster``),
     smpl.npy, contact.npy (private soft-f6), frame_id.npy, the ``color/`` link
     farm and artifact.json."""
-    session = load_shared_session(session_id)
-    out_dir = model_input_dir(session_id)
+    session = load_shared_session(session_id, cam)
+    out_dir = model_input_dir(session_id, cam)
     pressure_file = out_dir / "pressure.npz"
     contact_file = out_dir / "contact.npy"
     frame_file = out_dir / "frame_id.npy"
@@ -647,7 +660,7 @@ def build_one(session_id: str, *, force: bool = False, legacy_raster: bool = Fal
     else:
         carpet, carpet_stats = virtual_carpet(ctx, left48, right48)
     contact = soft_f6_contact(ctx)
-    smpl_provenance = build_smpl_npy(session)
+    smpl_provenance = build_smpl_npy(session, cam)
     color_stats = write_color_symlinks(session, out_dir) if color else None
 
     temporary = out_dir / f".pressure.{id(session)}.tmp.npz"
@@ -943,6 +956,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                        help="session id(s); representative sessions only during C1")
     scope.add_argument("--split", choices=("train", "val", "test"),
                        help="canonical split column (C2 bulk generation only)")
+    parser.add_argument("--cam", default="3",
+                        help="camera(s) to build inputs for; comma list or 'all' "
+                             "(四相机扩展 D2; cam3 = frozen default)")
     parser.add_argument("--force", action="store_true")
     raster_mode = parser.add_mutually_exclusive_group()
     raster_mode.add_argument("--carpet", dest="legacy_raster", action="store_false",
@@ -969,16 +985,22 @@ def main(argv: list[str] | None = None) -> int:
     sessions = list(args.session)
     if args.split:
         sessions = split_session_ids(args.split)
-    for session_id in sessions:
-        out_dir = build_one(session_id, force=args.force,
-                            legacy_raster=args.legacy_raster, color=not args.no_color)
-        print(f"{session_id}: {out_dir}"
-              f"{' [legacy raster]' if args.legacy_raster else ' [virtual carpet]'}")
-        if args.audit:
-            stats = audit_one(session_id, args.audit_dir)
-            print(f"{session_id}: audit -> {args.audit_dir}; "
-                  f"counts L={stats['left']['counts']} R={stats['right']['counts']}; "
-                  f"windows={stats['windows']}")
+    cams = [1, 2, 3, 4] if args.cam == "all" else [
+        int(item.strip()) for item in args.cam.split(",") if item.strip()]
+    unknown = [cam for cam in cams if cam not in (1, 2, 3, 4)]
+    if unknown:
+        raise SystemExit(f"unknown camera(s): {unknown}")
+    for cam in cams:
+        for session_id in sessions:
+            out_dir = build_one(session_id, force=args.force, cam=cam,
+                                legacy_raster=args.legacy_raster, color=not args.no_color)
+            print(f"cam{cam} {session_id}: {out_dir}"
+                  f"{' [legacy raster]' if args.legacy_raster else ' [virtual carpet]'}")
+            if args.audit:
+                stats = audit_one(session_id, args.audit_dir)
+                print(f"{session_id}: audit -> {args.audit_dir}; "
+                      f"counts L={stats['left']['counts']} R={stats['right']['counts']}; "
+                      f"windows={stats['windows']}")
     return 0
 
 

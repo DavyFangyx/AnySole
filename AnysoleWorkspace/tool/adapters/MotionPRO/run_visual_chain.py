@@ -66,11 +66,11 @@ STEPS = ("bbox", "kps", "feature")
 SCRIPTS = {"bbox": "gen_bbox.py", "kps": "gen_kps.py", "feature": "gen_image_feature.py"}
 
 
-def session_dir(session_id: str) -> Path:
-    return A.model_input_dir(session_id)
+def session_dir(session_id: str, cam_id: int = 3) -> Path:
+    return A.model_input_dir(session_id, cam_id)
 
 
-def build_shard_root(sessions: list[str], dest: Path) -> Path:
+def build_shard_root(sessions: list[str], dest: Path, cam_id: int = 3) -> Path:
     """Mirror <date>/<subject>/<session> with symlinks to the real session dirs.
 
     The upstream scripts discover work by walking the sequence root, so a shard
@@ -80,7 +80,7 @@ def build_shard_root(sessions: list[str], dest: Path) -> Path:
     """
     dest.mkdir(parents=True, exist_ok=True)
     for session_id in sessions:
-        real = session_dir(session_id)
+        real = session_dir(session_id, cam_id)
         if not real.is_dir():
             raise FileNotFoundError(f"{session_id}: {real} is not a directory "
                                     f"(rebuild it with adapter.py --session {session_id})")
@@ -123,11 +123,11 @@ def run_step(step: str, seq_root: Path, python: str, cuda_device: str | None,
     return completed.returncode
 
 
-def verify(sessions: list[str]) -> dict:
+def verify(sessions: list[str], cam_id: int = 3) -> dict:
     """Check the three chain artifacts next to each session."""
     report: dict[str, dict] = {}
     for session_id in sessions:
-        directory = session_dir(session_id)
+        directory = session_dir(session_id, cam_id)
         entry: dict = {"dir": str(directory)}
         bbox_path = directory / "bbox.npy"
         if bbox_path.is_file():
@@ -227,45 +227,45 @@ def main(argv=None) -> int:
         if step not in SCRIPTS:
             raise SystemExit(f"unknown step {step!r} (expected one of {list(SCRIPTS)})")
 
-    cam_root = Path(args.seq_root) if args.seq_root else Path(A.MODEL_INPUT_ROOT)
+    cam_ids = _cam_ids(args.cam_id)
+    explicit_root = Path(args.seq_root) if args.seq_root else None
     if args.sessions:
         shard = args.shard_root or Path(tempfile.mkdtemp(prefix="motionpro_visual_shard_"))
-        seq_root = build_shard_root(args.sessions, Path(shard))
-        print(f"shard root: {seq_root}")
-        for session_id in args.sessions:
-            print(f"  {session_id} -> {session_dir(session_id)}")
-    else:
-        seq_root = cam_root
-        print(f"sequence root: {seq_root} (all sessions -- the full run)")
+        print(f"shard root: {shard}")
+    elif explicit_root is None:
+        print(f"sequence roots: " + ", ".join(f"cam{cam} -> {A.model_input_root(cam)}" for cam in cam_ids))
 
-    if not args.verify_only:
-        for cam_id in _cam_ids(args.cam_id):
+    ok = True
+    for cam_id in cam_ids:
+        if args.sessions:
+            cam_shard = Path(shard) / f"cam{cam_id}"
+            seq_root = build_shard_root(args.sessions, cam_shard, cam_id)
+            for session_id in args.sessions:
+                print(f"  cam{cam_id} {session_id} -> {session_dir(session_id, cam_id)}")
+        else:
+            seq_root = explicit_root or A.model_input_root(cam_id)
+            print(f"cam{cam_id} sequence root: {seq_root} (all sessions -- the full run)")
+
+        if not args.verify_only:
             for step in steps:
                 python = args.bbox_python if step == "bbox" else args.python
                 code = run_step(step, seq_root, python, args.cuda_device, args.mode,
                                 cam_id, args.dry_run)
                 if code != 0:
                     return code
+        if args.sessions and not args.dry_run:
+            report = verify(args.sessions, cam_id)
+            if not print_verify(report["artifacts"]):
+                ok = False
+            if args.out:
+                args.out.parent.mkdir(parents=True, exist_ok=True)
+                args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+                print(f"\nreport -> {args.out}")
 
-    sessions = args.sessions or []
-    if not sessions and not args.verify_only:
-        print("\n(verification skipped: pass --sessions to verify a subset)")
-    report = {"seq_root": str(seq_root), "steps": steps,
-              "sessions": args.sessions, "cuda_device": args.cuda_device,
-              "artifacts": verify(sessions) if sessions else {}}
-    if sessions:
-        ok = print_verify(report["artifacts"]) if not args.dry_run else True
-        report["passed"] = ok
-    else:
-        ok = True
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        print(f"\nreport -> {args.out}")
     if args.sessions and args.shard_root is None and not args.dry_run:
-        print(f"\n(shard root kept for inspection: {seq_root})")
+        print(f"\n(shard root kept for inspection: {shard})")
     print(f"\nfull-run command:\n  {DEFAULT_TOUCH_PYTHON} {Path(__file__).resolve()} "
-          f"--seq-root {cam_root} --cuda-device <idle-gpu>")
+          f"--cam-id {args.cam_id} --cuda-device <idle-gpu>")
     return 0 if ok else 1
 
 
