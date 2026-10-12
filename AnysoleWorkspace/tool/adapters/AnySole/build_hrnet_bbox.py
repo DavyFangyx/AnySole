@@ -158,6 +158,37 @@ def mask_bbox_px(mask_path: Path):
     return np.asarray([xs.min(), ys.min(), xs.max() + 1, ys.max() + 1], dtype=np.float64)
 
 
+_INDEX_ROWS: dict | None = None
+
+
+def index_rows_by_key() -> dict:
+    """The whole mask index parsed once per process, grouped by
+    ``(session, camera)`` in file order.
+
+    2026-10-12: ``frontend_mask_bboxes`` used to re-read the 200k+ line index
+    for every (session, camera) call -- 560 full scans for the four-camera run
+    (~6s per session, ~40min total), with the scan dominating the runtime.
+    Parsing once is behaviour-identical: the per-key rows keep file order, so
+    later rows still overwrite earlier ones per frame and the frame-range
+    check fires on the same first offending row.
+    """
+    global _INDEX_ROWS
+    if _INDEX_ROWS is None:
+        if not MASK_INDEX.is_file():
+            raise FileNotFoundError("missing SAM3.1 mask index %s" % MASK_INDEX)
+        rows: dict = {}
+        with MASK_INDEX.open(encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                rows.setdefault((row.get("session"), row.get("camera")), []).append(
+                    (row.get("frame_id"), str(row.get("mask_path", ""))))
+        _INDEX_ROWS = rows
+    return _INDEX_ROWS
+
+
 def frontend_mask_bboxes(session_id: str, cam: int, n_frames: int) -> tuple:
     """Per-frame mask bbox for one camera's frontend rows.
 
@@ -168,25 +199,16 @@ def frontend_mask_bboxes(session_id: str, cam: int, n_frames: int) -> tuple:
     """
     bbox = np.zeros((n_frames, 4), dtype=np.float64)
     valid = np.zeros(n_frames, dtype=bool)
-    if not MASK_INDEX.is_file():
-        raise FileNotFoundError("missing SAM3.1 mask index %s" % MASK_INDEX)
-    with MASK_INDEX.open(encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            row = json.loads(line)
-            if row.get("session") != session_id or row.get("camera") != f"cam{cam}":
-                continue
-            frame = int(row["frame_id"])
-            if not 0 <= frame < n_frames:
-                raise ValueError("%s: frontend frame_id %d outside [0,%d)"
-                                 % (session_id, frame, n_frames))
-            box = mask_bbox_px(Path(str(row.get("mask_path", ""))))
-            if box is None:
-                continue
-            bbox[frame] = box
-            valid[frame] = True
+    for frame_raw, mask_path in index_rows_by_key().get((session_id, f"cam{cam}"), []):
+        frame = int(frame_raw)
+        if not 0 <= frame < n_frames:
+            raise ValueError("%s: frontend frame_id %d outside [0,%d)"
+                             % (session_id, frame, n_frames))
+        box = mask_bbox_px(Path(mask_path))
+        if box is None:
+            continue
+        bbox[frame] = box
+        valid[frame] = True
     if not valid.any():
         raise ValueError(
             "%s: cam%d has no usable frontend mask bbox. The per-camera index "

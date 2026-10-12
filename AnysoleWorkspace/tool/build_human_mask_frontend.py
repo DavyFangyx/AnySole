@@ -173,16 +173,36 @@ def main() -> int:
     # index, silently dropping every other session's rows (observed: 52,612 ->
     # 4,504 rows after a 10-session run).  Subset mode now merges: rows for the
     # requested (session, camera) pairs are replaced, all others are preserved.
+    # 2026-10-12 fix: the merge gate was ``args.sessions`` only, so a camera
+    # subset run without --sessions (e.g. the default ``--cam 3``) still
+    # clobbered every other camera's rows (a full run must cover all four
+    # cameras to be allowed to rebuild from scratch).
+    # 2026-10-12 fix (2/2): a non-force run skips existing session outputs
+    # without re-emitting their index rows (observed: a no-op
+    # ``--sessions S10101 --cam 1`` re-run dropped those 474 rows), so rows of
+    # a rebuilt-but-skipped pair are preserved from the old index as well.
     rebuilt_pairs = {(session, f"cam{cam}") for session in wanted for cam in cams}
+    subset_run = bool(args.sessions) or set(cams) != {1, 2, 3, 4}
     keep_rows: list[str] = []
-    if args.sessions and index_path.is_file():
+    skipped_pair_backup: dict[tuple, list[str]] = {}
+    if index_path.is_file():
         with index_path.open(encoding="utf-8") as handle:
             for line in handle:
                 row = json.loads(line)
-                if (row.get("session"), row.get("camera")) not in rebuilt_pairs:
+                key = (row.get("session"), row.get("camera"))
+                if key in rebuilt_pairs:
+                    if not args.force:
+                        skipped_pair_backup.setdefault(key, []).append(line)
+                elif subset_run:
                     keep_rows.append(line)
     total = valid_total = 0
-    index_handle = index_path.open("w", encoding="utf-8")
+    emitted_pairs: set[tuple] = set()
+    # 2026-10-12 fix: build the merged index in a sibling .tmp and replace on
+    # success.  The old ``open("w")`` truncated the live index before the first
+    # build, so a mid-run failure (missing csv/facts rows for one session) left
+    # the file holding only the sessions written so far.
+    index_tmp = index_path.with_name(index_path.name + ".tmp")
+    index_handle = index_tmp.open("w", encoding="utf-8")
     try:
         index_handle.writelines(keep_rows)
         for cam in cams:
@@ -194,9 +214,19 @@ def main() -> int:
                 valid_total += valid
                 for item in details.get("index_rows", []):
                     index_handle.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
+                if details.get("index_rows"):
+                    emitted_pairs.add((session, f"cam{cam}"))
                 print(f"{session} (cam{cam}): frames={count} valid_bbox={valid}")
-    finally:
+        # Re-append the preserved rows of skipped (session, camera) pairs.
+        for key, lines in skipped_pair_backup.items():
+            if key not in emitted_pairs:
+                index_handle.writelines(lines)
+    except BaseException:
         index_handle.close()
+        index_tmp.unlink(missing_ok=True)
+        raise
+    index_handle.close()
+    os.replace(index_tmp, index_path)
     write_artifact(FRONTEND_ROOT, schema_version="shared.frontend.human_masks.sam31.v1", producer="build_human_mask_frontend.py", repository_root=ROOT,
                    parameters={"session_count": len(wanted), "camera": ",".join(f"cam{cam}" for cam in cams), "bbox_source": "masks_index.csv",
                                "mode": "direct_csv_bbox", "match": "visual_time_s nearest <=20ms (time_error_s recorded)"},
