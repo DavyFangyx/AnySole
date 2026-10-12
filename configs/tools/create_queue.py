@@ -31,7 +31,7 @@ depth/depth_mask/keypoints/CLIFF/地面这些细则由 launcher 的 pre-flight �
 没真正拟合"的情况）；要把这类 session 重新入队，先删掉
 `configs/done/*_pressure_<session>.conf` 再跑一次生成器。
 """
-import argparse, json
+import argparse, json, re
 from pathlib import Path
 import sys
 
@@ -58,6 +58,18 @@ def pressure_queued(session):
             return True
     return False
 
+def _cam_id(model: str) -> int:
+    """Camera id of a four-camera model id (V3_3B_cam{N}); None otherwise."""
+    match = re.match(r"^V3_3B_cam([1-4])$", model)
+    return int(match.group(1)) if match else None
+
+
+def anysole_config_file(model: str) -> str:
+    """四相机扩展 D2: per-camera models use v1_cam{N}.yaml, others v1.yaml."""
+    cam = _cam_id(model)
+    return "anysole/configs/v1_cam%d.yaml" % cam if cam else "anysole/configs/v1.yaml"
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--models', required=True)
@@ -79,7 +91,7 @@ def main():
             continue
         index += 1
         text = f'MODEL={model}\nRUN_NAME={model}\nCONDA_ENV=touch_gait\n'
-        if model.startswith('anysole'): text += 'CONFIG_FILE=anysole/configs/v1.yaml\n'
+        if model.startswith('anysole'): text += 'CONFIG_FILE=%s\n' % anysole_config_file(model)
         elif model == 'step2motion': text += 'CONFIG_FILE=configs/config_gait.json\n'
         put(f'{index:03d}_{model}', text)
     if not any(model in models for model in ('pressure_toolkit', 'fpp_train', 'fpp_infer', 'posetransopt')):

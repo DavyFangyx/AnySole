@@ -84,9 +84,10 @@ def hrnet_cache_path(session_id: str, cache_root: Path = HRNET_CACHE_ROOT) -> Pa
     return Path(cache_root) / ("%s.pt" % session_id)
 
 
-def hmr_cache_path(model: str, session_id: str) -> Path:
-    """F1: per-session GVHMR cache written by anysole/data/extract_hmr.py."""
-    return HMR_CACHE_ROOT / model / "cam3" / ("%s.pt" % session_id)
+def hmr_cache_path(model: str, session_id: str, cam: int = 3) -> Path:
+    """F1: per-session GVHMR cache written by anysole/data/extract_hmr.py
+    (四相机扩展 D2: per-camera cache dir cam{N})."""
+    return HMR_CACHE_ROOT / model / ("cam%d" % cam) / ("%s.pt" % session_id)
 
 
 def assemble_v_hmr(hmr: dict, n_frames: int) -> np.ndarray:
@@ -182,10 +183,14 @@ class AnySoleDataset(Dataset):
         v_hmr_model: str = "gvhmr",
         f2_repr: bool = False,
         smpl_roots: Optional[Sequence[Path]] = None,
+        cam_id: int = 3,
     ):
         self.mode = mode
         self.window_length = int(window_length)
         self.tactile_input = str(tactile_input)
+        # 四相机扩展 D2: camera id selects the per-camera GVHMR cache dir
+        # (hrnet cache is addressed via cache_root, already camera-scoped).
+        self.cam_id = int(cam_id)
         if self.tactile_input not in ("raw108", "s2m50"):
             raise ValueError("tactile_input must be 'raw108' or 's2m50'")
         if no_imu and self.tactile_input != "s2m50":
@@ -336,7 +341,7 @@ class AnySoleDataset(Dataset):
 
             # F1: GVHMR visual channel (only when the run consumes it).
             if self.v_input == "hmr_gvhmr":
-                hmr_path = hmr_cache_path(self.v_hmr_model, session_id)
+                hmr_path = hmr_cache_path(self.v_hmr_model, session_id, self.cam_id)
                 if not hmr_path.is_file():
                     raise FileNotFoundError(
                         "Missing GVHMR cache %s. Run `python -m anysole.data.extract_hmr` "

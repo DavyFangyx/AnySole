@@ -51,6 +51,14 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V4B": ModelEntry("V4B", "v4b", "learned hard partition (--part-json)"),
 }
 
+# 四相机扩展（D2，2026-10-12 裁定：相机进模型名）。每相机一份 V3_3B，
+# 共用 v3_3b 结构入口；数据根差异由 v1_cam{N}.yaml 携带（types.camera_roots）。
+MODEL_REGISTRY.update({
+    f"V3_3B_cam{cam}": ModelEntry(f"V3_3B_cam{cam}", "v3_3b",
+                                  f"V3_3B on camera {cam} (four-camera experiment)")
+    for cam in (1, 2, 3, 4)
+})
+
 
 def list_registered_models() -> list[str]:
     return list(MODEL_REGISTRY)

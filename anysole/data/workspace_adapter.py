@@ -137,8 +137,9 @@ def hrnet_cache_path(session_id: str) -> Path:
     return HRNET_ROOT / f"{session_id}.pt"
 
 
-def hmr_cache_path(model: str, session_id: str) -> Path:
-    return HMR_ROOT / str(model) / "cam3" / f"{session_id}.pt"
+def hmr_cache_path(model: str, session_id: str, cam: int = 3) -> Path:
+    """四相机扩展 D2: per-camera GVHMR cache dir cam{N} (cam3 = frozen)."""
+    return HMR_ROOT / str(model) / ("cam%d" % cam) / f"{session_id}.pt"
 
 
 def label_path(session_id: str, method: str) -> Path:

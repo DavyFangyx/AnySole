@@ -886,6 +886,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             v_input=str(config.get("v_input", "hrnet")),
             f2_repr=bool(config.get("f2_repr", False)),
             smpl_roots=config.get("smpl_roots"),
+            cam_id=int(config.get("cam_id", 3)),
         )
     except FileNotFoundError as exc:
         if "HRNet cache" in str(exc):
@@ -909,7 +910,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"))
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:

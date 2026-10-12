@@ -124,6 +124,27 @@ def anysole_model_dir(modal: str, contact_method: str, variant: Optional[str] = 
     results_root = Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results")))
     base = results_root / "AnySole" / ("%s_%s" % (modal, contact_method))
     return base / variant if variant else base
+
+
+def camera_config_path(cam: int) -> Path:
+    """Per-camera training config (四相机扩展 D2, 2026-10-12).
+
+    ``anysole/configs/v1_cam{N}.yaml`` = a copy of v1.yaml with
+    cam_id/seq_root/cache_root overridden for camera N; cam3 URIs equal the
+    frozen defaults.
+    """
+    return DEFAULT_CONFIG_PATH.parent / f"v1_cam{cam}.yaml"
+
+
+def camera_roots(cam: int) -> dict:
+    """Canonical per-camera input roots (四相机扩展 D2); cam3 == frozen defaults."""
+    return {
+        "cam_id": cam,
+        "seq_root": f"shared://facts/sessions/cam{cam}",
+        "cache_root": f"model-input://AnySole/adapter_v1/visual/hrnet/cam{cam}",
+    }
+
+
 HRNET_YAML = (
     MOTIONPRO_ROOT
     / "lib"

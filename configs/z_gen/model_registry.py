@@ -82,6 +82,17 @@ MODELS = {
 }
 
 
+# 四相机扩展（D2，2026-10-12：相机进模型名）。训练规格与 V3_3B 完全一致；
+# 数据根差异由 create_queue 按名称尾缀推导 v1_cam{N}.yaml。
+_V3_3B = MODELS["V3_3B"]
+for _cam in (1, 2, 3, 4):
+    MODELS[f"V3_3B_cam{_cam}"] = {
+        **_V3_3B,
+        "label": f"V3-3B-cam{_cam}",
+        "name": f"V3_3B_cam{_cam}",
+    }
+
+
 _COMMON_FALLBACK = {
     "CONFIG": "anysole/configs/v1.yaml",
     "RESULTS_ROOT": "results",

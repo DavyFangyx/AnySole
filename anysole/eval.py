@@ -605,6 +605,7 @@ def _evaluate_one(
         v_input=str(checkpoint.get("config", {}).get("v_input", "hrnet")),
         f2_repr=bool(checkpoint.get("config", {}).get("f2_repr", False)),
         smpl_roots=checkpoint.get("config", {}).get("smpl_roots", config.get("smpl_roots")),
+        cam_id=int(config.get("cam_id", 3)),
         # E6.4: continuation eval uses overlapping windows (stride = tw/2);
         # without it the stride stays non-overlapping (E3 behavior).
         stride=(tw // 2) if (pos_mode and continuation) else None,
