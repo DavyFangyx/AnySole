@@ -32,10 +32,23 @@ ESSENTIALS = ROOT / "Baselines/VP-MoCap/FPP-Net/essentials/insole2cont"
 LAYOUT = WORKSPACE / "assets/foot_sensor_layout"
 
 
-def read_manifest() -> dict[str, dict]:
+def manifest_for(cam: int) -> Path:
+    """Manifest source for a camera: the main manifest for cam3 (frozen
+    public baseline), the per-camera manifest for cams 1/2/4
+    (四相机决策记录 §4-1: ``session_manifest_cam{N}.jsonl``)."""
+    if cam == 3:
+        return MANIFEST
+    path = WORKSPACE / "protocol/manifests" / f"session_manifest_cam{cam}.jsonl"
+    if not path.is_file():
+        raise SystemExit(
+            f"missing per-camera manifest {path}; run build_manifest.py --cam 1,2,3,4 first")
+    return path
+
+
+def read_manifest(cam: int = 3) -> dict[str, dict]:
     return {
         row["session_id"]: row
-        for row in (json.loads(line) for line in MANIFEST.read_text(encoding="utf-8").splitlines())
+        for row in (json.loads(line) for line in manifest_for(cam).read_text(encoding="utf-8").splitlines())
         if row.get("session_id")
     }
 
@@ -55,9 +68,10 @@ def read_pressure(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.nd
     ``raw_time_us`` carries the reconstructed physical wall-clock time of each
     row (``raw_t_us``, computed by mark-fake from the per-segment manifest
     anchors) with NaN where the row must never be selected (bridge/fake rows).
-    Raw times live on the same wall clock as the cam3 video clock (S2 ruling,
-    Baselines/决策/05_R1-R3_风险裁定.md §三 证据 C) and are used for
-    absolute-time resampling.
+    Raw times live on the same wall clock as the recording's JPEG wall clock
+    (S2 ruling, Baselines/决策/05_R1-R3_风险裁定.md §三 证据 C; the four
+    cameras' JPEG filenames share that clock -- 四相机决策记录 D1) and are
+    used for absolute-time resampling.
     """
     with path.open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
@@ -88,7 +102,11 @@ def day_seconds_from_iso(value: str) -> float:
 
 
 def day_seconds_from_jpeg_name(name: str) -> float:
-    """Local day-seconds from a cam3 frame name ``3_HHMMSS.mmm.jpg``."""
+    """Local day-seconds from a frame name ``<cam>_HHMMSS.mmm.jpg``.
+
+    Camera-prefix agnostic: only the timestamp tail is parsed, and the four
+    cameras share one wall clock (四相机决策记录 D1: JPEG 文件名共钟).
+    """
     core = name.split("_")[-1][:-4]  # strip ".jpg"
     return int(core[0:2]) * 3600 + int(core[2:4]) * 60 + float(core[4:])
 
@@ -134,7 +152,8 @@ def resample_pressure(left: tuple, right: tuple, n_frames: int, *,
 
     Absolute mode (default when the wall-clock anchors are available and the
     CSVs carry raw ``source_t_us``): video frame ``i`` has wall time
-    ``video_start_day_s + i/fps`` (cam3 jpeg clock); pressure row ``j`` has
+    ``video_start_day_s + i/fps`` (the source camera's jpeg clock); pressure
+    row ``j`` has
     wall time ``pressure_epoch_day_s + raw_t_us[j]/1e6`` (``started_at_iso`` +
     raw ``time.monotonic`` bridge -- the same clock, S2 §三 证据 C).  Values and
     quality flags are taken from the nearest row; no interpolation.  Video
@@ -238,7 +257,7 @@ def mmvp_map(foot: str) -> tuple[np.ndarray, np.ndarray]:
     return indices, mask
 
 
-def build_one(sid: str, row: dict, *, force: bool = False) -> Path:
+def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
     recording = resolve_uri(row["video_path"], must_exist=True)
     pressure_dir = resolve_uri(row["pressure_path"], must_exist=True)
     left_csv, right_csv = source_csvs(pressure_dir)
@@ -246,7 +265,7 @@ def build_one(sid: str, row: dict, *, force: bool = False) -> Path:
     right_uri = row["pressure_path"].rstrip("/") + "/pressure_right.csv"
     left_raw, right_raw = read_pressure(left_csv), read_pressure(right_csv)
     n = int(row["n_frames"])
-    rgb_source = recording / "3"
+    rgb_source = recording / str(cam)
     images = sorted(rgb_source.glob("*.jpg"))
     if not images:
         raise ValueError(f"{sid}: raw RGB has no extracted frames")
@@ -317,7 +336,7 @@ def build_one(sid: str, row: dict, *, force: bool = False) -> Path:
             "left_source": left_uri, "right_source": right_uri,
             "shared_alignment": (
                 "values and quality flags nearest-neighbour mapped by absolute wall-clock time "
-                "(video frames: first cam3 jpeg name + i/fps; pressure rows: started_at_iso + raw_t_us column; "
+                f"(video frames: first cam{cam} jpeg name + i/fps; pressure rows: started_at_iso + raw_t_us column; "
                 "same clock per S2 ruling Baselines/决策/05_R1-R3_风险裁定.md §三 证据 C); "
                 "rows without a raw timestamp are never selected; out-of-span video frames clamp to the edge sample"
                 if resample_meta["absolute"] else
@@ -342,7 +361,9 @@ def build_one(sid: str, row: dict, *, force: bool = False) -> Path:
 def build_mmvp(sid: str, session_root: Path, *, force: bool = False) -> Path:
     pressure = np.load(session_root / "pressure_48.npz", allow_pickle=True)
     # Representation contract omits camera because this is the single frozen
-    # camera-3 public conversion; facts retain the explicit camera component.
+    # camera-3 public conversion (四相机决策记录 §4-3: T 流内容相机无关且要求
+    # 跨相机一致，维持单棵 cam3 源，per-camera facts 构建跳过本步); facts
+    # retain the explicit camera component.
     target = MMVP_ROOT / session_root.parts[-3] / session_root.parts[-2] / sid
     if target.exists() and not force:
         if not (target / "frame_id.npy").is_file():
@@ -370,46 +391,80 @@ def build_mmvp(sid: str, session_root: Path, *, force: bool = False) -> Path:
     return target
 
 
+def _cam_list(value: str) -> tuple[int, ...]:
+    if value.strip() == "all":
+        return (1, 2, 3, 4)
+    try:
+        cams = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError:
+        raise SystemExit(f"--cam expects a comma list or 'all', got {value!r}")
+    unknown = set(cams) - {1, 2, 3, 4}
+    if unknown:
+        raise SystemExit(f"unknown camera(s): {sorted(unknown)}")
+    if not cams:
+        raise SystemExit("--cam list is empty")
+    return cams
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sessions", default="", help="comma-separated IDs; default is all eligible manifest sessions")
+    parser.add_argument("--cam", default="3",
+                        help="camera(s) to build shared facts for: 'all' or comma list (1,2,3,4), default 3")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--facts-only", action="store_true")
     parser.add_argument("--mmvp-only", action="store_true")
     args = parser.parse_args()
     if args.facts_only and args.mmvp_only:
         raise SystemExit("--facts-only and --mmvp-only are mutually exclusive")
-    rows = read_manifest()
-    wanted = {value.strip() for value in args.sessions.split(",") if value.strip()} or set(rows)
+    cams = _cam_list(args.cam)
+    if args.mmvp_only and cams != (3,):
+        raise SystemExit(
+            "--mmvp-only 只支持 cam3：MMVP 31x11 表示层是相机无关的单棵 cam3 源"
+            "（四相机决策记录 §4-3），per-camera facts 构建跳过 mmvp 步")
+    wanted = {value.strip() for value in args.sessions.split(",") if value.strip()}
     partial = bool(args.sessions)
-    built: list[str] = []
-    for sid in sorted(wanted):
-        if sid not in rows:
-            raise SystemExit(f"{sid} not found in {MANIFEST}")
-        if rows[sid].get("eligible_anysole") != "1":
-            print(f"skip {sid}: not eligible ({rows[sid].get('eligibility_reason')})")
-            continue
-        row = rows[sid]
-        recording = resolve_uri(row["video_path"], must_exist=True)
-        date, subject = recording.parts[-3], recording.parts[-2]
-        session_root = FACTS_ROOT / row["camera"] / date / subject / sid
-        if not args.mmvp_only:
-            session_root = build_one(sid, row, force=args.force)
-        if args.mmvp_only:
-            if not session_root.is_dir():
-                raise SystemExit(f"facts missing for MMVP build: {session_root}")
-            build_mmvp(sid, session_root, force=args.force)
-        print(f"built {sid}")
-        built.append(sid)
+    built_by_cam: dict[int, list[str]] = {}
+    for cam in cams:
+        rows = read_manifest(cam)
+        wanted_cam = wanted or set(rows)
+        built: list[str] = []
+        for sid in sorted(wanted_cam):
+            if sid not in rows:
+                raise SystemExit(f"{sid} not found in {manifest_for(cam)}")
+            if rows[sid].get("eligible_anysole") != "1":
+                print(f"skip {sid} (cam{cam}): not eligible ({rows[sid].get('eligibility_reason')})")
+                continue
+            row = rows[sid]
+            recording = resolve_uri(row["video_path"], must_exist=True)
+            date, subject = recording.parts[-3], recording.parts[-2]
+            session_root = FACTS_ROOT / row["camera"] / date / subject / sid
+            if not args.mmvp_only:
+                session_root = build_one(sid, row, cam, force=args.force)
+            if args.mmvp_only:
+                if not session_root.is_dir():
+                    raise SystemExit(f"facts missing for MMVP build: {session_root}")
+                build_mmvp(sid, session_root, force=args.force)
+            print(f"built {sid} (cam{cam})")
+            built.append(sid)
+        built_by_cam[cam] = built
     # 部分构建（--sessions）只更新 session 级 artifact，不得覆写根 artifact
     # 的全局统计（08 全局审阅：根 artifact 曾因 C1 单 session 冒烟被覆写成
     # session_count=1，与实际 140 个 session 不符）。
     if partial:
-        print(f"partial build ({len(built)} sessions); root artifacts not rewritten")
+        print(f"partial build ({len(built_by_cam[cams[0]])} sessions); root artifacts not rewritten")
         return 0
-    write_artifact(FACTS_ROOT, schema_version="shared.facts.v1", producer="build_shared.py", repository_root=ROOT,
-                   parameters={"session_count": len(built)}, source_artifacts=["protocol://manifests/session_manifest.jsonl"],
-                   consumers=["model_inputs/<model>"])
+    for cam in cams:
+        built = built_by_cam[cam]
+        if cam == 3:
+            write_artifact(FACTS_ROOT, schema_version="shared.facts.v1", producer="build_shared.py", repository_root=ROOT,
+                           parameters={"session_count": len(built)}, source_artifacts=["protocol://manifests/session_manifest.jsonl"],
+                           consumers=["model_inputs/<model>"])
+        else:
+            write_artifact(FACTS_ROOT / f"cam{cam}", schema_version="shared.facts.v1", producer="build_shared.py",
+                           repository_root=ROOT, parameters={"session_count": len(built), "camera": f"cam{cam}"},
+                           source_artifacts=[canonical_uri(manifest_for(cam))],
+                           consumers=["model_inputs/<model>"])
     if args.mmvp_only:
         write_artifact(MMVP_ROOT, schema_version="shared.representations.v1", producer="build_shared.py", repository_root=ROOT,
                        parameters={"representation": "tactile/mmvp_31x11/v1"}, source_artifacts=["shared://facts/sessions"],
