@@ -77,7 +77,8 @@ def all_session_ids(split_csv: Path) -> list:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate AnySole HRNet feature cache.")
-    parser.add_argument("--cam-id", type=int, required=True, help="Camera id, for example 3.")
+    parser.add_argument("--cam-id", type=str, default="3",
+                        help="Camera id(s): one id, 'all', or comma list (1,2,3,4), default 3.")
     parser.add_argument("--session", help="Process only one session.")
     parser.add_argument("--split", type=str, default="all", choices=["all", "train", "val", "test"],
                         help="Split column scope when --session is empty ('all' = every session under the seq root).")
@@ -87,18 +88,44 @@ def parse_args() -> argparse.Namespace:
                         help="Process only shard I of N selected sessions (I starts at 0).")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", default=None, help="cuda, cuda:0, or cpu.")
-    parser.add_argument("--seq-root", type=Path, default=DEFAULT_SEQ_ROOT,
-                        help="Shared-facts camera root (<date>/<subject>/<session>/rgb).")
-    parser.add_argument("--bbox-root", type=Path, default=DEFAULT_BBOX_ROOT,
-                        help="Per-session bbox.npy root (AnySole bbox shim).")
-    parser.add_argument("--cache-root", type=Path, default=DEFAULT_CACHE_ROOT,
-                        help="Feature cache root; files land at <cache-root>/<session>.pt.")
+    parser.add_argument("--seq-root", type=Path, default=None,
+                        help="Shared-facts camera root (<date>/<subject>/<session>/rgb); "
+                             "default shared/facts/sessions/cam<id>.")
+    parser.add_argument("--bbox-root", type=Path, default=None,
+                        help="Per-session bbox.npy root (AnySole bbox shim); "
+                             "default visual/hrnet/bbox (cam3) or bbox_cam<id>.")
+    parser.add_argument("--cache-root", type=Path, default=None,
+                        help="Feature cache root; files land at <cache-root>/<session>.pt; "
+                             "default visual/hrnet/cam<id>.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--skip-existing", action="store_true", help="Skip sessions whose cache exists.")
     mode.add_argument("--force", "--overwrite", dest="force", action="store_true", help="Recompute and overwrite existing caches.")
     parser.add_argument("--limit-sessions", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true", help="Print the commands without running them.")
     return parser.parse_args()
+
+
+def _cam_ids(value: str) -> tuple[int, ...]:
+    if value.strip() == "all":
+        return (1, 2, 3, 4)
+    try:
+        ids = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError:
+        raise SystemExit("--cam-id expects one id, a comma list, or 'all', got %r" % value)
+    unknown = set(ids) - {1, 2, 3, 4}
+    if unknown:
+        raise SystemExit("unknown camera(s): %s" % sorted(unknown))
+    if not ids:
+        raise SystemExit("--cam-id list is empty")
+    return ids
+
+
+def resolved_roots(cam_id: int, args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    seq_root = args.seq_root or DEFAULT_SEQ_ROOT.parent / ("cam%d" % cam_id)
+    cache_root = args.cache_root or DEFAULT_CACHE_ROOT.parent / ("cam%d" % cam_id)
+    bbox_root = args.bbox_root or (DEFAULT_BBOX_ROOT if cam_id == 3
+                                   else DEFAULT_BBOX_ROOT.parent / ("bbox_cam%d" % cam_id))
+    return seq_root, bbox_root, cache_root
 
 
 def parse_shard(value: str):
@@ -111,21 +138,21 @@ def parse_shard(value: str):
     return index, count
 
 
-def base_command(args: argparse.Namespace) -> list:
+def base_command(cam_id: int, seq_root: Path, bbox_root: Path, cache_root: Path, args: argparse.Namespace) -> list:
     return [
         sys.executable,
         "-m",
         "anysole.data.extract_hrnet",
         "--cam-id",
-        str(args.cam_id),
+        str(cam_id),
         "--batch-size",
         str(args.batch_size),
         "--cache-root",
-        str(args.cache_root),
+        str(cache_root),
         "--seq-root",
-        str(args.seq_root),
+        str(seq_root),
         "--bbox-root",
-        str(args.bbox_root),
+        str(bbox_root),
     ]
 
 
@@ -135,39 +162,41 @@ def main() -> int:
     env["PYTHONPATH"] = os.pathsep.join([str(ANYSOLE_ROOT), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
 
     commands = []
-    if args.shard is None:
-        command = base_command(args)
-        if args.session:
-            command += ["--session", args.session]
-        elif args.split != "all":
-            command += ["--split", args.split, "--split-csv", str(args.split_csv)]
-        if args.device:
-            command += ["--device", args.device]
-        command.append("--force" if args.force else "--skip-existing")
-        if args.limit_sessions is not None:
-            command += ["--limit-sessions", str(args.limit_sessions)]
-        commands.append(command)
-    else:
-        # The extractor takes a single --session per run, so a shard is a
-        # short loop; each session pays one CLIFF encoder load.
-        index, count = parse_shard(args.shard)
-        if args.session:
-            session_ids = [args.session]
-        elif args.split == "all":
-            session_ids = all_session_ids(Path(args.split_csv))
-        else:
-            session_ids = split_session_ids(Path(args.split_csv), args.split)
-        shard = [sid for position, sid in enumerate(session_ids) if position % count == index]
-        if not shard:
-            raise SystemExit("shard %s of %s is empty (%d sessions selected)"
-                             % (args.shard, args.split, len(session_ids)))
-        for session_id in shard:
-            command = base_command(args) + ["--session", session_id]
+    for cam_id in _cam_ids(args.cam_id):
+        seq_root, bbox_root, cache_root = resolved_roots(cam_id, args)
+        if args.shard is None:
+            command = base_command(cam_id, seq_root, bbox_root, cache_root, args)
+            if args.session:
+                command += ["--session", args.session]
+            elif args.split != "all":
+                command += ["--split", args.split, "--split-csv", str(args.split_csv)]
             if args.device:
                 command += ["--device", args.device]
             command.append("--force" if args.force else "--skip-existing")
+            if args.limit_sessions is not None:
+                command += ["--limit-sessions", str(args.limit_sessions)]
             commands.append(command)
-        print("shard %s: %d/%d sessions: %s" % (args.shard, len(shard), len(session_ids), " ".join(shard)))
+        else:
+            # The extractor takes a single --session per run, so a shard is a
+            # short loop; each session pays one CLIFF encoder load.
+            index, count = parse_shard(args.shard)
+            if args.session:
+                session_ids = [args.session]
+            elif args.split == "all":
+                session_ids = all_session_ids(Path(args.split_csv))
+            else:
+                session_ids = split_session_ids(Path(args.split_csv), args.split)
+            shard = [sid for position, sid in enumerate(session_ids) if position % count == index]
+            if not shard:
+                raise SystemExit("shard %s of %s is empty (%d sessions selected)"
+                                 % (args.shard, args.split, len(session_ids)))
+            for session_id in shard:
+                command = base_command(cam_id, seq_root, bbox_root, cache_root, args) + ["--session", session_id]
+                if args.device:
+                    command += ["--device", args.device]
+                command.append("--force" if args.force else "--skip-existing")
+                commands.append(command)
+            print("shard %s: %d/%d sessions: %s" % (args.shard, len(shard), len(session_ids), " ".join(shard)))
 
     for command in commands:
         print("run:", " ".join(command))

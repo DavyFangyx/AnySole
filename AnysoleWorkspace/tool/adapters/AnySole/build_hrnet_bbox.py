@@ -37,7 +37,8 @@ error.
 
 Output (one file per session, plus one directory-level artifact):
 
-    AnysoleWorkspace/model_inputs/AnySole/adapter_v1/visual/hrnet/bbox/<session>.npy
+    AnysoleWorkspace/model_inputs/AnySole/adapter_v1/visual/hrnet/bbox/<session>.npy      (cam3, frozen)
+    AnysoleWorkspace/model_inputs/AnySole/adapter_v1/visual/hrnet/bbox_cam{N}/<session>.npy
     AnysoleWorkspace/model_inputs/AnySole/adapter_v1/visual/hrnet/bbox/artifact.json
 """
 
@@ -59,18 +60,30 @@ from AnysoleWorkspace.tool.artifacts import write_artifact  # noqa: E402
 from anysole.data.workspace_adapter import load_shared_session  # noqa: E402
 
 
-FACTS_ROOT = ROOT / "AnysoleWorkspace/shared/facts/sessions/cam3"
+FACTS_ROOT = ROOT / "AnysoleWorkspace/shared/facts/sessions"
 SPLIT_CSV = ROOT / "AnysoleWorkspace/protocol/splits/default/splits.csv"
 CLIFF_ROOT = ROOT / "AnysoleWorkspace/model_inputs/PoseTransOpt/adapter_v1"
 MASK_INDEX = ROOT / "AnysoleWorkspace/shared/frontends/human_masks/sam31/v1/index.jsonl"
-OUTPUT_ROOT = ROOT / "AnysoleWorkspace/model_inputs/AnySole/adapter_v1/visual/hrnet/bbox"
+OUTPUT_BASE = ROOT / "AnysoleWorkspace/model_inputs/AnySole/adapter_v1/visual/hrnet"
 PRODUCER = "AnysoleWorkspace/tool/adapters/AnySole/build_hrnet_bbox.py"
 SCHEMA_VERSION = "model_input.anysole.v1"
 BBOX_SOURCE = "CLIFF_results.npz bbox_xyxy_px (SAM3.1 mask recomputed)"
 FALLBACK = "nearest valid frame"
 EXCEPTION_SOURCE = ("shared/frontends/human_masks/sam31/v1 mask bbox "
                     "(session has no valid CLIFF row; same SAM3.1 masks)")
+# cam != 3 has no per-camera CLIFF yet: the bbox derives directly from the
+# per-camera SAM3.1 frontend rows (四相机决策记录 §4-4), no cam3 leakage.
+PER_CAM_SOURCE = ("shared/frontends/human_masks/sam31/v1 per-camera mask bbox "
+                  "(no per-camera CLIFF; same source as the cam3 exception path)")
 SCORE = 1.0
+
+
+def output_root_for(cam: int) -> Path:
+    """cam3 keeps the frozen public dir ``visual/hrnet/bbox`` (zero change);
+    other cameras get ``visual/hrnet/bbox_cam{N}`` siblings."""
+    if cam == 3:
+        return OUTPUT_BASE / "bbox"
+    return OUTPUT_BASE / f"bbox_cam{cam}"
 
 
 def split_session_ids(split_csv: Path, split: str) -> list:
@@ -145,12 +158,13 @@ def mask_bbox_px(mask_path: Path):
     return np.asarray([xs.min(), ys.min(), xs.max() + 1, ys.max() + 1], dtype=np.float64)
 
 
-def frontend_mask_bboxes(session_id: str, n_frames: int) -> tuple:
-    """Per-frame mask bbox for a session with no usable CLIFF row.
+def frontend_mask_bboxes(session_id: str, cam: int, n_frames: int) -> tuple:
+    """Per-frame mask bbox for one camera's frontend rows.
 
-    The frontend index already carries the canonical ``frame_id`` per mask, so
-    rows are addressed directly rather than joined by time.  Returns
-    ``(bbox, valid)`` over the canonical frame axis.
+    The frontend index carries the canonical ``frame_id`` per mask and a
+    per-camera row (``camera`` column), so rows are addressed directly rather
+    than joined by time.  Returns ``(bbox, valid)`` over the canonical frame
+    axis.
     """
     bbox = np.zeros((n_frames, 4), dtype=np.float64)
     valid = np.zeros(n_frames, dtype=bool)
@@ -162,7 +176,7 @@ def frontend_mask_bboxes(session_id: str, n_frames: int) -> tuple:
             if not line:
                 continue
             row = json.loads(line)
-            if row.get("session") != session_id:
+            if row.get("session") != session_id or row.get("camera") != f"cam{cam}":
                 continue
             frame = int(row["frame_id"])
             if not 0 <= frame < n_frames:
@@ -174,38 +188,58 @@ def frontend_mask_bboxes(session_id: str, n_frames: int) -> tuple:
             bbox[frame] = box
             valid[frame] = True
     if not valid.any():
-        raise ValueError("%s: neither CLIFF nor the SAM3.1 frontend has a usable bbox"
-                         % session_id)
+        raise ValueError(
+            "%s: cam%d has no usable frontend mask bbox. The per-camera index "
+            "rows come from the mask frontend -- run "
+            "build_human_mask_frontend.py --cam 1,2,3,4 first, then retry"
+            % (session_id, cam))
     return bbox, valid
 
 
-def build_one(session_id: str, force: bool = False, allow_exception: bool = True) -> dict:
+def build_one(session_id: str, cam: int, force: bool = False, allow_exception: bool = True) -> dict:
     """Write one session's bbox.npy (stats always computed from the sources, so
-    an incremental run still reports honest fallback counts)."""
-    output = OUTPUT_ROOT / ("%s.npy" % session_id)
-    session = load_shared_session(session_id)
-    frames = np.asarray(session["frames"]["frame_id"])
-    n_frames = len(frames)
+    an incremental run still reports honest fallback counts).
 
-    data = np.load(cliff_path(session_id), allow_pickle=True)
-    frame_id = np.asarray(data["frame_id"])
-    if not np.array_equal(frame_id, frames):
-        raise ValueError(
-            "%s: CLIFF frame axis does not match shared facts (%s vs %s)"
-            % (session_id, frame_id.shape, frames.shape)
-        )
-    bbox = np.asarray(data["bbox_xyxy_px"], dtype=np.float64)
-    if bbox.shape != (n_frames, 4):
-        raise ValueError("%s: CLIFF bbox_xyxy_px shape %s != (%d, 4)"
-                         % (session_id, bbox.shape, n_frames))
+    cam3: CLIFF bbox, with the SAM3.1 frontend as the no-valid-row exception
+    (frozen public behaviour).  cam != 3: no per-camera CLIFF exists yet, so
+    the per-camera SAM3.1 frontend rows are the direct source
+    (四相机决策记录 §4-4); facts frame axis comes from ``shared/facts/cam{N}``.
+    """
+    output_root = output_root_for(cam)
+    output = output_root / ("%s.npy" % session_id)
+    if cam == 3:
+        session = load_shared_session(session_id)
+        frames = np.asarray(session["frames"]["frame_id"])
+        n_frames = len(frames)
 
-    valid = np.asarray(data["valid"]).astype(bool)
-    source = BBOX_SOURCE
-    if not valid.any():
-        if not allow_exception:
-            raise ValueError("%s: no valid CLIFF frame to source a bbox from" % session_id)
-        bbox, valid = frontend_mask_bboxes(session_id, n_frames)
-        source = EXCEPTION_SOURCE
+        data = np.load(cliff_path(session_id), allow_pickle=True)
+        frame_id = np.asarray(data["frame_id"])
+        if not np.array_equal(frame_id, frames):
+            raise ValueError(
+                "%s: CLIFF frame axis does not match shared facts (%s vs %s)"
+                % (session_id, frame_id.shape, frames.shape)
+            )
+        bbox = np.asarray(data["bbox_xyxy_px"], dtype=np.float64)
+        if bbox.shape != (n_frames, 4):
+            raise ValueError("%s: CLIFF bbox_xyxy_px shape %s != (%d, 4)"
+                             % (session_id, bbox.shape, n_frames))
+
+        valid = np.asarray(data["valid"]).astype(bool)
+        source = BBOX_SOURCE
+        if not valid.any():
+            if not allow_exception:
+                raise ValueError("%s: no valid CLIFF frame to source a bbox from" % session_id)
+            bbox, valid = frontend_mask_bboxes(session_id, cam, n_frames)
+            source = EXCEPTION_SOURCE
+    else:
+        facts = next(FACTS_ROOT.glob(f"cam{cam}/*/*/{session_id}"), None)
+        if facts is None:
+            raise FileNotFoundError("%s: missing shared facts for cam%d" % (session_id, cam))
+        with np.load(facts / "frames.npz", allow_pickle=True) as data:
+            frames = np.asarray(data["frame_id"])
+        n_frames = len(frames)
+        bbox, valid = frontend_mask_bboxes(session_id, cam, n_frames)
+        source = PER_CAM_SOURCE
 
     filled, fallback_rows = nearest_valid_bbox(valid, bbox)
     if not np.isfinite(filled).all():
@@ -213,6 +247,7 @@ def build_one(session_id: str, force: bool = False, allow_exception: bool = True
 
     stats = {
         "session": session_id,
+        "camera": f"cam{cam}",
         "frames": n_frames,
         "valid_frames": int(valid.sum()),
         "fallback_frames": int(fallback_rows.size),
@@ -227,41 +262,62 @@ def build_one(session_id: str, force: bool = False, allow_exception: bool = True
     rows[:, 5] = SCORE
     rows[:, 6] = 0.99
     rows[:, 7] = 0.0
-    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    output_root.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp.npy")
     np.save(temporary, rows)
     temporary.replace(output)
     return dict(stats, status="written")
 
 
-def write_dir_artifact(results: list) -> Path:
-    """One artifact for the bbox directory (all sessions share one producer)."""
+def write_dir_artifact(results: list, cam: int) -> Path:
+    """One artifact for a camera's bbox directory (all sessions share one producer)."""
+    output_root = output_root_for(cam)
     sessions = [item["session"] for item in results]
     total_frames = int(sum(item["frames"] for item in results))
     fallback_frames = int(sum(item.get("fallback_frames", 0) for item in results))
     exceptions = sorted(item["session"] for item in results
                         if item.get("bbox_source") == EXCEPTION_SOURCE)
+    per_cam = sorted(item["session"] for item in results
+                     if item.get("bbox_source") == PER_CAM_SOURCE)
     return write_artifact(
-        OUTPUT_ROOT,
+        output_root,
         schema_version=SCHEMA_VERSION,
         producer=PRODUCER,
         repository_root=ROOT,
         parameters={
-            "bbox_source": BBOX_SOURCE,
+            "camera": f"cam{cam}",
+            "bbox_source": BBOX_SOURCE if cam == 3 else PER_CAM_SOURCE,
             "fallback": FALLBACK,
             "sessions": len(sessions),
             "bbox_convention": "[i, x1, y1, x2, y2, score, 0.99, 0] (MotionPRO gen_bbox)",
             "frame_fallback_frames": fallback_frames,
             "frames_total": total_frames,
-            "sessions_without_valid_cliff": exceptions,
+            "sessions_without_valid_cliff": exceptions if cam == 3 else None,
+            "sessions_per_cam_mask_source": per_cam if cam != 3 else None,
             "sessions_exception_source": EXCEPTION_SOURCE if exceptions else None,
         },
-        source_artifacts=["model-input://PoseTransOpt/adapter_v1"],
+        source_artifacts=["model-input://PoseTransOpt/adapter_v1"] if cam == 3
+        else ["shared://frontends/human_masks/sam31/v1"],
         source_hashes={"sessions_covered": len(sessions)},
         frame_id_min=0,
         frame_count=len(sessions),
         consumers=["AnySole"],
     )
+
+
+def _cam_list(value: str) -> tuple[int, ...]:
+    if value.strip() == "all":
+        return (1, 2, 3, 4)
+    try:
+        cams = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError:
+        raise SystemExit(f"--cam expects a comma list or 'all', got {value!r}")
+    unknown = set(cams) - {1, 2, 3, 4}
+    if unknown:
+        raise SystemExit(f"unknown camera(s): {sorted(unknown)}")
+    if not cams:
+        raise SystemExit("--cam list is empty")
+    return cams
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -270,6 +326,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--split", default="all", choices=["all", "train", "val", "test"],
                         help="splits.csv column scope when --session is empty.")
     parser.add_argument("--split-csv", type=Path, default=SPLIT_CSV)
+    parser.add_argument("--cam", default="3",
+                        help="camera(s) to build bbox shims for: 'all' or comma list (1,2,3,4), default 3")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--skip-existing", action="store_true",
                       help="Keep sessions whose bbox.npy already exists (default).")
@@ -294,23 +352,25 @@ def main(argv=None) -> int:
     if not session_ids:
         raise FileNotFoundError("no sessions selected (split=%s)" % args.split)
 
-    results = []
-    for session_id in session_ids:
-        item = build_one(session_id, force=args.force, allow_exception=args.allow_exception)
-        results.append(item)
-        if item["status"] == "written":
-            print("bbox %s frames=%d valid=%d fallback=%d source=%s"
-                  % (session_id, item["frames"], item["valid_frames"],
-                     item["fallback_frames"], item["bbox_source"]))
-        else:
-            print("skip %s (%s exists)" % (session_id, OUTPUT_ROOT / (session_id + ".npy")))
-    if args.session and not args.no_artifact:
-        # The directory artifact describes the whole bbox directory; a
-        # one-session run must not restate it as a 1-session artifact.
-        print("note: --session given, directory artifact.json left untouched")
-    elif not args.no_artifact:
-        path = write_dir_artifact(results)
-        print("artifact %s (%d sessions)" % (path, len(results)))
+    for cam in _cam_list(args.cam):
+        output_root = output_root_for(cam)
+        results = []
+        for session_id in session_ids:
+            item = build_one(session_id, cam, force=args.force, allow_exception=args.allow_exception)
+            results.append(item)
+            if item["status"] == "written":
+                print("bbox %s (cam%d) frames=%d valid=%d fallback=%d source=%s"
+                      % (session_id, cam, item["frames"], item["valid_frames"],
+                         item["fallback_frames"], item["bbox_source"]))
+            else:
+                print("skip %s (cam%d) (%s exists)" % (session_id, cam, output_root / (session_id + ".npy")))
+        if args.session and not args.no_artifact:
+            # The directory artifact describes the whole bbox directory; a
+            # one-session run must not restate it as a 1-session artifact.
+            print("note: --session given, directory artifact.json left untouched")
+        elif not args.no_artifact:
+            path = write_dir_artifact(results, cam)
+            print("artifact %s (%d sessions)" % (path, len(results)))
     return 0
 
 
