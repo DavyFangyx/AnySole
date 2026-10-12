@@ -184,7 +184,9 @@ def parse_args(argv=None):
                         help="sequence root to process (default: the adapter cam3 root)")
     parser.add_argument("--sessions", nargs="*", default=None,
                         help="smoke/subset mode: build a shard root with these sessions")
-    parser.add_argument("--cam-id", type=int, default=3)
+    parser.add_argument("--cam-id", type=str, default="3",
+                        help="camera id(s) for the visual chain: one id, 'all', "
+                             "or comma list (1,2,3,4), default 3")
     parser.add_argument("--steps", default=",".join(STEPS),
                         help="comma-separated subset of bbox,kps,feature")
     parser.add_argument("--python", default=DEFAULT_TOUCH_PYTHON,
@@ -201,6 +203,21 @@ def parse_args(argv=None):
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--out", type=Path, default=None, help="write the JSON report here")
     return parser.parse_args(argv)
+
+
+def _cam_ids(value: str) -> tuple[int, ...]:
+    if value.strip() == "all":
+        return (1, 2, 3, 4)
+    try:
+        ids = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError:
+        raise SystemExit("--cam-id expects one id, a comma list, or 'all', got %r" % value)
+    unknown = set(ids) - {1, 2, 3, 4}
+    if unknown:
+        raise SystemExit("unknown camera(s): %s" % sorted(unknown))
+    if not ids:
+        raise SystemExit("--cam-id list is empty")
+    return ids
 
 
 def main(argv=None) -> int:
@@ -222,12 +239,13 @@ def main(argv=None) -> int:
         print(f"sequence root: {seq_root} (all sessions -- the full run)")
 
     if not args.verify_only:
-        for step in steps:
-            python = args.bbox_python if step == "bbox" else args.python
-            code = run_step(step, seq_root, python, args.cuda_device, args.mode,
-                            args.cam_id, args.dry_run)
-            if code != 0:
-                return code
+        for cam_id in _cam_ids(args.cam_id):
+            for step in steps:
+                python = args.bbox_python if step == "bbox" else args.python
+                code = run_step(step, seq_root, python, args.cuda_device, args.mode,
+                                cam_id, args.dry_run)
+                if code != 0:
+                    return code
 
     sessions = args.sessions or []
     if not sessions and not args.verify_only:

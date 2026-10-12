@@ -90,8 +90,13 @@ def link_color_frames(session_facts: dict, session_dir: Path,
     return int(len(fitting_ids))
 
 
-def session_report_path(date: str, subject: str, session: str) -> Path:
-    return common.ADAPTER_ROOT / "session_reports" / date / subject / f"{session}.json"
+def session_report_path(date: str, subject: str, session: str, cam: int = 3) -> Path:
+    return common.adapter_root(cam) / "session_reports" / date / subject / f"{session}.json"
+
+
+def frontend_suffix(name: str, cam: int) -> str:
+    """cam3 keeps the frozen frontend name; other cameras get a ``_cam{N}`` sibling."""
+    return name if cam == 3 else f"{name}_cam{cam}"
 
 
 def link_frontend_dir(source_dir: Path, link: Path, force: bool) -> str:
@@ -109,11 +114,11 @@ def link_frontend_dir(source_dir: Path, link: Path, force: bool) -> str:
     return "linked"
 
 
-def prepare_session(row: dict, args: argparse.Namespace,
+def prepare_session(row: dict, cam: int, args: argparse.Namespace,
                     rtmpose_present: bool, cliff_present: bool,
                     sam31: dict[str, list[dict]]) -> dict:
     date, subject, session = common.session_parts(row)
-    session_facts = common.load_session_facts(date, subject, session)
+    session_facts = common.load_session_facts(date, subject, session, cam)
     frames = session_facts["frames"]
     frame_ids = np.asarray(frames["frame_id"], dtype=np.int64)
     valid = np.asarray(frames["valid"], dtype=np.uint8).astype(bool)
@@ -138,7 +143,7 @@ def prepare_session(row: dict, args: argparse.Namespace,
             "skipped": True,
         }
 
-    session_dir = common.ADAPTER_ROOT / "images" / date / subject / session
+    session_dir = common.adapter_root(cam) / "images" / date / subject / session
     session_dir.mkdir(parents=True, exist_ok=True)
 
     report: dict = {
@@ -167,16 +172,17 @@ def prepare_session(row: dict, args: argparse.Namespace,
     report["n_color_linked"] = link_color_frames(
         session_facts, session_dir, fitting_ids, args.force)
 
-    # 3. calibration.npy：棋盘格标定只用于相机坐标变换
-    cal = load_calibration(common.CALIBRATION_DIR / f"{date}.json")
-    np.save(session_dir / "calibration.npy", build_calibration_npy(cal))
+    # 3. calibration.npy：棋盘格标定只用于相机坐标变换（per-camera K/D/R/t）
+    cal = load_calibration(common.CALIBRATION_DIR / f"{date}.json", cam)
+    np.save(session_dir / "calibration.npy", build_calibration_npy(cal, cam))
 
     # 4. depth：DepthPro 毫米刻度 PNG，由 mmvp_series/depth/rgb2depth.py 写入
-    # shared://frontends/depthpro/v1，本树以目录符号链接采用（前端缺该 session
+    # shared://frontends/depthpro/v1（cam3 目录名冻结为 depth，其余相机
+    # depth_cam{N}），本树以目录符号链接采用（前端缺该 session
     # 时保持缺失并记录错误；depth gate 见 §main）
     depth_dir = session_dir / "depth"
     report["depth_link"] = link_frontend_dir(
-        common.DEPTHPRO_ROOT / date / subject / session / "depth",
+        common.DEPTHPRO_ROOT / date / subject / session / frontend_suffix("depth", cam),
         depth_dir, args.force)
     depth_files = sorted(depth_dir.glob("*.png")) if depth_dir.is_dir() else []
     if depth_files:
@@ -221,7 +227,7 @@ def prepare_session(row: dict, args: argparse.Namespace,
             estimate = None
         if estimate is not None:
             floor_path = floor_mod.write_floor_artifact(
-                common.ADAPTER_ROOT, date, subject, estimate,
+                common.adapter_root(cam), date, subject, estimate,
                 depth_png=depth_png_filled, xy=roi,
                 depth_source=report["depth_source"],
                 depth_hash=masks.sha256_file(depth_png_filled),
@@ -282,10 +288,12 @@ def prepare_session(row: dict, args: argparse.Namespace,
             item["intersected_area"] for item in mask_stats),
     }
 
-    # 8. HALPE-26 关键点：只消费 rtmpose 前端（若已生成）
+    # 8. HALPE-26 关键点：只消费 rtmpose 前端（若已生成；cam3 目录名冻结为
+    # keypoints，其余相机 keypoints_cam{N}）
     if rtmpose_present:
-        kp_root = common.RTMPOSE_ROOT / date / subject / session / "keypoints"
-        kp_out = common.ADAPTER_ROOT / "input" / subject / session / "keypoints"
+        kp_root = (common.RTMPOSE_ROOT / date / subject / session /
+                   frontend_suffix("keypoints", cam))
+        kp_out = common.adapter_root(cam) / "input" / subject / session / "keypoints"
         kp_out.mkdir(parents=True, exist_ok=True)
         n_kp = 0
         for frame_id in fitting_ids:
@@ -301,12 +309,13 @@ def prepare_session(row: dict, args: argparse.Namespace,
             f"shared://frontends/rtmpose_halpe26/v1: {n_kp}/"
             f"{len(fitting_ids)} frames staged")
 
-    # 9. CLIFF 单受试者初始化：只消费 Agent E 前端（若已生成）
+    # 9. CLIFF 单受试者初始化：只消费 Agent E 前端（若已生成；cam3 文件名
+    # 冻结为 {session}_cliff_hr48.npz，其余相机加 _cam{N} 后缀）
     if cliff_present:
         cliff_src = (common.CLIFF_ROOT / date / subject / session /
-                     f"{session}_cliff_hr48.npz")
+                     f"{frontend_suffix(session + '_cliff_hr48', cam)}.npz")
         if cliff_src.is_file():
-            init_dir = common.ADAPTER_ROOT / "initialization" / date / subject / session
+            init_dir = common.adapter_root(cam) / "initialization" / date / subject / session
             init_dir.mkdir(parents=True, exist_ok=True)
             target = init_dir / f"{session}_cliff_hr48.npz"
             if target.exists() or target.is_symlink():
@@ -318,11 +327,26 @@ def prepare_session(row: dict, args: argparse.Namespace,
 
     if report["errors"]:
         report["errors"].sort()
-    report_path = session_report_path(date, subject, session)
+    report_path = session_report_path(date, subject, session, cam)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return report
+
+
+def _cam_list(value: str) -> tuple[int, ...]:
+    if value.strip() == "all":
+        return (1, 2, 3, 4)
+    try:
+        cams = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError:
+        raise SystemExit(f"--cam expects a comma list or 'all', got {value!r}")
+    unknown = set(cams) - {1, 2, 3, 4}
+    if unknown:
+        raise SystemExit(f"unknown camera(s): {sorted(unknown)}")
+    if not cams:
+        raise SystemExit("--cam list is empty")
+    return cams
 
 
 def main() -> None:
@@ -331,6 +355,9 @@ def main() -> None:
                         default="all")
     parser.add_argument("--sessions", default="",
                         help="comma-separated session ids")
+    parser.add_argument("--cam", default="3",
+                        help="camera(s) to build adapter inputs for: 'all' or "
+                             "comma list (1,2,3,4), default 3")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--floor-frame", type=int, default=None,
                         help="frame id of the depth frame used for floor estimation")
@@ -339,33 +366,40 @@ def main() -> None:
     args = parser.parse_args()
 
     rows = common.manifest_rows()
-    sam31 = common.load_sam31_index()
     sessions = ([s for s in args.sessions.split(",") if s]
                 if args.sessions else common.split_sessions(args.split))
-    rtmpose_present = (common.RTMPOSE_ROOT / "artifact.json").is_file()
-    cliff_present = (common.CLIFF_ROOT / "artifact.json").is_file()
+    for cam in _cam_list(args.cam):
+        sam31 = common.load_sam31_index(cam)
+        # cam3 保留原有"前端树是否存在"门控；cam!=3 的 per-camera 前端可能
+        # 尚未生成，逐 session 逐文件检查自然跳过（报告里登记为未暂存）
+        if cam == 3:
+            rtmpose_present = (common.RTMPOSE_ROOT / "artifact.json").is_file()
+            cliff_present = (common.CLIFF_ROOT / "artifact.json").is_file()
+        else:
+            rtmpose_present = cliff_present = True
 
-    reports = []
-    for session in sessions:
-        if session not in rows:
-            raise KeyError(f"session not in manifest: {session}")
-        reports.append(prepare_session(rows[session], args,
-                                       rtmpose_present, cliff_present, sam31))
+        reports = []
+        for session in sessions:
+            if session not in rows:
+                raise KeyError(f"session not in manifest: {session}")
+            reports.append(prepare_session(rows[session], cam, args,
+                                           rtmpose_present, cliff_present, sam31))
 
-    artifact = common.adapter_artifact(
-        [f"shared://facts/sessions/{s['date']}/{s['subject']}/{s['session_id']}"
-         for s in reports],
-        {"adapter_version": common.ADAPTER_VERSION,
-         "sessions": len(reports)},
-        frame_count=None)
-    (common.ADAPTER_ROOT / "artifact.json").write_text(
-        json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        artifact = common.adapter_artifact(
+            [f"shared://facts/sessions/cam{cam}/{s['date']}/{s['subject']}/{s['session_id']}"
+             for s in reports],
+            {"adapter_version": common.ADAPTER_VERSION,
+             "camera": f"cam{cam}",
+             "sessions": len(reports)},
+            frame_count=None)
+        (common.adapter_root(cam) / "artifact.json").write_text(
+            json.dumps(artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    print(json.dumps(
-        {"sessions": len(reports),
-         "with_errors": [r["session_id"] for r in reports if r["errors"]],
-         "reports": reports},
-        ensure_ascii=False, indent=2))
+        print(json.dumps(
+            {"camera": f"cam{cam}", "sessions": len(reports),
+             "with_errors": [r["session_id"] for r in reports if r["errors"]],
+             "reports": reports},
+            ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

@@ -63,17 +63,29 @@ def session_parts(row: dict) -> tuple[str, str, str]:
     return recording.parts[-3], recording.parts[-2], row["session_id"]
 
 
-def load_session_facts(date: str, subject: str, session: str) -> dict:
+def facts_root(cam: int = 3) -> Path:
+    """shared facts camera root (cam3 = the frozen public tree)."""
+    return FACTS_ROOT.parent / f"cam{cam}"
+
+
+def adapter_root(cam: int = 3) -> Path:
+    """pressure_toolkit adapter root; cam3 keeps the frozen public path,
+    other cameras get a ``cam{N}`` sibling subtree."""
+    return ADAPTER_ROOT if cam == 3 else ADAPTER_ROOT / f"cam{cam}"
+
+
+def load_session_facts(date: str, subject: str, session: str, cam: int = 3) -> dict:
     """Read one shared facts session: frames + pressure_48 + session.json."""
-    seq_dir = FACTS_ROOT / date / subject / session
+    seq_dir = facts_root(cam) / date / subject / session
     frames = dict(np.load(seq_dir / "frames.npz"))
     pressure = dict(np.load(seq_dir / "pressure_48.npz"))
     meta = json.loads((seq_dir / "session.json").read_text(encoding="utf-8"))
     return {"dir": seq_dir, "frames": frames, "pressure": pressure, "meta": meta}
 
 
-def load_sam31_index() -> dict[str, list[dict]]:
-    """session -> per-frame SAM3.1 human-mask index rows (frame_id ascending)."""
+def load_sam31_index(cam: int = 3) -> dict[str, list[dict]]:
+    """session -> per-frame SAM3.1 human-mask index rows for one camera
+    (frame_id ascending)."""
     index: dict[str, list[dict]] = {}
     if not SAM31_INDEX.is_file():
         return index
@@ -82,6 +94,8 @@ def load_sam31_index() -> dict[str, list[dict]]:
             if not line.strip():
                 continue
             row = json.loads(line)
+            if row.get("camera") != f"cam{cam}":
+                continue
             index.setdefault(row["session"], []).append(row)
     for rows in index.values():
         rows.sort(key=lambda item: int(item["frame_id"]))

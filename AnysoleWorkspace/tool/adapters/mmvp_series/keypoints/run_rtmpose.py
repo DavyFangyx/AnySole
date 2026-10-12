@@ -52,6 +52,32 @@ FACTS_ROOT = WORKSPACE / "shared/facts/sessions/cam3"
 DEFAULT_OUTPUT = common.RTMPOSE_ROOT  # shared/frontends/rtmpose_halpe26/v1
 
 
+def facts_root(cam: int = 3) -> Path:
+    """shared facts camera root (cam3 = the frozen public tree)."""
+    return FACTS_ROOT.parent / f"cam{cam}"
+
+
+def keypoints_dir_name(cam: int) -> str:
+    """cam3 keeps the frozen frontend dir name ``keypoints``; other cameras
+    get ``keypoints_cam{N}`` siblings in the same session directory."""
+    return "keypoints" if cam == 3 else f"keypoints_cam{cam}"
+
+
+def _cam_list(value: str) -> tuple[int, ...]:
+    if value.strip() == "all":
+        return (1, 2, 3, 4)
+    try:
+        cams = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError:
+        raise SystemExit(f"--cam expects a comma list or 'all', got {value!r}")
+    unknown = set(cams) - {1, 2, 3, 4}
+    if unknown:
+        raise SystemExit(f"unknown camera(s): {sorted(unknown)}")
+    if not cams:
+        raise SystemExit("--cam list is empty")
+    return cams
+
+
 def read_manifest() -> dict[str, dict]:
     rows = {}
     for line in (WORKSPACE / "protocol/manifests/session_manifest.jsonl").read_text().splitlines():
@@ -88,21 +114,22 @@ def first_person(prediction: dict) -> tuple[np.ndarray, np.ndarray]:
     return points, scores
 
 
-def run_session(session: str, row: dict, inferencer, output_root: Path,
+def run_session(session: str, row: dict, cam: int, inferencer, output_root: Path,
                 force: bool, shard: int = 0, shards: int = 1,
                 also_root: Path | None = None, limit: int = 0,
                 link_consumers: bool = True) -> dict:
     date, subject, sid = session_parts(row)
-    color_root = FACTS_ROOT / date / subject / sid / "rgb"
+    color_root = facts_root(cam) / date / subject / sid / "rgb"
     images = sorted(p for p in color_root.iterdir()
                     if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"})
     if len(images) != int(row["n_frames"]):
         raise ValueError(f"{sid}: RGB count {len(images)} != manifest {row['n_frames']}")
     if limit > 0:
         images = images[:limit]
-    out_dirs = [output_root / date / subject / sid / "keypoints"]
+    kp_dir_name = keypoints_dir_name(cam)
+    out_dirs = [output_root / date / subject / sid / kp_dir_name]
     if also_root is not None:
-        out_dirs.append(also_root / date / subject / sid / "keypoints")
+        out_dirs.append(also_root / date / subject / sid / kp_dir_name)
     for out_dir in out_dirs:
         out_dir.mkdir(parents=True, exist_ok=True)
     pending = [(index, image) for index, image in enumerate(images)
@@ -120,8 +147,9 @@ def run_session(session: str, row: dict, inferencer, output_root: Path,
             np.save(out_dir / f"{index:06d}.npy", payload)
     result = {"session": sid, "frames": len(images), "written": len(pending),
               "outputs": [str(d) for d in out_dirs]}
-    # 消费端采用：仅当产出落在共享前端时刷新目录符号链接（自定义输出根不牵连消费端）
-    if link_consumers and output_root == common.RTMPOSE_ROOT:
+    # 消费端采用：仅当产出落在共享前端且为 cam3（冻结行为）时刷新目录符号
+    # 链接；per-camera 前端由各模型 build_inputs 按相机目录自取。
+    if link_consumers and output_root == common.RTMPOSE_ROOT and cam == 3:
         result["consumer_links"] = frontends.refresh_keypoint_links(date, subject, sid)
     return result
 
@@ -130,6 +158,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", default="")
     parser.add_argument("--split", choices=("train", "val", "test", "all"), default="all")
+    parser.add_argument("--cam", default="3",
+                        help="camera(s) to produce keypoints for: 'all' or comma "
+                             "list (1,2,3,4), default 3; cam3 writes the frozen "
+                             "'keypoints' dir, other cameras 'keypoints_cam{N}'")
     parser.add_argument("--config", default=str(CONFIG_DEFAULT))
     parser.add_argument("--model", default=str(MODEL_DEFAULT))
     parser.add_argument("--device", default="cuda:0")
@@ -159,9 +191,10 @@ def main() -> None:
     sessions = [args.session] if args.session else split_sessions(args.split)
     output_root = Path(args.output_root)
     also_root = Path(args.also_output_root) if args.also_output_root else None
-    result = [run_session(session, rows[session], inferencer, output_root,
+    result = [run_session(session, rows[session], cam, inferencer, output_root,
                           args.force, args.shard, args.shards, also_root,
                           args.limit_frames, not args.no_consumer_links)
+              for cam in _cam_list(args.cam)
               for session in sessions]
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

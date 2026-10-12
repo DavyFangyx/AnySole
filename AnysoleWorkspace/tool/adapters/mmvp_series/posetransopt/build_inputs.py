@@ -39,9 +39,54 @@ from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 INPUT_ROOT = WORKSPACE / "model_inputs/PoseTransOpt/adapter_v1"
 FACTS_ROOT = WORKSPACE / "shared/facts/sessions/cam3"
 FPP_PREDICTIONS = WORKSPACE / "work/VP-MoCap/v1/fpp_predictions"
+CLIFF_ROOT = WORKSPACE / "shared/frontends/cliff_hr48/v1"
+RTMPOSE_ROOT = WORKSPACE / "shared/frontends/rtmpose_halpe26/v1"
 ADAPTER_VERSION = "adapter_v1"
 MIN_SEGMENT = 21  # >= savgol window 17 plus the 2-frame end trims
 TRIM_END = 2
+
+
+def facts_root(cam: int = 3) -> Path:
+    """shared facts camera root (cam3 = the frozen public tree)."""
+    return FACTS_ROOT.parent / f"cam{cam}"
+
+
+def adapter_root(cam: int = 3) -> Path:
+    """PoseTransOpt adapter root; cam3 keeps the frozen public path, other
+    cameras get a ``cam{N}`` sibling subtree."""
+    return INPUT_ROOT if cam == 3 else INPUT_ROOT / f"cam{cam}"
+
+
+def _cam_list(value: str) -> tuple[int, ...]:
+    if value.strip() == "all":
+        return (1, 2, 3, 4)
+    try:
+        cams = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError:
+        raise SystemExit(f"--cam expects a comma list or 'all', got {value!r}")
+    unknown = set(cams) - {1, 2, 3, 4}
+    if unknown:
+        raise SystemExit(f"unknown camera(s): {sorted(unknown)}")
+    if not cams:
+        raise SystemExit("--cam list is empty")
+    return cams
+
+
+def link_dir(source_dir: Path, link: Path, force: bool = False) -> str:
+    """目录符号链接指向共享前端（幂等）；源不存在时保持缺失。"""
+    if not source_dir.is_dir():
+        return "no_frontend"
+    if link.is_symlink():
+        if os.readlink(link) == os.path.relpath(source_dir, link.parent):
+            return "kept"
+        if not force:
+            raise FileExistsError(f"refusing to replace existing link: {link}")
+        link.unlink()
+    elif link.exists():
+        return "physical_dir_kept"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(os.path.relpath(source_dir, link.parent))
+    return "linked"
 
 
 def read_manifest() -> dict[str, dict]:
@@ -101,22 +146,28 @@ def index_segments(count: int, segments: list[list[int]]) -> list[list[int]]:
     return result
 
 
-def build_join(row: dict, force: bool) -> dict:
+def build_join(row: dict, cam: int, force: bool) -> dict:
     date, subject, sid = session_parts(row)
     n = int(row["n_frames"])
-    session_root = INPUT_ROOT / date / subject / sid
+    session_root = adapter_root(cam) / date / subject / sid
     session_root.mkdir(parents=True, exist_ok=True)
 
-    frames = np.load(FACTS_ROOT / date / subject / sid / "frames.npz")
+    frames = np.load(facts_root(cam) / date / subject / sid / "frames.npz")
     shared_valid = np.asarray(frames["valid"], dtype=np.uint8).astype(bool)
     shared_fake = np.asarray(frames["fake"], dtype=np.uint8).astype(bool)
 
-    # stream 1: CLIFF (single-person, mask-bbox)
-    cliff_path = session_root / "CLIFF_results.npz"
+    # stream 1: CLIFF (single-person, mask-bbox)。cam3 沿用前端符号链接刷新
+    # 的冻结文件；cam!=3 由本工具把 per-camera 前端 npz 链接进适配器树
+    cliff_name = "CLIFF_results.npz" if cam == 3 else f"CLIFF_results_cam{cam}.npz"
+    cliff_path = session_root / cliff_name
+    if not cliff_path.is_file():
+        source = CLIFF_ROOT / date / subject / sid / cliff_name
+        if source.is_file():
+            link_one(source, cliff_path, force)
     if not cliff_path.is_file():
         raise FileNotFoundError(
-            f"{sid}: CLIFF_results.npz missing; run "
-            "mmvp_series/cliff/run_cliff.py first")
+            f"{sid}: {cliff_name} missing; run "
+            f"mmvp_series/cliff/run_cliff.py --cam {cam} first")
     cliff = np.load(cliff_path, allow_pickle=False)
     cliff_frame = np.asarray(cliff["frame_id"], dtype=np.int64)
     cliff_valid = np.asarray(cliff["valid"], dtype=np.uint8).astype(bool)
@@ -124,8 +175,11 @@ def build_join(row: dict, force: bool) -> dict:
             cliff_frame, np.arange(n, dtype=np.int64)):
         raise ValueError(f"{sid}: CLIFF npz violates the one-row-per-frame contract")
 
-    # stream 2: RTMPose keypoints
+    # stream 2: RTMPose keypoints（cam3 沿用前端刷新链接；cam!=3 自取 per-camera 目录）
     kp_dir = session_root / "keypoints"
+    if cam != 3 and not kp_dir.is_symlink():
+        link_dir(RTMPOSE_ROOT / date / subject / sid / f"keypoints_cam{cam}",
+                 kp_dir, force)
     kp_present = np.zeros(n, dtype=bool)
     kp_bad_frame = []
     for i in range(n):
@@ -195,7 +249,7 @@ def build_join(row: dict, force: bool) -> dict:
          for s, e in kept]) if kept else np.asarray([], dtype=np.int64)
 
     # color links for the final frames only (visualizer order == optimized order)
-    rgb_dir = FACTS_ROOT / date / subject / sid / "rgb"
+    rgb_dir = facts_root(cam) / date / subject / sid / "rgb"
     color_dir = session_root / "color"
     color_dir.mkdir(parents=True, exist_ok=True)
     for frame in final_frames.tolist():
@@ -210,14 +264,15 @@ def build_join(row: dict, force: bool) -> dict:
     for frame in joined_frames.tolist():
         link_one(fpp_src / f"{frame:06d}.npy", fpp_dir / f"{frame:06d}.npy", force)
 
-    # camera delivery contract (D6): per-date cam3 intrinsics from the
+    # camera delivery contract (D6): per-date cam{N} intrinsics from the
     # protocol calibration json; the scheduler overrides task.focal_length
-    # with cam3_fx at runtime (the MMVP.yaml value is only a fallback)
+    # with cam{N}_fx at runtime (the MMVP.yaml value is only a fallback).
+    # cam3 保持冻结键名 cam3_fx/cam3_fy（零改动）。
     calibration_json = WORKSPACE / "protocol" / "calibration" / f"{date}.json"
     camera = {"source": str(calibration_json)}
     if calibration_json.is_file():
-        cam3_k = json.loads(calibration_json.read_text(encoding="utf-8"))["cameras"]["cam3"]["K"]
-        camera.update({"cam3_fx": float(cam3_k[0][0]), "cam3_fy": float(cam3_k[1][1])})
+        cam_k = json.loads(calibration_json.read_text(encoding="utf-8"))["cameras"][f"cam{cam}"]["K"]
+        camera.update({f"cam{cam}_fx": float(cam_k[0][0]), f"cam{cam}_fy": float(cam_k[1][1])})
     else:
         camera["error"] = "protocol calibration json missing for this date"
 
@@ -225,6 +280,7 @@ def build_join(row: dict, force: bool) -> dict:
         "adapter_version": ADAPTER_VERSION,
         "session_id": sid, "date": date, "subject": subject,
         "camera": camera,
+        "camera_name": f"cam{cam}",
         "n_frames": n,
         "streams": {
             "keypoints": {"count": int(kp_present.sum()), "total": n},
@@ -260,13 +316,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--split", choices=("train", "val", "test", "all"), default="all")
     parser.add_argument("--sessions", default="", help="comma-separated session IDs")
+    parser.add_argument("--cam", default="3",
+                        help="camera(s) to build adapter inputs for: 'all' or "
+                             "comma list (1,2,3,4), default 3")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     rows = read_manifest()
     sessions = [s for s in args.sessions.split(",") if s] if args.sessions else split_sessions(args.split)
-    reports = [build_join(rows[sid], args.force) for sid in sessions]
+    reports = [build_join(rows[sid], cam, args.force)
+               for cam in _cam_list(args.cam)
+               for sid in sessions]
     summary = [
-        {"session_id": r["session_id"], "joined": r["joined_count"],
+        {"session_id": r["session_id"], "camera": r.get("camera_name"),
+         "joined": r["joined_count"],
          "final": r["final_count"], "n_frames": r["n_frames"]}
         for r in reports]
     print(json.dumps(summary, ensure_ascii=False, indent=2))

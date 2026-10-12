@@ -59,6 +59,32 @@ OUTPUT_ROOT = WORKSPACE / "shared/frontends/depthpro/v1"
 FACTS_ROOT = WORKSPACE / "shared/facts/sessions/cam3"
 
 
+def facts_root(cam: int = 3) -> Path:
+    """shared facts camera root (cam3 = the frozen public tree)."""
+    return FACTS_ROOT.parent / f"cam{cam}"
+
+
+def depth_dir_name(cam: int) -> str:
+    """cam3 keeps the frozen frontend dir name ``depth``; other cameras get
+    ``depth_cam{N}`` siblings in the same session directory."""
+    return "depth" if cam == 3 else f"depth_cam{cam}"
+
+
+def _cam_list(value: str) -> tuple[int, ...]:
+    if value.strip() == "all":
+        return (1, 2, 3, 4)
+    try:
+        cams = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError:
+        raise SystemExit(f"--cam expects a comma list or 'all', got {value!r}")
+    unknown = set(cams) - {1, 2, 3, 4}
+    if unknown:
+        raise SystemExit(f"unknown camera(s): {sorted(unknown)}")
+    if not cams:
+        raise SystemExit("--cam list is empty")
+    return cams
+
+
 def read_manifest() -> dict[str, dict]:
     rows = {}
     for line in (WORKSPACE / "protocol/manifests/session_manifest.jsonl").read_text().splitlines():
@@ -92,6 +118,10 @@ def parse_args():
                         help="comma-separated session ids")
     parser.add_argument("--session", default=None,
                         help="process only this session id")
+    parser.add_argument("--cam", default="3",
+                        help="camera(s) to run depth on: 'all' or comma list "
+                             "(1,2,3,4), default 3; cam3 writes the frozen "
+                             "'depth' dir, other cameras 'depth_cam{N}'")
     parser.add_argument("--output-root", default=str(OUTPUT_ROOT),
                         help="frontend root (default: shared/frontends/depthpro/v1)")
     parser.add_argument("--model", default=str(DEFAULT_MODEL),
@@ -116,9 +146,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def fitting_frames(date: str, subject: str, session: str) -> list[int]:
+def fitting_frames(date: str, subject: str, session: str, cam: int = 3) -> list[int]:
     """shared facts 的 fitting frame ids（valid 且非 fake）。"""
-    frames = np.load(FACTS_ROOT / date / subject / session / "frames.npz")
+    frames = np.load(facts_root(cam) / date / subject / session / "frames.npz")
     frame_ids = np.asarray(frames["frame_id"], dtype=np.int64)
     valid = np.asarray(frames["valid"], dtype=np.uint8).astype(bool)
     fake = np.asarray(frames["fake"], dtype=np.uint8).astype(bool)
@@ -127,8 +157,8 @@ def fitting_frames(date: str, subject: str, session: str) -> list[int]:
     return [int(f) for f in frame_ids[valid & ~fake]]
 
 
-def session_rgb(date: str, subject: str, session: str, frame_id: int) -> Path:
-    return FACTS_ROOT / date / subject / session / "rgb" / f"{frame_id:06d}.jpg"
+def session_rgb(date: str, subject: str, session: str, frame_id: int, cam: int = 3) -> Path:
+    return facts_root(cam) / date / subject / session / "rgb" / f"{frame_id:06d}.jpg"
 
 
 def load_meta(path):
@@ -178,23 +208,23 @@ def load_model(model_path, device):
     return proc, model, use_fp16, dtype
 
 
-def process_session(date: str, subject: str, session: str, output_root: Path,
+def process_session(date: str, subject: str, session: str, cam: int, output_root: Path,
                     proc, model, device, use_fp16, limit,
                     skip_existing, batch_size):
     from PIL import Image
     from tqdm import tqdm
 
-    frame_ids = fitting_frames(date, subject, session)
+    frame_ids = fitting_frames(date, subject, session, cam)
     if limit > 0:
         frame_ids = frame_ids[:limit]
-    dst_path = output_root / date / subject / session / "depth"
+    dst_path = output_root / date / subject / session / depth_dir_name(cam)
     dst_path.mkdir(parents=True, exist_ok=True)
     meta_path = dst_path / "meta.json"
     meta = load_meta(str(meta_path))
     pending = []
     n_ok = n_skip = n_failed = 0
     for frame_id in frame_ids:
-        source = session_rgb(date, subject, session, frame_id)
+        source = session_rgb(date, subject, session, frame_id, cam)
         if not source.is_file():
             raise FileNotFoundError(f"{session}: shared RGB frame missing: {source}")
         out_png = dst_path / f"{frame_id:06d}.png"
@@ -275,17 +305,18 @@ def main():
         print("gpu=%s" % torch.cuda.get_device_name(device))
     totals = [0, 0, 0]
     failed_sessions = []
-    for session in sessions:
-        date, subject, sid = session_parts(rows[session])
-        try:
-            counts = process_session(date, subject, sid, output_root, proc, model,
-                                     device, use_fp16, args.limit,
-                                     args.skip_existing, args.batch_size)
-        except Exception as exc:  # noqa: BLE001
-            print(f"failed session {sid}: {exc}")
-            counts = (0, 0, 1)
-            failed_sessions.append(sid)
-        totals = [a + b for a, b in zip(totals, counts)]
+    for cam in _cam_list(args.cam):
+        for session in sessions:
+            date, subject, sid = session_parts(rows[session])
+            try:
+                counts = process_session(date, subject, sid, cam, output_root, proc, model,
+                                         device, use_fp16, args.limit,
+                                         args.skip_existing, args.batch_size)
+            except Exception as exc:  # noqa: BLE001
+                print(f"failed session {sid} (cam{cam}): {exc}")
+                counts = (0, 0, 1)
+                failed_sessions.append(f"{sid} (cam{cam})")
+            totals = [a + b for a, b in zip(totals, counts)]
     print("wrote %d depth maps, skipped %d, failed %d" % tuple(totals))
     if failed_sessions:
         print("failed sessions:")

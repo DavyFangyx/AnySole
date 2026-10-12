@@ -16,21 +16,21 @@ from AnysoleWorkspace.tool.adapters.mmvp_series.common.common import (
 )
 
 
-def load_calibration(protocol_json: Path) -> dict:
-    """读取 protocol/calibration/<date>.json 的 cam3 标定。"""
+def load_calibration(protocol_json: Path, cam: int = 3) -> dict:
+    """读取 protocol/calibration/<date>.json 的 cam{N} 标定（默认 cam3）。"""
     data = json.loads(protocol_json.read_text(encoding="utf-8"))
-    camera = data.get("cameras", {}).get("cam3")
+    camera = data.get("cameras", {}).get(f"cam{cam}")
     if not isinstance(camera, dict) or any(
             key not in camera for key in ("K", "D", "R", "t")):
-        raise ValueError(f"calibration {protocol_json} has no complete cam3 K/D/R/t")
+        raise ValueError(f"calibration {protocol_json} has no complete cam{cam} K/D/R/t")
     K = np.asarray(camera["K"], dtype=np.float64)
     R = np.asarray(camera["R"], dtype=np.float64)
     t_mm = np.asarray(camera["t"], dtype=np.float64).reshape(3)
     if K.shape != (3, 3) or R.shape != (3, 3):
         raise ValueError(
-            f"invalid cam3 matrix shapes in {protocol_json}: K={K.shape}, R={R.shape}")
+            f"invalid cam{cam} matrix shapes in {protocol_json}: K={K.shape}, R={R.shape}")
     if not np.allclose(R.T @ R, np.eye(3), atol=2e-3):
-        raise ValueError(f"cam3 R is not orthonormal: {protocol_json}")
+        raise ValueError(f"cam{cam} R is not orthonormal: {protocol_json}")
     return {
         "source": protocol_json,
         "K": K,
@@ -40,7 +40,7 @@ def load_calibration(protocol_json: Path) -> dict:
     }
 
 
-def build_calibration_npy(cal: dict) -> dict:
+def build_calibration_npy(cal: dict, cam: int = 3) -> dict:
     """上游 loadCalibrationFromNpy 期望的 dict：color_Intr/depth_Intr/d2c。"""
     K = cal["K"]
     return {
@@ -55,7 +55,7 @@ def build_calibration_npy(cal: dict) -> dict:
         "d2c": np.eye(4, dtype=np.float64),
         "distortion": cal["D"],
         "source_calibration": str(cal["source"]),
-        "depth_source": "DepthPro on cam3 RGB; depth and color share the cam3 frame",
+        "depth_source": f"DepthPro on cam{cam} RGB; depth and color share the cam{cam} frame",
         "checkerboard_used_for_floor": False,
     }
 

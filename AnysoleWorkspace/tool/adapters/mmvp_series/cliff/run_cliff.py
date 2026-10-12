@@ -67,6 +67,36 @@ OUTPUT_ROOT = common.CLIFF_ROOT  # shared/frontends/cliff_hr48/v1
 TOLERANCE_S = 0.020
 
 
+def facts_root(cam: int = 3) -> Path:
+    """shared facts camera root (cam3 = the frozen public tree)."""
+    return FACTS_ROOT.parent / f"cam{cam}"
+
+
+def cliff_npz_name(cam: int) -> str:
+    """cam3 keeps the frozen frontend name ``CLIFF_results.npz``; other
+    cameras get ``CLIFF_results_cam{N}.npz`` siblings."""
+    return "CLIFF_results.npz" if cam == 3 else f"CLIFF_results_cam{cam}.npz"
+
+
+def toolkit_init_name(sid: str, cam: int) -> str:
+    return f"{sid}_cliff_hr48.npz" if cam == 3 else f"{sid}_cliff_hr48_cam{cam}.npz"
+
+
+def _cam_list(value: str) -> tuple[int, ...]:
+    if value.strip() == "all":
+        return (1, 2, 3, 4)
+    try:
+        cams = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError:
+        raise SystemExit(f"--cam expects a comma list or 'all', got {value!r}")
+    unknown = set(cams) - {1, 2, 3, 4}
+    if unknown:
+        raise SystemExit(f"unknown camera(s): {sorted(unknown)}")
+    if not cams:
+        raise SystemExit("--cam list is empty")
+    return cams
+
+
 def read_manifest() -> dict[str, dict]:
     rows = {}
     for line in (WORKSPACE / "protocol/manifests/session_manifest.jsonl").read_text().splitlines():
@@ -116,14 +146,16 @@ def npz_contract_ok(path: Path, n_frames: int) -> str | None:
         return f"read_error={type(exc).__name__}"
 
 
-def mask_rows(session: str) -> tuple[list[dict], dict[str, str]]:
+def mask_rows(session: str, cam: int) -> tuple[list[dict], dict[str, str]]:
     root = MASK_ROOT / session
     index_path = root / "masks_index.csv"
     if not index_path.is_file():
         raise FileNotFoundError(f"missing mask index: {index_path}")
+    # 上游 csv 每帧四行（camera=1,2,3,4），按目标相机过滤（四相机决策记录 §4-4）
+    wanted_cams = {str(cam), f"cam{cam}"}
     with index_path.open(encoding="utf-8-sig", newline="") as handle:
         rows = [row for row in csv.DictReader(handle)
-                if str(row.get("camera", "")) in {"3", "cam3"}]
+                if str(row.get("camera", "")) in wanted_cams]
     rows.sort(key=lambda row: float(row["visual_time_s"]))
     sources = {"masks_index": sha256_file(index_path)}
     for name in ("segmentation_manifest.json", "failures.csv"):
@@ -133,10 +165,10 @@ def mask_rows(session: str) -> tuple[list[dict], dict[str, str]]:
     return rows, sources
 
 
-def match_masks(rows: list[dict], visual_times: np.ndarray) -> tuple[list[dict | None], np.ndarray]:
+def match_masks(rows: list[dict], visual_times: np.ndarray, cam: int = 3) -> tuple[list[dict | None], np.ndarray]:
     """Nearest-neighbour join on visual_time_s with a 20ms tolerance."""
     if not rows:
-        raise ValueError("no camera-3 mask rows")
+        raise ValueError(f"no camera-{cam} mask rows")
     mask_times = np.asarray([float(r["visual_time_s"]) for r in rows],
                             dtype=np.float64)
     order = np.searchsorted(mask_times, visual_times)
@@ -164,17 +196,18 @@ def mask_bbox(mask_path: Path) -> np.ndarray | None:
                       dtype=np.float32)
 
 
-def finalize_frontend(date: str, subject: str, sid: str, out_dir: Path,
+def finalize_frontend(date: str, subject: str, sid: str, cam: int, out_dir: Path,
                       link_consumers: bool) -> dict:
-    """前端配套产出（幂等）：pressure_tookit 初值 npz + 消费端符号链接。"""
+    """前端配套产出（幂等）：pressure_tookit 初值 npz + 消费端符号链接
+    （消费端链接仅 cam3，冻结行为；per-camera 由各模型 build_inputs 自取）。"""
     result = {"toolkit_init": export_toolkit_init.convert(
-        out_dir / "CLIFF_results.npz", out_dir / f"{sid}_cliff_hr48.npz")}
-    if link_consumers:
+        out_dir / cliff_npz_name(cam), out_dir / toolkit_init_name(sid, cam))}
+    if link_consumers and cam == 3:
         result["consumer_links"] = frontends.refresh_cliff_links(date, subject, sid)
     return result
 
 
-def run_session(session: str, row: dict, ckpt: str, backbone: str,
+def run_session(session: str, row: dict, cam: int, ckpt: str, backbone: str,
                 batch_size: int, device: str, force: bool,
                 link_consumers: bool = True) -> dict:
     import cv2
@@ -197,14 +230,14 @@ def run_session(session: str, row: dict, ckpt: str, backbone: str,
     n = int(row["n_frames"])
     out_dir = OUTPUT_ROOT / date / subject / sid
     out_dir.mkdir(parents=True, exist_ok=True)
-    output = out_dir / "CLIFF_results.npz"
+    output = out_dir / cliff_npz_name(cam)
     reason = npz_contract_ok(output, n)
     if reason is None and not force:
         # 已存在的前端文件也要补齐初值 npz 与消费端符号链接
-        return {"session": sid, "status": "ok_existing", "frames": n,
-                **finalize_frontend(date, subject, sid, out_dir, link_consumers)}
+        return {"session": sid, "camera": f"cam{cam}", "status": "ok_existing", "frames": n,
+                **finalize_frontend(date, subject, sid, cam, out_dir, link_consumers)}
 
-    frames = np.load(FACTS_ROOT / date / subject / sid / "frames.npz")
+    frames = np.load(facts_root(cam) / date / subject / sid / "frames.npz")
     frame_ids = np.asarray(frames["frame_id"], dtype=np.int64)
     visual = np.asarray(frames["visual_time_s"], dtype=np.float64)
     shared_valid = np.asarray(frames["valid"], dtype=np.uint8).astype(bool)
@@ -212,10 +245,10 @@ def run_session(session: str, row: dict, ckpt: str, backbone: str,
             frame_ids, np.arange(n, dtype=np.int64)):
         raise ValueError(f"{sid}: shared frame ids != canonical frames")
 
-    csv_rows, sources = mask_rows(sid)
-    matched, time_error = match_masks(csv_rows, visual)
+    csv_rows, sources = mask_rows(sid, cam)
+    matched, time_error = match_masks(csv_rows, visual, cam)
 
-    rgb_dir = FACTS_ROOT / date / subject / sid / "rgb"
+    rgb_dir = facts_root(cam) / date / subject / sid / "rgb"
     images_by_frame = sorted(
         p for p in rgb_dir.iterdir()
         if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"})
@@ -325,15 +358,19 @@ def run_session(session: str, row: dict, ckpt: str, backbone: str,
         detection_persons=np.asarray("single-person; no multi-person detector rows"),
         ckpt=np.asarray(str(ckpt)),
     )
-    return {"session": sid, "status": "rebuilt" if reason else "built",
+    return {"session": sid, "camera": f"cam{cam}", "status": "rebuilt" if reason else "built",
             "frames": n, "mask_valid": int(valid.sum()),
-            **finalize_frontend(date, subject, sid, out_dir, link_consumers)}
+            **finalize_frontend(date, subject, sid, cam, out_dir, link_consumers)}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session", default="")
     parser.add_argument("--split", choices=("train", "val", "test", "all"), default="all")
+    parser.add_argument("--cam", default="3",
+                        help="camera(s) to run CLIFF for: 'all' or comma list "
+                             "(1,2,3,4), default 3; cam3 keeps the frozen "
+                             "CLIFF_results.npz name, others get _cam{N} siblings")
     parser.add_argument("--ckpt", default=str(CKPT_DEFAULT))
     parser.add_argument("--backbone", choices=("hr48", "res50"), default="hr48")
     parser.add_argument("--batch-size", type=int, default=32)
@@ -352,9 +389,10 @@ def main() -> None:
     rows = read_manifest()
     sessions = [args.session] if args.session else split_sessions(args.split)
     sessions = sessions[args.shard::args.shards]
-    result = [run_session(sid, rows[sid], str(ckpt.resolve()), args.backbone,
+    result = [run_session(sid, rows[sid], cam, str(ckpt.resolve()), args.backbone,
                           args.batch_size, args.device, args.force,
                           not args.no_consumer_links)
+              for cam in _cam_list(args.cam)
               for sid in sessions]
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

@@ -57,7 +57,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract per-frame GVHMR SMPL params into AnySole hmr caches."
     )
-    parser.add_argument("--cam-id", type=int, default=3)
+    parser.add_argument("--cam-id", type=str, default="3",
+                        help="camera id(s): one id, 'all', or comma list (1,2,3,4), default 3")
     parser.add_argument("--model", type=str, default="gvhmr", help="Cache subdir name.")
     parser.add_argument("--session", type=str, default=None, help="Only extract this session id.")
     mode = parser.add_argument("--skip-existing", action="store_true",
@@ -133,13 +134,29 @@ def bbox_trunc_ratio(bbx_xys: torch.Tensor, img_w: int, img_h: int) -> np.ndarra
     return (1.0 - inside.clamp(min=0)).numpy().astype(np.float32)
 
 
-def extract_session(model, session_id: str, device: str, bbox_root: Path | None = None) -> dict:
+def _cam_ids(value: str) -> tuple[int, ...]:
+    if value.strip() == "all":
+        return (1, 2, 3, 4)
+    try:
+        ids = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError:
+        raise SystemExit("--cam-id expects one id, a comma list, or 'all', got %r" % value)
+    unknown = set(ids) - {1, 2, 3, 4}
+    if unknown:
+        raise SystemExit("unknown camera(s): %s" % sorted(unknown))
+    if not ids:
+        raise SystemExit("--cam-id list is empty")
+    return ids
+
+
+def extract_session(model, session_id: str, cam: int, device: str,
+                    bbox_root: Path | None = None) -> dict:
     from hmr4d.utils.geo.hmr_cam import estimate_K, get_bbx_xys_from_xyxy
     from hmr4d.utils.geo_transform import compute_cam_angvel
     from hmr4d.utils.preproc.vitfeat_extractor import Extractor, get_batch
     from hmr4d.utils.preproc.vitpose import VitPoseExtractor
 
-    seq_dir = find_session_dir(SEQ_ROOT, session_id)
+    seq_dir = find_session_dir(SEQ_ROOT.parent / f"cam{cam}", session_id)
     if (seq_dir / "session.json").is_file():
         meta = json.loads((seq_dir / "session.json").read_text())
         n = int(meta["frame_count"])
@@ -199,8 +216,8 @@ def extract_session(model, session_id: str, device: str, bbox_root: Path | None 
     return out
 
 
-def cache_path(model: str, session_id: str) -> Path:
-    return HMR_CACHE_ROOT / model / "cam3" / ("%s.pt" % session_id)
+def cache_path(model: str, session_id: str, cam_id: int = 3) -> Path:
+    return HMR_CACHE_ROOT / model / ("cam%d" % cam_id) / ("%s.pt" % session_id)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -212,25 +229,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.limit_sessions is not None:
         sessions = sessions[: args.limit_sessions]
     model = load_model(args.device)
-    for session_id in sessions:
-        out_path = cache_path(args.model, session_id)
-        if out_path.is_file() and args.skip_existing and not args.force:
-            print("skip %s (cache exists)" % session_id)
-            continue
-        print("extracting %s ..." % session_id)
-        out = extract_session(model, session_id, args.device, args.bbox_root)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(out, out_path)
-        session_dir = find_session_dir(SEQ_ROOT, session_id)
-        if (session_dir / "session.json").is_file():
-            write_cache_provenance(
-                out_path,
-                session=load_shared_session(session_id),
-                kind="extract_hmr",
-                shape=(int(out["body_pose"].shape[0]),),
-                parameters={"frontend": args.model, "keys": sorted(out)},
-            )
-        print("  -> %s (%d frames)" % (out_path, out["body_pose"].shape[0]))
+    for cam_id in _cam_ids(args.cam_id):
+        for session_id in sessions:
+            out_path = cache_path(args.model, session_id, cam_id)
+            if out_path.is_file() and args.skip_existing and not args.force:
+                print("skip %s (cam%d cache exists)" % (session_id, cam_id))
+                continue
+            print("extracting %s (cam%d) ..." % (session_id, cam_id))
+            out = extract_session(model, session_id, cam_id, args.device, args.bbox_root)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(out, out_path)
+            session_dir = find_session_dir(SEQ_ROOT.parent / f"cam{cam_id}", session_id)
+            if (session_dir / "session.json").is_file():
+                write_cache_provenance(
+                    out_path,
+                    session=load_shared_session(
+                        session_id, root=SEQ_ROOT.parent / f"cam{cam_id}"),
+                    kind="extract_hmr",
+                    shape=(int(out["body_pose"].shape[0]),),
+                    parameters={"frontend": args.model, "keys": sorted(out)},
+                )
+            print("  -> %s (%d frames)" % (out_path, out["body_pose"].shape[0]))
     return 0
 
 
