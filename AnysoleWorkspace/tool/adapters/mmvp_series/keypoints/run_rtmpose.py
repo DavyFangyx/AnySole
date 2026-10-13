@@ -58,9 +58,10 @@ def facts_root(cam: int = 3) -> Path:
 
 
 def keypoints_dir_name(cam: int) -> str:
-    """cam3 keeps the frozen frontend dir name ``keypoints``; other cameras
-    get ``keypoints_cam{N}`` siblings in the same session directory."""
-    return "keypoints" if cam == 3 else f"keypoints_cam{cam}"
+    """Unified per-camera frontend dir name (四相机扩展 D5): every camera,
+    including cam3, writes ``keypoints_cam{N}``; the legacy cam3 name
+    ``keypoints`` is kept as a symlink by normalize_cam_names.py."""
+    return f"keypoints_cam{cam}"
 
 
 def _cam_list(value: str) -> tuple[int, ...]:

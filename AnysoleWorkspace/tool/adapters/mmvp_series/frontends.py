@@ -159,7 +159,9 @@ def refresh_keypoint_links(date: str, subject: str, session: str,
     ``guard=True``（生产者增量运行的默认值）绝不删除未提升的物理副本；
     提升流程在逐文件校验之后以 ``guard=False`` 调用，完成目录符号链接替换。
     """
-    frontend_dir = common.RTMPOSE_ROOT / date / subject / session / "keypoints"
+    # D5 unified: the cam3 producer writes keypoints_cam3; the legacy
+    # ``keypoints`` name is a symlink to it (normalize_cam_names.py).
+    frontend_dir = common.RTMPOSE_ROOT / date / subject / session / "keypoints_cam3"
     result = {}
     for name in roots:
         link = CONSUMER_ROOTS[name] / date / subject / session / "keypoints"
@@ -187,7 +189,9 @@ def refresh_cliff_links(date: str, subject: str, session: str,
                         roots=CLIFF_CONSUMERS, dry_run: bool = False,
                         guard: bool = True) -> dict:
     """让消费端 ``CLIFF_results.npz`` 指向共享前端（幂等）。"""
-    frontend_file = common.CLIFF_ROOT / date / subject / session / "CLIFF_results.npz"
+    # D5 unified: the cam3 producer writes CLIFF_results_cam3.npz; the
+    # legacy name is a symlink to it (normalize_cam_names.py).
+    frontend_file = common.CLIFF_ROOT / date / subject / session / "CLIFF_results_cam3.npz"
     result = {}
     for name in roots:
         link = CONSUMER_ROOTS[name] / date / subject / session / "CLIFF_results.npz"

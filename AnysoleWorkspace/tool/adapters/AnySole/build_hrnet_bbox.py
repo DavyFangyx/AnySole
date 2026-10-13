@@ -79,10 +79,9 @@ SCORE = 1.0
 
 
 def output_root_for(cam: int) -> Path:
-    """cam3 keeps the frozen public dir ``visual/hrnet/bbox`` (zero change);
-    other cameras get ``visual/hrnet/bbox_cam{N}`` siblings."""
-    if cam == 3:
-        return OUTPUT_BASE / "bbox"
+    """Unified per-camera bbox root (四相机扩展 D5): every camera including
+    cam3 addresses ``visual/hrnet/bbox_cam{N}``; the legacy cam3 dir ``bbox``
+    is a symlink to bbox_cam3 (normalize_cam_names.py)."""
     return OUTPUT_BASE / f"bbox_cam{cam}"
 
 

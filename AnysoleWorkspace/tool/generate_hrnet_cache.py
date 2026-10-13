@@ -97,6 +97,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-root", type=Path, default=None,
                         help="Feature cache root; files land at <cache-root>/<session>.pt; "
                              "default visual/hrnet/cam<id>.")
+    parser.add_argument("--occlude-lower", type=float, default=None,
+                        help="Occlude the bottom fraction (0-1) of the person bbox before HRNet "
+                             "(V-degradation experiment); default cache root becomes "
+                             "cam{id}_occ_lower{FFF}.")
+    parser.add_argument("--occlude-fill", choices=("black", "blur"), default="black",
+                        help="Fill for the occluded strip (default black).")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--skip-existing", action="store_true", help="Skip sessions whose cache exists.")
     mode.add_argument("--force", "--overwrite", dest="force", action="store_true", help="Recompute and overwrite existing caches.")
@@ -122,9 +128,17 @@ def _cam_ids(value: str) -> tuple[int, ...]:
 
 def resolved_roots(cam_id: int, args: argparse.Namespace) -> tuple[Path, Path, Path]:
     seq_root = args.seq_root or DEFAULT_SEQ_ROOT.parent / ("cam%d" % cam_id)
-    cache_root = args.cache_root or DEFAULT_CACHE_ROOT.parent / ("cam%d" % cam_id)
-    bbox_root = args.bbox_root or (DEFAULT_BBOX_ROOT if cam_id == 3
-                                   else DEFAULT_BBOX_ROOT.parent / ("bbox_cam%d" % cam_id))
+    if args.cache_root is not None:
+        cache_root = args.cache_root
+    elif args.occlude_lower is not None:
+        cache_root = DEFAULT_CACHE_ROOT.parent / (
+            "cam%d_occ_lower%03d" % (cam_id, int(round(args.occlude_lower * 100)))
+        )
+    else:
+        cache_root = DEFAULT_CACHE_ROOT.parent / ("cam%d" % cam_id)
+    # D5 unified: every camera including cam3 addresses bbox_cam<id>;
+    # the legacy cam3 dir bbox/ is a symlink (normalize_cam_names.py).
+    bbox_root = args.bbox_root or (DEFAULT_BBOX_ROOT.parent / ("bbox_cam%d" % cam_id))
     return seq_root, bbox_root, cache_root
 
 
@@ -139,7 +153,7 @@ def parse_shard(value: str):
 
 
 def base_command(cam_id: int, seq_root: Path, bbox_root: Path, cache_root: Path, args: argparse.Namespace) -> list:
-    return [
+    command = [
         sys.executable,
         "-m",
         "anysole.data.extract_hrnet",
@@ -154,6 +168,10 @@ def base_command(cam_id: int, seq_root: Path, bbox_root: Path, cache_root: Path,
         "--bbox-root",
         str(bbox_root),
     ]
+    if args.occlude_lower is not None:
+        command += ["--occlude-lower", str(args.occlude_lower),
+                    "--occlude-fill", str(args.occlude_fill)]
+    return command
 
 
 def main() -> int:

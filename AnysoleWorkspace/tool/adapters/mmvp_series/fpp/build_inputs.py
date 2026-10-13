@@ -135,14 +135,12 @@ def build_session(row: dict, cam: int, force: bool) -> dict:
     if missing_insole:
         raise FileNotFoundError(f"{sid}: public insole missing frames {missing_insole[:10]}")
 
-    # keypoints：cam3 沿用前端符号链接刷新（run_rtmpose 冻结行为）；cam!=3
-    # 由本工具直接把 per-camera 前端目录链接进适配器树
+    # keypoints：一律链接 per-camera 前端目录（D5 统一命名；cam3 源
+    # keypoints_cam3 由 normalize_cam_names.py 软链兜底）
     keypoints_dir = session_root / "keypoints"
-    keypoints_link = ""
-    if cam != 3:
-        keypoints_link = link_dir(
-            RTMPOSE_ROOT / date / subject / sid / f"keypoints_cam{cam}",
-            keypoints_dir, force)
+    keypoints_link = link_dir(
+        RTMPOSE_ROOT / date / subject / sid / f"keypoints_cam{cam}",
+        keypoints_dir, force)
     n_keypoints = len(list(keypoints_dir.glob("*.npy"))) if keypoints_dir.is_dir() else 0
     report = {
         "adapter_version": ADAPTER_VERSION,

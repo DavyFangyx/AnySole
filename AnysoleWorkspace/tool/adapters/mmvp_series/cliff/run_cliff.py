@@ -73,13 +73,16 @@ def facts_root(cam: int = 3) -> Path:
 
 
 def cliff_npz_name(cam: int) -> str:
-    """cam3 keeps the frozen frontend name ``CLIFF_results.npz``; other
-    cameras get ``CLIFF_results_cam{N}.npz`` siblings."""
-    return "CLIFF_results.npz" if cam == 3 else f"CLIFF_results_cam{cam}.npz"
+    """Unified per-camera frontend name (四相机扩展 D5): every camera,
+    including cam3, writes ``CLIFF_results_cam{N}.npz``; the legacy cam3 name
+    is kept as a symlink by normalize_cam_names.py."""
+    return f"CLIFF_results_cam{cam}.npz"
 
 
 def toolkit_init_name(sid: str, cam: int) -> str:
-    return f"{sid}_cliff_hr48.npz" if cam == 3 else f"{sid}_cliff_hr48_cam{cam}.npz"
+    # D5 unified: every camera including cam3 writes the _cam{N} name; the
+    # legacy cam3 file name is a symlink (normalize_cam_names.py).
+    return f"{sid}_cliff_hr48_cam{cam}.npz"
 
 
 def _cam_list(value: str) -> tuple[int, ...]:

@@ -158,7 +158,7 @@ def build_join(row: dict, cam: int, force: bool) -> dict:
 
     # stream 1: CLIFF (single-person, mask-bbox)。cam3 沿用前端符号链接刷新
     # 的冻结文件；cam!=3 由本工具把 per-camera 前端 npz 链接进适配器树
-    cliff_name = "CLIFF_results.npz" if cam == 3 else f"CLIFF_results_cam{cam}.npz"
+    cliff_name = f"CLIFF_results_cam{cam}.npz"  # D5 unified (cam3 legacy name = symlink)
     cliff_path = session_root / cliff_name
     if not cliff_path.is_file():
         source = CLIFF_ROOT / date / subject / sid / cliff_name

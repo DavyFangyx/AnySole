@@ -255,7 +255,7 @@ def main(argv=None) -> int:
                     return code
         if args.sessions and not args.dry_run:
             report = verify(args.sessions, cam_id)
-            if not print_verify(report["artifacts"]):
+            if not print_verify(report):
                 ok = False
             if args.out:
                 args.out.parent.mkdir(parents=True, exist_ok=True)

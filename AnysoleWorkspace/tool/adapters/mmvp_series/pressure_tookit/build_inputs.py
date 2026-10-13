@@ -95,8 +95,10 @@ def session_report_path(date: str, subject: str, session: str, cam: int = 3) -> 
 
 
 def frontend_suffix(name: str, cam: int) -> str:
-    """cam3 keeps the frozen frontend name; other cameras get a ``_cam{N}`` sibling."""
-    return name if cam == 3 else f"{name}_cam{cam}"
+    """Unified per-camera frontend name (四相机扩展 D5): every camera,
+    including cam3, gets the ``_cam{N}`` sibling name; the legacy cam3 name is
+    a symlink (normalize_cam_names.py)."""
+    return f"{name}_cam{cam}"
 
 
 def link_frontend_dir(source_dir: Path, link: Path, force: bool) -> str:
