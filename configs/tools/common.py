@@ -405,12 +405,13 @@ def config_path(registry: dict[str, Any], model_id: str | None = None) -> Path:
     value = defaults.get("config", "anysole/configs/v1.yaml")
     if model_id is not None:
         value = resolved_model_spec(registry, model_id).get("config", value)
-    # 四相机扩展 D2 (2026-10-12): camera is part of the model identity, not a
-    # config override -- V3_3B_cam{N} (and its derived specialists) read the
-    # per-camera yaml so train/eval/rho_grid all land on the camera's roots.
-    cam = _model_cam_id(model_id) if model_id is not None else None
-    if cam is not None:
-        value = "anysole/configs/v1_cam%d.yaml" % cam
+    # 四相机扩展 D2/D3 (2026-10-12/13): the data config is part of the model
+    # identity, not a config override -- V3_3B_cam{N} / V3_3B_cam3_occ{M} (and
+    # their derived specialists) read the matching per-config yaml so
+    # train/eval/rho_grid all land on that config's roots.
+    suffix = _model_v_config_suffix(model_id) if model_id is not None else None
+    if suffix is not None:
+        value = "anysole/configs/v1_%s.yaml" % suffix
     path = resolve_path(value)
     assert path is not None
     return path
@@ -421,13 +422,19 @@ def effective_value(registry: dict[str, Any], model_id: str, key: str, default: 
     return spec.get(key, registry.get("defaults", {}).get(key, default))
 
 
-def _model_cam_id(model_id: str | None) -> int | None:
-    """Camera id of a four-camera model id (V3_3B_cam{N}, incl. derived
-    specialists like V3_3B_cam{N}_vonly); None for camera-3-agnostic ids."""
+def _model_v_config_suffix(model_id: str | None) -> str | None:
+    """Data-config suffix of a per-config model id: "cam3" for V3_3B_cam{N},
+    "cam3_occ010" for V3_3B_cam3_occ{M} (incl. derived specialists like
+    V3_3B_cam{N}_vonly); None for ids without a per-config data root."""
     if not model_id:
         return None
-    match = re.search(r"_cam([1-4])(?:$|_)", str(model_id))
-    return int(match.group(1)) if match else None
+    match = re.search(r"_cam([1-4])(?:_occ(\d{3}))?(?:$|_)", str(model_id))
+    if not match:
+        return None
+    suffix = "cam" + match.group(1)
+    if match.group(2):
+        suffix += "_occ" + match.group(2)
+    return suffix
 
 
 def sha256_file(path: Path) -> str | None:

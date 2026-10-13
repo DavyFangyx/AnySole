@@ -41,6 +41,16 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "SPECIALISTS": ["vonly"],
         "REQUIRES": [],
     },
+    # V-degradation 遮挡组 (2026-10-13): cam3 with the bottom fraction of the
+    # person bbox occluded.  tonly is absent for the same reason as the camera
+    # group -- the T stream is occlusion-independent, V3_3B_tonly serves all.
+    "singlemodal_eval_occl": {
+        "KIND": "singlemodal_compare",
+        "MODEL_IDS": ["V3_3B_cam3_occ010", "V3_3B_cam3_occ020",
+                      "V3_3B_cam3_occ030", "V3_3B_cam3_occ050"],
+        "SPECIALISTS": ["vonly"],
+        "REQUIRES": [],
+    },
     "rho_grid_eval": {
         "KIND": "rho_grid",
         "MODEL_IDS": ["V3_3B"],

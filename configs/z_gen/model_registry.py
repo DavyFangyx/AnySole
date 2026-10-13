@@ -92,6 +92,16 @@ for _cam in (1, 2, 3, 4):
         "name": f"V3_3B_cam{_cam}",
     }
 
+# V-degradation 遮挡组（2026-10-13：cam3 + bbox 底部遮挡 4 档）。训练规格与
+# V3_3B 完全一致；数据根差异由 create_queue/runner 按名称尾缀推导
+# v1_cam3_occ{N}.yaml（occ010 = 底部 10%，f=0.10）。
+for _occ in ("010", "020", "030", "050"):
+    MODELS[f"V3_3B_cam3_occ{_occ}"] = {
+        **_V3_3B,
+        "label": f"V3-3B-cam3-occ{_occ}",
+        "name": f"V3_3B_cam3_occ{_occ}",
+    }
+
 
 _COMMON_FALLBACK = {
     "CONFIG": "anysole/configs/v1.yaml",

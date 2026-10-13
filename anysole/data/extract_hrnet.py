@@ -52,17 +52,35 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--seq-root", type=Path, default=None)
     parser.add_argument("--bbox-root", type=Path, default=None,
                         help="Optional private/shared frontend bbox root; defaults to the session dir.")
+    parser.add_argument("--occlude-lower", type=float, default=None,
+                        help="Occlude the bottom fraction (0-1) of the person bbox before HRNet "
+                             "(V-degradation experiment); default cache root becomes "
+                             "cam{id}_occ_lower{FFF}.")
+    parser.add_argument("--occlude-fill", choices=("black", "blur"), default="black",
+                        help="Fill for the occluded strip (default black).")
     parser.add_argument("--limit-sessions", type=int, default=None)
     return parser.parse_args(argv)
+
+
+def occlusion_cache_dirname(cam_id: int, frac: float) -> str:
+    """Cache dir name for one occlusion level: cam{id}_occ_lower{FFF} with
+    FFF = round(frac * 100) zero-padded (0.1 -> cam3_occ_lower010)."""
+    return "cam%d_occ_lower%03d" % (int(cam_id), int(round(frac * 100)))
 
 
 def resolve_roots(
     cam_id: int,
     cache_root: Optional[Path] = None,
     seq_root: Optional[Path] = None,
+    occlude_lower: Optional[float] = None,
 ) -> tuple:
     resolved_seq_root = seq_root or SEQ_ROOT.parent / ("cam%d" % int(cam_id))
-    resolved_cache_root = cache_root or HRNET_CACHE_ROOT.parent / ("cam%d" % int(cam_id))
+    if cache_root is not None:
+        resolved_cache_root = cache_root
+    elif occlude_lower is not None:
+        resolved_cache_root = HRNET_CACHE_ROOT.parent / occlusion_cache_dirname(cam_id, occlude_lower)
+    else:
+        resolved_cache_root = HRNET_CACHE_ROOT.parent / ("cam%d" % int(cam_id))
     return resolved_seq_root, resolved_cache_root
 
 
@@ -124,6 +142,25 @@ def read_rgb(path: Path) -> np.ndarray:
     return bgr[:, :, ::-1]
 
 
+def occlude_lower_strip(rgb: np.ndarray, box, frac: float, fill: str) -> np.ndarray:
+    """Mask the full-width rows at/under (1 - frac) of the person bbox height.
+
+    The mask is anchored to the per-frame bbox (the same box that drives
+    ``process_image``); bbox and bbox_info stay untouched on purpose -- the
+    person is still detected, only the lower body is unreadable.
+    """
+    y1, y2 = float(box[1]), float(box[3])
+    cut = int(round(y1 + (1.0 - frac) * (y2 - y1)))
+    if cut <= 0 or cut >= rgb.shape[0] - 1:
+        return rgb
+    out = rgb.copy()
+    if fill == "black":
+        out[cut:] = 0
+    else:  # blur: keep local color statistics, remove texture
+        out[cut:] = cv2.GaussianBlur(rgb, (0, 0), 24)[cut:]
+    return out
+
+
 def session_frame_paths(seq_dir: Path, n_frames: int) -> List[Path]:
     color_dir = seq_dir / ("rgb" if (seq_dir / "rgb").is_dir() else "color")
     paths = [color_dir / ("%06d.jpg" % idx) for idx in range(n_frames)]
@@ -142,6 +179,8 @@ def extract_session(
     device: torch.device,
     batch_size: int,
     bbox_root: Optional[Path] = None,
+    occlude_lower: Optional[float] = None,
+    occlude_fill: str = "black",
 ) -> None:
     if (seq_dir / "session.json").is_file():
         meta = json.loads((seq_dir / "session.json").read_text())
@@ -163,6 +202,8 @@ def extract_session(
         for idx, image_path in enumerate(image_paths):
             rgb = read_rgb(image_path)
             box = bbox[idx][1:5]
+            if occlude_lower is not None:
+                rgb = occlude_lower_strip(rgb, box, occlude_lower, occlude_fill)
             norm_img, center, scale, _, _, _ = process_image(
                 rgb, box, crop_height=CROP_IMG_HEIGHT, crop_width=CROP_IMG_WIDTH
             )
@@ -215,19 +256,24 @@ def extract_session(
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(feat.contiguous(), cache_path)
     if (seq_dir / "session.json").is_file():
+        parameters = {"frontend": "CLIFF-HRNet", "feature_dim": V_FEAT_DIM}
+        if occlude_lower is not None:
+            parameters["occlude_lower"] = occlude_lower
+            parameters["occlude_fill"] = occlude_fill
         write_cache_provenance(
             cache_path,
             session=load_shared_session(seq_dir.name),
             kind="extract_hrnet",
             shape=tuple(feat.shape),
-            parameters={"frontend": "CLIFF-HRNet", "feature_dim": V_FEAT_DIM},
+            parameters=parameters,
         )
     print("saved %s %s" % (cache_path, tuple(feat.shape)))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
-    seq_root, cache_root = resolve_roots(args.cam_id, args.cache_root, args.seq_root)
+    seq_root, cache_root = resolve_roots(args.cam_id, args.cache_root, args.seq_root,
+                                         occlude_lower=args.occlude_lower)
     session_dirs = select_session_dirs(seq_root, args)
     if args.limit_sessions is not None:
         if args.limit_sessions <= 0:
@@ -248,7 +294,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("load encoder on %s" % device)
             model = load_encoder(device)
         print("extract %s" % seq_dir)
-        extract_session(seq_dir, cache_path, model, device, int(args.batch_size), args.bbox_root)
+        extract_session(seq_dir, cache_path, model, device, int(args.batch_size), args.bbox_root,
+                        args.occlude_lower, args.occlude_fill)
     return 0
 
 

@@ -59,6 +59,15 @@ MODEL_REGISTRY.update({
     for cam in (1, 2, 3, 4)
 })
 
+# V-degradation 遮挡组（2026-10-13）：cam3 + 人物 bbox 底部遮挡，共用 v3_3b
+# 结构入口；数据根差异由 v1_cam3_occ{N}.yaml 携带（occ010 = 底部 10%，f=0.10）。
+MODEL_REGISTRY.update({
+    f"V3_3B_cam3_occ{occ}": ModelEntry(f"V3_3B_cam3_occ{occ}", "v3_3b",
+                                       f"V3_3B on cam3 with bottom {int(occ) / 10:g}% of "
+                                       f"the person bbox occluded (V-degradation experiment)")
+    for occ in ("010", "020", "030", "050")
+})
+
 
 def list_registered_models() -> list[str]:
     return list(MODEL_REGISTRY)
