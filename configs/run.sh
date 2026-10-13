@@ -76,7 +76,8 @@ case "$MODEL" in
       if (( PRESSURE_KDTREE_WORKERS < 2 )); then PRESSURE_KDTREE_WORKERS=2; fi
       export PRESSURE_KDTREE_WORKERS
     fi
-    pressure_args=( --run-root "${INIT_DATA_DIR:?pressure conf must set INIT_DATA_DIR=<run_root>}"
+    pressure_args=( --cam "${CAM:-3}"
+                    --run-root "${INIT_DATA_DIR:?pressure conf must set INIT_DATA_DIR=<run_root>}"
                     --output-dir "${OUTPUT_DIR:?pressure conf must set OUTPUT_DIR=<run_root>/fitting}"
                     --subject "${SUB_IDS:?}" --gender "${MODEL_GENDER:-male}"
                     --dataset "${DATASET:-}" --split "${SPLIT:-all}"
@@ -107,11 +108,11 @@ case "$MODEL" in
   fpp_train)
     cd Baselines/VP-MoCap/FPP-Net
     fpp_cfg="${CONFIG_FILE:-configs/temporalKPSMPLCont_series5_mlp.yaml}"; [[ "$fpp_cfg" = /* ]] || fpp_cfg="$repo/$fpp_cfg"
-    "$py" app/train_temporal.py --config "$fpp_cfg" --batch_size "${BATCH_SIZE:-32}" --num_threads "${NUM_THREADS:-0}" --gpus "${CUDA_VISIBLE_DEVICES:-cpu}" ;;
+    "$py" app/train_temporal.py --config "$fpp_cfg" --cam "${CAM:-3}" --batch_size "${BATCH_SIZE:-32}" --num_threads "${NUM_THREADS:-0}" --gpus "${CUDA_VISIBLE_DEVICES:-cpu}" ;;
   fpp_infer)
     cd Baselines/VP-MoCap/FPP-Net
     fpp_cfg="${CONFIG_FILE:-configs/temporalKPSMPLCont_series5_mlp.yaml}"; [[ "$fpp_cfg" = /* ]] || fpp_cfg="$repo/$fpp_cfg"
-    "$py" app/infer_smplcont.py --config "$fpp_cfg" --phase "${FPP_PHASE:-test}" --batch_size "${BATCH_SIZE:-32}" --num_threads "${NUM_THREADS:-4}" --gpus "${CUDA_VISIBLE_DEVICES:-cpu}" ;;
+    "$py" app/infer_smplcont.py --config "$fpp_cfg" --cam "${CAM:-3}" --phase "${FPP_PHASE:-test}" --batch_size "${BATCH_SIZE:-32}" --num_threads "${NUM_THREADS:-4}" --gpus "${CUDA_VISIBLE_DEVICES:-cpu}" ;;
   posetransopt)
     cd Baselines/VP-MoCap/PoseTransOpt
     "$py" -m app.optimize task.input_path_base="${INPUT_PATH_BASE:?}" task.scene_rgbd="${SCENE_RGBD:?}" gpu="${CUDA_VISIBLE_DEVICES:-0}" ;;

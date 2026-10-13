@@ -65,9 +65,15 @@ def _cam_id(model: str) -> int:
 
 
 def anysole_config_file(model: str) -> str:
-    """四相机扩展 D2: per-camera models use v1_cam{N}.yaml, others v1.yaml."""
-    cam = _cam_id(model)
-    return "anysole/configs/v1_cam%d.yaml" % cam if cam else "anysole/configs/v1.yaml"
+    """四相机扩展 D2/D3: V3_3B_cam{N} → v1_cam{N}.yaml, V3_3B_cam3_occ{M} →
+    v1_cam3_occ{M}.yaml, others v1.yaml."""
+    match = re.match(r"^V3_3B_cam([1-4])(?:_occ(\d{3}))?$", model)
+    if not match:
+        return "anysole/configs/v1.yaml"
+    suffix = "cam" + match.group(1)
+    if match.group(2):
+        suffix += "_occ" + match.group(2)
+    return "anysole/configs/v1_%s.yaml" % suffix
 
 
 def main():
@@ -75,6 +81,9 @@ def main():
     parser.add_argument('--models', required=True)
     parser.add_argument('--manifest', default='AnysoleWorkspace/protocol/manifests/session_manifest.jsonl')
     parser.add_argument('--split', choices=('train', 'val', 'test', 'all'), default='all')
+    parser.add_argument('--cam', type=int, choices=(1, 2, 3, 4), default=3,
+                        help='camera id (四相机扩展 D6): fpp_train/fpp_infer conf 写 CAM=、'
+                             'posetransopt INPUT_PATH_BASE 与 pressure_toolkit 适配器根按 cam{N} 展开；默认 3')
     parser.add_argument(
         '--pressure-run-id', default='v1',
         help='pressure_toolkit run 根：work://pressure_toolkit/<run_id>；同一 run 根'
@@ -112,7 +121,7 @@ def main():
     if 'fpp_train' in models:
         index += 1
         put(f'{index:03d}_fpp_train',
-            'MODEL=fpp_train\nRUN_NAME=fpp_train\nCONDA_ENV=mmvp\n'
+            f'MODEL=fpp_train\nRUN_NAME=fpp_train\nCONDA_ENV=mmvp\nCAM={args.cam}\n'
             'CONFIG_FILE=Baselines/VP-MoCap/FPP-Net/configs/temporalKPSMPLCont_series5_mlp.yaml\n')
     if 'fpp_infer' in models:
         infer_phases = ('train', 'val', 'test') if args.split == 'all' else (args.split,)
@@ -120,7 +129,7 @@ def main():
             index += 1
             put(f'{index:03d}_fpp_infer_{phase}',
                 f'MODEL=fpp_infer\nRUN_NAME=fpp_infer_{phase}\nCONDA_ENV=mmvp\n'
-                f'FPP_PHASE={phase}\n'
+                f'CAM={args.cam}\nFPP_PHASE={phase}\n'
                 'CONFIG_FILE=Baselines/VP-MoCap/FPP-Net/configs/temporalKPSMPLCont_series5_mlp.yaml\n')
 
     if 'posetransopt' in models:
@@ -128,7 +137,9 @@ def main():
             index += 1
             date = date_from_row(row)
             session = row['session_id']
-            base = f'model-input://PoseTransOpt/adapter_v1/{date}/{row["subject_id"]}/{session}'
+            # D6: cam3 keeps the frozen root layout; cam{N} adds the cam{N} level
+            cam_level = '' if args.cam == 3 else f'/cam{args.cam}'
+            base = f'model-input://PoseTransOpt/adapter_v1{cam_level}/{date}/{row["subject_id"]}/{session}'
             # 评估整改任务 02：staging（task.conf/日志）落在 results/logs，
             # results/baselines/VP-MoCap/ 只保留 predictions/ 与 metrics/。
             text = (f'MODEL=posetransopt\nRUN_NAME=posetransopt_{session}\nCONDA_ENV=mmvp\n'
@@ -158,7 +169,7 @@ def main():
         # launcher 写入 run 根的 artifact.json 里作为参数记录，同一 run 根内
         # 口径漂移会被拒绝。
         text = (
-            f'MODEL=pressure_toolkit\nRUN_NAME=pressure_{session}\nCONDA_ENV=mmvp\n'
+            f'MODEL=pressure_toolkit\nRUN_NAME=pressure_{session}\nCONDA_ENV=mmvp\nCAM={args.cam}\n'
             'CONFIG_FILE=Baselines/pressure_tookit/configs/fit_smpl_rgbd.yaml\n'
             f'DATASET={date}\nSUB_IDS={subject}\nSEQ_NAME={session}\n'
             f'MODEL_GENDER={"female" if subject in FEMALE_SUBJECTS else "male"}\n'
