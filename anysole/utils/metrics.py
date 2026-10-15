@@ -18,7 +18,8 @@ diagnostic name :func:`foot_sliding_vertices` and is SMPL-only.
 of the former ``yaw_abs_deg`` / ``yaw_drift_deg``; their only implementation
 is :func:`root_orientation_error_deg` / :func:`root_orientation_drift_deg`.
 
-``pve_t_mm`` was cancelled (2026-09-26) and does not exist anywhere.
+``pve_t_mm`` is available for predicted shapes: zero-pose meshes with
+pelvis alignment, without scale correction (metrics branch alignment).
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ METRIC_UNITS = {
     "mpjpe_mm": "mm",
     "pa_mpjpe_mm": "mm",
     "pve_mm": "mm",
+    "pve_t_mm": "mm",
     "mpjae_deg": "degree",
     "accel_error_m_s2": "m/s^2",
     "jitter_pred_m_s3": "m/s^3",
@@ -57,6 +59,7 @@ MOTION_METRIC_NAMES = (
     "pa_mpjpe_mm",
     "mpjae_deg",
     "pve_mm",
+    "pve_t_mm",
     "root_ate_mm",
     "root_rte_percent",
     "w_mpjpe100_mm",
@@ -96,6 +99,20 @@ def mean_point_error(predicted: np.ndarray, target: np.ndarray, *, scale: float 
     if predicted.shape != target.shape or predicted.ndim != 3 or predicted.shape[-1] != 3:
         raise ValueError("point arrays must have matching [T,N,3] shapes")
     return np.linalg.norm(predicted - target, axis=-1).mean(axis=-1) * scale
+
+
+def pve_t_error(predicted_joints: np.ndarray, predicted_vertices: np.ndarray,
+                target_joints: np.ndarray, target_vertices: np.ndarray) -> np.ndarray:
+    """Per-frame shape error on zero-pose meshes; no scale correction.
+
+    The caller generates each mesh with its own beta. A single GT shape is
+    broadcast to the predicted sequence, matching the Tactile protocol.
+    """
+    gt_joints = np.broadcast_to(target_joints, predicted_joints.shape)
+    gt_vertices = np.broadcast_to(target_vertices, predicted_vertices.shape)
+    _, pred_aligned = pelvis_align(predicted_joints, predicted_vertices)
+    _, gt_aligned = pelvis_align(gt_joints, gt_vertices)
+    return mean_point_error(pred_aligned, gt_aligned, scale=1000.0)
 
 
 def similarity_align(predicted: np.ndarray, target: np.ndarray, *, fixed_scale: bool = False) -> np.ndarray:
