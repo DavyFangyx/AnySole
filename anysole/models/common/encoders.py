@@ -143,6 +143,19 @@ class ModalEncoders(nn.Module):
                 in_dim = T_RAW_DIM + T_PHYS_DIM
             self.t_enc = LinearTemporalEncoder(in_dim, embeddings, 1)
 
+    def forward_visual(self, V_feat, frame_valid, tactile_time_pe=None):
+        """Encode RGB alone; the real tactile encoder is never evaluated."""
+        if self.v_input != "hrnet":
+            raise ValueError("strict visual input requires the 2051-d HRNet stream")
+        safe_v = torch.where(frame_valid.unsqueeze(-1), V_feat, torch.zeros_like(V_feat))
+        v_tok = self.v_enc(safe_v)
+        null_v = self.embeddings.null_v.to(dtype=v_tok.dtype).expand_as(v_tok)
+        v_tok = torch.where(frame_valid.unsqueeze(-1), v_tok, null_v)
+        t_tok = self.embeddings.null_t.to(dtype=v_tok.dtype).expand_as(v_tok)
+        if tactile_time_pe is not None:
+            t_tok = t_tok + tactile_time_pe.to(dtype=t_tok.dtype)
+        return v_tok, t_tok
+
     def forward(self, V_feat, T_tac, config_id, V_hmr=None, mask_v=None, mask_t=None):
         """``mask_v/mask_t`` (bool, B×tw)：逐帧 null-token mask（missing-rate
         实验 1 / ρ 网格）。True 的位置把该帧 token 换成 null token，叠加在

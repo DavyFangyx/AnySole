@@ -442,6 +442,10 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    import sys
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments in (['--help'],['-h']) or any(flag in arguments for flag in ('--checkpoint','--manifest','--aggregate-plan','--merge-shards')):
+        return visual_eval_main(arguments)
     args = parse_args(argv)
     config_values = _parse_config_values(args.config_id)
     config = load_config(args.config)
@@ -877,6 +881,128 @@ def _evaluate_one(
             "canonical session evaluation requires non-overlapping windows; "
             "this checkpoint/config uses an unsupported continuation stride"
         )
+    return 0
+
+
+def visual_eval_main(argv):
+    """Saved-config grouped evaluation and reviewable report aggregation."""
+    import json
+    import time
+    from anysole.data.dataset import GroupedViewDataset
+    from anysole.data.workspace_adapter import sha256_file
+    from anysole.utils import eval_protocol as protocol
+    parser=argparse.ArgumentParser(description="RGB-only grouped evaluation; all predictions beta0 and segment p0=0.")
+    parser.add_argument('--checkpoint',type=Path)
+    parser.add_argument('--manifest',type=Path)
+    parser.add_argument('--split',choices=('train','val','test'),default='test')
+    parser.add_argument('--output',type=Path,required=True,help='New report directory or new JSON file, e.g. RUN_DIR/eval.json.')
+    parser.add_argument('--device',default='cpu')
+    parser.add_argument('--resource-plan',type=Path,help='Frozen training resource plan; required for CUDA; uses its common GPU ledger.')
+    parser.add_argument('--sessions',nargs='+',help='Explicit recording shard; cannot silently replace full report.')
+    parser.add_argument('--shard-index',type=int,default=0)
+    parser.add_argument('--shard-count',type=int,default=1)
+    parser.add_argument('--bootstrap-samples',type=int,default=10000)
+    parser.add_argument('--surfaces',action='store_true',help='Evaluate beta0/GTbeta surfaces with current authorized SMPL.')
+    parser.add_argument('--gt-shape-diagnostic',action='store_true',help='Separate GTbeta oracle diagnostic, excluded from main metrics.')
+    parser.add_argument('--aggregate-plan',type=Path,help='JSON {reports:[eval.json...],baseline:experiment}; 4 main groups seeds1/2/3 plus 3 mechanisms seed1.')
+    parser.add_argument('--merge-shards',type=Path,nargs='+',help='Complete disjoint shards from the same checkpoint.')
+    args=parser.parse_args(argv)
+    output=args.output.resolve()
+    if not output.is_relative_to(Path('/private/Tactile')):
+        raise ValueError('evaluation output must remain in /private/Tactile')
+    report_path=output if output.suffix.lower()=='.json' else output/'eval.json'
+    output_dir=report_path.parent
+    file_output=output.suffix.lower()=='.json'
+    if report_path.exists() or (not file_output and output.exists() and any(output.iterdir())):
+        raise FileExistsError('evaluation output must be a new or empty directory')
+    if args.bootstrap_samples<0:
+        raise ValueError('bootstrap samples cannot be negative')
+    if args.aggregate_plan or args.merge_shards:
+        if args.aggregate_plan and args.merge_shards:
+            raise ValueError('choose aggregation or shard merge')
+        if args.aggregate_plan:
+            plan=json.loads(args.aggregate_plan.read_text())
+            reports=[json.loads(Path(p).read_text()) for p in plan['reports']]
+            for report in reports:
+                protocol.verify_visual_report_artifacts(report)
+            report=protocol.aggregate_visual_reports(reports,baseline=plan.get('baseline','base_pool'),bootstrap_samples=args.bootstrap_samples)
+        else:
+            reports=[json.loads(p.read_text()) for p in args.merge_shards]
+            for report in reports:
+                protocol.verify_visual_report_artifacts(report)
+            report=protocol.merge_visual_shards(reports,bootstrap_samples=args.bootstrap_samples)
+        output_dir.mkdir(parents=True,exist_ok=True)
+        report_path.write_text(json.dumps(report,indent=2,sort_keys=True,allow_nan=False)+'\n')
+        return 0
+    if args.checkpoint is None or args.manifest is None:
+        parser.error('--checkpoint and --manifest are required for grouped evaluation')
+    if not 0<=args.shard_index<args.shard_count:
+        raise ValueError('invalid shard index/count')
+    prediction_dir=output_dir/'predictions'/f'eval_{args.split}_shard{args.shard_index}of{args.shard_count}'
+    rows_path=output_dir/(f'session_camera_rows_{args.split}_shard{args.shard_index}of{args.shard_count}.json' if file_output else 'session_camera_rows.json')
+    if rows_path.exists() or (prediction_dir.exists() and any(prediction_dir.iterdir())):
+        raise FileExistsError('evaluation row/prediction artifacts already exist')
+    identity=protocol.visual_hash({'checkpoint':sha256_file(args.checkpoint),'manifest':sha256_file(args.manifest),
+                                   'split':args.split,'shard':args.shard_index,'output':str(output)})
+    with protocol.visual_gpu_slot(args.device,args.resource_plan,identity) as resource:
+        model,config,stats,checkpoint=protocol.load_visual_student(args.checkpoint,args.device)
+        smpl_hash=sha256_file(Path(config['smpl_model_path']))
+        if config.get('smpl_runtime_model_hash') not in (None,smpl_hash):
+            raise ValueError('authorized current SMPL hash differs from saved checkpoint')
+        dataset=GroupedViewDataset(args.manifest,Path(config['dataset_root']),Path(config['feature_cache_root']),
+            Path(config['smpl_model_path']),split=args.split,window_length=int(config['tw']),
+            stride=int(config['tw'])//2,cameras=(1,2,3,4),cover_tail=True)
+        if config.get('manifest_hash') not in (None,dataset.manifest_meta['manifest_sha256']):
+            raise ValueError('evaluation manifest differs from saved checkpoint')
+        if config.get('cache_index_hash') is not None and config['cache_index_hash']!=sha256_file(Path(config['feature_cache_root'])/'index.json'):
+            raise ValueError('evaluation cache index differs from frozen checkpoint')
+        expected=sorted(r['recording_id'] for r in dataset.records)
+        selected=set(expected[args.shard_index::args.shard_count])
+        if args.sessions:
+            if not set(args.sessions)<=set(expected):
+                raise ValueError('unknown recording in --sessions')
+            selected &= set(args.sessions)
+        # Retain original dataset record indices used by its window/label cache.
+        dataset.windows=[w for w in dataset.windows if dataset.records[w[0]]['recording_id'] in selected]
+        started=time.perf_counter()
+        windows,truth,_=protocol.collect_visual_windows(model,dataset,torch.device(args.device),cameras=(1,2,3,4),recording_ids=selected)
+        windows=[w for w in windows if w['recording_id'] in selected]
+        truth={k:v for k,v in truth.items() if k[0] in selected}
+        series=protocol.aggregate_visual_windows(windows)
+        cached_elapsed=time.perf_counter()-started
+        offsets=protocol.beta_zero_visual_offsets(config['smpl_model_path'])
+        selection=protocol.visual_selection_metrics(series,offsets,truth,prefix='eval')
+        rows=protocol.visual_session_rows(series,offsets,stats)
+        if args.surfaces:
+            for row in rows:
+                row['metrics'].update(protocol.visual_surface_metrics(series[(row['recording_id'],row['camera_id'])],config['smpl_model_path']))
+        if args.gt_shape_diagnostic:
+            for row in rows:
+                row['diagnostics']=protocol.visual_gt_shape_diagnostic(series[(row['recording_id'],row['camera_id'])],config['smpl_model_path'])
+        provenance={'checkpoint_sha256':sha256_file(args.checkpoint),'structure_hash':config['structure_hash'],
+                    'smpl_runtime_model_hash':smpl_hash,'smpl_source_model_hash':config.get('smpl_source_model_hash'),
+                    'source_runtime_equivalence':config.get('smpl_source_runtime_equivalence','unverified'),
+                    'manifest_sha256':sha256_file(args.manifest),'stats_sha256':stats.get('stats_sha256'),
+                    'student_source_hash':config.get('source_hash')}
+        predictions=protocol.export_visual_series(series,prediction_dir,config,provenance)
+        report={'schema_version':protocol.VISUAL_EVAL_PROTOCOL,**provenance,
+            'protocol_sha256':sha256_file(Path(protocol.__file__)),'split':args.split,
+            'experiment':config.get('experiment'),'seed':config.get('seed'),
+            'effective_config':config,'selection_metrics':selection,'rows':rows,
+            'summary':protocol.summarize_visual_rows(rows,bootstrap_samples=args.bootstrap_samples),
+            'predictions':predictions,'coverage_hash':selection['eval/coverage_hash'],
+            'prediction_hash':protocol.visual_hash([entry['sha256'] for entry in predictions]),
+            'shard_index':args.shard_index,'shard_count':args.shard_count,'expected_recordings':expected,
+            'selected_recordings':sorted(selected),'explicit_session_subset':bool(args.sessions),'resource':resource,
+            'camera_reporting':{'fair_comparison_camera':3,'other_cameras':'domain transfer for base_legacy/base_time trained only on camera3'},
+            'cost':{'cached_prediction_seconds':cached_elapsed,
+                    'cached_unique_target_frames_per_second':selection['eval/prediction_frames']/max(cached_elapsed,1e-9),
+                    'window_lookahead_seconds':(int(config['tw'])-1)/40.,'causal':False},
+            'coverage_policy':'all RGB targets predicted independent of truth; missing labels excluded only per metric',
+            'selection_disclosure':'old val=test roles reused for checkpoint selection; test is not independent held-out evidence'}
+        output_dir.mkdir(parents=True,exist_ok=True)
+        report_path.write_text(json.dumps(report,indent=2,sort_keys=True,allow_nan=False)+'\n')
+        rows_path.write_text(json.dumps(rows,indent=2,sort_keys=True,allow_nan=False)+'\n')
     return 0
 
 

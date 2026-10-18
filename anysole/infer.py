@@ -530,6 +530,10 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    import sys
+    arguments=list(sys.argv[1:] if argv is None else argv)
+    if arguments in (['--help'],['-h']) or any(flag in arguments for flag in ('--checkpoint','--input','--rgb-meta')):
+        return visual_infer_main(arguments)
     args = parse_args(argv)
     requested_modes = _parse_modes(args.config_id)
 
@@ -570,6 +574,246 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.out is not None and len(requested_modes) > 1:
             output_override = args.out / ("%s_%s.npz" % (args.session, mode))
         _run_one(args, _MODE_TO_CONFIG[mode], output_override)
+    return 0
+
+
+def load_rgb_only_meta(path):
+    """Closed RGB-only schema; reject label/identity/calibration references."""
+    value=json.loads(Path(path).read_text())
+    allowed={'schema_version','camera_id','source_time_s','frame_files','target_start_s','target_end_s','target_hz'}
+    if not isinstance(value,dict) or set(value)-allowed:
+        raise ValueError('RGB metadata contains forbidden or unknown fields')
+    if value.get('schema_version')!='anysole.rgb-only.v1':
+        raise ValueError('expected anysole.rgb-only.v1 metadata')
+    if value.get('target_hz',40.)!=40.:
+        raise ValueError('student target grid is explicitly 40Hz')
+    if not isinstance(value.get('camera_id',1),int):
+        raise ValueError('camera_id must be an integer metadata tag')
+    return value
+
+
+def iter_rgb_input(input_path,meta,assume_fps=None):
+    """Yield only RGB pixels, source ID and physical capture/container time."""
+    import cv2
+    import re
+    from anysole.data.workspace_adapter import read_rgb_sources
+    path=Path(input_path)
+    if assume_fps is not None and (not np.isfinite(assume_fps) or assume_fps<=0):
+        raise ValueError('--assume-fps must be positive')
+    if path.is_dir():
+        files=meta.get('frame_files')
+        if files is None:
+            files=sorted(p.name for p in path.iterdir() if p.suffix.lower() in ('.jpg','.jpeg','.png'))
+        if not files:
+            raise ValueError('no RGB frames')
+        if any(Path(name).name!=name or Path(name).suffix.lower() not in ('.jpg','.jpeg','.png') for name in files):
+            raise ValueError('frame_files must be local RGB filenames')
+        if 'source_time_s' in meta:
+            times=np.asarray(meta['source_time_s'],np.float64)
+            if times.shape!=(len(files),):
+                raise ValueError('one physical source timestamp is required per RGB filename')
+            rows=[{'file':name,'frame_id':i,'time_s':float(t)} for i,(name,t) in enumerate(zip(files,times))]
+        elif all(re.fullmatch(r'frame\d+_\d+_\d{6}\.\d+\.jpg',name) for name in files):
+            camera=int(meta.get('camera_id',re.fullmatch(r'frame\d+_(\d+)_.*',files[0])[1]))
+            rows=read_rgb_sources(path,camera)
+            meta.setdefault('camera_id',camera)
+            if set(files)!=set(r['file'] for r in rows):
+                raise ValueError('physical timestamp directory and frame_files disagree')
+        elif assume_fps is not None:
+            rows=[{'file':name,'frame_id':i,'time_s':i/assume_fps} for i,name in enumerate(files)]
+        else:
+            raise ValueError('frames need physical source_time_s or timestamp filenames; unknown source fps requires --assume-fps')
+        previous=-np.inf
+        for row in rows:
+            if not np.isfinite(row['time_s']) or row['time_s']<previous:
+                raise ValueError('source timestamps must be finite and nondecreasing')
+            previous=row['time_s']
+            rgb=cv2.imread(str(path/row['file']))
+            if rgb is None:
+                raise ValueError('unreadable RGB frame '+row['file'])
+            yield row,cv2.cvtColor(rgb,cv2.COLOR_BGR2RGB)
+    else:
+        if path.suffix.lower() not in ('.mp4','.mov','.avi','.mkv','.webm','.m4v'):
+            raise ValueError('input must be a single RGB video or frame directory')
+        if 'source_time_s' in meta or 'frame_files' in meta:
+            raise ValueError('video uses container timestamps, not sidecar frame labels')
+        capture=cv2.VideoCapture(str(path)); previous=-np.inf; index=0
+        try:
+            while True:
+                ok,frame=capture.read()
+                if not ok:
+                    break
+                time_s=float(capture.get(cv2.CAP_PROP_POS_MSEC))/1000
+                if not np.isfinite(time_s) or time_s<=previous:
+                    if assume_fps is None:
+                        raise ValueError('container timestamp unavailable/nonmonotone; explicitly pass --assume-fps to replace timebase')
+                    time_s=index/assume_fps
+                if assume_fps is not None:
+                    time_s=index/assume_fps
+                previous=time_s
+                yield {'file':path.name,'frame_id':index,'time_s':time_s},cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
+                index+=1
+        finally:
+            capture.release()
+        if not index:
+            raise ValueError('video contains no decodable RGB frames')
+
+
+def visual_feature_windows(model,features,source_valid,sources,meta,device,*,window=20,stride=10):
+    """RGB timebase -> declared target axis; no labels consulted at any point."""
+    from anysole.data.workspace_adapter import match_rgb_sources
+    from anysole.utils.eval_protocol import aggregate_visual_windows
+    from anysole.utils.geometry import rot6d_to_rotmat
+    first=float(meta.get('target_start_s',sources[0]['time_s']))
+    last=float(meta.get('target_end_s',sources[-1]['time_s']))
+    if not np.isfinite([first,last]).all() or last<first:
+        raise ValueError('invalid RGB target range')
+    target=first+np.arange(int(np.floor((last-first)*40+1e-7))+1,dtype=np.float64)/40
+    matched=match_rgb_sources(target,sources,25.)
+    rows=np.asarray(matched['source_row'],int)
+    valid=np.asarray(matched['view_valid'],bool)&np.asarray(source_valid,bool)[rows]
+    values=np.zeros((len(target),2051),np.float32);values[valid]=np.asarray(features)[rows[valid]]
+    source_time=np.asarray(matched['source_time_s'],np.float64)
+    source_id=np.asarray(matched['source_frame_id'],np.int64)
+    edges=(valid[:-1]&valid[1:]&(np.diff(source_id)>0)&(np.diff(source_time)>0)&(np.diff(source_time)<=.050000001))
+    starts=list(range(0,max(len(target)-window+1,0),stride))
+    tail=max(len(target)-window,0)
+    if not starts or starts[-1]!=tail:
+        starts.append(tail)
+    windows=[]
+    for start in starts:
+        stop=min(start+window,len(target));n=stop-start
+        vv=np.zeros(window,bool);vv[:n]=valid[start:stop]
+        feat=np.zeros((window,2051),np.float32);feat[:n]=values[start:stop]
+        times=target[start]+np.arange(window)/40
+        time_actual=target[start:stop];times[:n]=time_actual
+        rotation=np.zeros((n,24,3,3));pressure=np.zeros((n,96));velocity=np.zeros((n,3))
+        if vv.any():
+            with torch.inference_mode():
+                out=model.forward_visual(torch.from_numpy(feat[None]).to(device),torch.from_numpy(vv[None]).to(device),
+                                         torch.tensor(times[None],dtype=torch.float64,device=device))
+            rotation=rot6d_to_rotmat(out['x0_hat'][0,:n].float().reshape(n,24,6)).cpu().numpy()
+            pressure=out['pressure_hat'][0,:n].float().cpu().numpy();velocity=out['v_hat'][0,:n].float().cpu().numpy()
+        windows.append({'recording_id':'rgb_input','camera_id':int(meta.get('camera_id',1)),
+            'frame_id':np.arange(start,stop),'time_s':time_actual,'valid':valid[start:stop],
+            'view_edges':edges[start:max(stop-1,start)],'rotation':rotation,'pressure':pressure,'velocity':velocity,
+            **{name:np.asarray(matched[name])[start:stop] for name in ('source_frame_id','source_time_s','reuse','time_residual_ms')}})
+    return aggregate_visual_windows(windows),matched
+
+
+def visual_infer_main(argv):
+    import os
+    import time
+    from anysole.data.extract_hrnet import RGBFeatureFrontend,load_encoder
+    from anysole.data.workspace_adapter import sha256_file
+    from anysole.utils import eval_protocol as protocol
+    parser=argparse.ArgumentParser(description='Pure single-camera RGB inference; no motion/pressure/bbox/calibration labels.')
+    parser.add_argument('--checkpoint',type=Path,required=True)
+    parser.add_argument('--input',type=Path,required=True)
+    parser.add_argument('--rgb-meta',type=Path,required=True,help='Closed anysole.rgb-only.v1 JSON; source_time_s for ordinary frame names.')
+    parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--assume-fps',type=float,help='Explicit source timebase replacement; never silently assume 40Hz source.')
+    parser.add_argument('--device',default='cpu')
+    parser.add_argument('--resource-plan',type=Path,help='Frozen common training/evaluation slot resource plan, required for CUDA.')
+    parser.add_argument('--frontend-batch',type=int,default=16)
+    args=parser.parse_args(argv)
+    if args.frontend_batch<1:
+        raise ValueError('positive frontend batch required')
+    output=args.output.resolve()
+    if not output.is_relative_to(Path('/private/Tactile')):
+        raise ValueError('output must stay inside /private/Tactile')
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError('inference output must be new or empty')
+    meta=load_rgb_only_meta(args.rgb_meta)
+    os.environ['YOLO_CONFIG_DIR']=str(output/'.ultralytics')
+    identity=protocol.visual_hash({'checkpoint':sha256_file(args.checkpoint),'input':str(args.input.resolve()),'output':str(output)})
+    with protocol.visual_gpu_slot(args.device,args.resource_plan,identity) as resource:
+        model,config,stats,checkpoint=protocol.load_visual_student(args.checkpoint,args.device)
+        assets={}
+        for key,hashkey in (('hrnet_checkpoint','hrnet_checkpoint_hash'),('detector_checkpoint','detector_checkpoint_hash')):
+            asset=Path(config[key]);actual=sha256_file(asset)
+            if actual!=config[hashkey]:
+                raise ValueError('RGB frontend checkpoint hash mismatch for '+key)
+            assets[key]={'path':str(asset),'sha256':actual}
+        frontend_fingerprint={key:config[key] for key in ('hrnet_checkpoint_hash','detector_checkpoint_hash',
+                                             'detector_version','preprocessing_version','cache_schema')}
+        frontend_fingerprint['extractor_sha256']=sha256_file(Path(__file__).parent/'data/extract_hrnet.py')
+        frontend_fingerprint['hrnet_config_sha256']=sha256_file(Path(config['hrnet_config']))
+        hrnet_root=Path(config['hrnet_module_root'])/'lib/model/backbone/hrnet'
+        frontend_fingerprint['hrnet_source_files']={str(path.relative_to(hrnet_root)):sha256_file(path)
+                                      for path in sorted(hrnet_root.rglob('*.py'))}
+        if config.get('frontend_runtime_hash') not in (None,protocol.visual_hash(frontend_fingerprint)):
+            raise ValueError('RGB frontend source/config differs from frozen training frontend')
+        import ultralytics
+        if str(ultralytics.__version__)!=str(config['detector_version']):
+            raise ValueError('RGB detector version differs from frozen cache frontend')
+        from ultralytics import YOLO
+        encoder=load_encoder(torch.device(args.device),Path(config['hrnet_module_root']),Path(config['hrnet_config']),Path(config['hrnet_checkpoint']))
+        timing={name:0. for name in ('decode','detection','crop','hrnet','student','total')}
+        detector=YOLO(config['detector_checkpoint'])
+        def synchronize():
+            if torch.device(args.device).type=='cuda':
+                torch.cuda.synchronize(torch.device(args.device))
+        class TimedDetector:
+            def predict(self,**kwargs):
+                synchronize();start=time.perf_counter();value=detector.predict(**kwargs);synchronize()
+                timing['detection']+=time.perf_counter()-start
+                return value
+        frontend=RGBFeatureFrontend(encoder,TimedDetector(),torch.device(args.device))
+        sources=[];features=[];source_valid=[];prepared=[];prepared_indices=[];crop_metadata=[];source_hashes=[]
+        total=time.perf_counter();iterator=iter(iter_rgb_input(args.input,meta,args.assume_fps))
+        def flush():
+            if not prepared:
+                return
+            synchronize();start=time.perf_counter();encoded=frontend.encode_prepared(prepared);synchronize()
+            timing['hrnet']+=time.perf_counter()-start
+            for index,feature in zip(prepared_indices,encoded.numpy()):
+                features[index]=feature;source_valid[index]=True
+            prepared.clear();prepared_indices.clear()
+        while True:
+            begin=time.perf_counter()
+            try:
+                row,rgb=next(iterator)
+            except StopIteration:
+                break
+            timing['decode']+=time.perf_counter()-begin
+            index=len(sources);sources.append(row);features.append(np.zeros(2051,np.float32));source_valid.append(False)
+            import hashlib
+            source_hashes.append(hashlib.sha256(rgb.tobytes()).hexdigest())
+            before=timing['detection'];begin=time.perf_counter();value=frontend.prepare(rgb)
+            timing['crop']+=max(0,time.perf_counter()-begin-(timing['detection']-before))
+            crop_metadata.append(value[2] if value is not None else None)
+            if value is not None:
+                prepared.append(value);prepared_indices.append(index)
+            if len(prepared)>=args.frontend_batch:
+                flush()
+        flush()
+        synchronize();begin=time.perf_counter()
+        series,matching=visual_feature_windows(model,np.stack(features),source_valid,sources,meta,torch.device(args.device))
+        synchronize();timing['student']=time.perf_counter()-begin
+        timing['total']=time.perf_counter()-total
+        smpl_hash=sha256_file(Path(config['smpl_model_path']))
+        if config.get('smpl_runtime_model_hash') not in (None,smpl_hash):
+            raise ValueError('current SMPL hash differs from saved checkpoint')
+        provenance={'checkpoint_sha256':sha256_file(args.checkpoint),'structure_hash':config['structure_hash'],
+            'protocol_sha256':sha256_file(Path(protocol.__file__)),'smpl_runtime_model_hash':smpl_hash,
+            'stats_sha256':stats.get('stats_sha256'),'rgb_metadata_sha256':sha256_file(args.rgb_meta),
+            'input_rgb_sha256':protocol.visual_hash({'pixels':source_hashes,'sources':sources,'assume_fps':args.assume_fps}),
+            'input_file_sha256':sha256_file(args.input) if args.input.is_file() else None,
+            'frontend_assets':assets,'GT_access':'none'}
+        predictions=protocol.export_visual_series(series,output/'predictions',config,provenance)
+        count=sum(int(item['valid'].sum()) for item in series.values())
+        report={'schema_version':protocol.VISUAL_EVAL_PROTOCOL,**provenance,'predictions':predictions,
+            'source_rows':sources,'source_valid':source_valid,'target_matching':matching,'rgb_crop_track':crop_metadata,
+            'resource':resource,'timing_seconds':timing,'timing_scope':'offline clip after asset/model load; excludes serialization',
+            'frontend_runtime_sha256':protocol.visual_hash(frontend_fingerprint),'decoded_frames':len(sources),'predicted_target_frames':count,
+            'frontend_fingerprint':frontend_fingerprint,'prediction_status':'ok' if count else 'no valid RGB detections',
+            'offline_frames_per_second':count/max(timing['total'],1e-9),'lookahead_seconds':19/40,
+            'source_timebase':'explicit --assume-fps replacement' if args.assume_fps else ('physical JPEG timestamps/sidecar' if args.input.is_dir() else 'container CAP_PROP_POS_MSEC'),
+            'source_fps_assumption':args.assume_fps,'target_hz':40.,'causal':False,'pred_beta_source':'zero',
+            'pressure_out_of_range_fraction':float(np.mean(np.concatenate([((s['pressure'][s['valid']]<0)|(s['pressure'][s['valid']]>1)).reshape(-1) for s in series.values()]))) if count else None}
+        output.mkdir(parents=True,exist_ok=True)
+        (output/'inference.json').write_text(json.dumps(report,indent=2,sort_keys=True,allow_nan=False)+'\n')
     return 0
 
 

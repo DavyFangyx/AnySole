@@ -25,6 +25,26 @@ def sinusoidal_pe(length, dim, device=None, dtype=None):
     return pe
 
 
+def relative_time_pe(timestamps, dim, scale=40.0, dtype=None):
+    """Encode target time in nominal-frame units without wall-clock identity.
+
+    Subtract in float64 before converting to the network dtype, preserving
+    millisecond differences even when input timestamps are seconds of day.
+    The original index PE remains unchanged for the legacy V/pose streams.
+    """
+    times = timestamps.to(dtype=torch.float64)
+    position = ((times - times[:, :1]) * float(scale)).to(torch.float32)
+    div_term = torch.exp(
+        torch.arange(0, dim, 2, device=times.device, dtype=torch.float32)
+        * (-math.log(10000.0) / dim)
+    )
+    args = position.unsqueeze(-1) * div_term
+    pe = torch.zeros(*position.shape, dim, device=times.device, dtype=torch.float32)
+    pe[..., 0::2] = torch.sin(args)
+    pe[..., 1::2] = torch.cos(args[..., : dim // 2])
+    return pe.to(dtype=dtype) if dtype is not None else pe
+
+
 class TimestepEmbedding(nn.Module):
     """Sinusoidal encoding of scalar diffusion step tau in [0, 999], then MLP.
 

@@ -61,7 +61,6 @@ from anysole.data.smpl_io import (
     smpl24_pose6d_to_poses,
     smpl_vertices_from_archive_params,
 )
-from anysole.eval import _sample_x_t_init, _session_window_groups, _tactile_corr
 from anysole.utils.geometry import f2_to_world, fk_pose6d, rot6d_to_rotmat
 from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.utils.metrics import (
@@ -79,7 +78,6 @@ from anysole.utils.metrics import (
     temporal_metrics,
     windowed_world_mpjpe,
 )
-from anysole.train import condition_inputs, move_batch
 from anysole.types import (
     ANKLE_FOOT_JOINTS,
     CONFIG_MODE_NAMES,
@@ -518,6 +516,7 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
         accum.add("pressure_cop_error_left", cop_err[:, 0])
         accum.add("pressure_cop_error_right", cop_err[:, 1])
         accum.add("pressure_cop_error_mean", cop_err)
+        from anysole.eval import _tactile_corr
         corr, corr_valid = _tactile_corr(pressure_pred, pressure_gt)
         if bool(corr_valid.any()):
             accum.add("T_corr", corr[corr_valid])
@@ -613,6 +612,8 @@ def _evaluate_config(
     contact = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
     window_rows = {"session_ids": [], "frame_starts": [], "n_frames": [], "metrics": {}}
     session_rows: List[dict] = []
+    from anysole.eval import _sample_x_t_init, _session_window_groups
+    from anysole.train import condition_inputs, move_batch
     groups = _session_window_groups(dataset)
     session_by_id = {s["session_id"]: s for s in dataset.sessions}
     with torch.inference_mode():
@@ -937,3 +938,953 @@ def run_protocol(
         )
         print("wrote detail dumps (+ %s, %s)" % (window_path.name, session_path.name))
     return metrics
+
+
+# Grouped RGB-only protocol. Legacy diffusion evaluation above is retained.
+VISUAL_EVAL_PROTOCOL = "anysole.visual-evaluation.v1"
+
+
+def visual_hash(value):
+    import hashlib
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode()).hexdigest()
+
+
+def _array(value):
+    return value.detach().cpu().numpy() if torch.is_tensor(value) else np.asarray(value)
+
+
+def project_so3(matrix):
+    """Uniform chordal SO(3) mean: polar projection with det=+1 correction."""
+    matrix = np.asarray(matrix, np.float64)
+    if not np.isfinite(matrix).all():
+        raise ValueError("nonfinite rotation prediction")
+    u, _, vh = np.linalg.svd(matrix)
+    correction = np.broadcast_to(np.eye(3), matrix.shape).copy()
+    correction[..., 2, 2] = np.linalg.det(u @ vh)
+    return u @ correction @ vh
+
+
+def integrate_visual_velocity(velocity, times, frame_ids, valid, edges):
+    """v[i] ends at i; integrate once after aggregation; reset every segment."""
+    velocity, times = np.asarray(velocity), np.asarray(times, np.float64)
+    frame_ids, valid = np.asarray(frame_ids), np.asarray(valid, bool)
+    edges = np.asarray(edges, bool)
+    if (velocity.shape != (len(times), 3) or valid.shape != times.shape or
+            frame_ids.shape != times.shape or edges.shape != (max(len(times)-1, 0),)):
+        raise ValueError("trajectory axis/mask shapes disagree")
+    result = np.full((len(times), 3), np.nan, np.float64)
+    segment = np.full(len(times), -1, np.int64)
+    number = -1
+    for i in range(len(times)):
+        if not valid[i]:
+            continue
+        if not np.isfinite(velocity[i]).all():
+            raise ValueError("nonfinite valid velocity")
+        connected = (i > 0 and valid[i-1] and edges[i-1] and frame_ids[i] == frame_ids[i-1]+1
+                     and 0 < times[i]-times[i-1] <= .050000001)
+        if connected:
+            segment[i] = number
+            result[i] = result[i-1] + velocity[i]*(times[i]-times[i-1])
+        else:
+            number += 1
+            segment[i] = number
+            result[i] = 0.
+    return result, segment
+
+
+def aggregate_visual_windows(windows):
+    """Merge CPU window dictionaries on original (recording,camera,frame).
+
+    Invalid target rows stay on the axis. Labels are optional and never decide
+    prediction extent. Duplicate metadata/labels must agree. Source edges are
+    reconstructed across window boundaries, with any observed false edge veto.
+    """
+    groups = {}
+    truth_fields = ("motion_valid", "pressure_valid", "gt_joints", "gt_pressure",
+                    "gt_pose6d", "gt_root", "gt_betas")
+    for window in windows:
+        key = (str(window["recording_id"]), int(window["camera_id"]))
+        group = groups.setdefault(key, {"rows": {}, "edges": {}, "label_edges": {},
+            **{name:window.get(name,"unknown") for name in ('subject','action','date')}})
+        ids, times = _array(window["frame_id"]), _array(window["time_s"])
+        valid = _array(window["valid"]).astype(bool)
+        if times.shape != ids.shape or valid.shape != ids.shape:
+            raise ValueError("window target axes disagree")
+        for i, frame in enumerate(ids):
+            if frame < 0:
+                continue
+            frame = int(frame)
+            row = group["rows"].setdefault(frame, {"time_s": float(times[i]), "n": 0,
+                                                   "rotation_sum": np.zeros((24,3,3)),
+                                                   "pressure_sum": np.zeros(96), "velocity_sum": np.zeros(3)})
+            if not np.isclose(row["time_s"], times[i], atol=1e-7, rtol=0):
+                raise ValueError("duplicate target timestamps disagree")
+            for name in ("source_frame_id", "source_time_s", "reuse", "time_residual_ms", *truth_fields):
+                if name not in window:
+                    continue
+                value = _array(window[name])
+                value = value if name == "gt_betas" and value.ndim == 1 else value[i]
+                if name in row and not np.array_equal(row[name], value, equal_nan=True):
+                    raise ValueError(f"overlapping windows disagree on {name}")
+                row[name] = np.array(value, copy=True)
+            if valid[i]:
+                for name, shape in (("rotation",(24,3,3)),("pressure",(96,)),("velocity",(3,))):
+                    value = _array(window[name])[i]
+                    if value.shape != shape or not np.isfinite(value).all():
+                        raise ValueError(f"invalid {name} prediction")
+                    row[name+"_sum"] += value
+                row["n"] += 1
+        for i in range(max(len(ids)-1, 0)):
+            if ids[i] < 0 or ids[i+1] < 0:
+                continue
+            pair = (int(ids[i]), int(ids[i+1]))
+            edge = bool(_array(window["view_edges"])[i])
+            group["edges"][pair] = group["edges"].get(pair, True) and edge
+            for name in ("motion_edges", "pressure_edges"):
+                if name in window:
+                    value = _array(window[name])[i].astype(bool)
+                    group["label_edges"][(name,pair)] = group["label_edges"].get((name,pair),True) & value
+    result = {}
+    for key, group in sorted(groups.items()):
+        ids = np.array(sorted(group["rows"]), np.int64)
+        rows = [group["rows"][int(i)] for i in ids]
+        if not rows:
+            continue
+        times = np.array([r["time_s"] for r in rows], np.float64)
+        if not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
+            raise ValueError("original target times must increase")
+        counts = np.array([r["n"] for r in rows], np.int64)
+        valid = counts > 0
+        series = {"recording_id": key[0], "camera_id": key[1], "subject": group["subject"],
+                  "action":group['action'],"date":group['date'],
+                  "frame_id": ids, "time_s": times, "valid": valid, "overlap_count": counts,
+                  "rotation": np.full((len(ids),24,3,3), np.nan),
+                  "pressure": np.full((len(ids),96), np.nan), "velocity": np.full((len(ids),3), np.nan)}
+        for name in ("source_frame_id", "source_time_s", "reuse", "time_residual_ms", *truth_fields):
+            if all(name in r for r in rows):
+                series[name] = np.stack([r[name] for r in rows])
+        if "gt_betas" in series:
+            series["gt_betas"] = series["gt_betas"][0]
+        for i in np.flatnonzero(valid):
+            series["rotation"][i] = project_so3(rows[i]["rotation_sum"]/counts[i])
+            for name in ("pressure", "velocity"):
+                series[name][i] = rows[i][name+"_sum"]/counts[i]
+        dt = np.diff(times)
+        edges = valid[:-1] & valid[1:] & (np.diff(ids) == 1) & (dt > 0) & (dt <= .050000001)
+        if "source_frame_id" in series:
+            edges &= np.diff(series["source_frame_id"]) > 0
+        if "source_time_s" in series:
+            ds = np.diff(series["source_time_s"])
+            edges &= (ds > 0) & (ds <= .050000001)
+        else:
+            # Missing source provenance cannot establish dynamic continuity.
+            edges[:] = False
+        if "reuse" in series:
+            edges &= ~series["reuse"][1:].astype(bool)
+        for i, pair in enumerate(zip(ids[:-1], ids[1:])):
+            if pair in group["edges"]:
+                edges[i] &= group["edges"][pair]
+        series["edges"] = edges
+        for name in ("motion_edges", "pressure_edges"):
+            shape = (max(len(ids)-1,0),96) if name == "pressure_edges" else (max(len(ids)-1,0),)
+            series[name] = np.zeros(shape,bool)
+            for i,pair in enumerate(zip(ids[:-1],ids[1:])):
+                if (name,pair) in group["label_edges"]:
+                    series[name][i] = group["label_edges"][(name,pair)]
+        series["trajectory"], series["segment_id"] = integrate_visual_velocity(
+            series["velocity"], times, ids, valid, edges)
+        result[key] = series
+    return result
+
+
+def beta_zero_visual_offsets(model_path):
+    from anysole.data.smpl_io import _rest_joints
+    from anysole.types import JOINT_PARENTS
+    rest = _rest_joints({"betas": np.zeros(10)}, model_path=Path(model_path))
+    offsets = np.zeros((24,3), np.float32)
+    for joint, parent in enumerate(JOINT_PARENTS):
+        if parent >= 0:
+            offsets[joint] = rest[joint]-rest[parent]
+    return torch.from_numpy(offsets)
+
+
+def visual_predicted_joints(series, offsets):
+    from anysole.types import JOINT_PARENTS
+    valid = series["valid"]
+    joints = np.full((len(valid),24,3), np.nan, np.float64)
+    rotation = series["rotation"][valid]
+    pose = np.concatenate((rotation[...,0], rotation[...,1]), -1).reshape(1,-1,144)
+    if valid.any():
+        joints[valid] = fk_pose6d(torch.tensor(pose, dtype=torch.float32),
+            torch.zeros(1, valid.sum(), 3), torch.as_tensor(offsets, dtype=torch.float32),
+            torch.tensor(JOINT_PARENTS))[0].numpy()
+    return joints
+
+
+def visual_selection_metrics(series, offsets, truth_reference=None, prefix="val"):
+    """Single shared beta0 root-relative MPJPE/pressure RMSE selector formula."""
+    totals, camera_totals, coverage = np.zeros(5), {}, []
+    inferred_truth = {}
+    for key, item in sorted(series.items()):
+        valid = item["valid"]
+        mv = np.asarray(item.get("motion_valid", np.zeros(len(valid))), bool)
+        pm = np.asarray(item.get("pressure_valid", np.zeros((len(valid),96))), bool)
+        for i, frame in enumerate(item["frame_id"]):
+            inferred_truth[(*key,int(frame))] = (bool(mv[i]), pm[i])
+        pred = visual_predicted_joints(item, offsets)
+        take = valid & mv
+        err = np.linalg.norm((pred[take]-pred[take,:1])-
+                            (item["gt_joints"][take]-item["gt_joints"][take,:1]), axis=-1).mean(-1) if take.any() else np.zeros(0)
+        mask = valid[:,None] & pm
+        delta = (item["pressure"][mask]-item["gt_pressure"][mask]) if mask.any() else np.zeros(0)
+        if not np.isfinite(err).all() or not np.isfinite(delta).all():
+            raise ValueError("nonfinite valid evaluation truth/prediction")
+        values = np.array([err.sum(), take.sum(), np.square(delta).sum(), np.abs(delta).sum(), mask.sum()])
+        totals += values
+        camera_totals[key[1]] = camera_totals.get(key[1], np.zeros(5))+values
+        for i in np.flatnonzero(valid):
+            coverage.append([*key,int(item["frame_id"][i]),bool(mv[i]),pm[i].astype(np.uint8).tolist()])
+    truth = inferred_truth if truth_reference is None else truth_reference
+    motion_gt = sum(int(m) for m,_ in truth.values())
+    pressure_gt = sum(int(np.asarray(p).sum()) for _,p in truth.values())
+    motion_sum,motion_n,pressure_sq,pressure_abs,pressure_n = totals
+    result = {f"{prefix}/mpjpe": float(motion_sum/motion_n) if motion_n else None,
+              f"{prefix}/pressure_rmse": float(np.sqrt(pressure_sq/pressure_n)) if pressure_n else None,
+              f"{prefix}/pressure_mae": float(pressure_abs/pressure_n) if pressure_n else None,
+              f"{prefix}/motion_frames":int(motion_n),f"{prefix}/pressure_cells":int(pressure_n),
+              f"{prefix}/prediction_frames":len(coverage),f"{prefix}/gt_motion_frames":motion_gt,
+              f"{prefix}/gt_pressure_cells":pressure_gt,
+              f"{prefix}/motion_coverage":motion_n/max(motion_gt,1),
+              f"{prefix}/pressure_coverage":pressure_n/max(pressure_gt,1),
+              f"{prefix}/coverage_hash":visual_hash({"prediction":coverage,"truth":[
+                  [*k,bool(m),np.asarray(p,np.uint8).tolist()] for k,(m,p) in sorted(truth.items())]}),
+              f"{prefix}/pred_beta_source":"zero",f"{prefix}/duplicate_policy":"SO3_polar_uniform_pressure_mean",
+              f"{prefix}/selection_protocol":"smpl24_rootrelative_m_pressure_normalized.v1"}
+    for camera, value in camera_totals.items():
+        if value[1]:
+            result[f"{prefix}/cam{camera}/mpjpe"] = float(value[0]/value[1])
+        if value[4]:
+            result[f"{prefix}/cam{camera}/pressure_rmse"] = float(np.sqrt(value[2]/value[4]))
+    return result
+
+
+def collect_visual_windows(model, dataset, device, *, cameras=(1,2,3,4), recording_ids=None):
+    """Only V/mask/time reach student. Full GT remains on the evaluator side."""
+    from anysole.data.dataset import grouped_collate
+    from anysole.train import _move_grouped, capture_training_rng, restore_training_rng
+    state, was_training = capture_training_rng(device), model.training
+    windows, truth_reference, plot = [], {}, None
+    model.eval()
+    try:
+        with torch.no_grad():
+            for index in range(len(dataset)):
+                item = dataset[index]
+                batch = _move_grouped(grouped_collate([item]), device)
+                visual, labels, masks, meta = (batch[k] for k in ("visual","labels","masks","meta"))
+                for t, frame in enumerate(_array(meta["target_frame_id"][0])):
+                    if frame >= 0:
+                        for camera in cameras:
+                            truth_reference[(meta["recording_id"][0],camera,int(frame))] = (
+                                bool(masks["motion_valid"][0,t]),_array(masks["pressure_valid"][0,t]))
+                active = visual["view_valid"].any(-1).nonzero()
+                predictions = None
+                if len(active):
+                    g,c = active.unbind(1)
+                    predictions = model.forward_visual(visual["V_feat"][g,c],visual["view_valid"][g,c],visual["target_time_s"][g])
+                    rotation = _array(rot6d_to_rotmat(predictions["x0_hat"].float().reshape(len(active),-1,24,6)))
+                    flat_index = {int(slot):flat for flat,(_,slot) in enumerate(active.tolist())}
+                else:
+                    flat_index = {}
+                for c,camera in enumerate(_array(meta["camera_id"][0])):
+                    if camera < 0 or camera not in cameras:
+                        continue
+                    length = visual["view_valid"].shape[-1]
+                    window = {"recording_id":meta["recording_id"][0],"camera_id":int(camera),
+                        "subject":meta.get("subject",["unknown"])[0],
+                        "action":meta.get("action",["unknown"])[0],"date":meta.get("date",["unknown"])[0],
+                        "frame_id":_array(meta["target_frame_id"][0]),"time_s":_array(visual["target_time_s"][0]),
+                        "valid":_array(visual["view_valid"][0,c]),"view_edges":_array(visual["view_edges"][0,c]),
+                        "motion_valid":_array(masks["motion_valid"][0]),"pressure_valid":_array(masks["pressure_valid"][0]),
+                        "motion_edges":_array(masks["motion_edges"][0]),"pressure_edges":_array(masks["pressure_edges"][0]),
+                        "gt_joints":_array(labels["kp_gt"][0]),"gt_pressure":_array(labels["pressure"][0]),
+                        "gt_pose6d":_array(labels["pose6d"][0]),"gt_root":_array(labels["root"][0]),
+                        "gt_betas":_array(labels["betas"][0])}
+                    for name in ("source_frame_id","source_time_s","reuse","time_residual_ms"):
+                        if name in meta:
+                            window[name] = _array(meta[name][0,c])
+                    flat = flat_index.get(c)
+                    if flat is None:
+                        window.update(rotation=np.zeros((length,24,3,3)),pressure=np.zeros((length,96)),velocity=np.zeros((length,3)))
+                    else:
+                        window.update(rotation=rotation[flat],pressure=_array(predictions["pressure_hat"][flat].float()),
+                                      velocity=_array(predictions["v_hat"][flat].float()))
+                    windows.append(window)
+                    if plot is None and flat is not None:
+                        plot = {"prediction":window["pressure"],"truth":window["gt_pressure"],
+                                "mask":window["pressure_valid"] & window["valid"][:,None],
+                                "key":meta["sample_key"][0],"split":getattr(dataset,"split","val"),
+                                "unit":"normalized_sensor_reading"}
+    finally:
+        model.train(was_training)
+        restore_training_rng(state, device)
+    # Manifest axis templates also retain rows absent from every RGB window.
+    # This path is evaluation-only and reads labels only on the evaluator side.
+    if hasattr(dataset,"records"):
+        from anysole.data.workspace_adapter import load_grouped_labels
+        for ri,record in enumerate(dataset.records):
+            if recording_ids is not None and record['recording_id'] not in recording_ids:
+                continue
+            labels=dataset._labels.get(ri)
+            if labels is None:
+                labels=load_grouped_labels(record,dataset.dataset_root,dataset.smpl_model_path)
+            n=len(record['target_frame_id'])
+            mv=np.asarray(record['motion']['valid'],bool)
+            pm=np.repeat(np.asarray(record['pressure']['foot_valid'],bool),48,axis=1)
+            for camera in cameras:
+                for i,frame in enumerate(record['target_frame_id']):
+                    truth_reference[(record['recording_id'],camera,int(frame))]=(bool(mv[i]),pm[i])
+                view=next((v for v in record['views'] if v['camera_id']==camera),None)
+                template={'recording_id':record['recording_id'],'camera_id':camera,'subject':record['subject'],
+                    'action':record['action'],'date':record['date'],
+                    'frame_id':record['target_frame_id'],'time_s':record['target_time_s'],'valid':np.zeros(n,bool),
+                    'view_edges':np.ones(max(n-1,0),bool),'motion_valid':mv,'pressure_valid':pm,
+                    'motion_edges':record['motion_edges'],
+                    'pressure_edges':np.repeat(np.asarray(record['pressure_foot_edges'],bool),48,axis=1),
+                    'gt_joints':labels['kp_gt'],'gt_pressure':labels['pressure'],'gt_pose6d':labels['pose6d'],
+                    'gt_root':labels['root'],'gt_betas':labels['betas']}
+                if view:
+                    template.update({name:view[name] for name in ('source_frame_id','source_time_s','reuse','time_residual_ms')})
+                windows.append(template)
+    return windows, truth_reference, plot
+
+
+def evaluate_visual_dataset(model,dataset,config,device,*,offsets=None):
+    if getattr(dataset,"split","val") == "test":
+        raise ValueError("training validation cannot use the test role")
+    windows,truth,plot = collect_visual_windows(model,dataset,device,cameras=tuple(config["validation_cameras"]))
+    if not any(np.asarray(w["valid"]).any() for w in windows):
+        raise ValueError("empty validation outputs")
+    offsets = offsets if offsets is not None else beta_zero_visual_offsets(config["smpl_model_path"])
+    result = visual_selection_metrics(aggregate_visual_windows(windows), offsets, truth)
+    if not result["val/motion_frames"] or not result["val/pressure_cells"]:
+        raise ValueError("validation has no common motion/pressure supervision")
+    return result,plot
+
+
+def _metric(value, count, unit, *, reason=None, support=None,eligible_support=None,expected_count=None):
+    count = int(count)
+    expected=count if expected_count is None else int(expected_count)
+    missing=max(0,expected-count)
+    if missing:
+        value=None
+        reason=f'incomplete prediction on fixed public metric set: {missing}/{expected} samples unavailable'
+    value = float(value) if value is not None and np.isfinite(value) and count else None
+    return {"value":value,"count":count,"unit":unit,
+            "reason":None if value is not None else (reason or "no valid samples"),
+            "support_hash":visual_hash(support or []),
+            "eligible_support_hash":visual_hash((support or []) if eligible_support is None else eligible_support),
+            "eligible_count":expected,"missing_prediction_count":missing}
+
+
+def _segment_indices(valid, edges):
+    valid, edges = np.asarray(valid,bool),np.asarray(edges,bool)
+    result, current = [],[]
+    for i in range(len(valid)):
+        if not valid[i]:
+            if current:
+                result.append(np.asarray(current)); current=[]
+            continue
+        if current and not edges[i-1]:
+            result.append(np.asarray(current)); current=[]
+        current.append(i)
+    if current:
+        result.append(np.asarray(current))
+    return result
+
+
+def _time_correlation(first,second,times):
+    if len(times) < 3:
+        return None
+    # Time-weighted Pearson, using trapezoidal quadrature on actual seconds.
+    dt=np.diff(times)
+    weight=np.r_[dt[0]/2,(dt[:-1]+dt[1:])/2,dt[-1]/2]
+    weight/=weight.sum()
+    a=first-np.sum(weight*first); b=second-np.sum(weight*second)
+    denom=np.sqrt(np.sum(weight*a*a)*np.sum(weight*b*b))
+    return float(np.sum(weight*a*b)/denom) if denom>1e-12 else None
+
+
+def visual_pressure_metrics(item, frozen_stats=None):
+    """Raw normalized readings; temporal correlation is never spatial T_corr."""
+    valid=item['valid']; pm=np.asarray(item.get('pressure_valid',np.zeros((len(valid),96))),bool)
+    mask=valid[:,None]&pm
+    pred=item['pressure']; truth=item.get('gt_pressure',np.zeros_like(pred))
+    if not np.isfinite(truth[mask]).all():
+        raise ValueError('nonfinite pressure label marked valid')
+    delta=pred[mask]-truth[mask]
+    ids=item['frame_id']; keys=lambda take: ids[np.asarray(take)].astype(int).tolist()
+    support=np.argwhere(mask).tolist()
+    result={
+        'pressure_mae':_metric(np.abs(delta).mean() if delta.size else None,delta.size,'normalized_sensor_reading',support=support),
+        'pressure_rmse':_metric(np.sqrt(np.square(delta).mean()) if delta.size else None,delta.size,'normalized_sensor_reading',support=support),
+        'pressure_out_of_range_fraction':_metric(((pred[valid]<0)|(pred[valid]>1)).mean() if valid.any() else None,
+            int(valid.sum())*96,'fraction',support=keys(valid)),
+        'pressure_spatial_corr':_metric(None,0,'correlation',reason='no frame with nonconstant paired sensor vectors')}
+    spatial=[]; spatial_ids=[];spatial_scored=[]
+    for i in np.flatnonzero(valid):
+        keep=pm[i]
+        a,b=pred[i,keep],truth[i,keep]
+        if len(a)>1 and b.std()>1e-12:
+            spatial_ids.append(int(ids[i]))
+            if a.std()>1e-12:
+                spatial.append(np.corrcoef(a,b)[0,1])
+                spatial_scored.append(int(ids[i]))
+    result['pressure_spatial_corr']=_metric(np.mean(spatial) if spatial else None,len(spatial),'correlation',
+        support=spatial_scored,eligible_support=spatial_ids,expected_count=len(spatial_ids),reason='no nonconstant GT sensor vectors')
+    foot_pred=pred.reshape(-1,2,48).sum(-1)
+    foot_gt=truth.reshape(-1,2,48).sum(-1)
+    foot_valid=pm.reshape(-1,2,48).all(-1)&valid[:,None]
+    policy=(frozen_stats or {}).get('pressure_eval',{})
+    fitted=policy.get('fit_split')=='train' and bool(policy.get('fitted_from_train_sha256'))
+    for foot,name in enumerate(('left','right')):
+        keep=foot_valid[:,foot]
+        d=foot_pred[keep,foot]-foot_gt[keep,foot]
+        result[f'{name}_sum_mae']=_metric(np.abs(d).mean() if len(d) else None,len(d),'normalized_reading_sum',support=keys(keep))
+        correlations=[]; peak=[]; temporal_support=[];peak_support=[];temporal_scored=[];peak_scored=[];peak_expected=0
+        pressure_edges=item.get('pressure_edges',np.zeros((max(len(valid)-1,0),96),bool))
+        foot_edges=pressure_edges[:,foot*48:(foot+1)*48].all(-1)
+        for ix in _segment_indices(keep,item['edges'] & foot_edges):
+            corr=_time_correlation(foot_pred[ix,foot],foot_gt[ix,foot],item['time_s'][ix])
+            if len(ix)>=3 and foot_gt[ix,foot].std()>1e-12:
+                temporal_support.extend(ids[ix].astype(int).tolist())
+            if corr is not None:
+                correlations.append((corr,len(ix)))
+                temporal_scored.extend(ids[ix].astype(int).tolist())
+            # Tied/constant peaks carry no unique physical peak time.
+            a,b=foot_pred[ix,foot],foot_gt[ix,foot]
+            if len(ix)>=3 and np.count_nonzero(b==b.max())==1:
+                peak_support.extend(ids[ix].astype(int).tolist())
+                peak_expected+=1
+                if np.count_nonzero(a==a.max())==1:
+                    peak.append(abs(item['time_s'][ix[np.argmax(a)]]-item['time_s'][ix[np.argmax(b)]])*1000)
+                    peak_scored.extend(ids[ix].astype(int).tolist())
+        result[f'{name}_temporal_corr']=_metric(
+            np.average([v for v,n in correlations],weights=[n for v,n in correlations]) if correlations else None,
+            sum(n for _,n in correlations),'correlation',reason='needs >=3 continuous paired frames with nonconstant load',
+            support=temporal_scored,eligible_support=temporal_support,expected_count=len(temporal_support))
+        result[f'{name}_peak_timing_abs_ms']=_metric(np.mean(peak) if peak else None,len(peak),'ms',
+            reason='no continuous segment with unique predicted and GT peaks',support=peak_scored,
+            eligible_support=peak_support,expected_count=peak_expected)
+        threshold=policy.get('low_load_threshold_normalized') if fitted else None
+        if threshold is None:
+            result[f'{name}_low_load_fraction']=_metric(None,0,'fraction',reason='missing frozen train-fitted low-load threshold')
+        else:
+            result[f'{name}_low_load_fraction']=_metric((foot_gt[keep,foot]<=threshold[foot]).mean() if keep.any() else None,
+                keep.sum(),'fraction',support=keys(keep))
+        threshold=policy.get('contact_threshold_normalized') if fitted else None
+        for metric in ('contact_f1','cop_error_grid'):
+            result[f'{name}_{metric}']=_metric(None,0,'fraction' if metric=='contact_f1' else 'sensor_grid_units',
+                reason='missing frozen train-fitted pressure contact threshold or trusted sensor geometry')
+        if threshold is not None and keep.any():
+            pp=foot_pred[keep,foot]>threshold[foot]; gg=foot_gt[keep,foot]>threshold[foot]
+            tp=np.sum(pp&gg); denominator=pp.sum()+gg.sum()
+            result[f'{name}_contact_f1']=_metric(2*tp/denominator if denominator else None,keep.sum(),'fraction',
+                reason='no positive contact labels or predictions',support=keys(keep))
+            geometry=policy.get('sensor_xy_grid')
+            if geometry is not None:
+                xy=np.asarray(geometry,float)
+                if xy.shape!=(2,48,2) or not np.isfinite(xy).all():
+                    raise ValueError('sensor_xy_grid must have trusted [2,48,2] finite geometry')
+                sensor=slice(foot*48,(foot+1)*48)
+                eligible_cop=keep & (foot_gt[:,foot]>threshold[foot]) & (truth[:,sensor]>=0).all(-1)
+                select=eligible_cop & (foot_pred[:,foot]>threshold[foot])
+                select &= (pred[:,sensor]>=0).all(-1)&(truth[:,sensor]>=0).all(-1)
+                value=None
+                if select.any():
+                    pc=(pred[select,sensor]@xy[foot])/foot_pred[select,foot,None]
+                    gc=(truth[select,sensor]@xy[foot])/foot_gt[select,foot,None]
+                    value=np.linalg.norm(pc-gc,axis=-1).mean()
+                result[f'{name}_cop_error_grid']=_metric(value,select.sum(),'sensor_grid_units',
+                    support=keys(select),eligible_support=keys(eligible_cop),expected_count=eligible_cop.sum())
+    both=foot_valid.all(-1)
+    pred_total=foot_pred.sum(-1); truth_total=foot_gt.sum(-1)
+    eligible=both & (truth_total>1e-8)
+    both = eligible & (pred_total>1e-8)
+    result['left_ratio_mae']=_metric(np.abs(foot_pred[both,0]/pred_total[both]-foot_gt[both,0]/truth_total[both]).mean()
+        if both.any() else None,both.sum(),'fraction',reason='no paired nonzero total loads',support=keys(both),
+        eligible_support=keys(eligible),expected_count=eligible.sum())
+    return result
+
+
+def visual_motion_metrics(item, offsets):
+    """Canonical SMPL24 formulas, predicted beta0, no absolute root origin."""
+    from anysole.utils import metrics as canonical
+    from anysole.types import LOWER_JOINTS,ANKLE_FOOT_JOINTS
+    valid=item['valid']; motion=np.asarray(item.get('motion_valid',np.zeros(len(valid))),bool)&valid
+    pred=visual_predicted_joints(item,offsets); gt=item.get('gt_joints',np.zeros_like(pred))
+    keys=item['frame_id'][motion].astype(int).tolist()
+    if not np.isfinite(gt[motion]).all():
+        raise ValueError('nonfinite motion label marked valid')
+    p=pred[motion]-pred[motion,:1]; g=gt[motion]-gt[motion,:1]
+    result={}
+    for name,joints in (('mpjpe_mm',list(range(24))),('lower_mpjpe_mm',LOWER_JOINTS),('feet_mpjpe_mm',ANKLE_FOOT_JOINTS)):
+        result[name]=_metric(canonical.mean_point_error(p[:,joints],g[:,joints],scale=1000).mean() if len(p) else None,
+            len(p),'mm',support=keys)
+    result['pa_mpjpe_mm']=_metric(canonical.pa_mpjpe(p,g).mean() if len(p) else None,len(p),'mm',support=keys)
+    if 'gt_pose6d' in item and motion.any():
+        gtrot=rot6d_to_rotmat(torch.tensor(item['gt_pose6d'][motion]).reshape(-1,24,6)).numpy()
+        for name,joints in (('local23_angle_deg',list(range(1,24))),('root_angle_deg',[0])):
+            err=canonical.matrix_rotation_error_degrees(item['rotation'][motion][:,joints],gtrot[:,joints])
+            result[name]=_metric(err.mean(),len(p),'degree',support=keys)
+    accum={name:[] for name in ('accel_error_m_s2','jitter_pred_m_s3','jitter_gt_m_s3','foot_sliding_motion_contact_mm',
+                               'relative_root_drift_mm','w_mpjpe100_mm')}
+    dynamic_support={name:[] for name in accum}
+    for ix in _segment_indices(motion,item['edges'] & item.get('motion_edges',np.zeros(max(len(valid)-1,0),bool))):
+        if len(ix)>=3:
+            pp=pred[ix]-pred[ix,:1]; gg=gt[ix]-gt[ix,:1]
+            temporal=canonical.temporal_metrics(pp,gg,item['time_s'][ix])
+            for name in ('accel_error_m_s2','jitter_pred_m_s3','jitter_gt_m_s3'):
+                count=temporal['acceleration_samples' if name=='accel_error_m_s2' else 'jerk_samples']
+                if count:
+                    accum[name].append((temporal[name],count))
+                    horizon=3 if name=='accel_error_m_s2' else 4
+                    dynamic_support[name].extend([item['frame_id'][ix[k:k+horizon]].astype(int).tolist()
+                                                 for k in range(len(ix)-horizon+1)])
+        if len(ix)>=2 and 'gt_root' in item:
+            root=item['gt_root'][ix]-item['gt_root'][ix[0]]
+            predroot=item['trajectory'][ix]-item['trajectory'][ix[0]]
+            accum['relative_root_drift_mm'].append((np.linalg.norm(predroot-root,axis=-1).mean()*1000,len(ix)))
+            dynamic_support['relative_root_drift_mm'].extend(item['frame_id'][ix].astype(int).tolist())
+            worldpred=pred[ix]+predroot[:,None]
+            worldgt=gt[ix]-gt[ix[0],:1]
+            slide,contacts=canonical.foot_sliding_joints(worldpred[:,ANKLE_FOOT_JOINTS],worldgt[:,ANKLE_FOOT_JOINTS],item['time_s'][ix])
+            if contacts:
+                accum['foot_sliding_motion_contact_mm'].append((slide,contacts))
+                speed=np.linalg.norm(np.diff(worldgt[:,ANKLE_FOOT_JOINTS],axis=0),axis=-1)/np.diff(item['time_s'][ix])[:,None]
+                dynamic_support['foot_sliding_motion_contact_mm'].extend([
+                    [int(item['frame_id'][ix[k]]),int(item['frame_id'][ix[k+1]]),int(foot)] for k,foot in np.argwhere(speed<.3)])
+            # Require complete W100; canonical partial-window behavior not used.
+            for start in range(0,len(ix)-99,100):
+                value,_=canonical.windowed_world_mpjpe(worldpred[start:start+100],worldgt[start:start+100],window=100)
+                accum['w_mpjpe100_mm'].append((value,100))
+                dynamic_support['w_mpjpe100_mm'].append(item['frame_id'][ix[start:start+100]].astype(int).tolist())
+    for name,values in accum.items():
+        result[name]=_metric(np.average([v for v,n in values],weights=[n for v,n in values]) if values else None,
+            sum(n for _,n in values),'m/s^2' if name=='accel_error_m_s2' else ('m/s^3' if 'jitter' in name else 'mm'),
+            reason='no complete continuous source-valid motion segment',support=dynamic_support[name])
+    result['root_ate_mm']=_metric(None,0,'mm',reason='absolute world origin unavailable; every predicted segment starts at zero')
+    result['world_mpjpe_mm']=_metric(None,0,'mm',reason='absolute world origin unavailable')
+    for name in ('pve_mm','pve_t_mm'):
+        result[name]=_metric(None,0,'mm',reason='surface evaluation not requested; use --surfaces with authorized current SMPL')
+    return result
+
+
+def visual_session_rows(series,offsets,frozen_stats=None):
+    rows=[]
+    for (recording,camera),item in sorted(series.items()):
+        metrics={**visual_motion_metrics(item,offsets),**visual_pressure_metrics(item,frozen_stats)}
+        rows.append({'recording_id':recording,'camera_id':camera,'subject':item['subject'],
+            'action':item.get('action','unknown'),'date':item.get('date','unknown'),
+            'prediction_frames':int(item['valid'].sum()),'target_frames':len(item['valid']),
+            'missing_rgb_frames':int((~item['valid']).sum()),
+            'missing_motion_frames':int((~np.asarray(item.get('motion_valid',np.zeros(len(item['valid']))),bool)).sum()),
+            'missing_pressure_cells':int((~np.asarray(item.get('pressure_valid',np.zeros((len(item['valid']),96))),bool)).sum()),
+            'metrics':metrics})
+    return rows
+
+
+def summarize_visual_rows(rows,*,bootstrap_samples=10000,seed=20261016):
+    """Session×camera -> equal session within camera -> equal camera macro.
+
+    Bootstrap samples whole physical recordings and retains every camera row.
+    Subjects are separately described; two held-out subjects are not independent
+    evidence for a broad population claim.
+    """
+    names=sorted({name for row in rows for name in row['metrics']})
+    result={}
+    generator=np.random.default_rng(seed)
+    recordings=sorted({r['recording_id'] for r in rows})
+    cameras=sorted({r['camera_id'] for r in rows})
+    draws_index=generator.integers(0,len(recordings),size=(bootstrap_samples,len(recordings))) if recordings and bootstrap_samples else None
+    def macro(subset,name):
+        cameras=sorted({r['camera_id'] for r in subset})
+        per_camera={}
+        for camera in cameras:
+            selected=[r['metrics'][name] for r in subset if r['camera_id']==camera and name in r['metrics']]
+            if any(m['value'] is None and m.get('eligible_count',0)>0 for m in selected):
+                per_camera[str(camera)]=None
+                continue
+            vals=[m['value'] for m in selected if m['value'] is not None]
+            if vals:
+                per_camera[str(camera)]=float(np.mean(vals))
+        return (float(np.mean(list(per_camera.values()))) if per_camera and all(v is not None for v in per_camera.values()) else None),per_camera
+    for name in names:
+        value,bycamera=macro(rows,name)
+        bysubject={}
+        for subject in sorted({r['subject'] for r in rows}):
+            bysubject[subject]=macro([r for r in rows if r['subject']==subject],name)[0]
+        byaction={action:macro([r for r in rows if r.get('action','unknown')==action],name)[0]
+                  for action in sorted({r.get('action','unknown') for r in rows})}
+        draws=[]
+        if draws_index is not None and value is not None:
+            matrix=np.full((len(recordings),len(cameras)),np.nan)
+            for ri,recording in enumerate(recordings):
+                for ci,camera in enumerate(cameras):
+                    values=[r['metrics'][name]['value'] for r in rows if r['recording_id']==recording
+                            and r['camera_id']==camera and name in r['metrics'] and r['metrics'][name]['value'] is not None]
+                    if values:
+                        matrix[ri,ci]=np.mean(values)
+            for start in range(0,len(draws_index),512):
+                sampled=matrix[draws_index[start:start+512]]
+                counts=np.isfinite(sampled).sum(axis=1)
+                means=np.divide(np.nansum(sampled,axis=1),counts,out=np.full(counts.shape,np.nan),where=counts>0)
+                available=np.isfinite(means).sum(-1)
+                macro_values=np.divide(np.nansum(means,axis=-1),available,out=np.full(len(available),np.nan),where=available>0)
+                draws.extend(macro_values[np.isfinite(macro_values)].tolist())
+        result[name]={'value':value,'camera_macro_inputs':bycamera,'subject_macro':bysubject,'action_macro':byaction,
+                      'recording_cluster_ci95':np.percentile(draws,[2.5,97.5]).tolist() if draws else None,
+                      'recording_clusters':len(recordings),
+                      'valid_session_camera_rows':sum(r['metrics'].get(name,{}).get('value') is not None for r in rows),
+                      'missing_reasons':sorted({r['metrics'][name]['reason'] for r in rows if name in r['metrics'] and r['metrics'][name]['reason']})}
+    return {'metrics':result,'policy':'session_mean_within_camera_then_equal_camera_macro; physical_recording_cluster_bootstrap',
+            'bootstrap_samples':bootstrap_samples,'bootstrap_seed':seed,
+            'subject_limit':'held-out S13/S14 only; val and test are reused roles, not independent generalization'}
+
+
+def load_visual_student(checkpoint_path,device='cpu'):
+    """Rebuild exclusively from saved effective config and train-only stats."""
+    from anysole.registry import get_builder
+    from anysole.train import restore_visual_runtime_state,visual_run_identity
+    path=Path(checkpoint_path)
+    checkpoint=torch.load(path,map_location='cpu',weights_only=False)
+    if checkpoint.get('schema_version')!='anysole.visual-training.v1':
+        raise ValueError('expected grouped visual-training checkpoint schema')
+    config=checkpoint.get('config',{})
+    required=('model_name','pressure_head','pressure_time_pe','pressure_time_pe_enabled','time_pe_scale',
+              'visual_structure_version','structure_hash','d_model','tw','pose_layers','nhead','dropout','modal','pose_repr')
+    if any(key not in config for key in required):
+        raise ValueError('checkpoint missing saved effective architecture fields')
+    if checkpoint.get('semantic_hash')!=visual_run_identity(config):
+        raise ValueError('checkpoint semantic identity mismatch')
+    config=get_builder('visual').effective_config(config)
+    stats=checkpoint.get('stats',{})
+    if 'pose_mean' not in stats or 'pose_std' not in stats:
+        raise ValueError('checkpoint missing frozen pose statistics')
+    if 'stats_sha256' in stats and visual_hash({k:v for k,v in stats.items() if k!='stats_sha256'})!=stats['stats_sha256']:
+        raise ValueError('checkpoint statistics hash mismatch')
+    if config.get('stats_hash') is not None and config['stats_hash']!=stats.get('stats_sha256'):
+        raise ValueError('checkpoint config/statistics binding mismatch')
+    model=get_builder('visual').build(config)
+    model.load_state_dict(checkpoint['model'],strict=True)
+    restore_visual_runtime_state(model,checkpoint)
+    for name in ('pose_mean','pose_std'):
+        expected=torch.tensor(stats[name],dtype=torch.float32)
+        if name=='pose_std':
+            if not (expected>0).all():
+                raise ValueError('checkpoint pose_std must be strictly positive')
+            expected=expected.clamp_min(.01)
+        actual=getattr(model.pose_head,name).detach().cpu()
+        if expected.shape!=actual.shape or not torch.isfinite(expected).all() or not torch.equal(expected,actual):
+            raise ValueError('checkpoint state/statistics disagree for '+name)
+    model.eval().to(device)
+    return model,config,stats,checkpoint
+
+
+def visual_surface_metrics(item,model_path,*,batch_size=32):
+    """Canonical root-relative PVE, beta0 predicted and GTbeta reference."""
+    import smplx
+    from anysole.data.smpl_io import smpl24_pose6d_to_poses
+    from anysole.utils import metrics as canonical
+    take=item['valid']&np.asarray(item.get('motion_valid',np.zeros(len(item['valid']))),bool)
+    if not take.any():
+        return {name:_metric(None,0,'mm') for name in ('pve_mm','pve_t_mm')}
+    rotation=item['rotation'][take]
+    pose=np.concatenate((rotation[...,0],rotation[...,1]),-1).reshape(-1,144)
+    predpose=smpl24_pose6d_to_poses(pose)
+    gtpose=smpl24_pose6d_to_poses(item['gt_pose6d'][take])
+    model=smplx.create(str(Path(model_path)),'smpl',gender='neutral',num_betas=10,batch_size=batch_size)
+    beta=np.asarray(item['gt_betas'],np.float32).reshape(-1)[:10]
+    def surface(poses,betas):
+        vertices,joints=[],[]
+        for start in range(0,len(poses),batch_size):
+            pp=torch.tensor(poses[start:start+batch_size],dtype=torch.float32).reshape(-1,24,3)
+            with torch.no_grad():
+                output=model(betas=torch.tensor(np.repeat(betas[None],len(pp),0)),body_pose=pp[:,1:],
+                             global_orient=pp[:,:1],transl=torch.zeros(len(pp),3))
+            vertices.append(output.vertices.numpy());joints.append(output.joints[:,:24].numpy())
+        return np.concatenate(joints),np.concatenate(vertices)
+    pj,pv=surface(predpose,np.zeros(10,np.float32)); gj,gv=surface(gtpose,beta)
+    pv=pv-pj[:,:1];gv=gv-gj[:,:1]
+    pve=canonical.mean_point_error(pv,gv,scale=1000)
+    zero=np.zeros((1,72),np.float32)
+    ptj,ptv=surface(zero,np.zeros(10,np.float32));gtj,gtv=surface(zero,beta)
+    pvet=canonical.pve_t_error(ptj,ptv,gtj,gtv)
+    keys=item['frame_id'][take].astype(int).tolist()
+    return {'pve_mm':_metric(pve.mean(),len(pve),'mm',support=keys),
+            'pve_t_mm':_metric(pvet.mean(),len(pve),'mm',support=keys)}
+
+
+def export_visual_series(series,output,config,provenance):
+    """Prediction-only NPZ; no truth arrays or shape leaked into student export."""
+    from anysole.data.smpl_io import _rest_joints,smpl24_pose6d_to_poses
+    output=Path(output)
+    if not output.resolve().is_relative_to(Path('/private/Tactile')):
+        raise ValueError('outputs must remain in /private/Tactile')
+    output.mkdir(parents=True,exist_ok=True)
+    rest=_rest_joints({'betas':np.zeros(10)},model_path=Path(config['smpl_model_path']))[0]
+    paths=[]
+    used_names=set()
+    for (recording,camera),item in sorted(series.items()):
+        # Physical recording IDs are date/session; flatten only that grammar.
+        # Keep the original ID in metadata, and reject traversal/extra levels.
+        import re
+        if re.fullmatch(r'\d{8}/S\d+',recording):
+            stem=recording.replace('/','_')
+        elif re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',recording):
+            stem=recording
+        else:
+            raise ValueError('unsafe recording identifier')
+        name=f'{stem}_cam{camera}.npz'
+        if name in used_names:
+            raise ValueError('flattened recording filename collision')
+        used_names.add(name)
+        valid=item['valid']; pose=np.full((len(valid),144),np.nan,np.float32)
+        rotation=item['rotation'][valid]
+        pose[valid]=np.concatenate((rotation[...,0],rotation[...,1]),-1).reshape(-1,144)
+        poses=np.full((len(valid),72),np.nan,np.float32)
+        if valid.any():
+            poses[valid]=smpl24_pose6d_to_poses(pose[valid])
+        meta={**provenance,'protocol':VISUAL_EVAL_PROTOCOL,'recording_id':recording,'camera_id':camera,
+              'pred_beta_source':'zero','trajectory_origin':'p0=0 independently per continuous source-valid segment',
+              'velocity_convention':'v[i] ends at target i; aggregate windows before integration',
+              'pressure_unit':'normalized_sensor_reading; uncalibrated; not Newtons',
+              'pressure_main':'unclamped_linear','pressure_display':'clip_0_1_for_display_only',
+              'coordinate_system':'native SMPL +Y up, metres','pose_layout':'root world, joints1..23 parent-local',
+              'timebase':'actual RGB source timestamps matched to explicit 40Hz target grid',
+              'duplicate_policy':'uniform_SO3_chordal_projection_pressure_velocity_mean',
+              'smpl_trans':'pelvis_root_translation minus beta0 unrotated rest pelvis',
+              'absolute_world_origin':None,'effective_config':config}
+        values={name:item[name] for name in ('frame_id','time_s','valid','overlap_count','rotation','pressure','velocity',
+                                            'trajectory','segment_id','edges','source_frame_id','source_time_s','reuse','time_residual_ms') if name in item}
+        path=output/name
+        if path.exists():
+            raise FileExistsError('refusing to overwrite existing prediction '+str(path))
+        np.savez_compressed(path,**values,pose6d=pose,poses=poses,trans=item['trajectory']-rest,
+            betas=np.zeros(10,np.float32),pressure_display=np.clip(item['pressure'],0,1),
+            metadata_json=np.asarray(json.dumps(meta,sort_keys=True,allow_nan=False)))
+        from anysole.data.workspace_adapter import sha256_file
+        paths.append({'recording_id':recording,'camera_id':camera,'path':str(path),'sha256':sha256_file(path)})
+    return paths
+
+
+def _compatible_eval_reports(reports,*,same_checkpoint=False):
+    if not reports:
+        raise ValueError('no evaluation reports')
+    for report in reports:
+        if report.get('schema_version')!=VISUAL_EVAL_PROTOCOL:
+            raise ValueError('evaluation schema mismatch')
+    keys=['manifest_sha256','split','protocol_sha256','stats_sha256','smpl_runtime_model_hash']
+    if same_checkpoint:
+        keys+=['checkpoint_sha256','shard_count','expected_recordings']
+    for name in keys:
+        if any(report.get(name)!=reports[0].get(name) for report in reports):
+            raise ValueError('evaluation reports disagree on '+name)
+
+
+def merge_visual_shards(reports,*,bootstrap_samples=10000):
+    _compatible_eval_reports(reports,same_checkpoint=True)
+    count=int(reports[0]['shard_count'])
+    if sorted(r['shard_index'] for r in reports)!=list(range(count)):
+        raise ValueError('shards missing or duplicated')
+    result={k:v for k,v in reports[0].items() if k not in ('rows','summary','predictions','selection_metrics','coverage_hash')}
+    rows=[row for report in reports for row in report['rows']]
+    keys=[(r['recording_id'],r['camera_id']) for r in rows]
+    if len(set(keys))!=len(keys):
+        raise ValueError('overlapping session-camera shards')
+    expected=sorted({x for report in reports for x in report['expected_recordings']})
+    if sorted({r['recording_id'] for r in rows})!=expected:
+        raise ValueError('merged shards do not cover expected recordings')
+    result.update(rows=sorted(rows,key=lambda r:(r['recording_id'],r['camera_id'])),shard_index=None,
+                  predictions=[p for report in reports for p in report['predictions']],expected_recordings=expected)
+    result['summary']=summarize_visual_rows(result['rows'],bootstrap_samples=bootstrap_samples)
+    result['coverage_hash']=visual_hash([[r['recording_id'],r['camera_id'],{k:v['support_hash'] for k,v in r['metrics'].items()}] for r in result['rows']])
+    result['prediction_hash']=visual_hash([entry['sha256'] for entry in result['predictions']])
+    result['selected_recordings']=expected
+    result['explicit_session_subset']=False
+    if all('selection_metrics' in report for report in reports):
+        selection={}
+        for name in ('motion_frames','pressure_cells','prediction_frames','gt_motion_frames','gt_pressure_cells'):
+            selection['eval/'+name]=sum(report['selection_metrics']['eval/'+name] for report in reports)
+        for name,denom,squared in (('mpjpe','motion_frames',False),('pressure_mae','pressure_cells',False),('pressure_rmse','pressure_cells',True)):
+            n=selection['eval/'+denom]
+            numerator=sum((report['selection_metrics']['eval/'+name] or 0)**(2 if squared else 1)*
+                          report['selection_metrics']['eval/'+denom] for report in reports)
+            selection['eval/'+name]=(np.sqrt(numerator/n) if squared else numerator/n) if n else None
+        selection['eval/coverage_hash']=result['coverage_hash']
+        selection['eval/coverage_hash_policy']='merged per-session metric supports; unsharded selector uses full mask payload'
+        result['selection_metrics']=selection
+    return result
+
+
+def aggregate_visual_reports(reports,*,baseline=None,bootstrap_samples=10000,require_full_matrix=True):
+    """Frozen 15-run matrix; main seeds1/2/3 and mechanism seed1 only.
+
+    Reject differing per-metric supports instead of quietly comparing changing
+    sets. A new fixed-set reevaluation is required if any run loses coverage.
+    """
+    _compatible_eval_reports(reports)
+    byexperiment={}
+    coverage=None
+    actual_support={}
+    for report in reports:
+        if report.get('shard_index') is not None and report.get('shard_count',1)>1:
+            raise ValueError('merge all shards before cross-run aggregation')
+        if set(r['recording_id'] for r in report['rows'])!=set(report['expected_recordings']):
+            raise ValueError('report is a session subset; full expected recordings required')
+        support=sorted((r['recording_id'],r['camera_id'],k,v.get('eligible_support_hash',v['support_hash']))
+            for r in report['rows'] for k,v in r['metrics'].items() if k not in ('pressure_out_of_range_fraction',))
+        if coverage is not None and support!=coverage:
+            raise ValueError('metric coverage differs; reevaluate on a fixed common set')
+        coverage=support
+        for row in report['rows']:
+            for name,metric in row['metrics'].items():
+                key=(row['recording_id'],row['camera_id'],name)
+                previous=actual_support.get(key)
+                if previous and metric['value'] is not None and previous['value'] is not None and metric['support_hash']!=previous['support_hash']:
+                    raise ValueError('finite metric values use different actual coverage')
+                if metric['value'] is not None or previous is None:
+                    actual_support[key]=metric
+        exp=report['experiment']; seed=int(report['seed'])
+        if seed in byexperiment.setdefault(exp,{}):
+            raise ValueError('duplicate experiment seed')
+        byexperiment[exp][seed]=report
+    expected={name:{1,2,3} for name in ('base_legacy','base_time','base_pool','view_consist')}
+    expected.update({name:{1} for name in ('pose_pair','press_pair','pair_shuffle')})
+    if require_full_matrix and set(byexperiment)!=set(expected):
+        raise ValueError('formal aggregate requires all 15 runs: four main groups and three mechanism groups')
+    result={'schema_version':VISUAL_EVAL_PROTOCOL+'.aggregate','experiments':{},'paired_differences':{},
+            'policy':'main seeds1/2/3 mean/sample-std; mechanism seed1 no std; physical recording paired cluster bootstrap; fixed metric supports',
+            'formal_matrix_complete':set(byexperiment)==set(expected),
+            'subject_limit':'S13/S14 only; reused val=test, not independent generalization'}
+    for exp,runs in byexperiment.items():
+        if exp not in expected or set(runs)!=expected[exp]:
+            raise ValueError('unexpected or incomplete seeds for '+exp+'; expected '+str(sorted(expected.get(exp,[]))))
+        metrics={}
+        summaries=[summarize_visual_rows(runs[seed]['rows'],bootstrap_samples=0)['metrics'] for seed in sorted(runs)]
+        for name in summaries[0]:
+            values=[s[name]['value'] for s in summaries]
+            good=[v for v in values if v is not None]
+            metrics[name]={'mean':float(np.mean(good)) if len(good)==len(runs) else None,
+                           'std':float(np.std(good,ddof=1)) if len(good)==len(runs) and len(runs)>1 else None,
+                           'seed_values':values,'seeds':sorted(runs),'seed_count':len(runs),
+                           'interpretation':'single-seed mechanism diagnostic' if len(runs)==1 else 'three-seed main comparison'}
+        result['experiments'][exp]=metrics
+    if baseline:
+        if baseline not in byexperiment:
+            raise ValueError('unknown paired baseline')
+        generator=np.random.default_rng(20261016)
+        for exp,runs in byexperiment.items():
+            if exp==baseline:
+                continue
+            differences={}
+            for name in result['experiments'][exp]:
+                pairs=[]
+                common_seeds=sorted(set(runs)&set(byexperiment[baseline]))
+                for seed in common_seeds:
+                    report=runs[seed]
+                    left={(r['recording_id'],r['camera_id']):r for r in report['rows']}
+                    for right in byexperiment[baseline][seed]['rows']:
+                        key=(right['recording_id'],right['camera_id'])
+                        a=left[key]['metrics'][name]['value'];b=right['metrics'][name]['value']
+                        eligible=max(left[key]['metrics'][name].get('eligible_count',1),right['metrics'][name].get('eligible_count',1))
+                        pairs.append({'recording_id':key[0],'camera_id':key[1],'subject':right['subject'],
+                            'metrics':{name:{'value':a-b if a is not None and b is not None else None,
+                                'eligible_count':eligible,'reason':None if a is not None and b is not None else 'paired metric incomplete on fixed public set'}}})
+                if pairs:
+                    summary=summarize_visual_rows(pairs,bootstrap_samples=bootstrap_samples,seed=int(generator.integers(2**31)))
+                    differences[name]=summary['metrics'][name]
+                    differences[name].update(paired_seeds=common_seeds,seed_count=len(common_seeds),
+                        ci_interpretation='physical recordings conditional on these seeds; not a seed-population confidence interval')
+            result['paired_differences'][f'{exp}-{baseline}']=differences
+    return result
+
+
+def verify_visual_report_artifacts(report):
+    """CLI aggregation verifies hashes and prediction identity before merging."""
+    from anysole.data.workspace_adapter import sha256_file
+    entries=report.get('predictions',[])
+    if report.get('rows') and not entries:
+        raise ValueError('evaluation report has no auditable prediction archives')
+    keys=[]
+    for entry in entries:
+        path=Path(entry['path'])
+        if sha256_file(path)!=entry['sha256']:
+            raise ValueError('prediction archive hash mismatch')
+        with np.load(path,allow_pickle=False) as archive:
+            meta=json.loads(str(archive['metadata_json']))
+            if meta['checkpoint_sha256']!=report['checkpoint_sha256']:
+                raise ValueError('prediction archive belongs to another checkpoint')
+            key=(meta['recording_id'],meta['camera_id']);keys.append(key)
+            if key!=(entry['recording_id'],entry['camera_id']):
+                raise ValueError('prediction entry identity mismatch')
+            if not np.all(np.diff(archive['frame_id'])>0) or not np.all(np.diff(archive['time_s'])>0):
+                raise ValueError('prediction target axis is not ordered/unique')
+    if sorted(keys)!=sorted((r['recording_id'],r['camera_id']) for r in report.get('rows',[])):
+        raise ValueError('report and prediction session-camera coverage disagree')
+
+
+def visual_gpu_slot(device,resource_plan,identity):
+    """Atomically enforce measured eval and total limits in the training ledger."""
+    import contextlib
+    import os
+    @contextlib.contextmanager
+    def context():
+        if torch.device(device).type!='cuda':
+            yield {'device':str(device),'slot':None}
+            return
+        if resource_plan is None:
+            raise ValueError('CUDA evaluation requires --resource-plan with a frozen measured resource envelope')
+        plan=json.loads(Path(resource_plan).read_text())
+        from configs.tools.runner import SlotLedger,check_visual_gpu_owners,validate_visual_resource_plan
+        resources=validate_visual_resource_plan(plan)
+        index=torch.device(device).index or 0
+        visible=os.environ.get('CUDA_VISIBLE_DEVICES')
+        gpu=int(visible.split(',')[index]) if visible else index
+        if gpu not in resources.get('gpus',[]):
+            raise ValueError('device absent from frozen resource plan')
+        n=resources['runs_per_gpu']
+        eval_cap=resources['eval_runs_per_gpu']
+        resource_version=resources['version']
+        ledger=SlotLedger(Path(plan['base_config']['control_dir'])/'gpu_slots.json')
+        check_visual_gpu_owners([gpu],ledger)
+        slot=ledger.claim([(gpu,s) for s in range(n)],identity,job_type='eval',
+                          job_class='eval',max_job_class_per_gpu=eval_cap,
+                          resource_version=resource_version)
+        if slot is None:
+            raise RuntimeError('evaluation GPU concurrency limit reached or all frozen GPU slots busy; defer evaluation')
+        code=1
+        try:
+            yield {'device':str(device),'physical_gpu':gpu,'slot':slot,'resource_plan':str(resource_plan),
+                   'resource_version':resource_version,'eval_runs_per_gpu':eval_cap}
+            code=0
+        finally:
+            ledger.release(slot,identity,code)
+    return context()
+
+
+def visual_gt_shape_diagnostic(item,model_path):
+    """Explicit GT-shape oracle; caller stores this outside main metrics."""
+    from anysole.data.smpl_io import _rest_joints
+    from anysole.types import JOINT_PARENTS
+    rest=_rest_joints({'betas':item['gt_betas']},model_path=Path(model_path))
+    offsets=np.zeros((24,3),np.float32)
+    for joint,parent in enumerate(JOINT_PARENTS):
+        if parent>=0:
+            offsets[joint]=rest[joint]-rest[parent]
+    pred=visual_predicted_joints(item,offsets)
+    take=item['valid']&np.asarray(item['motion_valid'],bool)
+    gt=item['gt_joints']
+    value=np.linalg.norm((pred[take]-pred[take,:1])-(gt[take]-gt[take,:1]),axis=-1).mean()*1000 if take.any() else None
+    return {'gt_beta_mpjpe_mm':_metric(value,take.sum(),'mm',support=item['frame_id'][take].astype(int).tolist()),
+            'beta_source':'GT label oracle; diagnostic only','excluded_from_main_metrics':True}

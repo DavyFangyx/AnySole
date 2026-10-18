@@ -140,8 +140,8 @@ def _smpl_model(path: str):
     return reg, template, shapedirs
 
 
-def _rest_joints(data: dict) -> np.ndarray:
-    model_path = Path(os.environ.get("ANYSOLE_SMPL_MODEL", str(SMPL_MODEL_PATH)))
+def _rest_joints(data: dict, model_path: Optional[Path] = None) -> np.ndarray:
+    model_path = Path(model_path or os.environ.get("ANYSOLE_SMPL_MODEL", str(SMPL_MODEL_PATH)))
     if not model_path.is_file():
         raise FileNotFoundError("SMPL_NEUTRAL.pkl not found: %s" % model_path)
     reg, template, shapedirs = _smpl_model(str(model_path))
@@ -190,8 +190,16 @@ def _pose_arrays(data: dict) -> np.ndarray:
     return poses.reshape(-1, N_JOINTS, 3)
 
 
-def load_smpl(path: Path, query_t: Optional[np.ndarray] = None) -> dict:
-    data = dict(np.load(Path(path), allow_pickle=True))
+def load_smpl(path: Path, query_t: Optional[np.ndarray] = None, *,
+              model_path: Optional[Path] = None, allow_extrapolation: bool = True) -> dict:
+    # Native fit archives also contain large marker arrays and object labels.
+    # Motion loading needs neither, and must not unpickle them as a side effect.
+    fields = {"poses", "trans", "betas", "root_orient", "pose_body", "mocap_frame_rate",
+              "source_frame_times_s", "surface_model_type", "gender", "model_units",
+              "coordinate_system", "motion_protocol", "joint_protocol_checksum",
+              "surface_model_sha256"}
+    with np.load(Path(path), allow_pickle=False) as archive:
+        data = {key: archive[key] for key in fields if key in archive.files}
     _validate_archive(data, Path(path))
     poses = _pose_arrays(data)
     model_trans = np.asarray(data["trans"], dtype=np.float64)
@@ -225,6 +233,10 @@ def load_smpl(path: Path, query_t: Optional[np.ndarray] = None) -> dict:
             raise ValueError(f"{path}: poses body does not match pose_body")
     if query_t is not None:
         q = np.asarray(query_t, dtype=np.float64).reshape(-1)
+        if not np.isfinite(q).all():
+            raise ValueError("SMPL query times must be finite")
+        if not allow_extrapolation and np.any((q < src_t[0]) | (q > src_t[-1])):
+            raise ValueError("SMPL query time lies outside the trusted source span")
         clipped = np.clip(q, src_t[0], src_t[-1])
         if len(src_t) == 1:
             poses = np.repeat(poses[:1], len(q), axis=0)
@@ -236,7 +248,7 @@ def load_smpl(path: Path, query_t: Optional[np.ndarray] = None) -> dict:
             poses = sampled
             model_trans = np.stack([np.interp(clipped, src_t, model_trans[:, i]) for i in range(3)], axis=1)
 
-    rest_joints = _rest_joints(data)
+    rest_joints = _rest_joints(data, model_path=model_path)
     offsets = np.zeros((N_JOINTS, 3), dtype=np.float64)
     for joint, parent in enumerate(JOINT_PARENTS):
         if parent >= 0:

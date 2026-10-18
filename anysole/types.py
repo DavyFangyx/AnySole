@@ -19,6 +19,18 @@ ANYSOLE_ROOT = Path(__file__).resolve().parents[1]
 # (ANYSOLE_ROOT above is the repo root for historical reasons; anchor this
 # one to the package directory itself.)
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "configs" / "v1.yaml"
+# The grouped visual protocol is opt-in; historical single-view defaults above
+# and below remain available to their existing consumers.
+VIEW_CONFIG_PATH = DEFAULT_CONFIG_PATH.parent / "view_consistency.yaml"
+VIEW_SCHEMA_VERSION = "view_consistency.v1"
+VIEW_MANIFEST_SCHEMA = "anysole.grouped.v1"
+VIEW_CACHE_SCHEMA = "anysole.visual-cache.v1"
+VIEW_STATS_SCHEMA = "anysole.stats.v1"
+VISUAL_STRUCTURE_VERSION = "visual_v1"
+VIEW_EXPERIMENTS = (
+    "base_legacy", "base_time", "base_pool", "view_consist",
+    "pose_pair", "press_pair", "pair_shuffle",
+)
 MOTIONPRO_ROOT = GAIT_ROOT / "Baselines" / "MotionPRO"
 WORKSPACE_ROOT = GAIT_ROOT / "AnysoleWorkspace"
 # AnySole's default input contract is the public shared-facts tree.
@@ -333,3 +345,184 @@ def assert_batch_shapes(batch, batch_size=None, tw=TW):
         if value.shape[0] != batch_size:
             raise ValueError("%s batch %d != %d" % (name, value.shape[0], batch_size))
     return batch_size
+
+
+def assert_visual_batch_shapes(batch, *, tw=TW):
+    """Validate the grouped visual/labels/masks/meta boundary (True=valid).
+
+    This is a data-wrapper check, never a student input API. In particular,
+    labels and metadata must not be forwarded to ``forward_visual``.
+    """
+    import torch
+
+    for section in ("visual", "labels", "masks", "meta"):
+        if not isinstance(batch.get(section), dict):
+            raise TypeError(f"grouped batch.{section} must be a dict")
+    visual, labels, masks, meta = (batch[k] for k in ("visual", "labels", "masks", "meta"))
+    features = visual.get("V_feat")
+    if not torch.is_tensor(features) or features.ndim != 4:
+        raise ValueError("visual.V_feat must be [B,C,T,2051]")
+    b, c, t, width = features.shape
+    if not (1 <= c <= 4) or t != tw or width != V_FEAT_DIM:
+        raise ValueError(f"visual.V_feat invalid shape {tuple(features.shape)}")
+
+    def check(section, name, shape, dtype=None):
+        value = section.get(name)
+        if not torch.is_tensor(value) or tuple(value.shape) != tuple(shape):
+            raise ValueError(f"grouped field {name} must have shape {tuple(shape)}")
+        if dtype is not None and value.dtype != dtype:
+            raise TypeError(f"grouped field {name} must have dtype {dtype}")
+        return value
+
+    check(visual, "V_feat", (b, c, t, V_FEAT_DIM), torch.float32)
+    view_valid = check(visual, "view_valid", (b, c, t), torch.bool)
+    times = check(visual, "target_time_s", (b, t), torch.float64)
+    if not torch.isfinite(times).all() or (t > 1 and not (times[:, 1:] > times[:, :-1]).all()):
+        raise ValueError("target_time_s must be finite and strictly increasing")
+    check(visual, "view_edges", (b, c, t - 1), torch.bool)
+    check(labels, "pose6d", (b, t, POSE_DIM), torch.float32)
+    check(labels, "pressure", (b, t, T_RAW_DIM), torch.float32)
+    for name in ("velocity", "root"):
+        check(labels, name, (b, t, 3), torch.float32)
+    for name, shape in (("motion_valid", (b, t)),
+                        ("pressure_valid", (b, t, T_RAW_DIM)),
+                        ("velocity_valid", (b, t)),
+                        ("motion_edges", (b, t - 1)),
+                        ("pressure_edges", (b, t - 1, T_RAW_DIM))):
+        check(masks, name, shape, torch.bool)
+    target_ids = check(meta, "target_frame_id", (b, t))
+    if target_ids.dtype not in (torch.int32, torch.int64):
+        raise TypeError("meta.target_frame_id must contain integer frame IDs")
+    for name in ("source_frame_id", "source_feature_row"):
+        ids = check(meta, name, (b, c, t))
+        if ids.dtype not in (torch.int32, torch.int64):
+            raise TypeError(f"meta.{name} must contain integer IDs")
+    check(meta, "source_time_s", (b, c, t), torch.float64)
+    for name in ("reuse", "padding"):
+        check(meta, name, (b, c, t), torch.bool)
+    check(meta, "time_residual_ms", (b, c, t))
+    # Missing input may be NaN; only valid samples promise finite features.
+    if not torch.isfinite(features[view_valid]).all():
+        raise ValueError("valid visual features contain non-finite values")
+    for name, valid in (("pose6d", masks["motion_valid"]),
+                        ("pressure", masks["pressure_valid"])):
+        if not torch.isfinite(labels[name][valid]).all():
+            raise ValueError(f"valid {name} labels contain non-finite values")
+    return b, c, t
+
+
+def validate_view_config(config: dict, *, formal: bool = False) -> None:
+    """Reject incompatible grouped settings and unmeasured formal budgets.
+
+    P1 permits unresolved measured values in the template. P2's formal entry
+    must call this with ``formal=True`` after the plan has been frozen.
+    """
+    if config.get("schema_version") != VIEW_SCHEMA_VERSION:
+        raise ValueError("unsupported view-consistency config schema")
+    if config.get("model_name") != "visual":
+        raise ValueError("view-consistency requires model_name=visual")
+    if config.get("visual_structure_version") != VISUAL_STRUCTURE_VERSION:
+        raise ValueError("unsupported visual structure version")
+    if config.get("pressure_head") not in ("legacy", "time_pe"):
+        raise ValueError("P1 supports only legacy or time_pe pressure heads")
+    if config.get("pressure_time_pe") != "before_fusion" or config.get("time_pe_scale") != FPS:
+        raise ValueError("pressure PE must use before_fusion and nominal frame phase")
+    if config.get("d_model") != D_MODEL or config.get("window_length") != TW or config.get("tw") != TW:
+        raise ValueError("view-consistency requires d_model=256 and T=20")
+    if config.get("strict_visual") is not True or config.get("config_probs") != [0.0, 1.0, 0.0]:
+        raise ValueError("view-consistency must use strict V-only input")
+    if config.get("generate_contact_cache") is not False:
+        raise ValueError("grouped loading must not generate contact cache")
+    if config.get("validation_cameras") != [1, 2, 3, 4]:
+        raise ValueError("all grouped experiments require the same four-camera old-val domain")
+    if (config.get("crop_height"), config.get("crop_width")) != (256, 192):
+        raise ValueError("frozen CLIFF frontend requires a 256x192 RGB crop")
+    for key, expected in (("manifest_schema", VIEW_MANIFEST_SCHEMA),
+                          ("cache_schema", VIEW_CACHE_SCHEMA), ("stats_schema", VIEW_STATS_SCHEMA)):
+        if config.get(key) != expected:
+            raise ValueError(f"unsupported {key}")
+    if any(config.get(key) is not False for key in ("horizontal_flip", "time_stretch", "mix_occlusion_cache")):
+        raise ValueError("unaudited grouped augmentation/cache mixing must remain disabled")
+    if (config.get("selection_rule") != "pareto_weighted" or
+            config.get("selection_motion_weight") != .5 or config.get("selection_pressure_weight") != .5 or
+            config.get("selection_tie_break") != ["motion", "pressure", "earlier_successful_update"]):
+        raise ValueError("unsupported shared joint checkpoint selection rule")
+    if not formal:
+        return
+    if config.get("stage") != "formal" or config.get("plan_frozen") is not True:
+        raise ValueError("formal training requires a frozen formal plan")
+    required = (
+        "experiment", "manifest_hash", "split_hash", "stats_hash", "frontend_hash",
+        "source_hash", "structure_hash", "plan_hash", "selection_coverage_hash",
+        "target_updates", "target_rgb_windows", "effective_batch_rgb_windows",
+        "reference_steps_per_epoch", "selection_m_ref", "selection_p_ref",
+        "runs_per_gpu", "lambda_mv", "microbatch_rgb_windows",
+        "validation_every_updates", "checkpoint_every_updates", "amp",
+        "num_workers", "disk_min_free_bytes", "hrnet_checkpoint_hash",
+        "cache_index_hash", "stats_file_hash", "detector_checkpoint_hash",
+        "smpl_runtime_model_hash", "microbatch_packing_rule",
+        "n_cam3_train_windows", "reference_batch_rgb_windows", "reference_epochs",
+        "frontend_runtime_hash",
+        "resource_version",
+    )
+    missing = [key for key in required if config.get(key) is None or config.get(key) == ""]
+    if missing:
+        raise ValueError("formal config has unresolved fields: " + ", ".join(missing))
+    for key in ("manifest_hash", "split_hash", "stats_hash", "frontend_hash", "source_hash",
+                "structure_hash", "plan_hash", "selection_coverage_hash", "hrnet_checkpoint_hash",
+                "cache_index_hash", "stats_file_hash", "detector_checkpoint_hash", "smpl_runtime_model_hash",
+                "frontend_runtime_hash"):
+        value = config[key]
+        if not isinstance(value, str) or len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+            raise ValueError(f"formal config {key} must be a SHA-256 hex digest")
+    if config["experiment"] not in VIEW_EXPERIMENTS:
+        raise ValueError("unknown formal experiment")
+    positive = (
+        "target_updates", "target_rgb_windows", "effective_batch_rgb_windows",
+        "reference_steps_per_epoch", "selection_m_ref", "selection_p_ref",
+        "runs_per_gpu", "microbatch_rgb_windows", "validation_every_updates",
+        "checkpoint_every_updates", "disk_min_free_bytes",
+        "n_cam3_train_windows", "reference_batch_rgb_windows", "reference_epochs",
+    )
+    for key in positive:
+        value = config[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0 < value < float("inf")):
+            raise ValueError(f"formal config {key} must be finite and positive")
+    for key in ("target_updates", "target_rgb_windows", "effective_batch_rgb_windows",
+                "reference_steps_per_epoch", "runs_per_gpu", "microbatch_rgb_windows",
+                "validation_every_updates", "checkpoint_every_updates", "num_workers",
+                "disk_min_free_bytes"):
+        if isinstance(config[key], bool) or not isinstance(config[key], int):
+            raise ValueError(f"formal config {key} must be an integer")
+    for key in ("n_cam3_train_windows", "reference_batch_rgb_windows", "reference_epochs"):
+        if isinstance(config[key], bool) or not isinstance(config[key], int):
+            raise ValueError(f"formal config {key} must be an integer")
+    reference_batch = config["reference_batch_rgb_windows"]
+    reference_n = config["n_cam3_train_windows"]
+    steps = reference_n // reference_batch if config.get("drop_last") else (reference_n+reference_batch-1)//reference_batch
+    if (config["reference_epochs"] != 740 or steps != config["reference_steps_per_epoch"] or
+            config["target_updates"] != 740*steps or
+            config["effective_batch_rgb_windows"] != reference_batch or
+            config["target_rgb_windows"] != config["target_updates"]*reference_batch):
+        raise ValueError("formal reference 740-epoch update/RGB budgets must match the shared frozen batch rule")
+    for key in ("lambda_mv", "num_workers"):
+        value = config[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0 <= value < float("inf")):
+            raise ValueError(f"formal config {key} must be finite and nonnegative")
+    if not isinstance(config["amp"], bool):
+        raise ValueError("formal amp must be a boolean")
+    floor = config.get("selection_reference_floor", 1.e-8)
+    if not isinstance(floor, (int, float)) or not 0 < floor < float("inf") or min(
+            config["selection_m_ref"], config["selection_p_ref"]) < floor:
+        raise ValueError("formal selection references must respect the frozen positive floor")
+    if config.get("resource_frozen") is not True:
+        raise ValueError("formal resource envelope must be measured and frozen")
+    if config.get("packing_rule") != "subset_sum_pending.v1" or config.get("microbatch_packing_rule") != "contiguous_complete_pairs.v1":
+        raise ValueError("unsupported formal complete-group packing rule")
+    if isinstance(config.get("seed"), bool) or config.get("seed") not in (1, 2, 3):
+        raise ValueError("formal seed must be 1, 2, or 3")
+    if config["experiment"] in ("pose_pair", "press_pair", "pair_shuffle") and config["seed"] != 1:
+        raise ValueError("formal mechanism checks use only seed 1")
+    for key in ("max_steps", "limit_sessions", "max_batches", "smoke_steps", "stop_after_updates", "pilot_train_sample_keys"):
+        if config.get(key) is not None:
+            raise ValueError(f"formal config cannot use truncation {key}")

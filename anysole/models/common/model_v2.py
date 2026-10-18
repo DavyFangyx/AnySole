@@ -18,13 +18,13 @@ import torch
 import torch.nn as nn
 
 from anysole.models.common.aux_heads import AuxHeads
-from anysole.models.common.embeddings import SharedEmbeddings
+from anysole.models.common.embeddings import SharedEmbeddings, relative_time_pe
 from anysole.models.common.encoders import ModalEncoders
 from anysole.models.common.fusion import FusionTransformer
 from anysole.models.common.pose_head import PoseHead
 from anysole.models.common.t_residual import TResidualBranch
 from anysole.models.common.traj_head import TrajHead
-from anysole.types import CONFIG_VT, D_MODEL, POSE_DIM, TW
+from anysole.types import CONFIG_VT, D_MODEL, POSE_DIM, TW, V_FEAT_DIM
 
 
 MODEL_ANYSOLEV2 = "anysolev2"
@@ -36,7 +36,8 @@ class AnySoleModelV2(nn.Module):
                  tactile_direct=False, no_imu=False, v_input="hrnet",
                  t_encoder="linear", f2_repr=False, pose_parts=3,
                  soft_parts=False, gate="none", part_joints=None,
-                 residual_t=False):
+                 residual_t=False, visual_only=False, pressure_head="legacy",
+                 pressure_time_pe="before_fusion", time_pe_scale=40.0):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -51,6 +52,17 @@ class AnySoleModelV2(nn.Module):
         self.soft_parts = bool(soft_parts)
         self.gate = str(gate)
         self.residual_t = bool(residual_t)
+        self.visual_only = bool(visual_only)
+        self.pressure_head = str(pressure_head)
+        self.pressure_time_pe_enabled = self.pressure_head == "time_pe"
+        self.pressure_time_pe = str(pressure_time_pe)
+        self.time_pe_scale = float(time_pe_scale)
+        if self.pressure_head not in ("legacy", "time_pe"):
+            raise ValueError("pressure_head must be 'legacy' or 'time_pe'")
+        if self.pressure_time_pe != "before_fusion":
+            raise ValueError("pressure_time_pe must be 'before_fusion'")
+        if self.time_pe_scale != 40.0:
+            raise ValueError("visual time_pe_scale is frozen at 40.0 nominal frames/s")
         if self.v_input not in ("hrnet", "hmr_gvhmr"):
             raise ValueError("v_input must be 'hrnet' or 'hmr_gvhmr', got %r" % self.v_input)
         if self.tactile_input not in ("raw108", "s2m50"):
@@ -93,6 +105,8 @@ class AnySoleModelV2(nn.Module):
         T_s2m.  ``mask_v/mask_t`` (bool, B×tw) are the ρ-grid per-frame
         null-token masks (missing-rate 实验 1); None = old path.
         """
+        if self.visual_only:
+            raise ValueError("visual students accept only forward_visual(V_feat, frame_valid, timestamps)")
         if self.tactile_input == "s2m50":
             if T_s2m is None:
                 raise ValueError("T_s2m is required when tactile_input='s2m50'")
@@ -159,6 +173,74 @@ class AnySoleModelV2(nn.Module):
             # raw sigma logits (grad-carrying), detached gate weights
             # (attribution), detached per-slot hypotheses + assignment and the
             # pose stats (the normalized-space error target).
+            out.update({
+                "gate_sigma": self.pose_head.last_gate_sigma(),
+                "gate_g": self.pose_head.last_gate_g(),
+                "part_hypotheses": self.pose_head.last_part_hypotheses(),
+                "pose_mean": self.pose_head.pose_mean,
+                "pose_std": self.pose_head.pose_std,
+                "sigma_frozen": bool(self.pose_head.decoder.layers[-1].sigma_frozen),
+            })
+        return out
+
+    def forward_visual(self, V_feat, frame_valid, timestamps):
+        """Strict single-view RGB inference, with supervision kept outside.
+
+        N is the number of nonempty views after the caller flattens groups.
+        The only cross-view interaction belongs in the output loss, never in
+        this function. Invalid RGB is removed before any learned operation.
+        """
+        if self.v_input != "hrnet" or self.f2_repr or self.tactile_direct or self.residual_t:
+            raise ValueError("strict visual forward requires the non-F2 HRNet regression model")
+        if (V_feat.ndim != 3 or V_feat.shape[1:] != (self.tw, V_FEAT_DIM)
+                or not V_feat.is_floating_point()):
+            raise ValueError("V_feat must be floating [N,%d,%d]" % (self.tw, V_FEAT_DIM))
+        if V_feat.shape[0] == 0:
+            raise ValueError("filter empty/all-invalid views before forward_visual")
+        if frame_valid.shape != V_feat.shape[:2] or frame_valid.dtype != torch.bool:
+            raise ValueError("frame_valid must be bool [N,T], True means valid")
+        if timestamps.shape != frame_valid.shape or not timestamps.is_floating_point():
+            raise ValueError("timestamps must be floating [N,T] target times")
+        if frame_valid.device != V_feat.device or timestamps.device != V_feat.device:
+            raise ValueError("visual features, validity and timestamps must share a device")
+        if not bool(frame_valid.any(dim=1).all()):
+            raise ValueError("filter all-invalid views before forward_visual")
+        if not bool(torch.isfinite(V_feat[frame_valid]).all()):
+            raise ValueError("valid visual features contain NaN or Inf")
+        if (not bool(torch.isfinite(timestamps).all())
+                or not bool((timestamps[:, 1:] > timestamps[:, :-1]).all())):
+            raise ValueError("target timestamps must be finite and strictly increasing")
+
+        time_pe = None
+        if self.pressure_head == "time_pe":
+            time_pe = relative_time_pe(timestamps, self.d, self.time_pe_scale, V_feat.dtype)
+        v_tok, t_tok = self.encoders.forward_visual(V_feat, frame_valid, time_pe)
+        memory_padding_mask = torch.cat([~frame_valid, ~frame_valid], dim=1)
+        # None preserves the old full-valid attention kernel and exact legacy
+        # V-only prediction, including the constant-pressure control.
+        padding = memory_padding_mask if bool(memory_padding_mask.any()) else None
+        fused = self.fusion(v_tok, t_tok, memory_padding_mask=padding)
+        fused = torch.where(memory_padding_mask.unsqueeze(-1), torch.zeros_like(fused), fused)
+        x0_hat = self.pose_head(F=fused, frame_valid=frame_valid,
+                                 memory_padding_mask=padding)
+        v_hat, trans_hat = self.traj_head(fused, frame_valid=frame_valid, timestamps=timestamps)
+        pressure_hat, vfeat_hat = self.aux_heads(fused)
+        out = {
+            "x0_hat": x0_hat,
+            "v_hat": v_hat,
+            "trans_hat": trans_hat,
+            "pressure_hat": pressure_hat,
+            "vfeat_hat": vfeat_hat,
+            "F": fused,
+            "v_tok": v_tok,
+            "t_tok": t_tok,
+            "frame_valid": frame_valid,
+            "memory_padding_mask": memory_padding_mask,
+            "part_logits": self.pose_head.part_logits if self.soft_parts else None,
+            "part_assignment": self.pose_head.part_assignment() if self.soft_parts else None,
+            "x0_residual": None,
+        }
+        if self.gate == "sigma":
             out.update({
                 "gate_sigma": self.pose_head.last_gate_sigma(),
                 "gate_g": self.pose_head.last_gate_g(),

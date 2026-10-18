@@ -38,6 +38,8 @@ class FusionTransformer(nn.Module):
         self.tw = tw
         self.encoder = _transformer_encoder(dim, n_layers, nhead, dim_feedforward, dropout)
 
-    def forward(self, v_tok, t_tok):
+    def forward(self, v_tok, t_tok, memory_padding_mask=None):
         tokens = torch.cat([v_tok, t_tok], dim=1)
-        return self.encoder(tokens)
+        if memory_padding_mask is None:
+            return self.encoder(tokens)
+        return self.encoder(tokens, src_key_padding_mask=memory_padding_mask)

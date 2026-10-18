@@ -1,0 +1,158 @@
+# P1/P2 template. Measured plan fields remain null until P3; formal mode must call
+# validate_view_config(..., formal=True) and reject unresolved values.
+schema_version: view_consistency.v1
+protocol: view_consistency.v1
+visual_structure_version: visual_v1
+model_name: visual
+stage: preflight
+plan_frozen: false
+experiment: null
+seed: 1
+strict_visual: true
+config_probs: [0.0, 1.0, 0.0]
+pressure_head: time_pe
+# visual.effective_config derives pressure_time_pe_enabled from the head and
+# persists it with structure_hash. Do not carry a time_pe=True flag to legacy.
+pressure_time_pe: before_fusion
+time_pe_scale: 40.0
+d_model: 256
+nhead: 8
+modal: anysolev2
+pose_repr: 6d
+dropout: 0.1
+pose_layers: 6
+tw: 20
+window_length: 20
+nominal_fps: 40.0
+
+dataset_root: /private/Tactile/1_Dataset
+manifest_path: /private/Tactile/1_Dataset/anysole_manifest.jsonl
+split_csv: /private/Tactile/AnySole/AnysoleWorkspace/protocol/splits/default/splits.csv
+pressure_metadata_root: /private/Tactile/Pressure/metadata
+rgb_method: method_1_offset
+clock_anchor_camera: 3
+rgb_tolerance_ms: 25.0
+source_gap_ms: 50.0
+motion_gap_s: 0.0125
+train_stride: 20
+feature_cache_root: /private/Tactile/AnySole/AnysoleWorkspace/model_inputs/hrnet
+stats_path: /private/Tactile/AnySole/AnysoleWorkspace/model_inputs/stats/view_stats_eval_v1.json
+cache_schema: anysole.visual-cache.v1
+manifest_schema: anysole.grouped.v1
+stats_schema: anysole.stats.v1
+generate_contact_cache: false
+horizontal_flip: false
+time_stretch: false
+mix_occlusion_cache: false
+smpl_model_path: /private/Tactile/models/smpl/SMPL_NEUTRAL.pkl
+smpl_source_model_hash: 98e65c74ad9b998783132f00880d1025a8d64b158e040e6ef13a557e5098bc42
+smpl_runtime_model_hash: b93df2dd228acc91d4ea6ede5f83f81e5171e7bee35c39695e6e27cb25ee1d4a
+# Original user asset -> converted runtime arrays are exact. Equivalence to
+# the different Mocap source model above is still unverified.
+smpl_source_runtime_equivalence: unverified_reference_asset_unavailable
+pred_beta_source: zero
+root_init_source: segment_zero
+coordinate_frame: world_relative_origin
+
+hrnet_module_root: /private/Tactile/third_party/MotionPRO
+hrnet_module: lib.model.backbone.hrnet.cls_hrnet
+hrnet_config: /private/Tactile/third_party/MotionPRO/lib/model/backbone/hrnet/models/cls_hrnet_w48_sgd_lr5e-2_wd1e-4_bs32_x100.yaml
+hrnet_checkpoint: /private/Tactile/models/anysole/hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt
+hrnet_checkpoint_hash: 85622692bb87ff1160f32ba39cff2853bced8bd05e91905a4495c5e1fd74572a
+hrnet_source_commit: 325f48550eb82a64e7630fcbf54404e0a387e66b
+hrnet_frozen: true
+crop_height: 256
+crop_width: 192
+crop_bbox_rescale: 1.1
+cliff_focal_length: 608.0
+detector_checkpoint: /private/Tactile/models/yolo/yolo11m-pose.pt
+detector_checkpoint_hash: 29b17eaf3a3117cbea906090dbedf9159f7c6a49db58ec8b99ed2dfde1cf6eb2
+detector_provider: ultralytics_rgb_only
+detector_version: 8.4.178
+preprocessing_version: cliff_crop_256x192.v1
+
+lr: 1.0e-4
+lr_schedule: constant
+lambda_pose: 3.0
+lambda_traj: 1.0
+lambda_trec: 0.1
+lambda_vrec: 0.0
+lambda_kp: 1.0
+lambda_con: 0.0
+lambda_assign: 0.05
+lambda_sigma: 0.01
+sigma_freeze_frac: 0.1
+lr_warmup_frac: 0.05
+grad_clip: 5.0
+traj_velocity_w: 1.0
+traj_delta_w: 1.0
+traj_delta_weight_power: 1.0
+traj_deltas: [2, 4, 8, 19]
+mv_pose_weight: 1.0
+mv_pressure_weight: 1.0
+lambda_mv: null
+mv_ramp_frac: 0.1
+pair_shuffle: false
+reference_epochs: 740
+reference_camera: 3
+n_cam3_train_windows: null
+reference_batch_rgb_windows: 256
+reference_steps_per_epoch: null
+effective_batch_rgb_windows: null
+target_updates: null
+target_rgb_windows: null
+microbatch_rgb_windows: null
+drop_last: false
+sampler: complete_group_rgb_budget
+packing_rule: subset_sum_pending.v1
+microbatch_packing_rule: contiguous_complete_pairs.v1
+amp: null
+max_amp_backoffs_per_update: 16
+num_workers: null
+selection_rule: pareto_weighted
+validation_cameras: [1, 2, 3, 4]
+selection_m_ref: null
+selection_p_ref: null
+selection_reference_floor: 1.0e-8
+selection_motion_weight: 0.5
+selection_pressure_weight: 0.5
+selection_tie_break: [motion, pressure, earlier_successful_update]
+selection_coverage_hash: null
+validation_every_updates: null
+checkpoint_every_updates: null
+# P1 pre-frontend candidates. P3 must recheck coverage and freeze the plan.
+manifest_hash: 70815cd31659c575881a4f598eb8f9082be44ab344509ce728dc4134d00dbd5d
+split_hash: dcc224840b1c742c14b3102d3544bed6c37b1b94a22c2b0ad74dd9190bde8883
+# stats_hash is the semantic stats_sha256; file hash protects serialization.
+stats_hash: 9c37f401e1baaa6423e42137d7e3621e505c2b83ccc1cf21415bfb557d973972
+stats_file_hash: 6f6000360d5a6042752a55b3287a8644f36d19540e060ccab59aab26f9439b32
+cache_index_hash: null
+frontend_hash: null
+frontend_runtime_hash: null
+source_hash: null
+structure_hash: null
+plan_hash: null
+
+results_root: /private/Tactile/3_Result/AnySole
+control_dir: /private/Tactile/.ai/runtime/tasks/active/TASK-20261016-1513-anysole-view-consistency/artifacts/runtime
+wandb_shared_dir: /private/Tactile/.ai/runtime/tasks/active/TASK-20261016-1513-anysole-view-consistency/wandb
+run_dir: null
+device: cuda
+runs_per_gpu: null
+max_retries: 2
+heartbeat_sec: 10
+heartbeat_timeout_sec: 300
+worker_startup_timeout_sec: 900
+disk_min_free_bytes: null
+resource_frozen: false
+resource_version: null
+wandb_mode: online
+wandb_fallback_mode: offline
+wandb_online_preferred: true
+wandb_project: anysole
+wandb_entity: null
+wandb_group: view-consistency-20261016
+wandb_job_type: train
+wandb_log_code: false
+log_every_updates: 50
+tensorboard: true

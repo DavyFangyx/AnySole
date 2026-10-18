@@ -307,6 +307,9 @@ def main() -> int:
                      val=_subject_list(a.val) if a.val is not None else None)
         return 0
     p = argparse.ArgumentParser()
+    p.add_argument("--grouped", action="store_true", help="Build the direct trimodal physical-time index; never rewrites splits")
+    p.add_argument("--config", type=Path, help="Grouped view-consistency YAML configuration")
+    p.add_argument("--overwrite", action="store_true", help="Explicitly replace a manifest only before any training consumes it")
     p.add_argument("--fps", type=float, default=40)
     p.add_argument("--camera", default="cam3")
     p.add_argument("--cam", default="",
@@ -317,6 +320,18 @@ def main() -> int:
     p.add_argument("--index", type=Path, default=WORKSPACE / "protocol/manifests/raw_session_index.jsonl")
     build_args = argv[1:] if argv and argv[0] == "build" else argv
     a = p.parse_args(build_args)
+    if a.grouped:
+        if a.config is None:
+            p.error("--grouped requires --config")
+        from anysole.data.workspace_adapter import build_grouped_manifest, read_view_config
+        config = read_view_config(a.config)
+        output = a.output
+        if output == WORKSPACE / "protocol/manifests/session_manifest.csv":
+            output = Path(config.get("manifest_path", Path(config["dataset_root"]) / "anysole_manifest.jsonl"))
+        meta = build_grouped_manifest(config, output, overwrite=a.overwrite)
+        print(json.dumps({"output": str(output), "manifest_sha256": meta["manifest_sha256"],
+                          "candidate": meta["candidate_split_counts"], "eligible": meta["eligible_split_counts"]}))
+        return 0
     rows, _ = build(a.fps, a.camera, a.output, a.index)
     print(f"wrote {a.output} and {a.output.with_suffix('.jsonl')} ({len(rows)} sessions); split file unchanged")
     if a.cam:

@@ -137,9 +137,9 @@ class GatedDecoder(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList(layers)
 
-    def forward(self, z, F, masks):
+    def forward(self, z, F, masks, query_padding_mask=None):
         for layer in self.layers:
-            z = layer(z, F, masks)
+            z = layer(z, F, masks, query_padding_mask=query_padding_mask)
         return z
 
 
@@ -198,13 +198,16 @@ class GatedDecoderLayer(nn.Module):
         with torch.no_grad():
             self.tau_p.copy_(torch.as_tensor(tau, dtype=self.tau_p.dtype, device=self.tau_p.device))
 
-    def forward(self, z, F, masks):
+    def forward(self, z, F, masks, query_padding_mask=None):
         # NOTE: the memory parameter is named F like the fusion output, which
         # shadows the module-level `torch.nn.functional as F` — functional
         # calls in here must go through nn.functional explicitly.
         ignore_t_mask, ignore_v_mask = masks  # (B, S) bool, True = ignored token
         # Self-attention (identical to the standard block).
-        z = z + self.dropout1(self.self_attn(self.norm1(z), self.norm1(z), self.norm1(z), need_weights=False)[0])
+        z = z + self.dropout1(self.self_attn(
+            self.norm1(z), self.norm1(z), self.norm1(z),
+            key_padding_mask=query_padding_mask, need_weights=False,
+        )[0])
         n = self.norm2(z)
         # Dual cross-attn: e_V reads only F's V-source tokens, e_T only T's.
         e_v = self.dropout2(
@@ -509,7 +512,8 @@ class PoseHead(nn.Module):
             out[..., j * self.per_joint:(j + 1) * self.per_joint] = flat[..., k * self.per_joint:(k + 1) * self.per_joint]
         return out
 
-    def forward(self, x_tau=None, tau=None, F=None):
+    def forward(self, x_tau=None, tau=None, F=None, frame_valid=None,
+                memory_padding_mask=None):
         """Dispatch by head_mode.
 
         Diffusion keeps the ``(x_tau, tau, F)`` positional signature so every
@@ -525,7 +529,10 @@ class PoseHead(nn.Module):
                 )
             if F is None:
                 raise ValueError("regress head requires F")
-            return self._forward_regress(F)
+            return self._forward_regress(F, frame_valid=frame_valid,
+                                         memory_padding_mask=memory_padding_mask)
+        if frame_valid is not None or memory_padding_mask is not None:
+            raise ValueError("visual padding masks apply to regression heads only")
         if x_tau is None or tau is None or F is None:
             raise ValueError("diffusion head requires (x_tau, tau, F)")
         return self._forward_diffusion(x_tau, tau, F)
@@ -546,7 +553,7 @@ class PoseHead(nn.Module):
         x0 = self._unembed(h)
         return x0 * self.pose_std + self.pose_mean
 
-    def _forward_regress(self, F):
+    def _forward_regress(self, F, frame_valid=None, memory_padding_mask=None):
         """F0b: token = query + time PE + group embedding, straight through the
         6-layer decoder (self-attention, cross-attention to F, FFN), then
         unembed and denormalize with the same fitted stats as the diffusion
@@ -564,6 +571,11 @@ class PoseHead(nn.Module):
             1, 1, self.n_tokens, self.dim
         )
         h = tokens.reshape(batch, self.tw * self.n_tokens, self.dim)
+        query_padding_mask = None
+        if frame_valid is not None:
+            query_padding_mask = (~frame_valid).repeat_interleave(self.n_tokens, dim=1)
+            if not bool(query_padding_mask.any()):
+                query_padding_mask = None
         if self.gate == "sigma":
             if F.shape[1] != 2 * self.tw:
                 raise ValueError(
@@ -574,12 +586,20 @@ class PoseHead(nn.Module):
             ignore_t_mask = torch.zeros(batch, 2 * self.tw, dtype=torch.bool, device=F.device)
             ignore_t_mask[:, self.tw:] = True  # e_V: ignore the T-source tokens
             ignore_v_mask = ~ignore_t_mask      # e_T: ignore the V-source tokens
-            h = self.decoder(h, F, (ignore_t_mask, ignore_v_mask))
+            if memory_padding_mask is not None:
+                ignore_t_mask = ignore_t_mask | memory_padding_mask
+                ignore_v_mask = ignore_v_mask | memory_padding_mask
+            h = self.decoder(h, F, (ignore_t_mask, ignore_v_mask),
+                             query_padding_mask=query_padding_mask)
             # Per-slot hypotheses for the beta-NLL sigma supervision; detached
             # (the supervision stops the gradient at the error target).
             self._last_hypo = self._part_hypotheses(h).detach()
         else:
-            h = self.decoder(h, F)
+            if query_padding_mask is None and memory_padding_mask is None:
+                h = self.decoder(h, F)
+            else:
+                h = self.decoder(h, F, tgt_key_padding_mask=query_padding_mask,
+                                 memory_key_padding_mask=memory_padding_mask)
         x0 = self._unembed(h)
         return x0 * self.pose_std + self.pose_mean
 

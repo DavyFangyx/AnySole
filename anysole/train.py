@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import copy
+import fcntl
+import hashlib
+import json
 import math
 import os
 import random
+import shutil
+import signal
+import sys
+import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -329,6 +340,10 @@ def warn_legacy_output_checkpoint(out_dir: Path) -> None:
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train AnySole V1.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("--preflight-only", action="store_true", help="Read-only grouped protocol and asset checks; never constructs Dataset.")
+    parser.add_argument("--run-dir", type=Path, default=None, help="Grouped run directory.")
+    parser.add_argument("--resume", type=Path, default=None, help="Resume this exact grouped run from its atomic last checkpoint.")
+    parser.add_argument("--stop-after-updates", type=int, default=None, help="Pilot-only controlled checkpoint boundary for recovery verification.")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument(
@@ -702,8 +717,1211 @@ def _evaluate(model, diffusion, loader, config, device):
     return result
 
 
+VIEW_CHECKPOINT_SCHEMA = "anysole.visual-training.v1"
+_OPERATIONAL_KEYS = {
+    "run_id", "run_dir", "results_root", "device", "pid", "pgid", "started_at",
+    "resume", "resume_path", "semantic_hash", "run_hash", "plan_hash",
+    "wandb_id", "history_step", "attempt_id", "heartbeat_sec", "max_retries",
+    "disk_min_free_bytes", "runs_per_gpu", "resource_version", "resource_frozen",
+    "log_every_updates", "tensorboard", "plan_frozen",
+    "dataset_root", "manifest_path", "split_csv", "feature_cache_root", "stats_path",
+    "pressure_metadata_root", "smpl_model_path", "hrnet_module_root",
+    "hrnet_checkpoint", "hrnet_config", "detector_checkpoint", "checkpoint_every_updates",
+    "control_dir", "wandb_shared_dir", "recovery_note",
+    "heartbeat_timeout_sec", "worker_startup_timeout_sec",
+}
+
+
+def canonical_hash(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode()).hexdigest()
+
+
+def visual_run_identity(config: dict) -> str:
+    """Content/algorithm identity, independent of relocation, process and W&B."""
+    return canonical_hash({key: value for key, value in config.items()
+                           if key not in _OPERATIONAL_KEYS and not key.startswith("wandb_")})
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp.%d" % os.getpid())
+    with temporary.open("w") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True, allow_nan=False)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def atomic_checkpoint(path: Path, state: dict) -> str:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp.%d" % os.getpid())
+    with temporary.open("wb") as handle:
+        torch.save(state, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    return sha256_file(path)
+
+
+def process_starttime(pid: int):
+    try:
+        return Path(f"/proc/{int(pid)}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+class ProcessLease:
+    """OS lock plus PID/starttime evidence; never signals an unknown process."""
+    def __init__(self, path: Path, identity: str):
+        self.path, self.identity, self.handle = Path(path), identity, None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("a+")
+        try:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.handle.seek(0)
+            old = json.loads(self.handle.read() or "{}")
+            if old.get("status") == "active" and process_starttime(old.get("pid", -1)) == old.get("starttime") and old.get("starttime") is not None:
+                raise RuntimeError(f"live owner still recorded in {self.path}")
+            self.metadata = {"status": "active", "pid": os.getpid(), "pgid": os.getpgrp(),
+                             "starttime": process_starttime(os.getpid()), "identity": self.identity,
+                             "owner": "view-runtime", "started_at": time.time()}
+            self._write()
+            return self
+        except Exception:
+            self.handle.close()
+            self.handle = None
+            raise
+
+    def _write(self):
+        self.handle.seek(0)
+        self.handle.truncate()
+        json.dump(self.metadata, self.handle)
+        self.handle.flush()
+        os.fsync(self.handle.fileno())
+
+    def __exit__(self, *_):
+        if self.handle is not None:
+            self.metadata.update(status="released", released_at=time.time())
+            self._write()
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            self.handle.close()
+
+
+def capture_training_rng(device: torch.device) -> dict:
+    return {"python": random.getstate(), "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else None}
+
+
+def restore_training_rng(state: dict, device: torch.device) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"].cpu())
+    if state.get("cuda") is not None:
+        if device.type != "cuda":
+            raise ValueError("CUDA training cannot resume as a CPU run")
+        torch.cuda.set_rng_state_all(state["cuda"])
+
+
+class GroupBudgetSampler:
+    """Deterministic complete-group subset packing; no model RNG or prefetch.
+
+    Pending groups, epoch and permutation cursor are checkpointed. A bounded
+    subset-sum pack selects exactly the RGB exposure target without splitting
+    a physical group or silently dropping a non-fitting group.
+    """
+    def __init__(self, weights, keys, seed: int):
+        self.weights, self.keys, self.seed = list(weights), list(keys), int(seed)
+        if not self.weights or min(self.weights) < 1 or max(self.weights) > 4:
+            raise ValueError("sampler needs nonempty groups with 1..4 visual windows")
+        self.epoch = self.cursor = 0
+        self.pending = []
+        self._order = None
+
+    def _next(self):
+        if self._order is None:
+            self._order = torch.randperm(len(self.weights), generator=torch.Generator().manual_seed(self.seed + self.epoch)).tolist()
+        if self.cursor == len(self._order):
+            self.epoch += 1
+            self.cursor = 0
+            self._order = torch.randperm(len(self.weights), generator=torch.Generator().manual_seed(self.seed + self.epoch)).tolist()
+        value = self._order[self.cursor]
+        self.cursor += 1
+        return value
+
+    def next_update(self, rgb_windows: int) -> list[int]:
+        if not isinstance(rgb_windows, int) or rgb_windows < 1:
+            raise ValueError("positive integer RGB budget required")
+        # Four possible costs; 4*budget guarantees enough of one compatible
+        # class for the recommended common multiple 240. 256/all-C3 fails.
+        bound = max(4 * rgb_windows, len(self.weights))
+        while len(self.pending) < bound:
+            reachable = {0: []}
+            for position, index in enumerate(self.pending):
+                for total, selected in list(reachable.items())[::-1]:
+                    updated = total + self.weights[index]
+                    if updated <= rgb_windows and updated not in reachable:
+                        reachable[updated] = selected + [position]
+                if rgb_windows in reachable:
+                    chosen = set(reachable[rgb_windows])
+                    result = [index for pos, index in enumerate(self.pending) if pos in chosen]
+                    self.pending = [index for pos, index in enumerate(self.pending) if pos not in chosen]
+                    return result
+            self.pending.append(self._next())
+        raise ValueError("cannot pack exact RGB exposure; freeze a compatible common batch such as 240")
+
+    def state_dict(self):
+        return {"seed": self.seed, "epoch": self.epoch, "cursor": self.cursor,
+                "pending": self.pending[:], "keys_hash": canonical_hash(self.keys),
+                "weights_hash": canonical_hash(self.weights)}
+
+    def load_state_dict(self, state):
+        if state["seed"] != self.seed or state["keys_hash"] != canonical_hash(self.keys) or state["weights_hash"] != canonical_hash(self.weights):
+            raise ValueError("sampler sample order/domain changed")
+        self.epoch, self.cursor, self.pending = int(state["epoch"]), int(state["cursor"]), list(state["pending"])
+        self._order = torch.randperm(len(self.weights), generator=torch.Generator().manual_seed(self.seed + self.epoch)).tolist()
+
+
+def grouped_view_index(batch):
+    return batch["visual"]["view_valid"].any(dim=-1).nonzero(as_tuple=False)
+
+
+def visual_forward(model, batch, view_index):
+    if len(view_index) == 0:
+        raise ValueError("all-invalid views must be filtered before forward")
+    g, c = view_index.unbind(1)
+    visual = batch["visual"]
+    return model.forward_visual(visual["V_feat"][g, c], visual["view_valid"][g, c],
+                                visual["target_time_s"][g])
+
+
+def shuffle_pair_groups(batch, seed: int, update: int, micro: int):
+    keys = batch["meta"]["sample_key"]
+    n = len(keys)
+    if n < 2:
+        raise ValueError("pair_shuffle requires at least two distinct microbatch groups")
+    salt = int(canonical_hash([seed, update, micro, keys])[:16], 16) % (2**63 - 1)
+    generator = torch.Generator().manual_seed(salt)
+    neighbors = [torch.randperm(n, generator=generator).tolist() for _ in range(n)]
+    right_to_left = {}
+    def augment(left, visited):
+        for right in neighbors[left]:
+            if right == left or keys[right] == keys[left] or right in visited:
+                continue
+            visited.add(right)
+            if right not in right_to_left or augment(right_to_left[right], visited):
+                right_to_left[right] = left
+                return True
+        return False
+    if not all(augment(left, set()) for left in range(n)):
+        raise ValueError("no derangement exists across distinct physical sample keys")
+    result = [0] * n
+    for right, left in right_to_left.items():
+        result[left] = right
+    return torch.tensor(result, device=batch["visual"]["V_feat"].device, dtype=torch.long)
+
+
+class JointSelector:
+    """Finite/common-coverage Pareto candidates and deterministic fixed score."""
+    def __init__(self, m_ref=None, p_ref=None, coverage_hash=None):
+        self.m_ref, self.p_ref, self.coverage_hash = m_ref, p_ref, coverage_hash
+        self.candidates = []
+        self.best_step = None
+
+    def consider(self, metrics: dict, step: int):
+        m, p = float(metrics["val/mpjpe"]), float(metrics["val/pressure_rmse"])
+        if not (math.isfinite(m) and math.isfinite(p)) or min(metrics["val/motion_frames"], metrics["val/pressure_cells"]) <= 0:
+            raise ValueError("nonfinite or empty validation coverage")
+        coverage = metrics["val/coverage_hash"]
+        if self.coverage_hash is None:
+            self.coverage_hash = coverage
+        if coverage != self.coverage_hash:
+            raise ValueError("validation coverage changed")
+        if self.m_ref is None or self.p_ref is None:
+            return False  # explicit unselected pilot; never invent a scale
+        if not (0 < float(self.m_ref) < math.inf and 0 < float(self.p_ref) < math.inf):
+            raise ValueError("selection references must be finite and positive")
+        candidate = {"step": int(step), "motion": m, "pressure": p,
+                     "score": .5 * m / self.m_ref + .5 * p / self.p_ref}
+        pool = self.candidates + [candidate]
+        self.candidates = [a for a in pool if not any(
+            b["motion"] <= a["motion"] and b["pressure"] <= a["pressure"] and
+            (b["motion"] < a["motion"] or b["pressure"] < a["pressure"])
+            for b in pool)]
+        selected = min(self.candidates, key=lambda a: (a["score"], a["motion"], a["pressure"], a["step"]))
+        changed = selected["step"] != self.best_step
+        self.best_step = selected["step"]
+        return changed and self.best_step == step
+
+    def state_dict(self):
+        return copy.deepcopy(self.__dict__)
+
+    def load_state_dict(self, state):
+        if state["m_ref"] != self.m_ref or state["p_ref"] != self.p_ref:
+            raise ValueError("selection reference changed on resume")
+        self.__dict__.update(copy.deepcopy(state))
+
+
+def visual_source_hash():
+    root = Path(__file__).resolve().parent
+    files = {str(p.relative_to(root)): sha256_file(p) for p in sorted(root.rglob("*.py"))}
+    files["../configs/tools/runner.py"] = sha256_file(root.parent / "configs/tools/runner.py")
+    return canonical_hash(files)
+
+
+def visual_fingerprints(config: dict):
+    from anysole.data.workspace_adapter import load_grouped_manifest, load_grouped_stats
+    records, meta = load_grouped_manifest(Path(config["manifest_path"]))
+    stats = load_grouped_stats(Path(config["stats_path"]), manifest_sha256=meta["manifest_sha256"])
+    index_path = Path(config["feature_cache_root"]) / "index.json"
+    index = json.loads(index_path.read_text()) if index_path.is_file() else {"entries": {}}
+    frontend = {key: config[key] for key in ("hrnet_checkpoint_hash", "detector_checkpoint_hash",
+                                             "detector_version", "preprocessing_version", "cache_schema")}
+    frontend["extractor_sha256"] = sha256_file(Path(__file__).parent / "data/extract_hrnet.py")
+    frontend["hrnet_config_sha256"] = sha256_file(Path(config["hrnet_config"]))
+    hrnet_root = Path(config["hrnet_module_root"]) / "lib/model/backbone/hrnet"
+    frontend["hrnet_source_files"] = {str(p.relative_to(hrnet_root)): sha256_file(p)
+                                      for p in sorted(hrnet_root.rglob("*.py"))}
+    values = {"manifest_hash": meta["manifest_sha256"], "split_hash": sha256_file(Path(config["split_csv"])),
+              "stats_hash": stats["stats_sha256"], "stats_file_hash": sha256_file(Path(config["stats_path"])),
+              "cache_index_hash": sha256_file(index_path) if index_path.is_file() else None,
+              "frontend_hash": index.get("frontend_sha256"),
+              "frontend_runtime_hash": canonical_hash(frontend), "source_hash": visual_source_hash(),
+              "smpl_runtime_model_hash": sha256_file(Path(config["smpl_model_path"]))}
+    return values, records, stats, index
+
+
+def visual_preflight(config: dict):
+    """Pure reads: no Dataset, stats fit, contact generation, cache or run writes."""
+    from anysole.types import validate_view_config
+    from anysole.data.workspace_adapter import grouped_window_inventory
+    validate_view_config(config)
+    errors = []
+    values = records = stats = index = None
+    try:
+        values, records, stats, index = visual_fingerprints(config)
+    except (OSError, ValueError, KeyError) as exc:
+        errors.append(type(exc).__name__ + ": " + str(exc))
+    assets = {}
+    for key in ("hrnet_checkpoint", "hrnet_config", "detector_checkpoint", "smpl_model_path"):
+        path = Path(config[key])
+        assets[key] = {"path": str(path.resolve()), "exists": path.is_file(),
+                       "sha256": sha256_file(path) if path.is_file() else None}
+        expected = config.get(key + "_hash")
+        if not path.is_file() or (expected and assets[key]["sha256"] != expected):
+            errors.append(f"missing or changed {key}")
+    missing = []
+    if records is not None:
+        extractor_hash = sha256_file(Path(__file__).parent / "data/extract_hrnet.py")
+        crop_hash = sha256_file(Path(__file__).parent / "data/crop.py")
+        hrnet_root = Path(config["hrnet_module_root"]) / "lib/model/backbone/hrnet"
+        hrnet_files = {str(p.relative_to(hrnet_root)): sha256_file(p) for p in sorted(hrnet_root.rglob("*.py"))}
+        if not index.get("complete") or not index.get("frontend_sha256"):
+            errors.append("canonical cache index is not complete/versioned")
+        if index.get("manifest_sha256") != values["manifest_hash"]:
+            errors.append("cache index manifest hash mismatch")
+        for key, entry in index.get("entries", {}).items():
+            provenance = entry.get("provenance", {})
+            if provenance.get("frontend_sha256") != index.get("frontend_sha256"):
+                errors.append(f"mixed or unversioned cache frontend: {key}")
+                break
+            frontend_assets = provenance.get("asset_hashes", {})
+            if any(frontend_assets.get(k) != assets[k]["sha256"] for k in ("hrnet_checkpoint", "hrnet_config", "detector_checkpoint")):
+                errors.append(f"cache/current asset hash mismatch: {key}")
+                break
+            if (provenance.get("extractor_sha256") != extractor_hash or
+                    provenance.get("crop_source_sha256") != crop_hash or
+                    provenance.get("hrnet_source_files") != hrnet_files):
+                errors.append(f"cache/current frontend source hash mismatch: {key}")
+                break
+        for record in records:
+            if record["eligible"]:
+                for view in record["views"]:
+                    if view["sources"]:
+                        key = f"{record['recording_id']}/cam{view['camera_id']}"
+                        entry = index.get("entries", {}).get(key)
+                        if entry is None or not (Path(config["feature_cache_root"]) / entry["path"]).is_file():
+                            missing.append(key)
+        if missing:
+            errors.append(f"missing {len(missing)} real frontend caches")
+        for key, current in values.items():
+            if config.get(key) is not None and current != config[key]:
+                errors.append(f"configured {key} does not match actual contents")
+    return {"schema": "anysole.visual-preflight.v1", "ready": not errors, "errors": errors,
+            "assets": assets, "fingerprints": values, "missing_caches": missing,
+            "unfrozen": [k for k, v in config.items() if v is None],
+            "candidate_inventory": grouped_window_inventory(Path(config["manifest_path"])) if records is not None else None,
+            "formal_plan_frozen": bool(config.get("plan_frozen")),
+            "smpl_source_runtime_equivalence": config.get("smpl_source_runtime_equivalence")}
+
+
+def _move_grouped(value, device):
+    if torch.is_tensor(value):
+        return value.to(device)
+    if isinstance(value, dict):
+        return {k: _move_grouped(v, device) for k, v in value.items()}
+    return value
+
+
+def visual_health(device, run_dir):
+    import resource
+    values = {"health/peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
+              "health/disk_free_bytes": shutil.disk_usage(run_dir).free}
+    try:
+        fields = dict(line.split(":", 1) for line in Path("/proc/self/io").read_text().splitlines())
+        values.update({"health/io_" + name: int(fields[name]) for name in ("read_bytes", "write_bytes")})
+    except (OSError, KeyError, ValueError):
+        pass
+    if device.type == "cuda":
+        values.update({"health/gpu_allocated_bytes": torch.cuda.memory_allocated(device),
+                       "health/gpu_reserved_bytes": torch.cuda.memory_reserved(device),
+                       "health/gpu_peak_allocated_bytes": torch.cuda.max_memory_allocated(device)})
+    return values
+
+
+def microbatch_groups(indices, weights, limit, *, keys=None, require_pairs=False):
+    if require_pairs:
+        # Same deterministic packing for every grouped experiment. A legal
+        # derangement exists iff no physical key occupies more than half.
+        solution = {len(indices): []}
+        for start in reversed(range(len(indices))):
+            total = 0
+            for end in range(start + 1, len(indices) + 1):
+                total += weights[indices[end-1]]
+                if total > limit:
+                    break
+                chunk = indices[start:end]
+                names = [keys[i] for i in chunk]
+                eligible = len(chunk) >= 2 and max(names.count(k) for k in set(names)) * 2 <= len(chunk)
+                if eligible and end in solution:
+                    solution[start] = [chunk] + solution[end]
+                    break
+        if 0 not in solution:
+            raise ValueError("common grouped microbatch packing cannot fit a distinct-key derangement; increase microbatch RGB budget")
+        return solution[0]
+    result, current, total = [], [], 0
+    for index in indices:
+        cost = weights[index]
+        if cost > limit:
+            raise ValueError("microbatch budget would split a complete group")
+        if current and total + cost > limit:
+            result.append(current)
+            current, total = [], 0
+        current.append(index)
+        total += cost
+    if current:
+        result.append(current)
+    return result
+
+
+def visual_accumulation_step(model, batches, config, optimizer, scaler, device,
+                             update, horizon):
+    """One successful optimizer update, separately normalized for every term."""
+    from anysole.utils.losses import (
+        compute_visual_loss_terms, compute_pair_loss_terms,
+        compute_visual_loss_counts, compute_pair_loss_counts, loss_term_weights,
+    )
+    sigma_frozen = update < int(float(config.get("sigma_freeze_frac", .1)) * horizon)
+    if hasattr(model, "pose_head"):
+        model.pose_head.set_sigma_frozen(sigma_frozen)
+    peak = float(config.get("lambda_mv") or 0.)
+    ramp = max(1, int(float(config.get("mv_ramp_frac", .1)) * horizon))
+    lambda_mv = peak * min(float(update) / ramp, 1.)
+    weights = loss_term_weights(config, int(config["tw"]), lambda_mv=lambda_mv)
+    prepared, denominators = [], {}
+    regularizer_used = False
+    for number, batch in enumerate(batches):
+        index = grouped_view_index(batch)
+        counts = compute_visual_loss_counts(batch, index, config, include_assignment=False,
+                                            sigma_frozen=sigma_frozen)
+        supervised = counts.get("pose", 0) + counts.get("pressure", 0) > 0
+        include_assignment = supervised and not regularizer_used
+        if include_assignment:
+            regularizer_used = True
+            counts = compute_visual_loss_counts(batch, index, config, include_assignment=True,
+                                                sigma_frozen=sigma_frozen)
+        if config.get("pair_shuffle") and (len(batch["meta"]["sample_key"]) < 2 or len(set(batch["meta"]["sample_key"])) < 2):
+            raise ValueError("pair_shuffle packing needs two distinct complete groups per microbatch")
+        permutation = shuffle_pair_groups(batch, int(config["seed"]), update, number) if config.get("pair_shuffle") and lambda_mv else None
+        if lambda_mv:
+            counts.update(compute_pair_loss_counts(batch, index, config, pair_group_index=permutation))
+        for key, count in counts.items():
+            denominators[key] = denominators.get(key, 0) + int(count)
+        prepared.append((batch, index, permutation, include_assignment, counts))
+    if denominators.get("pose", 0) + denominators.get("pressure", 0) == 0:
+        return {"stepped": False, "reason": "zero_supervision", "counts": denominators,
+                "lambda_mv": lambda_mv, "sigma_frozen": sigma_frozen}
+    optimizer.zero_grad(set_to_none=True)
+    raw, weighted, shuffle_maps = {}, {}, []
+    amp = bool(config.get("amp")) and device.type == "cuda"
+    for batch, index, permutation, include_assignment, expected_counts in prepared:
+        batch = _move_grouped(batch, device)
+        index = index.to(device)
+        permutation = permutation.to(device) if permutation is not None else None
+        if not len(index):
+            continue
+        with torch.autocast(device_type=device.type, enabled=amp, dtype=torch.float16):
+            outputs = visual_forward(model, batch, index)
+            terms = compute_visual_loss_terms(outputs, batch, index, config,
+                                               include_assignment=include_assignment)
+            if lambda_mv:
+                terms.update(compute_pair_loss_terms(outputs, batch, index, config,
+                                                       pair_group_index=permutation))
+            objective = outputs["x0_hat"].reshape(-1)[:0].sum()
+            for key, term in terms.items():
+                numerator = term["raw_sum"]
+                if not torch.isfinite(numerator):
+                    raise FloatingPointError(f"nonfinite loss term {key}")
+                count = int(term["valid_count"])
+                if count != expected_counts.get(key, 0):
+                    raise ValueError(f"loss/count preparation disagrees for {key}")
+                raw[key] = raw.get(key, 0.) + float(numerator.detach())
+                contribution = numerator / denominators[key] if denominators.get(key, 0) else numerator * 0
+                contribution = contribution * float(weights.get(key, 0.))
+                weighted[key] = weighted.get(key, 0.) + float(contribution.detach())
+                objective = objective + contribution
+        scaler.scale(objective).backward()
+        shuffle_maps.append(permutation.cpu().tolist() if permutation is not None else None)
+    scaler.unscale_(optimizer)
+    parameters = [p for p in model.parameters() if p.grad is not None]
+    if not parameters:
+        raise FloatingPointError("absent training gradients")
+    if any(not torch.isfinite(p.grad).all() for p in parameters):
+        # Finite raw losses can overflow only after FP16 loss scaling. Let
+        # GradScaler consume its recorded found_inf without calling the
+        # optimizer. The caller retries this same batch and dropout RNG.
+        scale_before = float(scaler.get_scale())
+        if not scaler.is_enabled() or scale_before <= 1.:
+            raise FloatingPointError("nonfinite training gradients at unscaled precision")
+        scaler.update()
+        scale_after = float(scaler.get_scale())
+        if not math.isfinite(scale_after) or not 1. <= scale_after < scale_before:
+            raise FloatingPointError("GradScaler did not safely reduce its overflowing scale")
+        optimizer.zero_grad(set_to_none=True)
+        return {"stepped": False, "reason": "amp_overflow", "counts": denominators,
+                "amp_scale_before": scale_before, "amp_scale_after": scale_after,
+                "lambda_mv": lambda_mv, "sigma_frozen": sigma_frozen}
+    grad_norm = float(torch.nn.utils.clip_grad_norm_(parameters, float(config.get("grad_clip", 5.)),
+                                                     error_if_nonfinite=True))
+    scaler.step(optimizer)
+    scaler.update()
+    return {"stepped": True, "counts": denominators,
+            "raw": {k: raw[k] / denominators[k] if denominators.get(k, 0) else 0. for k in raw},
+            "weighted": weighted, "grad_norm": grad_norm, "lambda_mv": lambda_mv,
+            "sigma_frozen": sigma_frozen, "shuffle_maps": shuffle_maps}
+
+
+def visual_update_with_amp_retries(model, batches, config, optimizer, scaler,
+                                   device, update, horizon, state, on_overflow=None):
+    """Retry scaling overflow with unchanged data, model RNG and update budget."""
+    rng = capture_training_rng(device)
+    retries = 0
+    limit = config.get("max_amp_backoffs_per_update", 16)
+    if type(limit) is not int or not 0 <= limit <= 16:
+        raise ValueError("max_amp_backoffs_per_update must be an integer from 0 through 16")
+    state.setdefault("amp_overflow_attempts", 0)
+    while True:
+        state["attempt_steps"] += 1
+        result = visual_accumulation_step(model, batches, config, optimizer,
+                                          scaler, device, update, horizon)
+        if result.get("reason") != "amp_overflow":
+            return result
+        retries += 1
+        state["amp_overflow_attempts"] += 1
+        if on_overflow is not None:
+            on_overflow({"update": update, "attempt_steps": state["attempt_steps"],
+                         "retry": retries, "scale_before": result["amp_scale_before"],
+                         "scale_after": result["amp_scale_after"],
+                         "sample_keys": list(state["last_sample_keys"]),
+                         "successful_updates": state["successful_updates"],
+                         "rgb_windows": state["rgb_windows"]})
+        if retries > limit:
+            raise FloatingPointError("AMP backoff limit exceeded for the same update")
+        restore_training_rng(rng, device)
+
+
+def beta_zero_offsets(model_path: Path):
+    from anysole.data.smpl_io import _rest_joints
+    from anysole.types import JOINT_PARENTS
+    rest = _rest_joints({"betas": np.zeros(10)}, model_path=Path(model_path))
+    offsets = np.zeros((24, 3), np.float32)
+    for j, parent in enumerate(JOINT_PARENTS):
+        if parent >= 0:
+            offsets[j] = rest[j] - rest[parent]
+    return torch.from_numpy(offsets)
+
+
+def visual_sample_plot(model, item, config, device, *, split):
+    """One fixed sample, strictly visual prediction and train-only GT display."""
+    from anysole.data.dataset import grouped_collate
+    from anysole.types import JOINT_PARENTS
+    rng, training = capture_training_rng(device), model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            batch = _move_grouped(grouped_collate([item]), device)
+            index = grouped_view_index(batch)
+            if not len(index):
+                return None
+            out = visual_forward(model, batch, index)
+            g, c = index[0].tolist()
+            offsets = beta_zero_offsets(Path(config["smpl_model_path"]))
+            pose = out["x0_hat"][:1].float().cpu()
+            pred = fk_pose6d(pose, torch.zeros(1, pose.shape[1], 3), offsets,
+                             torch.tensor(JOINT_PARENTS))[0]
+            gt = batch["labels"]["kp_gt"][g].cpu()
+            motion_error = torch.linalg.vector_norm((pred-pred[:, :1])-(gt-gt[:, :1]), dim=-1).mean(-1)
+            valid = batch["visual"]["view_valid"][g, c].cpu()
+            motion = batch["masks"]["motion_valid"][g].cpu() & valid
+            motion_error[~motion] = float('nan')
+            velocity = out["v_hat"][0].float().cpu()
+            times = batch["visual"]["target_time_s"][g].cpu()
+            edges = batch["visual"]["view_edges"][g, c].cpu()
+            trajectory = torch.zeros_like(velocity)
+            for t in range(1, len(times)):
+                if bool(edges[t-1] & valid[t-1] & valid[t]):
+                    trajectory[t] = trajectory[t-1] + velocity[t] * (times[t]-times[t-1]).float()
+            gt_root = batch["labels"]["root"][g].cpu()
+            truth_trajectory = torch.zeros_like(gt_root)
+            anchor = 0
+            for t in range(len(times)):
+                if t == 0 or not bool(edges[t-1] & motion[t-1] & motion[t]):
+                    anchor = t
+                truth_trajectory[t] = gt_root[t]-gt_root[anchor]
+            return {"prediction": out["pressure_hat"][0].float().cpu().numpy(),
+                    "truth": batch["labels"]["pressure"][g].cpu().numpy(),
+                    "mask": (batch["masks"]["pressure_valid"][g] & valid.to(device)[:, None]).cpu().numpy(),
+                    "motion_error_m": motion_error.numpy(), "trajectory_m": trajectory.numpy(),
+                    "truth_trajectory_m": truth_trajectory.numpy(), "times_s": (times-times[0]).numpy(),
+                    "key": batch["meta"]["sample_key"][g], "split": split,
+                    "unit": "normalized_sensor_reading"}
+    finally:
+        model.train(training)
+        restore_training_rng(rng, device)
+
+
+def evaluate_visual(model, dataset, config, device, *, offsets=None):
+    """Shared strict-V old-val protocol; metrics have one canonical owner."""
+    from anysole.utils.eval_protocol import evaluate_visual_dataset
+    return evaluate_visual_dataset(model, dataset, config, device, offsets=offsets)
+
+
+class VisualMonitor:
+    """Worker-owned short heartbeat and disk guard while main sleeps."""
+    def __init__(self, run_dir, config):
+        self.run_dir, self.config = Path(run_dir), config
+        self.stop, self.failure = threading.Event(), None
+        self.progress = {"update": 0}
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+
+    def _loop(self):
+        while not self.stop.is_set():
+            try:
+                free = shutil.disk_usage(self.run_dir).free
+                if free < int(self.config.get("disk_min_free_bytes") or 0):
+                    raise OSError("insufficient disk headroom")
+                atomic_json(self.run_dir / "heartbeat.json", {
+                    **self.progress, "pid": os.getpid(), "pgid": os.getpgrp(),
+                    "starttime": process_starttime(os.getpid()), "unix_time": time.time(),
+                    "disk_free_bytes": free})
+            except Exception as exc:
+                self.failure = type(exc).__name__ + ": " + str(exc)
+                return
+            self.stop.wait(float(self.config.get("heartbeat_sec", 10)))
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def check(self):
+        if self.failure:
+            raise RuntimeError(self.failure)
+
+    def __exit__(self, *_):
+        self.stop.set()
+        self.thread.join(timeout=5)
+
+
+class VisualLogger:
+    """Local JSONL/TensorBoard always; online SDK when auth is already present."""
+    def __init__(self, run_dir, config, saved=None):
+        from torch.utils.tensorboard import SummaryWriter
+        self.run_dir, self.config = Path(run_dir), config
+        self.history_step = int((saved or {}).get("history_step", 0))
+        metrics_path = self.run_dir / "metrics.jsonl"
+        if metrics_path.is_file():
+            for line in metrics_path.read_text().splitlines():
+                try:
+                    self.history_step = max(self.history_step, int(json.loads(line).get("history_step", -1)) + 1)
+                except (ValueError, TypeError):
+                    pass
+            if metrics_path.stat().st_size and not metrics_path.read_bytes().endswith(b"\n"):
+                with metrics_path.open("a") as handle:
+                    handle.write("\n")
+        self.run, self.run_id, self.mode, self.url = None, (saved or {}).get("wandb_id"), "disabled", None
+        self.run_id = (saved or {}).get("wandb_logical_id") or self.run_id
+        self.online_id = (saved or {}).get("online_wandb_id") or (
+            (saved or {}).get("wandb_id") if (saved or {}).get("wandb_mode") == "online" else None)
+        self.offline_segments = list((saved or {}).get("offline_segments", []))
+        self.tb = SummaryWriter(log_dir=str(self.run_dir / "tb"))
+        requested = config.get("wandb_mode", "online")
+        if requested != "disabled":
+            import wandb
+            shared = Path(config["wandb_shared_dir"])
+            for name in ("cache", "config", "data"):
+                (shared / name).mkdir(parents=True, exist_ok=True)
+                os.environ[f"WANDB_{name.upper()}_DIR"] = str(shared / name)
+            os.environ["WANDB_DIR"] = str(self.run_dir)
+            try:
+                auth = bool(wandb.Api(timeout=5).api_key)
+            except Exception:
+                auth = False
+            self.mode = "online" if requested == "online" and auth else "offline"
+            self.run_id = self.run_id or uuid.uuid4().hex[:8]
+            # Offline attempts get their own segment. They share the explicit
+            # logical training identity, not a false online resume claim.
+            sdk_id = self.run_id if self.mode == "online" else None
+            options = dict(
+                id=sdk_id, resume="must" if sdk_id and self.online_id else None,
+                project="anysole", entity=config.get("wandb_entity"),
+                group=config.get("wandb_group", "view-consistency-20261016"),
+                job_type=config.get("wandb_job_type", "train"), name=self.run_dir.name,
+                dir=str(self.run_dir), mode=self.mode,
+                config={k: v for k, v in config.items() if k not in ("wandb_entity",)},
+                settings=wandb.Settings(disable_git=True, save_code=False, console="off", quiet=True, init_timeout=30))
+            fallback = "authentication_unavailable" if requested == "online" and not auth else None
+            try:
+                self.run = wandb.init(**options)
+            except Exception as exc:
+                if self.mode != "online":
+                    raise
+                # Keep only the error class; messages may contain private URLs.
+                fallback = "online_init_failed:" + type(exc).__name__
+                self.mode = "offline"
+                options.update(mode="offline", id=None, resume=None)
+                self.run = wandb.init(**options)
+            self.run.define_metric("progress/update")
+            self.run.define_metric("*", step_metric="progress/update")
+            self.url = self.run.url if self.mode == "online" else None
+            if self.mode == "online":
+                self.online_id = self.run.id
+            if self.mode == "offline":
+                self.offline_segments.append(str(Path(self.run.dir).parent))
+        self.metadata = {"wandb_id": self.run.id if self.run is not None else None,
+                         "wandb_logical_id": self.run_id, "online_wandb_id": self.online_id,
+                         "wandb_mode": self.mode, "wandb_url": self.url,
+                         "offline_dir": str(Path(self.run.dir).parent) if self.run is not None and self.mode == "offline" else None,
+                         "wandb_files_dir": self.run.dir if self.run is not None else None,
+                         "sync_state": "online" if self.mode == "online" else "not_synced",
+                         "offline_segments": self.offline_segments,
+                         "online_fallback_reason": fallback if requested != "disabled" else None}
+
+    def log(self, values, *, plot=None):
+        record = {**values, "history_step": self.history_step, "unix_time": time.time()}
+        with (self.run_dir / "metrics.jsonl").open("a") as handle:
+            handle.write(json.dumps(record, allow_nan=False) + "\n")
+        update = int(values["progress/update"])
+        for key, value in values.items():
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                self.tb.add_scalar(key, value, update)
+        media = {}
+        plots = plot if isinstance(plot, list) else [plot]
+        for plot in plots:
+            if plot is None:
+                continue
+            # Display clipping is explicit; scalar losses/metrics stay linear.
+            for foot, part in (("left", slice(0, 48)), ("right", slice(48, 96))):
+                truth = np.where(plot["mask"][:, part], plot["truth"][:, part], np.nan)
+                prediction = np.where(plot["mask"][:, part], plot["prediction"][:, part], np.nan)
+                image = np.concatenate([truth, prediction], axis=0)[None]
+                image = np.where(np.isfinite(image), image, 0)
+                tag = f"{plot['split']}/{foot}_pressure_display_clip01_truth_prediction"
+                self.tb.add_image(tag, np.clip(image, 0, 1), update, dataformats="CHW")
+                if self.run is not None:
+                    import wandb
+                    media[tag] = wandb.Image(np.clip(image[0], 0, 1), caption=plot["key"])
+                    traces = []
+                    for t, (gt_row, pred_row) in enumerate(zip(truth, prediction)):
+                        gt_finite, pred_finite = gt_row[np.isfinite(gt_row)], pred_row[np.isfinite(pred_row)]
+                        traces.append([t, float(gt_finite.mean()) if len(gt_finite) else None,
+                                       float(pred_finite.mean()) if len(pred_finite) else None,
+                                       float(gt_finite.max()) if len(gt_finite) else None,
+                                       float(pred_finite.max()) if len(pred_finite) else None])
+                    media[f"{plot['split']}/{foot}_pressure_time_traces"] = wandb.Table(
+                        columns=["window_frame", "truth_mean", "prediction_mean", "truth_peak", "prediction_peak"], data=traces)
+                # Low-frequency fixed sample traces, indexed by relative time.
+                for kind, readings in (("truth", truth), ("prediction", prediction)):
+                    for t, reading in enumerate(readings):
+                        finite = reading[np.isfinite(reading)]
+                        if len(finite):
+                            self.tb.add_scalar(f"{plot['split']}/{foot}_{kind}_mean_u{update}", float(finite.mean()), t)
+                            self.tb.add_scalar(f"{plot['split']}/{foot}_{kind}_peak_u{update}", float(finite.max()), t)
+            if "motion_error_m" in plot:
+                columns = ["relative_time_s", "motion_error_m", "pred_x_m", "pred_y_m", "pred_z_m",
+                           "gt_x_m", "gt_y_m", "gt_z_m"]
+                data = np.column_stack([plot["times_s"], plot["motion_error_m"],
+                                        plot["trajectory_m"], plot["truth_trajectory_m"]])
+                for t, row in enumerate(data):
+                    for column, value in zip(columns[1:], row[1:]):
+                        if math.isfinite(value):
+                            self.tb.add_scalar(f"{plot['split']}/{column}_u{update}", value, t)
+                if self.run is not None:
+                    import wandb
+                    media[f"{plot['split']}/fixed_motion_trajectory"] = wandb.Table(
+                        columns=columns, data=[[float(x) if math.isfinite(x) else None for x in row] for row in data])
+        if self.run is not None:
+            self.run.log({**values, **media}, step=self.history_step)
+        self.history_step += 1
+        self.tb.flush()
+
+    def state_dict(self):
+        return {**self.metadata, "history_step": self.history_step}
+
+    def close(self):
+        self.tb.close()
+        if self.run is not None:
+            self.run.finish()
+
+
+def restore_visual_runtime_state(model, checkpoint):
+    """Restore functional flags that a torch state_dict does not serialize."""
+    if not hasattr(model, "pose_head") or not hasattr(model.pose_head, "set_sigma_frozen"):
+        return
+    flags = []
+    for name in ("model_runtime", "training", "schedule"):
+        value = checkpoint.get(name, {}).get("sigma_frozen")
+        if value is not None:
+            if not isinstance(value, bool):
+                raise ValueError("checkpoint sigma-frozen state must be boolean")
+            flags.append(value)
+    if flags and any(flag != flags[0] for flag in flags):
+        raise ValueError("checkpoint sigma-frozen functional/schedule states disagree")
+    if not flags and checkpoint.get("training", {}).get("successful_updates", 0) > 0:
+        raise ValueError("trained checkpoint is missing sigma-frozen functional state")
+    # A pure random/untrained checkpoint predating this field used False.
+    model.pose_head.set_sigma_frozen(flags[0] if flags else False)
+
+
+def _visual_checkpoint(model, optimizer, scheduler, scaler, sampler, selector,
+                       config, state, stats, logger, device):
+    training = copy.deepcopy(state)
+    runtime = {}
+    if hasattr(model, "pose_head") and getattr(model.pose_head, "gate", None) == "sigma":
+        flags = {bool(layer.sigma_frozen) for layer in model.pose_head.decoder.layers}
+        if len(flags) != 1:
+            raise ValueError("model decoder sigma-frozen flags disagree")
+        runtime["sigma_frozen"] = flags.pop()
+        if training.get("sigma_frozen") not in (None, runtime["sigma_frozen"]):
+            raise ValueError("model and recorded training sigma-frozen states disagree")
+        training["sigma_frozen"] = runtime["sigma_frozen"]
+    return {"schema_version": VIEW_CHECKPOINT_SCHEMA, "semantic_hash": visual_run_identity(config),
+            "config": dict(config), "model": model.state_dict(), "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(), "scaler": scaler.state_dict(),
+            "sampler": sampler.state_dict(), "selector": selector.state_dict(),
+            "training": training, "model_runtime": runtime, "rng": capture_training_rng(device),
+            "stats": stats, "observability": logger.state_dict(),
+            "schedule": {"horizon": config["target_updates"], "lr": scheduler.get_last_lr(),
+                         "lambda_mv": state.get("lambda_mv", 0.), "sigma_frozen": training.get("sigma_frozen")}}
+
+
+def load_visual_checkpoint(path, config, model, optimizer, scheduler, scaler, sampler,
+                           selector, device):
+    try:
+        checkpoint = torch.load(Path(path), map_location="cpu", weights_only=False)
+    except Exception as exc:
+        raise ValueError("checkpoint is corrupt or incomplete") from exc
+    if (checkpoint.get("schema_version") != VIEW_CHECKPOINT_SCHEMA or
+            checkpoint.get("semantic_hash") != visual_run_identity(config) or
+            checkpoint.get("semantic_hash") != visual_run_identity(checkpoint.get("config", {}))):
+        raise ValueError("checkpoint schema/semantic identity mismatch")
+    # State-dict shape equality alone cannot distinguish legacy from time PE.
+    entry = get_builder("visual")
+    saved = entry.effective_config(checkpoint["config"])
+    if saved["structure_hash"] != config["structure_hash"]:
+        raise ValueError("checkpoint pressure-head/PE structure mismatch")
+    model.load_state_dict(checkpoint["model"], strict=True)
+    restore_visual_runtime_state(model, checkpoint)
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    scheduler.load_state_dict(checkpoint["scheduler"])
+    scaler.load_state_dict(checkpoint["scaler"])
+    sampler.load_state_dict(checkpoint["sampler"])
+    selector.load_state_dict(checkpoint["selector"])
+    restore_training_rng(checkpoint["rng"], device)
+    return checkpoint
+
+
+def _validate_visual_experiment(config):
+    experiment = config.get("experiment")
+    if experiment not in ("base_legacy", "base_time", "base_pool", "view_consist",
+                           "pose_pair", "press_pair", "pair_shuffle"):
+        raise ValueError("explicit grouped experiment required")
+    baseline = experiment.startswith("base_")
+    if config["pressure_head"] != ("legacy" if experiment == "base_legacy" else "time_pe"):
+        raise ValueError("experiment name and frozen pressure head disagree")
+    if baseline and float(config.get("lambda_mv") or 0) != 0:
+        raise ValueError("baseline cannot enable pair loss")
+    if bool(config.get("pair_shuffle")) != (experiment == "pair_shuffle"):
+        raise ValueError("pair_shuffle routing must match the experiment")
+    if experiment == "pose_pair" and config.get("mv_pressure_weight") != 0:
+        raise ValueError("pose_pair must disable only pressure pair")
+    if experiment == "press_pair" and config.get("mv_pose_weight") != 0:
+        raise ValueError("press_pair must disable only pose pair")
+    if int(config.get("num_workers") or 0) != 0:
+        raise ValueError("deterministic cached P2 loader currently requires num_workers=0")
+    retries = config.get("max_retries", 2)
+    if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 2:
+        raise ValueError("at most two documented failed-run recovery attempts are allowed")
+    if int(config["target_updates"]) * int(config["effective_batch_rgb_windows"]) != int(config["target_rgb_windows"]):
+        raise ValueError("successful-update and exact RGB-exposure budgets disagree")
+
+
+def reference_visual_budget(n_cam3_windows: int, batch_rgb_windows: int = 256,
+                            *, drop_last: bool = False, epochs: int = 740):
+    """Pure arithmetic; P3 supplies measured post-frontend cam3 coverage."""
+    if any(isinstance(x, bool) or not isinstance(x, int) or x < 1
+           for x in (n_cam3_windows, batch_rgb_windows, epochs)):
+        raise ValueError("positive integer reference coverage/batch/epochs required")
+    steps = n_cam3_windows // batch_rgb_windows if drop_last else math.ceil(n_cam3_windows/batch_rgb_windows)
+    if steps < 1:
+        raise ValueError("reference batch rule yields zero optimizer steps")
+    updates = epochs * steps
+    return {"n_cam3_train_windows": n_cam3_windows, "reference_batch_rgb_windows": batch_rgb_windows,
+            "effective_batch_rgb_windows": batch_rgb_windows,
+            "reference_steps_per_epoch": steps, "reference_epochs": epochs,
+            "target_updates": updates, "target_rgb_windows": updates * batch_rgb_windows}
+
+
+def restrict_pilot_windows(dataset, config):
+    """Use a predeclared subset of real windows without bypassing preflight."""
+    keys = config.get("pilot_train_sample_keys")
+    if keys is None:
+        return
+    if config.get("stage") != "pilot" or not keys or len(keys) != len(set(keys)):
+        raise ValueError("only pilot runs may declare a nonempty unique window subset")
+    lookup = {dataset.sample_key(i): window for i, window in enumerate(dataset.windows)}
+    if any(key not in lookup for key in keys):
+        raise ValueError("declared pilot sample key is absent from the real training domain")
+    dataset.windows = [lookup[key] for key in keys]
+
+
+def visual_selection_references(metrics, *, floor=1.e-8):
+    """Freeze only a qualified base_pool pilot's shared old-val references."""
+    if not math.isfinite(floor) or floor <= 0:
+        raise ValueError("positive finite selection-reference floor required")
+    m, p = float(metrics["val/mpjpe"]), float(metrics["val/pressure_rmse"])
+    if not all(math.isfinite(x) and x >= 0 for x in (m, p)) or min(
+            metrics["val/motion_frames"], metrics["val/pressure_cells"]) <= 0:
+        raise ValueError("selection references need finite metrics and nonempty old-val coverage")
+    return {"selection_m_ref": max(m, floor), "selection_p_ref": max(p, floor),
+            "selection_coverage_hash": metrics["val/coverage_hash"], "selection_reference_floor": floor}
+
+
+def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
+                     dataset=None, validation_dataset=None, model=None, validation_fn=None):
+    """Shared production controller; injectable pilot-only IO for state tests."""
+    from anysole.types import validate_view_config
+    from anysole.data.dataset import GroupedViewDataset, grouped_collate
+    config = copy.deepcopy(config)
+    formal = config.get("stage") == "formal"
+    injected = dataset is not None or model is not None or validation_fn is not None
+    if formal and (injected or stop_after_updates is not None):
+        raise ValueError("formal runs cannot use test IO or stop/truncation controls")
+    if config.get("stage") not in ("pilot", "formal"):
+        raise ValueError("training requires explicit pilot or formal stage")
+    validate_view_config(config, formal=formal)
+    config = get_builder("visual").effective_config(config)
+    stats = config.get("_test_stats")
+    if not injected:
+        report = visual_preflight(config)
+        if not report["ready"]:
+            raise ValueError("preflight failed: " + "; ".join(report["errors"]))
+        values, _, stats, _ = visual_fingerprints(config)
+        for key, value in values.items():
+            if config.get(key) is not None and config[key] != value:
+                raise ValueError(f"frozen input hash changed: {key}")
+            config[key] = value
+    _validate_visual_experiment(config)
+    target = int(config["target_updates"])
+    if target < 1 or int(config["effective_batch_rgb_windows"]) < 1:
+        raise ValueError("positive pilot budget required")
+    if not stats:
+        raise ValueError("frozen train-only stats required")
+    run_dir = Path(run_dir).resolve()
+    workspace = Path(__file__).resolve().parents[2]
+    if not run_dir.is_relative_to(workspace):
+        raise ValueError("run directory must stay inside /private/Tactile")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    config["run_dir"] = str(run_dir)
+    identity = visual_run_identity(config)
+    device = resolve_device(str(config.get("device", "cpu")))
+    if formal and device.type != "cuda":
+        raise ValueError("formal run requires the measured CUDA resource envelope")
+    if formal and not config.get("resource_frozen"):
+        raise ValueError("formal run requires measured and frozen GPU resource envelope")
+    if dataset is None:
+        cameras = (3,) if config["experiment"] in ("base_legacy", "base_time") else (1, 2, 3, 4)
+        common = dict(manifest=Path(config["manifest_path"]), dataset_root=Path(config["dataset_root"]),
+                      feature_cache_root=Path(config["feature_cache_root"]), smpl_model_path=Path(config["smpl_model_path"]),
+                      window_length=int(config["window_length"]), stride=int(config["train_stride"]), cameras=cameras)
+        dataset = GroupedViewDataset(**common, split="train", cover_tail=False)
+        validation_dataset = GroupedViewDataset(**{**common, "cameras": tuple(config["validation_cameras"])}, split="val", cover_tail=True)
+        if formal:
+            reference = dataset if cameras == (3,) else GroupedViewDataset(
+                **{**common, "cameras": (3,)}, split="train", cover_tail=False)
+            if len(reference) != config["n_cam3_train_windows"]:
+                raise ValueError("actual post-frontend cam3 train windows differ from the frozen reference budget")
+            if reference is not dataset:
+                del reference
+    if not len(dataset) or validation_dataset is None:
+        raise ValueError("nonempty train and old-val datasets required")
+    restrict_pilot_windows(dataset, config)
+    weights = [len(window[3]) for window in dataset.windows]
+    keys = [dataset.sample_key(i) for i in range(len(dataset))]
+    sampler = GroupBudgetSampler(weights, keys, int(config["seed"]))
+    previous = json.loads((run_dir / "run.json").read_text()) if (run_dir / "run.json").is_file() else {}
+    if previous and previous.get("semantic_hash") != identity:
+        raise ValueError("run directory already belongs to another semantic identity")
+    if previous and resume is None:
+        raise ValueError("existing run requires explicit --resume, even when a checkpoint exists")
+    recovery_attempts = int(previous.get("recovery_attempts", 0))
+    if resume and previous.get("state") == "failed":
+        if not config.get("recovery_note"):
+            raise ValueError("failed run requires a recorded fix/recovery_note before retry")
+        recovery_attempts += 1
+        if recovery_attempts > int(config.get("max_retries", 2)):
+            raise ValueError("failed-run recovery limit exceeded")
+    metadata = {"schema_version": VIEW_CHECKPOINT_SCHEMA, "semantic_hash": identity,
+                "run_id": previous.get("run_id", uuid.uuid4().hex),
+                "attempt_id": uuid.uuid4().hex, "recovery_attempts": recovery_attempts,
+                "pid": os.getpid(), "pgid": os.getpgrp(), "starttime": process_starttime(os.getpid()),
+                "stage": config["stage"], "state": "running", "started_at": time.time(),
+                "target_updates": target, "target_rgb_windows": config["target_rgb_windows"],
+                "formal_complete": False, "exit_code": None}
+    for field in ("last_checkpoint_hash", "best_checkpoint_hash"):
+        if previous.get(field):
+            metadata[field] = previous[field]
+    if config.get("recovery_note"):
+        metadata["recovery_note"] = config["recovery_note"]
+    logger = None
+    state = {"successful_updates": 0, "attempt_steps": 0, "rgb_windows": 0,
+             "amp_overflow_attempts": 0,
+             "physical_group_windows": 0, "zero_supervision_attempts": 0,
+             "consecutive_zero_supervision_attempts": 0,
+             "unique_sample_keys": [], "last_sample_keys": [], "last_shuffle_maps": []}
+    stop_requested = threading.Event()
+    handlers = {}
+    global_lease = Path(config["control_dir"]) / "run_locks" / (identity + ".lock")
+    with ProcessLease(global_lease, identity), ProcessLease(run_dir / "writer.lock", identity), VisualMonitor(run_dir, config) as monitor:
+        try:
+            atomic_json(run_dir / "run.json", metadata)
+            import yaml
+            (run_dir / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=True))
+            seed = int(config["seed"])
+            random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+            torch.use_deterministic_algorithms(bool(config.get("deterministic_algorithms", False)))
+            if device.type == "cuda":
+                torch.cuda.manual_seed_all(seed)
+                torch.backends.cudnn.benchmark = False
+                torch.backends.cudnn.deterministic = True
+            model = model if model is not None else get_builder("visual").build(config)
+            model = model.to(device).train()
+            if hasattr(model, "pose_head"):
+                model.pose_head.set_stats(torch.tensor(stats["pose_mean"], device=device),
+                                          torch.tensor(stats["pose_std"], device=device))
+            optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))
+            warmup = max(1, int(float(config.get("lr_warmup_frac", .05)) * target))
+            def lr_factor(step):
+                warm = min((step + 1) / warmup, 1.)
+                if config.get("lr_schedule", "constant") == "cosine":
+                    warm *= .5 * (1 + math.cos(math.pi * min(step, target) / target))
+                return warm
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
+            scaler = torch.amp.GradScaler("cuda", enabled=bool(config.get("amp")) and device.type == "cuda")
+            selector = JointSelector(config.get("selection_m_ref"), config.get("selection_p_ref"),
+                                     config.get("selection_coverage_hash"))
+            loaded = None
+            if resume is not None:
+                loaded = load_visual_checkpoint(resume, config, model, optimizer, scheduler,
+                                                scaler, sampler, selector, device)
+                state = loaded["training"]
+                if loaded["stats"] != stats:
+                    raise ValueError("checkpoint normalization statistics changed")
+            rng = capture_training_rng(device)
+            logger = VisualLogger(run_dir, config, loaded.get("observability") if loaded else None)
+            restore_training_rng(rng, device)
+            metadata.update(logger.metadata)
+            metadata["replay_from_update"] = state["successful_updates"] if resume else None
+            metadata["replay_to_update"] = previous.get("successful_updates") if resume else None
+            if config.get("save_initial_checkpoint") and resume is None:
+                initial = _visual_checkpoint(model, optimizer, scheduler, scaler, sampler, selector,
+                                             config, state, stats, logger, device)
+                metadata["initial_checkpoint_hash"] = atomic_checkpoint(run_dir / "initial.pt", initial)
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                if threading.current_thread() is threading.main_thread():
+                    handlers[sig] = signal.signal(sig, lambda *_: stop_requested.set())
+            unique = set(state["unique_sample_keys"])
+            last_val = state.get("last_validation")
+            validation_every = int(config["validation_every_updates"])
+            checkpoint_every = int(config["checkpoint_every_updates"])
+            if min(validation_every, checkpoint_every) < 1:
+                raise ValueError("positive validation/checkpoint cadence required")
+            while state["successful_updates"] < target:
+                monitor.check()
+                selected = sampler.next_update(int(config["effective_batch_rgb_windows"]))
+                parts = microbatch_groups(selected, weights, int(config["microbatch_rgb_windows"]),
+                                         keys=keys, require_pairs=config["experiment"] not in ("base_legacy", "base_time"))
+                batches = [grouped_collate([dataset[i] for i in part]) for part in parts]
+                started = time.monotonic()
+                state["last_sample_keys"] = [keys[i] for i in selected]
+                def record_overflow(event):
+                    with (run_dir / "amp_overflows.jsonl").open("a") as handle:
+                        handle.write(json.dumps({**event, "time": time.time()}, sort_keys=True) + "\n")
+                result = visual_update_with_amp_retries(
+                    model, batches, config, optimizer, scaler, device,
+                    state["successful_updates"], target, state, record_overflow)
+                if not result["stepped"]:
+                    state["zero_supervision_attempts"] += 1
+                    state["consecutive_zero_supervision_attempts"] += 1
+                    if state["consecutive_zero_supervision_attempts"] >= int(config.get("max_zero_supervision_attempts", 3)):
+                        raise ValueError("persistent zero-supervision batches")
+                    continue
+                state["consecutive_zero_supervision_attempts"] = 0
+                scheduler.step()
+                state["successful_updates"] += 1
+                state["rgb_windows"] += sum(weights[i] for i in selected)
+                state["physical_group_windows"] += len(selected)
+                unique.update(state["last_sample_keys"])
+                state["unique_sample_keys"] = sorted(unique)
+                state["lambda_mv"], state["sigma_frozen"] = result["lambda_mv"], result["sigma_frozen"]
+                state["last_shuffle_maps"] = result["shuffle_maps"]
+                step = state["successful_updates"]
+                elapsed = max(time.monotonic() - started, 1e-9)
+                monitor.progress = {"update": step, "target_updates": target,
+                                    "rgb_windows": state["rgb_windows"]}
+                values = {"progress/update": step, "progress/target_updates": target,
+                          "progress/completion": step / target, "progress/rgb_windows": state["rgb_windows"],
+                          "progress/attempt_steps": state["attempt_steps"],
+                          "progress/amp_overflow_attempts": state["amp_overflow_attempts"],
+                          "progress/zero_supervision_attempts": state["zero_supervision_attempts"],
+                          "progress/physical_group_windows": state["physical_group_windows"],
+                          "progress/unique_sample_keys": len(unique),
+                          "health/recovery_attempts": recovery_attempts,
+                          "train/lr": scheduler.get_last_lr()[0], "train/lambda_mv": result["lambda_mv"],
+                          "train/grad_norm": result["grad_norm"], "health/step_seconds": elapsed,
+                          "train/amp_scale": float(scaler.get_scale()),
+                          "health/rgb_windows_per_second": config["effective_batch_rgb_windows"] / elapsed,
+                          "progress/eta_seconds": elapsed * (target - step)}
+                for prefix, terms in (("loss_raw", result["raw"]), ("loss_weighted", result["weighted"]), ("valid_count", result["counts"])):
+                    values.update({f"train/{prefix}/{key}": value for key, value in terms.items()})
+                selected_best, plot = False, None
+                if step % validation_every == 0 or step == target:
+                    evaluator = validation_fn or evaluate_visual
+                    last_val, plot = evaluator(model, validation_dataset, config, device)
+                    state["last_validation"] = last_val
+                    selected_best = selector.consider(last_val, step)
+                    values.update(last_val)
+                    values["val/best_step"] = selector.best_step or 0
+                    if selector.best_step is not None:
+                        values["val/selection_score"] = next(c["score"] for c in selector.candidates if c["step"] == selector.best_step)
+                    else:
+                        values["val/selection_frozen"] = 0
+                    if not injected:
+                        plot = [visual_sample_plot(model, dataset[0], config, device, split="train"),
+                                visual_sample_plot(model, validation_dataset[0], config, device, split="val")]
+                if step % int(config.get("log_every_updates", 50)) == 0 or last_val and (step % validation_every == 0 or step == target) or step == 1:
+                    values.update(visual_health(device, run_dir))
+                    if metadata.get("checkpoint_seconds") is not None:
+                        values["health/checkpoint_seconds"] = metadata["checkpoint_seconds"]
+                    logging_rng = capture_training_rng(device)
+                    logger.log({**values, "attempt_id": metadata["attempt_id"]}, plot=plot)
+                    restore_training_rng(logging_rng, device)
+                metadata.update(successful_updates=step, rgb_windows=state["rgb_windows"],
+                                attempt_steps=state["attempt_steps"], selection=selector.state_dict(),
+                                observability=logger.state_dict(), last_validation=last_val)
+                if not injected and (step % checkpoint_every == 0 or step == target):
+                    current, *_ = visual_fingerprints(config)
+                    if any(current[k] != config[k] for k in current):
+                        raise ValueError("input/source hash drift during training")
+                stopping = stop_requested.is_set() or stop_after_updates is not None and step >= stop_after_updates
+                if selected_best or step % checkpoint_every == 0 or step == target or stopping:
+                    saving_started = time.monotonic()
+                    checkpoint = _visual_checkpoint(model, optimizer, scheduler, scaler, sampler, selector,
+                                                    config, state, stats, logger, device)
+                    if selected_best:
+                        metadata["best_checkpoint_hash"] = atomic_checkpoint(run_dir / "best.pt", checkpoint)
+                    metadata["last_checkpoint_hash"] = atomic_checkpoint(run_dir / "last.pt", checkpoint)
+                    metadata["checkpoint_seconds"] = time.monotonic()-saving_started
+                atomic_json(run_dir / "run.json", metadata)
+                if stopping and step < target:
+                    metadata.update(state="paused", exit_code=0)
+                    atomic_json(run_dir / "run.json", metadata)
+                    return metadata
+            if state["rgb_windows"] != int(config["target_rgb_windows"]) or last_val is None and not metadata.get("last_validation"):
+                raise ValueError("terminal successful budget or complete validation missing")
+            if formal and (selector.best_step is None or not (run_dir / "best.pt").is_file()):
+                raise ValueError("formal run has no qualified jointly selected checkpoint")
+            metadata.update(state="completed" if formal else "pilot_completed", exit_code=0,
+                            formal_complete=formal, finished_at=time.time(),
+                            successful_updates=state["successful_updates"], rgb_windows=state["rgb_windows"],
+                            attempt_steps=state["attempt_steps"],
+                            last_validation=last_val, selection=selector.state_dict())
+            atomic_json(run_dir / "run.json", metadata)
+            return metadata
+        except BaseException as exc:
+            metadata.update(state="failed", exit_code=1, finished_at=time.time(),
+                            error_type=type(exc).__name__, error=str(exc),
+                            successful_updates=state["successful_updates"],
+                            attempt_steps=state["attempt_steps"], rgb_windows=state["rgb_windows"])
+            atomic_json(run_dir / "run.json", metadata)
+            raise
+        finally:
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
+            if logger is not None:
+                logger.close()
+
+
+def _visual_main(args, raw_config):
+    config = dict(raw_config)
+    defaults = vars(parse_args([]))
+    supported = {"config", "preflight_only", "run_dir", "resume", "stop_after_updates",
+                 "device", "wandb_mode", "wandb_entity"}
+    unsupported = [key for key, value in vars(args).items()
+                   if key not in supported and value != defaults[key]]
+    if unsupported:
+        raise ValueError("grouped settings must be explicit in the hashed config; unsupported CLI overrides: " + ", ".join(unsupported))
+    if args.preflight_only:
+        report = visual_preflight(config)
+        print(json.dumps(report, indent=2))
+        return 0 if report["ready"] else 2
+    if args.init_from is not None or args.epochs is not None or args.limit_sessions is not None:
+        raise ValueError("grouped training cannot use warm-start, epoch or session truncation overrides")
+    if args.device != "auto":
+        config["device"] = args.device
+    for key in ("wandb_mode", "wandb_entity"):
+        if getattr(args, key) is not None:
+            config[key] = getattr(args, key)
+    directory = args.run_dir or config.get("run_dir")
+    if directory is None:
+        raise ValueError("grouped training requires --run-dir")
+    train_visual_run(config, directory, resume=args.resume, stop_after_updates=args.stop_after_updates)
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    import yaml
+    raw_config = yaml.safe_load(args.config.read_text()) or {}
+    if raw_config.get("schema_version") == "view_consistency.v1":
+        return _visual_main(args, raw_config)
+    if args.preflight_only or args.run_dir is not None or args.resume is not None or args.stop_after_updates is not None:
+        raise ValueError("these runtime controls require the view-consistency schema")
     config = load_config(args.config)
     config["input_adapter"] = "AnySole"
     config["adapter_version"] = ADAPTER_VERSION

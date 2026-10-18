@@ -36,6 +36,7 @@ class ModelEntry:
 
 
 MODEL_REGISTRY: dict[str, ModelEntry] = {
+    "visual": ModelEntry("visual", "visual", "strict RGB student with explicit legacy/time_pe head"),
     "F0b": ModelEntry("F0b", "f0b", "V2 regression base (linear t-encoder)"),
     "F4a": ModelEntry("F4a", "f4a", "foot_conv tactile encoder"),
     "F2": ModelEntry("F2", "f2", "f2 representation"),

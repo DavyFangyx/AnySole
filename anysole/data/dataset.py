@@ -286,20 +286,9 @@ class AnySoleDataset(Dataset):
                     "left48": left48,
                     "right48": right48,
                 }
-                try:
-                    contact = load_contact_label(shared, self.contact_method)
-                except FileNotFoundError:
-                    # Contact labels are model-private derived inputs.  A
-                    # cleaned workspace may legitimately not contain them;
-                    # materialize the requested method from shared facts on
-                    # first use, then load it through the same validation path.
-                    from anysole.data.contact_adapter import build_one
-                    print(
-                        "building missing AnySole contact label: "
-                        f"session={session_id} method={self.contact_method}"
-                    )
-                    build_one(session_id, [self.contact_method], shared_root=self.seq_root)
-                    contact = load_contact_label(shared, self.contact_method)
+                # Dataset construction is read-only. The explicit contact
+                # adapter command in this exception provides materialization.
+                contact = load_contact_label(shared, self.contact_method)
                 fake_mask = np.maximum(
                     np.asarray(shared["frames"]["fake"], dtype=np.uint8),
                     1 - np.asarray(shared["frames"]["valid"], dtype=np.uint8),
@@ -517,3 +506,189 @@ class AnySoleDataset(Dataset):
         if banned:
             raise RuntimeError("SMPL fields leaked into batch: %s" % banned)
         return item
+
+
+class GroupedViewDataset(Dataset):
+    """Read-only windows with independent RGB views and one shared truth.
+
+    Cache creation is an explicit extractor operation. Missing/incompatible
+    features raise; no zero tensor is substituted for an observed image.
+    """
+
+    def __init__(self, manifest: Path, dataset_root: Path, feature_cache_root: Path,
+                 smpl_model_path: Path, *, split: str = "train", window_length: int = 20,
+                 stride: int = 20, cameras: Sequence[int] = (1, 2, 3, 4),
+                 cover_tail: bool = False):
+        from anysole.data.workspace_adapter import load_grouped_manifest, VIEW_CACHE_SCHEMA
+        if split not in {"train", "val", "test"} or not 1 <= stride <= window_length:
+            raise ValueError("invalid split or window/stride")
+        if not cameras or len(set(cameras)) != len(cameras) or set(cameras) - {1,2,3,4}:
+            raise ValueError("cameras must be unique members of 1..4")
+        self.split = split
+        self.manifest_path = Path(manifest)
+        all_records, self.manifest_meta = load_grouped_manifest(self.manifest_path)
+        self.records = [r for r in all_records if r["eligible"] and split in r["split_roles"]]
+        self.dataset_root, self.cache_root = Path(dataset_root), Path(feature_cache_root)
+        self.smpl_model_path = Path(smpl_model_path)
+        self.window_length, self.stride, self.cameras = window_length, stride, tuple(cameras)
+        index_path = self.cache_root / "index.json"
+        if not index_path.is_file():
+            raise FileNotFoundError(f"Missing real RGB feature cache index {index_path}; run the explicit HRNet extractor")
+        self.cache_index = json.loads(index_path.read_text())
+        if self.cache_index.get("schema_version") != VIEW_CACHE_SCHEMA:
+            raise ValueError("visual cache index schema mismatch")
+        self._features, self._labels = {}, {}
+        self.windows = []
+        self.coverage = {"candidate_windows":0,"kept_windows":0,"zero_supervision_windows":0,
+                         "no_valid_rgb_windows":0,
+                         "tail_rows_without_window":0,"recordings":len(self.records)}
+        require_supervision = split == "train" and not cover_tail
+        for ri, record in enumerate(self.records):
+            n = len(record["target_frame_id"])
+            views = [v for v in record["views"] if v["camera_id"] in cameras and v["sources"]]
+            for view in views:
+                cache_key = f"{record['recording_id']}/cam{view['camera_id']}"
+                if cache_key not in self.cache_index.get("entries", {}):
+                    raise FileNotFoundError(f"Missing real HRNet cache for {cache_key}")
+                entry = self.cache_index["entries"][cache_key]
+                if not (self.cache_root / entry["path"]).is_file():
+                    raise FileNotFoundError(self.cache_root / entry["path"])
+            starts = list(range(0, max(n-window_length+1, 0), stride))
+            if cover_tail and n:
+                tail = max(n-window_length, 0)
+                if not starts or starts[-1] != tail:
+                    starts.append(tail)
+            self.coverage["tail_rows_without_window"] += 0 if cover_tail else n-(starts[-1]+window_length if starts else 0)
+            # Frontend validity is checked now; the Dataset still never writes.
+            feature_views = [(v, self._load_features(record, v)[1]) for v in views]
+            supervision = (np.asarray(record["motion"]["valid"],bool) |
+                           np.asarray(record["pressure"]["foot_valid"],bool).any(axis=1))
+            for start in starts:
+                self.coverage["candidate_windows"] += 1
+                end = min(start+window_length, n)
+                active = [v["camera_id"] for v,valid in feature_views if valid[start:end].any()]
+                has_supervision = any(np.any(valid[start:end] & supervision[start:end]) for v,valid in feature_views)
+                if not active:
+                    self.coverage["no_valid_rgb_windows"] += 1
+                elif not has_supervision:
+                    self.coverage["zero_supervision_windows"] += 1
+                if active and (has_supervision or not require_supervision):
+                    self.windows.append((ri,start,end,tuple(active)))
+                    self.coverage["kept_windows"] += 1
+
+    def _load_features(self, record: dict, view: dict) -> tuple[np.ndarray, np.ndarray]:
+        from anysole.data.workspace_adapter import semantic_hash, sha256_file
+        key = f"{record['recording_id']}/cam{view['camera_id']}"
+        if key not in self._features:
+            entry = self.cache_index["entries"][key]
+            path = self.cache_root / entry["path"]
+            provenance = entry["provenance"]
+            expected = {"recording_id":record["recording_id"],"camera_id":view["camera_id"],
+                        "method":record["method"],"source_index_sha256":semantic_hash(view["sources"])}
+            if any(provenance.get(k) != v for k,v in expected.items()) or sha256_file(path) != entry["sha256"]:
+                raise ValueError(f"visual source/cache provenance mismatch: {key}")
+            obj = torch.load(path, map_location="cpu", weights_only=True)
+            if isinstance(obj,dict) and (obj["features"].dtype!=torch.float32 or obj["source_valid"].dtype!=torch.bool):
+                raise ValueError(f"visual cache tensor dtype mismatch: {key}")
+            values = obj["features"].numpy() if isinstance(obj,dict) else obj.numpy()
+            source_valid = obj["source_valid"].numpy().astype(bool) if isinstance(obj,dict) else np.ones(len(values),bool)
+            if values.shape != (len(view["sources"]),2051) or source_valid.shape != (len(values),):
+                raise ValueError(f"visual cache/source row shape mismatch: {key}")
+            if source_valid.any() and (not np.isfinite(values[source_valid]).all() or not np.any(values[source_valid])):
+                raise ValueError(f"nonfinite or all-zero visual cache: {key}")
+            rows = np.asarray(view["source_row"],np.int64)
+            valid = np.asarray(view["view_valid"],bool) & (rows >= 0)
+            valid[rows >= 0] &= source_valid[rows[rows >= 0]]
+            self._features[key] = values.astype(np.float32),valid
+        return self._features[key]
+
+    def __len__(self):
+        return len(self.windows)
+
+    def sample_key(self, index: int) -> str:
+        ri,start,end,cameras = self.windows[index]
+        return f"{self.records[ri]['recording_id']}:{start}:{end}"
+
+    def __getitem__(self, index: int) -> dict:
+        from anysole.data.workspace_adapter import load_grouped_labels
+        ri,start,end,cameras = self.windows[index]
+        record = self.records[ri]
+        if ri not in self._labels:
+            self._labels[ri] = load_grouped_labels(record,self.dataset_root,self.smpl_model_path)
+        labels = self._labels[ri]
+        t,c = end-start,len(cameras)
+        views = [next(v for v in record["views"] if v["camera_id"]==cam) for cam in cameras]
+        features,valid,edges = [],[],[]
+        source_fields = {k:[] for k in ("source_frame_id","source_time_s","source_feature_row","reuse","time_residual_ms")}
+        for view in views:
+            array, vv = self._load_features(record,view)
+            rows = np.asarray(view["source_row"][start:end],np.int64)
+            keep = vv[start:end]
+            value = np.zeros((t,2051),np.float32)
+            value[keep] = array[rows[keep]]
+            features.append(value)
+            valid.append(keep)
+            edges.append(np.asarray(view["view_edges"][start:max(start,end-1)],bool) & keep[:-1] & keep[1:])
+            for key in source_fields:
+                src = "source_row" if key=="source_feature_row" else key
+                source_fields[key].append(np.asarray(view[src][start:end]))
+        def tensor(value):
+            return torch.from_numpy(np.ascontiguousarray(value))
+        item_labels = {key:tensor(value[start:end]) if key in {"pose6d","pressure","root","velocity","kp_gt"}
+                       else tensor(value) for key,value in labels.items()}
+        mv = np.asarray(record["motion"]["valid"][start:end],bool)
+        motion_edges = np.asarray(record["motion_edges"][start:max(start,end-1)],bool)
+        velocity_valid = np.r_[False,np.asarray(record["motion_edges"],bool)][start:end]
+        times = np.asarray(record["target_time_s"][start:end],np.float64)
+        return {"visual":{"V_feat":tensor(np.stack(features)),"view_valid":tensor(np.stack(valid)),
+                           "view_edges":tensor(np.stack(edges)),"target_time_s":tensor(times)},
+                "labels":item_labels,
+                "masks":{"motion_valid":tensor(mv),
+                         "pressure_valid":tensor(np.repeat(np.asarray(record["pressure"]["foot_valid"][start:end],bool),48,axis=1)),
+                         "velocity_valid":tensor(velocity_valid),"motion_edges":tensor(motion_edges),
+                         "pressure_edges":tensor(np.repeat(np.asarray(record["pressure_foot_edges"][start:max(start,end-1)],bool),48,axis=1))},
+                "meta":{"target_frame_id":tensor(np.asarray(record["target_frame_id"][start:end],np.int64)),
+                        **{key:tensor(np.stack(vals)) for key,vals in source_fields.items()},
+                        "padding":torch.zeros((c,t),dtype=torch.bool),"camera_id":torch.tensor(cameras,dtype=torch.long),
+                        **{key:record[key] for key in ("recording_id","subject","action","date","split_roles")},
+                        "sample_key":self.sample_key(index),"window_length":self.window_length,
+                        "source_hashes":{k:record[k]["sha256"] for k in ("pressure","motion","calibration")}}}
+
+
+def grouped_collate(items: list[dict]) -> dict:
+    """Pad C/T without compressing time; labels remain common across views."""
+    if not items:
+        raise ValueError("cannot collate an empty grouped batch")
+    max_c = max(x["visual"]["V_feat"].shape[0] for x in items)
+    max_t = max(max(x["visual"]["V_feat"].shape[1] for x in items),
+                max(x["meta"].get("window_length",TW) for x in items))
+    result = {name:{} for name in ("visual","labels","masks","meta")}
+    view_keys={"V_feat","view_valid","view_edges","source_frame_id","source_time_s","source_feature_row","reuse","padding","time_residual_ms"}
+    edge_keys={"view_edges","motion_edges","pressure_edges"}
+    static_labels={"offsets","parents","betas"}
+    for section in result:
+        for key in items[0][section]:
+            values=[x[section][key] for x in items]
+            if not torch.is_tensor(values[0]):
+                result[section][key]=values
+                continue
+            padded=[]
+            for value in values:
+                if key in static_labels and section=="labels":
+                    padded.append(value)
+                    continue
+                shape=list(value.shape)
+                if key=="camera_id":
+                    shape[0]=max_c
+                elif key in view_keys:
+                    shape[0],shape[1]=max_c,max_t-1 if key in edge_keys else max_t
+                else:
+                    shape[0]=max_t-1 if key in edge_keys else max_t
+                fill=True if key=="padding" else (-1 if key in {"source_frame_id","source_feature_row","camera_id","target_frame_id"} else 0)
+                dest=torch.full(shape,fill,dtype=value.dtype)
+                dest[tuple(slice(0,s) for s in value.shape)]=value
+                if key=="target_time_s" and len(value)<max_t and len(value):
+                    dest[len(value):]=value[-1]+torch.arange(1,max_t-len(value)+1,dtype=value.dtype)/40
+                padded.append(dest)
+            result[section][key]=torch.stack(padded)
+    return result
