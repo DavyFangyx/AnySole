@@ -57,7 +57,26 @@ gait/
 - `results/`：checkpoint、最终预测、最终评测结果；展示端只从这里消费。
 - `results_display/`：展示与跨模型比较，只消费 `results/` 的正式结果。
 
-## 指标实现落点（单一实现）
+## 方案 A 的正式 SMPL 评估
+
+方案 A（`visual` / `view_consistency.v1`）的正式动作评分统一使用工作区
+[`2_Code/smpl_evaluation/anysole_a_native.py`](../2_Code/smpl_evaluation/anysole_a_native.py)，
+直接调用 `2_Code/smpl_evaluation` 的指标、GT 插值和 SMPL 几何实现。
+它对15个已冻结正式 run 在三基线相同的完整原生 RGB 帧上重新推理：
+T20/stride10 遍历整段、融合窗口预测后连续积分，计算 W100、Root ATE 和
+Foot sliding 等规范指标，不重新训练或选择 checkpoint。Root ATE 明确计入
+固定 native-world 初始根位置 p0=0 的误差，不借 GT 初始化。
+命令、支持和完整新表见
+[方案A组间性能与三基线对比](../3_Result/AnySole/方案A_组间性能与三基线对比.md)。
+`anysole_a.py` 保留为旧40Hz保存输出的历史重评分入口。
+
+`anysole/utils/eval_protocol.py` 的 `visual-v1` 动作函数及旧训练 selector
+保留历史复现用途；其 root0/旧时钟/分段定义不能作为本次规范成绩。
+压力没有对应的 SMPL 标准；原40Hz压力分数与相关性数值修复单独记录，
+不能视作本次原生 RGB 时序的压力评分。
+下面的旧评估入口说明不覆盖方案 A 的这一权威评估约定。
+
+## 指标实现落点（旧协议入口）
 
 同名指标只有一个实现，各端只 import：
 

@@ -1306,6 +1306,8 @@ def _segment_indices(valid, edges):
 def _time_correlation(first,second,times):
     if len(times) < 3:
         return None
+    first=np.asarray(first,dtype=np.float64)
+    second=np.asarray(second,dtype=np.float64)
     # Time-weighted Pearson, using trapezoidal quadrature on actual seconds.
     dt=np.diff(times)
     weight=np.r_[dt[0]/2,(dt[:-1]+dt[1:])/2,dt[-1]/2]
@@ -1335,9 +1337,9 @@ def visual_pressure_metrics(item, frozen_stats=None):
     for i in np.flatnonzero(valid):
         keep=pm[i]
         a,b=pred[i,keep],truth[i,keep]
-        if len(a)>1 and b.std()>1e-12:
+        if len(a)>1 and b.std(dtype=np.float64)>1e-12:
             spatial_ids.append(int(ids[i]))
-            if a.std()>1e-12:
+            if a.std(dtype=np.float64)>1e-12:
                 spatial.append(np.corrcoef(a,b)[0,1])
                 spatial_scored.append(int(ids[i]))
     result['pressure_spatial_corr']=_metric(np.mean(spatial) if spatial else None,len(spatial),'correlation',
@@ -1356,7 +1358,7 @@ def visual_pressure_metrics(item, frozen_stats=None):
         foot_edges=pressure_edges[:,foot*48:(foot+1)*48].all(-1)
         for ix in _segment_indices(keep,item['edges'] & foot_edges):
             corr=_time_correlation(foot_pred[ix,foot],foot_gt[ix,foot],item['time_s'][ix])
-            if len(ix)>=3 and foot_gt[ix,foot].std()>1e-12:
+            if len(ix)>=3 and foot_gt[ix,foot].std(dtype=np.float64)>1e-12:
                 temporal_support.extend(ids[ix].astype(int).tolist())
             if corr is not None:
                 correlations.append((corr,len(ix)))

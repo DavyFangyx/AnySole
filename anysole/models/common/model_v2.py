@@ -208,8 +208,11 @@ class AnySoleModelV2(nn.Module):
         if not bool(torch.isfinite(V_feat[frame_valid]).all()):
             raise ValueError("valid visual features contain NaN or Inf")
         if (not bool(torch.isfinite(timestamps).all())
-                or not bool((timestamps[:, 1:] > timestamps[:, :-1]).all())):
-            raise ValueError("target timestamps must be finite and strictly increasing")
+                or not bool((timestamps[:, 1:] >= timestamps[:, :-1]).all())):
+            # Native camera files can share a recorded timestamp. Their RGB
+            # observations remain distinct; time PE is defined at equal times.
+            # Sequence evaluators integrate velocity once after window fusion.
+            raise ValueError("target timestamps must be finite and non-decreasing")
 
         time_pe = None
         if self.pressure_head == "time_pe":

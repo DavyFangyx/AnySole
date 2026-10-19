@@ -177,8 +177,20 @@ def test_all_invalid_empty_and_bad_inputs_are_rejected():
     v[0, 0, 0] = 0
     with pytest.raises(ValueError, match="bool"):
         m.forward_visual(v, valid.float(), times)
-    with pytest.raises(ValueError, match="strictly increasing"):
+    with pytest.raises(ValueError, match="non-decreasing"):
         m.forward_visual(v, valid, times.flip(1))
+
+
+def test_native_duplicate_timestamps_preserve_all_rgb_observations():
+    m = small_model()
+    v, valid, times = inputs()
+    times = times.clone()
+    times[:, 2] = times[:, 1]
+    out = m.forward_visual(v, valid, times)
+    for key in ("x0_hat", "pressure_hat", "v_hat", "trans_hat"):
+        assert out[key].shape[:2] == valid.shape
+        assert torch.isfinite(out[key]).all()
+    assert torch.equal(out["frame_valid"], valid)
 
 
 def test_relative_time_pe_ignores_absolute_clock_and_preserves_gaps():

@@ -117,6 +117,35 @@ def test_pressure_frozen_contact_geometry_and_low_load():
     assert p.visual_pressure_metrics(item,policy)['left_contact_f1']['value'] is None
 
 
+def test_constant_float32_gt_does_not_claim_missing_temporal_prediction():
+    item=p.aggregate_visual_windows([window(np.arange(23))])[('r',1)]
+    item['gt_pressure']=np.full((23,96),np.float32(.1),dtype=np.float32)
+    item['pressure']=np.linspace(.02,.4,23)[:,None]*np.ones((1,96))
+    item['gt_pressure'][19:]=np.arange(1,5,dtype=np.float32)[:,None]*.02
+    item['edges'][18]=False
+    # Identical float32 readings can have a nonzero float32 std due to
+    # mean-rounding. They carry no defined temporal correlation target.
+    constant=item['gt_pressure'][:19].reshape(-1,2,48).sum(-1)[:,0]
+    assert constant.std()>1e-12 and constant.std(dtype=np.float64)==0
+    metrics=p.visual_pressure_metrics(item)
+    for foot in ('left','right'):
+        value=metrics[f'{foot}_temporal_corr']
+        assert value['eligible_count']==4
+        assert value['count']==4
+        assert value['missing_prediction_count']==0
+        assert value['value']==pytest.approx(1.)
+
+
+def test_constant_prediction_on_dynamic_gt_still_counts_as_missing():
+    item=p.aggregate_visual_windows([window()])[('r',1)]
+    item['gt_pressure']=np.arange(1,6,dtype=np.float32)[:,None]*np.ones((1,96),np.float32)*.01
+    item['pressure']=np.full((5,96),.1)
+    value=p.visual_pressure_metrics(item)['right_temporal_corr']
+    assert value['value'] is None
+    assert value['eligible_count']==5
+    assert value['missing_prediction_count']==5
+
+
 def test_beta_zero_selector_and_full_rows_share_formulas_and_coverage():
     w=window();offsets=torch.arange(72).reshape(24,3).float()/200;offsets[0]=0
     pose=torch.tensor(w['gt_pose6d'],dtype=torch.float32)
