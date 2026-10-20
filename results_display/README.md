@@ -47,10 +47,13 @@ C/M 系列分析入口为语义化脚本（`complement.py`、`dropout_ablation.p
 | --- | --- | --- |
 | D_Test1 原始数据可视化 | GT/输入渲染（BVH/SMPL） | `d_test1_data_viz.py` |
 | D_Test2 数据集自检 | 数据集自检 | `d_test2_dataset_check.py` |
-| D_Test3 接触检测 | 接触标签判定 | `AnysoleWorkspace/tool/contact_labels.py`；`d_test3_contact.py` |
+| D_Test3 接触检测 | 接触标签判定（含 `smpl_contact` = SMPL 网格足底 <2cm） | `AnysoleWorkspace/tool/contact_labels.py`；`d_test3_contact.py` |
 | D_Test4 基线触觉审计 | 四基线触觉格式审计（审计只读） | `d_test4_baseline_tactile.py`（数据源 = `build_shared.py` 产物） |
 | D_Test5 鞋垫偏移补偿（**待适配**） | 鞋垫漂移补偿器测试 | `d_test5_insole_drift.py` |
 | D_Test6 地面估计与坐标系审计 | 行走地面 ROI 审计（`AnysoleWorkspace/tool/.../floor_audit.py`） + 生产 floor 查看 | `floor_audit.py`；`d_test6_floor_view.py` |
+| D_Test7 遮挡管线可视化 | cam3 bbox 底部遮挡（f∈{10,20,30,50}%）：原始帧 + HRNet 输入 crop，与训练提取逐位相同 | `d_test7_occlusion.py` |
+| D_Test8 GT 足底热图/CoP × 触觉热图/CoP | 2×2 同帧：GT 足底热图 / 触觉热图 / GT CoP / 触觉 CoP（同一 `cop_from_grid`） | `d_test8_smpl_gt_cop.py` |
+| D_Test9 BVH × SMPL 脚部对照 | 2×4 同帧：双源全身/脚侧视/接触网格/同框对照/高度时间线×接触标签（关节定义与趾间隙审计） | `d_test9_bvh_smpl_compare.py` |
 | R_Test1 模型可视化 | 姿态动画（选中 + 生成什么统一入口） | `r_test1_visualize.py`（缺省单独生成；`--compare` 同 mode 1×N 横排：输入一次 + 各模型预测 + 每协议一栏 GT） |
 | R_Test2 参数对照 | 跨模型/参数对照评估 | `r_test2_compare.py`（`--by-mode` 模式分块；原生协议 + 能力门控） |
 | R_Test3 轨迹可视化 | 轨迹对比动画 | `r_test3_traj.py`（`--compare` 并排轨迹；配对协议 GT） |
@@ -61,6 +64,7 @@ C/M 系列分析入口为语义化脚本（`complement.py`、`dropout_ablation.p
 | M1 | V 分支的 T 相关能力 | `v2t_upper.py`（→ `--m1`） |
 | M2 | T 分支的 V 相关能力 | `trust.py`（→ `--m2`） |
 | M3 | 连续缺失鲁棒性 | `rho_grid_analysis.py`（→ `utils/rho_grid_display.py`） |
+| Test6_VdegradTest | V 削弱难度轴（两套件 × 8 配置，Δ=VT−V 面板 + decile 分层） | `vdegrad.py` |
 
 任务书 = `anysole/model_fix_note/missing_rate_experiment_plan.md`（实验编号 C1–M3）。
 
@@ -80,7 +84,10 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   │   ├── d_test3_contact.py          # D_Test3：接触标签动画 + 阈值分析
 │   │   ├── d_test4_baseline_tactile.py # D_Test4：四基线触觉格式审计（审计只读，读 build_shared 产物）
 │   │   ├── d_test5_insole_drift.py     # D_Test5：鞋垫漂移补偿器测试（待适配）
-│   │   └── d_test6_floor_view.py       # D_Test6：生产 floor 查看（floor 系点云/RGB+ROI/高度直方图；审计工具在 AnysoleWorkspace）
+│   │   ├── d_test6_floor_view.py       # D_Test6：生产 floor 查看（floor 系点云/RGB+ROI/高度直方图；审计工具在 AnysoleWorkspace）
+│   │   ├── d_test7_occlusion.py        # D_Test7：遮挡管线可视化（原始帧 + HRNet crop；occ 缓存作闸门）
+│   │   ├── d_test8_smpl_gt_cop.py      # D_Test8：GT 足底热图/CoP × 触觉热图/CoP（2×2 同帧）
+│   │   └── d_test9_bvh_smpl_compare.py # D_Test9：BVH × SMPL 脚部对照（2×4 + 高度时间线）
 │   ├── ── 结果检验（R_TestN）──
 │   │   ├── r_test1_visualize.py         # R_Test1：姿态动画（选中 + 生成什么；--compare 同 mode 横排）
 │   │   ├── r_test2_compare.py          # R_Test2：跨模型/参数对照评估（只出指标）
@@ -96,7 +103,10 @@ results_display/                        # 纯产物目录（实验代码在 scri
 │   ├── D3Test_contact/                 # D_Test3 输出（按方案分目录）
 │   ├── D4Test_baseline_tactile/        # D_Test4 输出（每 session 一个 <session>_adapted_tactile.gif/.mp4）
 │   ├── D5Test_insole_drift/            # D_Test5 输出（补偿前后对比动画 + theta_summary.csv）
-│   └── D6Test_floor/                   # D_Test6 输出（<date>_floor_audit.png + floor_candidates.csv + <date>_<subject>_floor_view.png）
+│   ├── D6Test_floor/                   # D_Test6 输出（<date>_floor_audit.png + floor_candidates.csv + <date>_<subject>_floor_view.png）
+│   ├── D7Test_occlusion/               # D_Test7 输出（<sid>_occ<FFF>.gif/.mp4）
+│   ├── D8Test_smpl_gt_cop/             # D_Test8 输出（<sid>_smpl_gt_cop.gif/.mp4）
+│   └── D9Test_bvh_smpl_compare/        # D_Test9 输出（<sid>_bvh_smpl.gif/.mp4）
 ├── ResultTest/                         # R 组：结果检验产物（R_TestN）
 │   ├── R1Test_visualize/               # R_Test1 输出（AnySole/MMVP/MotionPRO/Step2Motion 分栏 + compare/<mode> 并排）
 │   ├── R2Test_compare/                 # R_Test2 输出（只出指标，不做动画 + by_mode/ 模式分块）
@@ -110,6 +120,9 @@ results_display/                        # 纯产物目录（实验代码在 scri
     ├── M1_v2t/                         # M1：从 F_V 读出 T 负责分量（branch_* 产物）
     ├── M2_t2v/                         # M2：从 F_T 读出 V 负责分量（branch_* 产物）
     └── M3_rho_grid/                    # M3：ρ 网格连续缺失鲁棒性（heatmap/slices/criteria）
+└── Test6_VdegradTest/                  # 实验六：V 削弱难度轴（V削弱实验报告.md 两套件）
+    ├── V3_3B/                          # 融合主线套件（delta_table / physical_delta / win_rates / delta_panels）
+    └── V3_3D/                          # 干净通道套件（+ decile_table / decile_panels）
 ```
 
 ## 时间对齐约定（动捕 ↔ 触觉/视频）
@@ -244,6 +257,7 @@ F6 三件套（`motion_f6`/`pressure_f6`/`f6_soft`，2026-09-18 定稿，设计�
 | `motion_f6` | F6 运动学状态机：接触→离地 v>0.6m/s 连续 2 帧（压力永不触发离地）；离地→接触 (v<0.3 且 \|az\|<3 连续 2 帧) 或 (压力承重 且 v<0.6)；h≥20cm 且无压力时拒绝接触 |
 | `pressure_f6` | F6 承重：逐格基线 = 离地帧值 90 分位（自举自 motion_f6），corrected 和 + 迟滞阈值（80 或 0.2×stance 中位，1.5× 滞回） |
 | `f6_soft（目前作为GT）` | F6 软标签：中间按 pressure_f6 一致度取 4 档软值 {0.95 触地承重 / 0.70 触地未承重 / 0.05 离地 / 0.30 离地残余压}，导出二值化 == motion_f6（与其他方案统一 {0, 1}） |
+| `smpl_contact` | SMPL 网格足底：足部最低顶点离地 <2cm 判接触（smplx 正演 + estimate_floor_y 地面；2026-10-15 新增） |
 
 ```bash
 conda activate touch_gait
@@ -251,8 +265,9 @@ conda activate touch_gait
 python AnysoleWorkspace/tool/contact_labels.py
 # 按 split 三组限定范围（train/val/test，--session 显式列表优先）
 python AnysoleWorkspace/tool/contact_labels.py --split test
+
 # 2) 渲染动画（默认全部方案 × test split；标签缺失时自动补齐）
-python results_display/script/d_test3_contact.py --methods f6_soft
+python results_display/script/d_test3_contact.py
 ```
 
 产出（`DataTest/D3Test_contact/`）：每个方案一个子目录（`<method>/`）：
@@ -333,6 +348,81 @@ python results_display/script/d_test6_floor_view.py --date 20260808 --subject S1
 产出（`DataTest/D6Test_floor/`）：`<date>_floor_audit.png`（四联审计图）、
 `floor_candidates.csv`（36 候选残差/棋盘格偏移/法向）、`<date>_<subject>_floor_view.png`
 （生产地面查看图：floor 系点云 / 侧视 / RGB+ROI / 高度直方图）。
+
+## D_Test7 遮挡管线可视化（四相机扩展遮挡组）
+
+`d_test7_occlusion.py` 可视化 cam3 bbox 底部遮挡实验的像素级管线：读原始帧 +
+bbox 前端，用与训练提取完全相同的 `occlude_lower_strip` + `process_image` 复算
+HRNet 输入 crop（256×192），并排渲染 原始帧 | 遮挡后 crop（左面板叠加 bbox 绿框 /
+crop 区域黄框 / 切割线红线，副标题带 bbox_info 数值）。occ 缓存存在性作 session
+闸门（无缓存即跳过，只可视化参与遮挡实验的 session）。
+
+档位语义：`--occ 10`=足部、`20`=足+踝、`30`=到膝、`50`=下肢全失（默认 50）。
+
+```bash
+conda activate touch_gait
+python results_display/script/d_test7_occlusion.py --occ 50 --session S5091
+python results_display/script/d_test7_occlusion.py --occ 50 --split test
+```
+
+产出（`DataTest/D7Test_occlusion/`）：`<sid>_occ<FFF>.gif/.mp4`。
+
+## D_Test8 GT 足底热图/CoP × 触觉热图/CoP
+
+`d_test8_smpl_gt_cop.py` 2×2 同帧动画（facts 40Hz 帧轴，mocap 经 mocap_time_s
+对齐）：左上 SMPL GT 足底热图（smplx 正演 + 离地<3cm 顶点计数，4×12 与触觉
+网格同形）；右上 触觉热图（默认 shared facts raw108 0-1023，D_Test4 同口径）；
+左下 SMPL GT 的 CoP、右下 触觉 CoP——两 CoP 用同一 `cop_from_grid`（GT 热图质心 /
+触觉压力质心），叠加 40 渲染帧轨迹与准星，和值=0 帧不画点。
+
+GT 侧口径（2026-10-20 GT足底×触觉冲突审计修复，只影响展示层）：地面 =
+archive y=0（g0，SMPL 足部地面审计 2026-10-19 裁定；旧 estimate_floor_y 关节
+p5 比物理地面高致恒接触）；接触阈值 3cm（鞋底厚度 1.4–2.0cm 稳定裕度）；
+随足轴在 ‖d_xz‖<0.05m（足俯仰>50°，提踵/上楼梯）时沿用上一有效轴。标题行
+附 action 编号（session_manifest.csv，无记录不显示；action 11 = 上楼梯）。
+`--tactile-input` 切触觉源：raw108（默认，shared facts）| denoised108（v1
+交接包）| denoised108_v2（v2 无平滑）| denoised108_v3（v3 落地后可用），
+与训练侧 `anysole/data/dataset.py` 同语义；fake/valid 标志仍取 shared facts。
+
+已知局限（不建模）：上楼梯（action 11）session 台阶面高于 y=0，单平面 GT 对
+台阶支撑期必然显示"悬空"——台阶支撑期 GT 热图可为空而触觉面板有载荷，正常。
+
+```bash
+conda activate touch_gait
+python results_display/script/d_test8_smpl_gt_cop.py --session S5091
+python results_display/script/d_test8_smpl_gt_cop.py --split test --stride 2
+python results_display/script/d_test8_smpl_gt_cop.py --session S5091 --tactile-input denoised108_v2
+```
+
+产出（`DataTest/D8Test_smpl_gt_cop/`）：`<sid>_smpl_gt_cop.gif/.mp4`。
+
+## D_Test9 BVH × SMPL 脚部对照
+
+`d_test9_bvh_smpl_compare.py` 2×4 同帧动画，审计双源两处差异（关节定义高度偏移
+~6cm / 根轨迹平移）：
+
+```text
+上排 SMPL 左足侧视 | BVH 左足侧视 | SMPL 右足侧视 | BVH 右足侧视（分足分源）
+下排 BVH×SMPL 同框对照（hip 对齐） | SMPL 足底接触网格 | 高度时间线（跨2列）
+```
+
+- 上排四个侧视面板同轴同刻度：地面线 + 2cm（smpl_contact）/5cm（bvh_h）阈值线；
+  每足三点对等——踝（BVH *Foot / SMPL ankle）、趾根（BVH *ToeBase / SMPL foot）、
+  趾尖（BVH EndSite / SMPL 网格最靠趾端顶点）；
+- 高度时间线（跨 2 列）：摆动足 max(L,R) 的 BVH 踝/足最低点、SMPL 踝/足底
+  最低点四条信号 + 阈值线 + 当前帧游标 + 底部 bvh_h/smpl_contact 双方法
+  接触标签带（红=接触 绿=离地；标签读 session 目录 contact_*.npy，缺失留空）；
+- `--frame 316,366`：指定帧号静态渲染 PNG（<sid>_bvh_smpl_f<N>.png），
+  逐帧细看用（优先于 --stride）。
+
+```bash
+conda activate touch_gait
+python results_display/script/d_test9_bvh_smpl_compare.py --session S5091 --stride 1
+# --stride 2 生成更简略
+python results_display/script/d_test9_bvh_smpl_compare.py --session S11032,S11053,S11073,S11011,S10103,S11061,S12011 --stride 1
+```
+
+产出（`DataTest/D9Test_bvh_smpl_compare/`）：`<sid>_bvh_smpl.gif/.mp4`。
 
 # 第二部分：结果检验（R_TestN）
 
@@ -555,6 +645,28 @@ python results_display/script/trust.py --split val
 
 输出：`results_display/{Test1_ComplementTest,Test2_MissingTest}/<代号>/V3_3B/`（代号 =
 C1_specialist / C2_fusion / C3_missing_branch / M1_v2t / M2_t2v）。
+
+## V 削弱难度轴（Test6_VdegradTest）
+
+数据生产由 `configs/z_gen/vdegrad.py` 一键生成（`singlemodal_eval_cams` /
+`singlemodal_eval_occl` / `position_test_vdegrad` 三实验表），分析入口：
+
+```bash
+conda activate touch_gait
+python results_display/script/vdegrad.py                # 两套件全部（缺省）
+python results_display/script/vdegrad.py --suite V3_3B  # 融合主线套件
+```
+
+口径（V削弱实验报告.md §1）：Δ = VT − V（负 = 加触觉更优）；V3_3B 套件的
+V/VT 列 = 主线模型 V2M/VT2M 条件（cam3 基准行的全局 MPJPE/地面穿透不在主线
+test.json，CSV 留空、图中标 n/a）；V3_3D 套件同两条件 + 全配置 val decile 分层
+（oracle 上限 / VT 胜率 / d10·d1 Δ，与 `oracle_analysis.py` 同一计算）。胜率 =
+协议指标行中 VT 优于 V 的占比（平局计半，行数记于 CSV）。
+
+产出（`Test6_VdegradTest/{V3_3B,V3_3D}/`）：`delta_table.csv`（PA/踝足 PA
+V·VT·Δ）、`physical_delta.csv`（全局 MPJPE/地面穿透/根轨迹 ATE Δ）、
+`win_rates.csv`、`delta_panels.png`（按符号着色的 Δ 条形图）、
+`analysis_summary.json`；V3_3D 另有 `decile_table.csv` + `decile_panels.png`。
 
 ## 附录：训练侧 dropout 开关（两个独立旋钮）
 

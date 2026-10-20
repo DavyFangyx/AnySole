@@ -8,9 +8,9 @@ file filtered to whole-body scalars, plus a ``V2T`` group in fourth position
 whenever V2M carries tactile rows).  The F-series protocol numbers are what
 every step F0..F9 reports:
 
-- 局部姿态: MPJPE / PA-MPJPE per 9 native SMPL-24 parts
-  (root/torso/headneck/l_arm/r_arm/l_leg/r_leg/l_foot/r_foot), plus upper/lower,
-  ankle-feet and hands aggregates.  PA-MPJPE uses one per-frame
+- 局部姿态: MPJPE / PA-MPJPE over the JOINT_HIERARCHY anatomical levels
+  (upper/lower partitions, pelvis/spine/head and six limb segments, plus the
+  anklefoot/hands subset views).  PA-MPJPE uses one per-frame
   similarity Procrustes alignment over all 24 joints (the eval.py 口径) and
   reads the part errors from the aligned points.
 - 全局: metrics.py 的 100-frame W-MPJPE/WA-MPJPE、root ATE/RTE
@@ -62,6 +62,12 @@ from anysole.data.smpl_io import (
     smpl_vertices_from_archive_params,
 )
 from anysole.eval import _sample_x_t_init, _session_window_groups, _tactile_corr
+from anysole.utils.constraints import apply_v3e_constraints
+from anysole.utils.constraints_g import apply_v3g_constraints
+from anysole.utils.constraints_h import apply_v3h
+from anysole.models.common.model_v3h import apply_foot_residual
+from anysole.models.common.model_v3f import sample_v3f
+from anysole.models.common.model_v5_1 import v5_1_z_src
 from anysole.utils.geometry import f2_to_world, fk_pose6d, rot6d_to_rotmat
 from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.utils.metrics import (
@@ -83,17 +89,16 @@ from anysole.train import condition_inputs, move_batch
 from anysole.types import (
     ANKLE_FOOT_JOINTS,
     CONFIG_MODE_NAMES,
+    CONFIG_T,
     CONFIG_V,
     CONFIG_VT,
     ELBOW_ANGLE_TRIPLES,
     FPS,
     FOOT_JOINTS,
-    HAND_JOINTS,
+    JOINT_HIERARCHY,
     KNEE_ANGLE_TRIPLES,
-    LOWER_JOINTS,
+    KNEE_ANKLE_FOOT_JOINTS,
     N_JOINTS,
-    PART_JOINTS,
-    PART_NAMES,
     UPPER_JOINTS,
 )
 
@@ -337,6 +342,20 @@ class _Accum:
         return {name: self.sums[name] / max(self.counts[name], 1e-12) for name in self.sums}
 
 
+def _apply_pos_corr(pred_kp: torch.Tensor, seq: dict) -> torch.Tensor:
+    """V3_3D soft skeleton: replace the six lower-limb joint positions with
+    the position head's corrected ones (base FK + pelvis-relative dpos,
+    world axes — the probe's target convention).  No-op without the head."""
+    corr = seq.get("pos_corr")
+    if corr is None:
+        return pred_kp
+    pred_kp = pred_kp.clone()
+    pred_kp[..., KNEE_ANKLE_FOOT_JOINTS, :] = (
+        pred_kp[..., KNEE_ANKLE_FOOT_JOINTS, :] + corr.reshape(-1, len(KNEE_ANKLE_FOOT_JOINTS), 3)
+    )
+    return pred_kp
+
+
 def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
                      accum: _Accum, contact: Dict[str, int]) -> None:
     """All protocol metrics of one session's full-sequence prediction."""
@@ -345,6 +364,7 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     pred_kp = fk_pose6d(
         seq["pred_pose"][None], seq["pred_trans"][None], seq["offsets"], seq["parents"]
     )[0]
+    pred_kp = _apply_pos_corr(pred_kp, seq)
 
     # ---- canonical metrics.py definitions ----
     pred_np = pred_kp.detach().cpu().numpy()
@@ -404,23 +424,19 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     if foot_vert_count:
         accum.add_scalar("foot_sliding_vertex_mm", foot_vert_value, foot_vert_count)
 
-    # ---- retained AnySole part diagnostics ----
+    # ---- anatomical hierarchy diagnostics (JOINT_HIERARCHY single source) ----
     err = torch.linalg.vector_norm(pred_kp - kp_gt, dim=-1)  # (T, 24)
-    for pname, joints in zip(PART_NAMES, PART_JOINTS):
-        accum.add("MPJPE_part_%s" % pname, err[:, joints].mean(dim=-1), 1000.0)
-    accum.add("MPJPE_upper", err[:, UPPER_JOINTS].mean(dim=-1), 1000.0)
-    accum.add("MPJPE_lower", err[:, LOWER_JOINTS].mean(dim=-1), 1000.0)
-    accum.add("MPJPE_anklefoot", err[:, ANKLE_FOOT_JOINTS].mean(dim=-1), 1000.0)
-    accum.add("MPJPE_hands", err[:, HAND_JOINTS].mean(dim=-1), 1000.0)
+    for name, joints in JOINT_HIERARCHY.items():
+        if name == "overall":
+            continue
+        accum.add("MPJPE_%s" % name, err[:, joints].mean(dim=-1), 1000.0)
 
     aligned = _pa_align(pred_kp, kp_gt)
     pa_err = torch.linalg.vector_norm(aligned - kp_gt, dim=-1)
-    for pname, joints in zip(PART_NAMES, PART_JOINTS):
-        accum.add("PA-MPJPE_part_%s" % pname, pa_err[:, joints].mean(dim=-1), 1000.0)
-    accum.add("PA-MPJPE_upper", pa_err[:, UPPER_JOINTS].mean(dim=-1), 1000.0)
-    accum.add("PA-MPJPE_lower", pa_err[:, LOWER_JOINTS].mean(dim=-1), 1000.0)
-    accum.add("PA-MPJPE_anklefoot", pa_err[:, ANKLE_FOOT_JOINTS].mean(dim=-1), 1000.0)
-    accum.add("PA-MPJPE_hands", pa_err[:, HAND_JOINTS].mean(dim=-1), 1000.0)
+    for name, joints in JOINT_HIERARCHY.items():
+        if name == "overall":
+            continue
+        accum.add("PA-MPJPE_%s" % name, pa_err[:, joints].mean(dim=-1), 1000.0)
 
     # ---- root orientation (the only implementation lives in metrics.py;
     # keys are the formal root_orientation_* names) ----
@@ -453,9 +469,14 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
         accum.add("seam_jump_gt_mm", torch.linalg.vector_norm(kp_gt[seams] - kp_gt[seams - 1], dim=-1), 1000.0)
 
     # ---- contact ----
-    pred_contact = soft_contact_from_keypoints(
-        pred_kp[None], seq["floor_y"].reshape(1)
-    )[0] > 0.5  # (T, 2)
+    if seq.get("contact_pred") is not None:
+        # V3_3E: the T contact head's own prediction (the constraint layer's
+        # input), not the kinematic fallback.
+        pred_contact = seq["contact_pred"] > 0.5
+    else:
+        pred_contact = soft_contact_from_keypoints(
+            pred_kp[None], seq["floor_y"].reshape(1)
+        )[0] > 0.5  # (T, 2)
     gt_contact = seq["contact_gt"] > 0.5
     contact["tp"] += int((pred_contact & gt_contact).sum().item())
     contact["fp"] += int((pred_contact & ~gt_contact).sum().item())
@@ -538,15 +559,15 @@ def _window_detail_rows(seq: dict, tw: int) -> dict:
     pred_kp = fk_pose6d(
         seq["pred_pose"][None], seq["pred_trans"][None], seq["offsets"], seq["parents"]
     )[0]
+    pred_kp = _apply_pos_corr(pred_kp, seq)
     pred_np = pred_kp.detach().cpu().numpy()
     gt_np = kp_gt.detach().cpu().numpy()
-    part_keys = ["PA-MPJPE_part_%s" % pname for pname in PART_NAMES]
-    region_keys = ["PA-MPJPE_upper", "PA-MPJPE_lower", "PA-MPJPE_anklefoot", "PA-MPJPE_hands"]
+    hierarchy_keys = ["PA-MPJPE_%s" % name for name in JOINT_HIERARCHY if name != "overall"]
     rows: dict = {
         "frame_starts": [],
         "n_frames": [],
         "metrics": {key: [] for key in
-                    ["pa_mpjpe_mm", "mpjpe_mm", "global_mpjpe_mm"] + part_keys + region_keys},
+                    ["pa_mpjpe_mm", "mpjpe_mm", "global_mpjpe_mm"] + hierarchy_keys},
     }
     for start in range(0, T, tw):
         end = min(start + tw, T)
@@ -560,13 +581,11 @@ def _window_detail_rows(seq: dict, tw: int) -> dict:
         rows["metrics"]["global_mpjpe_mm"].append(float(mean_point_error(p, g, scale=1000.0).mean()))
         pa_w = _pa_align(pred_kp[start:end], kp_gt[start:end])
         pa_err_w = torch.linalg.vector_norm(pa_w - kp_gt[start:end], dim=-1)
-        for pname, joints in zip(PART_NAMES, PART_JOINTS):
-            rows["metrics"]["PA-MPJPE_part_%s" % pname].append(
+        for name, joints in JOINT_HIERARCHY.items():
+            if name == "overall":
+                continue
+            rows["metrics"]["PA-MPJPE_%s" % name].append(
                 float(pa_err_w[:, joints].mean() * 1000.0))
-        rows["metrics"]["PA-MPJPE_upper"].append(float(pa_err_w[:, UPPER_JOINTS].mean() * 1000.0))
-        rows["metrics"]["PA-MPJPE_lower"].append(float(pa_err_w[:, LOWER_JOINTS].mean() * 1000.0))
-        rows["metrics"]["PA-MPJPE_anklefoot"].append(float(pa_err_w[:, ANKLE_FOOT_JOINTS].mean() * 1000.0))
-        rows["metrics"]["PA-MPJPE_hands"].append(float(pa_err_w[:, HAND_JOINTS].mean() * 1000.0))
     return rows
 
 
@@ -596,6 +615,8 @@ def _evaluate_config(
     degrade: Optional[str] = None, seed: int = 0,
     v2t_out_dir: Optional[Path] = None,
     dump_detail: bool = False,
+    z_src_override: Optional[str] = None,
+    null_t: bool = False,
 ) -> Tuple[Dict[str, float], dict, List[dict]]:
     """Full-session inference for one conditioning config, then all protocol
     metrics.  ``degrade`` in ("v", "t") adds the robustness span dropout.
@@ -609,6 +630,22 @@ def _evaluate_config(
     v_hmr_mode = str(getattr(model, "v_input", "hrnet")) == "hmr_gvhmr"
     # F2a: heading/tilt representation.
     f2_repr = bool(getattr(model, "f2_repr", False))
+    # V3_3E: the three conditions are three readouts of one forward.
+    v3e_mode = bool(getattr(model, "v3e", False))
+    # V3_3G: same protocol; the observation layer replaces E's constraints.
+    v3g_mode = bool(getattr(model, "v3g", False))
+    # V3_3H: same protocol; the residual channels replace E's constraints,
+    # and the T2M row is the null-V prior (V zeroed upstream) + channels.
+    v3h_mode = bool(getattr(model, "v3h", False))
+    # V3_3F: the three conditions are sampler switches on one prior.
+    v3f_mode = bool(getattr(model, "v3f", False))
+    # V5_1A: the three conditions are z-source readouts of one forward
+    # (z_src 开关 + T 流三条件恒定); 无推理侧约束层（无锚-几何组件）。
+    v5_1_mode = bool(getattr(model, "v5_1", False))
+    # V4_1A: 同一前向三种读出（config_id 被忽略，E/G 同款）; V2M = V
+    # 载体（修正不应用）、VT2M = V + pos_corr 软骨架（seq 层应用）、
+    # T2M = 先验 + pos_corr_prior。
+    v4_1_mode = bool(getattr(model, "v4_1", False))
     accum = _Accum()
     contact = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
     window_rows = {"session_ids": [], "frame_starts": [], "n_frames": [], "metrics": {}}
@@ -622,15 +659,44 @@ def _evaluate_config(
             bsz = batch["pose_gt"].shape[0]
             config_id = torch.full((bsz,), config_value, device=device, dtype=torch.long)
             v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+            if v3f_mode:
+                # T stays live under every condition (the contact head reads
+                # the real stream); condition_inputs already zeroed V for
+                # T2M — exactly the unconditional pass.
+                t_raw, t_phys = batch["T_raw"], batch["T_phys"]
+            if v5_1_mode or v4_1_mode:
+                # V5_1A/V4_1A：T 流输入三条件恒定（g_T/接触头/XAttn 恒读
+                # 真实压力）。
+                t_raw, t_phys = batch["T_raw"], batch["T_phys"]
+            if null_t:
+                # V4_1A 判据 ③ null-T 注入（eval --null-t）：T 输入整窗
+                # 置零后前向，训练正确的修正分支应输出 ≈0 → VT 行读数
+                # 退回 V2M（两次跑配对比较 = 干预实验读数）。
+                t_raw = torch.zeros_like(t_raw)
+                t_phys = torch.zeros_like(t_phys)
+                t_s2m = torch.zeros_like(t_s2m)
             if degrade is not None:
                 rng = np.random.RandomState((seed * 1000003) ^ zlib.crc32(str(session_id).encode()))
                 v_feat, t_raw, t_phys, t_s2m = _degrade_inputs(
                     v_feat, t_raw, t_phys, t_s2m, tw, degrade, rng
                 )
             v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
-            if regress_mode:
+            if v3f_mode:
+                out = sample_v3f(
+                    model, v_feat, t_raw, t_phys,
+                    anchor=batch["trans_anchor"][:, None, :],
+                    floor_y=batch["floor_y"],
+                    offsets=batch["offsets"], parents=batch["parents"],
+                    use_t=config_value != CONFIG_V,
+                    refine=config_value != CONFIG_V,
+                    diffusion=diffusion, steps=sample_steps, eta=0.0,
+                    device=device)
+                pred_pose = out["x0_hat"]
+                v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
+            elif regress_mode:
+                z_kw = {"z_src": v5_1_z_src(config_value, z_src_override)} if v5_1_mode else {}
                 out = model(v_feat, t_raw, t_phys, config_id,
-                            batch.get("session_id"), T_s2m=t_s2m, **v_kw)
+                            batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw)
                 pred_pose = out["x0_hat"]
             else:
                 cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
@@ -646,6 +712,90 @@ def _evaluate_config(
                 out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id,
                             batch.get("session_id"), T_s2m=t_s2m, **v_kw)
             anchor = batch["trans_anchor"][:, None, :]
+            if not v3f_mode:
+                v3e_contact = None
+            if v3e_mode:
+                # V3_3E condition selection: VT = constraint layer on the
+                # full forward, V = raw V pose, T = the T pose prior.
+                if config_value == CONFIG_VT:
+                    pred_pose, pred_trans_w = apply_v3e_constraints(
+                        out["x0_hat"], out["trans_hat"] + anchor,
+                        batch["floor_y"],
+                        batch["offsets"], batch["parents"])
+                    v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
+                elif config_value == CONFIG_V:
+                    pred_pose, pred_trans_w = out["x0_hat"], out["trans_hat"] + anchor
+                else:
+                    pred_pose, pred_trans_w = out["x0_prior"], out["trans_prior"] + anchor
+            elif v3g_mode:
+                # V3_3G condition selection: VT = 分部观测层 on the V stream,
+                # V = raw carrier (= E), T = T prior + 观测层.  floor_src
+                # stays the registered default "gt" (E v2.1 口径).
+                if config_value == CONFIG_VT:
+                    pred_pose, pred_trans_w = apply_v3g_constraints(
+                        out["x0_hat"], out["trans_hat"] + anchor,
+                        out["contact_logits"],
+                        batch["offsets"], batch["parents"],
+                        floor_y=batch["floor_y"])
+                    v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
+                elif config_value == CONFIG_V:
+                    pred_pose, pred_trans_w = out["x0_hat"], out["trans_hat"] + anchor
+                else:
+                    pred_pose, pred_trans_w = apply_v3g_constraints(
+                        out["x0_prior"], out["trans_prior"] + anchor,
+                        out["contact_logits"],
+                        batch["offsets"], batch["parents"],
+                        floor_y=batch["floor_y"])
+            elif v3h_mode:
+                # V3_3H condition selection: VT = 残差通道 on the V stream,
+                # V = raw V tower, T = null-V 先验 + 残差通道 (H 无 T 塔——
+                # 同一 V 塔、V 已由 condition_inputs 零化).  floor_src stays
+                # the registered default "gt" (E v2.1 口径).
+                # V3_3H_v3：VT/T 行先应用一阶足部残差（V2M 行不应用）。
+                pose_vt = apply_foot_residual(
+                    out["x0_hat"], out["foot_res"],
+                    landing=str(getattr(model, "res_landing", "foot"))) if out.get("foot_res") is not None else out["x0_hat"]
+                if config_value == CONFIG_VT:
+                    pred_pose, pred_trans_w = apply_v3h(
+                        bool(getattr(model, "no_anchor", False)),
+                        pose_vt, out["trans_hat"] + anchor,
+                        out["contact_logits"],
+                        batch["offsets"], batch["parents"],
+                        floor_y=batch["floor_y"])
+                    v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
+                elif config_value == CONFIG_V:
+                    pred_pose, pred_trans_w = out["x0_hat"], out["trans_hat"] + anchor
+                else:
+                    pred_pose, pred_trans_w = apply_v3h(
+                        bool(getattr(model, "no_anchor", False)),
+                        pose_vt, out["trans_hat"] + anchor,
+                        out["contact_logits"],
+                        batch["offsets"], batch["parents"],
+                        floor_y=batch["floor_y"])
+            elif v5_1_mode:
+                # V5_1A condition selection: 三行直接读 z_src 选定的读出
+                # （前向已按条件切换；无推理侧约束层——无锚-几何组件，
+                # 穿透/Global 行只作报告）。VT 行接触读数 = G 配方接触头。
+                if config_value == CONFIG_VT:
+                    v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
+                pred_pose, pred_trans_w = out["x0_hat"], out["trans_hat"] + anchor
+                v4_1_corr = None
+            elif v4_1_mode:
+                # V4_1A condition selection: 三读出 + 修正分支开关。
+                # V2M = V 载体（修正不应用，契约 1 守卫）；VT2M = V +
+                # pos_corr（seq 层软骨架）；T2M = 先验 + pos_corr_prior。
+                if config_value == CONFIG_VT:
+                    v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
+                    pred_pose, pred_trans_w = out["x0_hat"], out["trans_hat"] + anchor
+                    v4_1_corr = out["pos_corr"]
+                elif config_value == CONFIG_V:
+                    pred_pose, pred_trans_w = out["x0_hat"], out["trans_hat"] + anchor
+                    v4_1_corr = None
+                else:
+                    pred_pose, pred_trans_w = out["x0_prior"], out["trans_prior"] + anchor
+                    v4_1_corr = out["pos_corr_prior"]
+            else:
+                v4_1_corr = None
             if f2_repr:
                 # F2a: world pose/trans recovered from the tilt pose + heading
                 # trajectory before the protocol metrics (same FK scope).
@@ -661,6 +811,8 @@ def _evaluate_config(
                     "pred_trans": pred_trans_w.reshape(-1, 3),
                     "gt_pose": gt_pose_w.reshape(-1, gt_pose_w.shape[-1]),
                     "gt_trans": (batch["trans_gt"] + anchor).reshape(-1, 3),
+                    "pos_corr": (out["pos_corr"].reshape(-1, out["pos_corr"].shape[-1])
+                                 if out.get("pos_corr") is not None else None),
                     "kp_gt": batch["kp_gt"].reshape(-1, N_JOINTS, 3),
                     "contact_gt": batch["contact_gt"].reshape(-1, 2),
                     "floor_y": batch["floor_y"][0],
@@ -672,11 +824,24 @@ def _evaluate_config(
                     "betas": batch["betas"][0],
                 }
             else:
+                if v4_1_mode:
+                    # V4_1A 契约 1：V2M 行 seq 修正必须为 None（v4_1_corr
+                    # 按条件为空）——不得回退到 out["pos_corr"]（V3_3D
+                    # 遗留口径会污染 V2M 行）。
+                    seq_pos_corr = (v4_1_corr.reshape(-1, v4_1_corr.shape[-1])
+                                    if v4_1_corr is not None else None)
+                else:
+                    seq_pos_corr = (out["pos_corr"].reshape(-1, out["pos_corr"].shape[-1])
+                                    if out.get("pos_corr") is not None else None)
                 seq = {
                     "pred_pose": pred_pose.reshape(-1, pred_pose.shape[-1]),
-                    "pred_trans": (out["trans_hat"] + anchor).reshape(-1, 3),
+                    "pred_trans": (pred_trans_w if (v3e_mode or v3g_mode or v3h_mode or v5_1_mode or v4_1_mode)
+                                   else out["trans_hat"] + anchor).reshape(-1, 3),
                     "gt_pose": batch["pose_gt"].reshape(-1, batch["pose_gt"].shape[-1]),
                     "gt_trans": (batch["trans_gt"] + anchor).reshape(-1, 3),
+                    "pos_corr": seq_pos_corr,
+                    "contact_pred": (v3e_contact.reshape(-1, v3e_contact.shape[-1])
+                                     if v3e_contact is not None else None),
                     "kp_gt": batch["kp_gt"].reshape(-1, N_JOINTS, 3),
                     "contact_gt": batch["contact_gt"].reshape(-1, 2),
                     "floor_y": batch["floor_y"][0],
@@ -728,6 +893,7 @@ def _evaluate_config(
                     seq["pred_pose"][None], seq["pred_trans"][None],
                     seq["offsets"], seq["parents"],
                 )[0]
+                pred_kp = _apply_pos_corr(pred_kp, seq)
                 pred_contact = soft_contact_from_keypoints(
                     pred_kp[None], seq["floor_y"].reshape(1)
                 )[0].detach().cpu().numpy() > 0.5
@@ -814,6 +980,8 @@ def run_protocol(
     brief_out: Optional[Path] = None,
     v2t_out_dir: Optional[Path] = None,
     dump_detail: bool = False,
+    z_src_override: Optional[str] = None,
+    null_t: bool = False,
 ) -> Dict[str, Dict[str, float]]:
     """Run the full F0a protocol and write metrics/<split>.json (detail) and,
     when brief_out is given, metrics/<split>_brief.json (whole-body brief).
@@ -845,6 +1013,8 @@ def run_protocol(
                 sample_steps, warm_start, tw, forward_axis,
                 v2t_out_dir=v2t_out_dir,
                 dump_detail=dump_detail,
+                z_src_override=z_src_override,
+                null_t=null_t,
             )
             if dump_detail:
                 window_conditions[name] = window_rows
@@ -856,10 +1026,14 @@ def run_protocol(
             metrics["robust_vdrop"], _, _ = _evaluate_config(
                 dataset, model, device, CONFIG_VT, regress_mode, diffusion,
                 sample_steps, warm_start, tw, forward_axis, degrade="v", seed=seed,
+                z_src_override=z_src_override,
+                null_t=null_t,
             )
             metrics["robust_tdrop"], _, _ = _evaluate_config(
                 dataset, model, device, CONFIG_VT, regress_mode, diffusion,
                 sample_steps, warm_start, tw, forward_axis, degrade="t", seed=seed,
+                z_src_override=z_src_override,
+                null_t=null_t,
             )
             print("protocol robust_vdrop: mpjpe=%.3fmm pa_mpjpe=%.3fmm"
                   % (metrics["robust_vdrop"]["mpjpe_mm"], metrics["robust_vdrop"]["pa_mpjpe_mm"],

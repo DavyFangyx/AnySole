@@ -68,6 +68,7 @@ VARIANT_FIELDS: Tuple[Tuple[str, str], ...] = (
     ("lambda_pose", "lp%.4g"),
     ("lambda_traj", "lt%.4g"),
     ("lambda_kp", "lk%.4g"),
+    ("lambda_pos", "lpos%.4g"),
     ("lambda_assign", "la%.4g"),
     ("lambda_assign_ent", "lae%.4g"),
     ("lambda_assign_conc", "lac%.4g"),
@@ -189,6 +190,9 @@ V_HMR_IMG_DIM = 1024 # HMR2 ViT backbone features
 V_HMR_MISC_DIM = 5   # bbox_info 3 + q_V 2
 FUSE_LEN = 40  # V(20) + combined T(20)
 N_CONTACT = 2
+# V3_3F: the diffused state = [pose 6D | root trajectory (anchor-relative,
+# world axes) | soft contact per foot], normalized per component.
+STATE_DIM = POSE_DIM + 3 + N_CONTACT
 
 JOINT_NAMES = (
     "pelvis", "left_hip", "right_hip", "spine1", "left_knee", "right_knee",
@@ -212,6 +216,10 @@ JOINT_PROTOCOL_CHECKSUM = hashlib.sha256(json.dumps(
 
 LEFT_LEG_JOINTS = (1, 4, 7, 10)
 RIGHT_LEG_JOINTS = (2, 5, 8, 11)
+# V3_3F: the refinement layer's optimization variables — the full leg chain
+# (hip/knee/ankle/foot per side).  Upper-body joints are structurally absent
+# from this set, so T-driven corrections can never touch them.
+LEG_JOINTS = LEFT_LEG_JOINTS + RIGHT_LEG_JOINTS
 BODY_JOINTS = tuple(i for i in range(N_JOINTS) if i not in LEFT_LEG_JOINTS + RIGHT_LEG_JOINTS)
 
 # Semantic metric groups and angle triples.  Keep these next to the canonical
@@ -220,6 +228,15 @@ BODY_JOINTS = tuple(i for i in range(N_JOINTS) if i not in LEFT_LEG_JOINTS + RIG
 LOWER_JOINTS = LEFT_LEG_JOINTS + RIGHT_LEG_JOINTS
 UPPER_JOINTS = tuple(i for i in range(N_JOINTS) if i not in LOWER_JOINTS)
 ANKLE_FOOT_JOINTS = (
+    JOINT_NAMES.index("left_ankle"), JOINT_NAMES.index("right_ankle"),
+    JOINT_NAMES.index("left_foot"), JOINT_NAMES.index("right_foot"),
+)
+# V3_3D position head: the six lower-limb joints whose pelvis-relative
+# positions carry T's measurable increments (T信息量判定实验 §3.2 — the
+# probe's direct-regression target set; probe_v33b_info_ceiling_direct.py
+# SIX_JOINTS).  Keep this next to the semantic groups above.
+KNEE_ANKLE_FOOT_JOINTS = (
+    JOINT_NAMES.index("left_knee"), JOINT_NAMES.index("right_knee"),
     JOINT_NAMES.index("left_ankle"), JOINT_NAMES.index("right_ankle"),
     JOINT_NAMES.index("left_foot"), JOINT_NAMES.index("right_foot"),
 )
@@ -249,6 +266,29 @@ PART_JOINTS = (
     (14, 17, 19, 21, 23), (1, 4), (2, 5), (7, 10), (8, 11),
 )
 N_PARTS = len(PART_NAMES)
+
+# PA-MPJPE series metric hierarchy (2026-10-15 ruling): the single anatomical
+# source for evaluation keys.  ``upper``/``lower`` are partitions,
+# ``pelvis``/``spine``/``head`` and the six limb groups are segments;
+# ``anklefoot``/``hands`` are subset views of ``lower``/``upper``.  The
+# decoder's 9 part slots (PART_NAMES) remain a model-side concept and never
+# define evaluation keys.
+JOINT_HIERARCHY = {
+    "overall": tuple(range(N_JOINTS)),
+    "upper": UPPER_JOINTS,
+    "lower": LOWER_JOINTS,
+    "pelvis": (0,),
+    "spine": (3, 6, 9),
+    "head": (12, 15),
+    "l_arm": (13, 16, 18, 20, 22),
+    "r_arm": (14, 17, 19, 21, 23),
+    "l_leg": (1, 4),
+    "r_leg": (2, 5),
+    "l_foot": (7, 10),
+    "r_foot": (8, 11),
+    "anklefoot": ANKLE_FOOT_JOINTS,   # subset view of lower
+    "hands": HAND_JOINTS,             # subset view of upper
+}
 
 LEFT_LEG_SLICE = tuple(j for j in LEFT_LEG_JOINTS)
 RIGHT_LEG_SLICE = tuple(j for j in RIGHT_LEG_JOINTS)

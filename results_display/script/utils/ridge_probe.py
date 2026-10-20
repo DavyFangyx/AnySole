@@ -6,8 +6,8 @@ improves, the ridge ceiling should move with it.
 ridge F (512 per frame = the two fused tokens of each frame, the test12 口径)
 -> native SMPL-24 pose_gt (144), fitted on the train split under VT conditioning, evaluated
 on the requested split with each window's GT trajectory.  Reports MPJPE,
-PA-MPJPE (per-frame Procrustes, eval 口径), per-part MPJPE (9 parts +
-upper/lower/ankle-foot/hands) and the raw L_pose MSE.
+PA-MPJPE (per-frame Procrustes, eval 口径), the JOINT_HIERARCHY level
+expansion (MPJPE / PA-MPJPE over 13 anatomical keys) and the raw L_pose MSE.
 
 Works for both anysolev1 (diffusion) and anysolev2 (regression) checkpoints —
 only the encoders + fusion are used.
@@ -33,12 +33,7 @@ sys.path.insert(0, str(REPO))
 from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.eval import _load_model, load_config, resolve_device
 from anysole.utils.eval_protocol import (
-    ANKLE_FOOT_JOINTS,
-    HAND_JOINTS,
-    LOWER_JOINTS,
-    PART_JOINTS,
-    PART_NAMES,
-    UPPER_JOINTS,
+    JOINT_HIERARCHY,
     _pa_align,
 )
 from anysole.utils.geometry import fk_pose6d
@@ -193,21 +188,19 @@ def main(argv=None) -> int:
         "MPJPE": float(err.mean().item()) * 1000.0,
         "PA-MPJPE": float(pa_err.mean().item()) * 1000.0,
     }
-    for pname, joints in zip(PART_NAMES, PART_JOINTS):
-        out["MPJPE_part_%s" % pname] = float(err[:, joints].mean().item()) * 1000.0
-        out["PA-MPJPE_part_%s" % pname] = float(pa_err[:, joints].mean().item()) * 1000.0
-    for agg, joints in (("upper", UPPER_JOINTS), ("lower", LOWER_JOINTS),
-                        ("anklefoot", ANKLE_FOOT_JOINTS), ("hands", HAND_JOINTS)):
-        out["MPJPE_%s" % agg] = float(err[:, joints].mean().item()) * 1000.0
-        out["PA-MPJPE_%s" % agg] = float(pa_err[:, joints].mean().item()) * 1000.0
+    for name, joints in JOINT_HIERARCHY.items():
+        if name == "overall":
+            continue
+        out["MPJPE_%s" % name] = float(err[:, joints].mean().item()) * 1000.0
+        out["PA-MPJPE_%s" % name] = float(pa_err[:, joints].mean().item()) * 1000.0
 
     print("ridge-on-F -> pose: %s MPJPE = %.1f mm, PA-MPJPE = %.1f mm, L_pose = %.4f"
           % (args.split, out["MPJPE"], out["PA-MPJPE"], l_pose))
-    for pname in PART_NAMES:
+    for name in JOINT_HIERARCHY:
+        if name == "overall":
+            continue
         print("  %-9s MPJPE %6.1f mm   PA-MPJPE %6.1f mm"
-              % (pname, out["MPJPE_part_%s" % pname], out["PA-MPJPE_part_%s" % pname]))
-    print("  upper %.1f / lower %.1f / ankle-foot %.1f / hands %.1f mm"
-          % (out["MPJPE_upper"], out["MPJPE_lower"], out["MPJPE_anklefoot"], out["MPJPE_hands"]))
+              % (name, out["MPJPE_%s" % name], out["PA-MPJPE_%s" % name]))
 
     out_path = args.out
     if out_path is None:

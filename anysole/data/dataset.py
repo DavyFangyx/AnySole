@@ -19,6 +19,13 @@ from torch.utils.data import Dataset
 from anysole.data.smpl_io import estimate_floor_y, load_smpl, resolve_smpl_path
 from anysole.data.pressure import load_session_pressure, normalize_raw
 from anysole.data.pressure import physical_tokens
+from anysole.data.v5_1_gt import derive_phase_gt, load_cop
+from anysole.data.occ_mix import (
+    SRC_OCC,
+    OccMixSampler,
+    default_occ_cache_root,
+    load_occ_session,
+)
 from anysole.data.workspace_adapter import (
     load_contact_label,
     load_shared_session,
@@ -184,6 +191,8 @@ class AnySoleDataset(Dataset):
         f2_repr: bool = False,
         smpl_roots: Optional[Sequence[Path]] = None,
         cam_id: int = 3,
+        load_v5_1_gt: bool = False,
+        occ_mix: Optional[dict] = None,
     ):
         self.mode = mode
         self.window_length = int(window_length)
@@ -191,8 +200,10 @@ class AnySoleDataset(Dataset):
         # 四相机扩展 D2: camera id selects the per-camera GVHMR cache dir
         # (hrnet cache is addressed via cache_root, already camera-scoped).
         self.cam_id = int(cam_id)
-        if self.tactile_input not in ("raw108", "s2m50"):
-            raise ValueError("tactile_input must be 'raw108' or 's2m50'")
+        if self.tactile_input not in ("raw108", "s2m50", "denoised108", "denoised108_v2", "denoised108_v3"):
+            raise ValueError(
+                "tactile_input must be 'raw108', 's2m50', 'denoised108', "
+                "'denoised108_v2' or 'denoised108_v3'")
         if no_imu and self.tactile_input != "s2m50":
             raise ValueError("no_imu requires tactile_input='s2m50'")
         # --no-imu: T_s2m is built without the synthesized IMU channels
@@ -218,6 +229,14 @@ class AnySoleDataset(Dataset):
         self.cache_root = Path(cache_root)
         self.allow_missing_video = allow_missing_video
         self.contact_method = str(contact_method)
+        # V5_1A z 通道 GT（2026-10-19）：相位运动学派生（__init__ 内，
+        # kp_gt + floor_y 同口径）；CoP = smplx 正演数据件（独立构建脚本
+        # anysole.data.v5_1_gt 落盘，缺失即报错——训练不按需构建）。
+        self.load_v5_1_gt = bool(load_v5_1_gt)
+        # V6_1A occ_mix（2026-10-19）：窗口级结构化丢弃采样器，默认关
+        # （None = 现行为逐位不变）。启用后逐会话装载 occ010 双缓存、
+        # __getitem__ 采样窗源并挂标签（occ_src/occ_v_zeroed/occ_t_zeroed）。
+        self.occ_sampler = OccMixSampler(**occ_mix) if occ_mix else None
 
         if session_ids is None:
             column = {"train": "train", "eval": "val", "val": "val", "test": "test"}[mode]
@@ -277,6 +296,29 @@ class AnySoleDataset(Dataset):
                 shared_pressure = shared["pressure"]
                 left48 = np.asarray(shared_pressure["left48"], dtype=np.float32)
                 right48 = np.asarray(shared_pressure["right48"], dtype=np.float32)
+                if self.tactile_input in ("denoised108", "denoised108_v2",
+                                          "denoised108_v3"):
+                    # 交接包降噪压力（2026-10-17 起）：同帧网格、同最近行语义，
+                    # 值换成 baseline_step_corrected（values48 = processed48）。
+                    # denoised108 = v1 包（含自适应平滑）；denoised108_v2 =
+                    # v2 包（无平滑，仅前三项）；denoised108_v3 = v3 包
+                    # （v2 三项 + 故障格突发清洗，2026-10-20）。T_phys 随后按
+                    # normalize_raw 约定重算，接触标签保持 shared 原样
+                    # （固定 GT，隔离触觉输入变化的 A/B）。root 必须显式传：
+                    # resample_handoff 的默认值在函数定义时绑定，改模块常量
+                    # 不会生效。
+                    from anysole.data.handoff_pressure import (
+                        resample_handoff,
+                        video_start_for,
+                        handoff_root,
+                    )
+                    package = {"denoised108": "v1",
+                               "denoised108_v2": "v2",
+                               "denoised108_v3": "v3"}[self.tactile_input]
+                    left48, right48 = resample_handoff(
+                        session_id, str(meta["date"]), str(meta["subject"]),
+                        video_start_for(shared["dir"]), n_frames,
+                        package=package, root=handoff_root(package))
                 t_raw_source = np.concatenate([left48, right48], axis=1)
                 pressure = {
                     "T_raw": t_raw_source,
@@ -328,6 +370,13 @@ class AnySoleDataset(Dataset):
                 else:
                     v_feat = np.asarray(v_feat, dtype=np.float32)
             elif self.allow_missing_video:
+                if self.occ_sampler is not None:
+                    # 零 V 会话无真实遮挡缓存语义（occ_mix.py 挂钩点 1b）：
+                    # allow_missing_video 回退路径不挂 occ_mix。
+                    raise ValueError(
+                        "occ_mix is incompatible with allow_missing_video "
+                        "(session %s has no cam3 cache, hence no occ cache)"
+                        % session_id)
                 v_feat = np.zeros((n_frames, V_FEAT_DIM), dtype=np.float32)
             else:
                 raise FileNotFoundError(
@@ -445,6 +494,23 @@ class AnySoleDataset(Dataset):
                 "betas": motion.get("betas", np.zeros(10, dtype=np.float32)).astype(np.float32),
                 "fake_mask": fake_mask,
             }
+            if self.occ_sampler is not None:
+                # occ_mix 挂钩点 1b：occ010 双缓存装载（同帧轴强制核对，
+                # 缺失/不符立即报错）。
+                session["V_feat_occ"] = load_occ_session(
+                    session_id,
+                    occ_root=default_occ_cache_root(self.cache_root),
+                    cam3_array=v_feat)
+            if self.load_v5_1_gt:
+                # V5_1A z 通道 GT：相位（探针同口径运动学派生，直接算）+
+                # CoP（smplx 数据件装载，接触帧专用）。掩码全空（近静止
+                # 会话）属正常——损失按掩码跳过。
+                phase = derive_phase_gt(kp, float(floor_y))
+                cop, cop_mask = load_cop(session_id, n_frames)
+                session["phase_gt"] = phase["phase"]
+                session["phase_mask"] = phase["phase_mask"]
+                session["cop_gt"] = cop
+                session["cop_mask"] = cop_mask
             if self.v_input == "hmr_gvhmr":
                 session["V_hmr"] = v_hmr.astype(np.float32)
             file_index = len(self.sessions)
@@ -478,8 +544,10 @@ class AnySoleDataset(Dataset):
                 tensor = tensor.float()
             return tensor
 
+        # occ_mix 挂钩点 1c：crop 装配之前的窗口级采样（整窗一致）。
+        aug = self.occ_sampler.sample_one() if self.occ_sampler is not None else None
         item = {
-            "V_feat": crop("V_feat"),
+            "V_feat": crop("V_feat_occ") if (aug is not None and aug.v_src == SRC_OCC) else crop("V_feat"),
             "T_raw": crop("T_raw"),
             "T_phys": crop("T_phys"),
             "T_s2m": crop("T_s2m"),
@@ -496,8 +564,15 @@ class AnySoleDataset(Dataset):
             "session_id": session["session_id"],
             "frame_start": torch.tensor(left, dtype=torch.long),
         }
+        if aug is not None:
+            item.update(aug.batch_fields())
         if self.v_input == "hmr_gvhmr":
             item["V_hmr"] = crop("V_hmr")
+        if self.load_v5_1_gt:
+            item["phase_gt"] = crop("phase_gt")
+            item["phase_mask"] = crop("phase_mask")
+            item["cop_gt"] = crop("cop_gt")
+            item["cop_mask"] = crop("cop_mask")
         if self.f2_repr:
             item["traj_gt_f2"] = crop("traj_gt_f2")
             item["psi_anchor"] = torch.tensor(

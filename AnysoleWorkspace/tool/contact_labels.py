@@ -28,6 +28,8 @@ Methods (``METHODS`` registry):
     f6_soft     F6 软标签: 中间阶段按 pressure_f6 一致度取 4 档软值
                 {0.95 触地承重 / 0.70 触地未承重 / 0.05 离地 / 0.30 离地残余压},
                 导出时二值化 (硬值=motion_f6), 与其他方案统一 {0, 1}
+    smpl_contact SMPL 网格足底: 足部最低顶点离地 <2cm 判接触（smplx 正演 +
+                estimate_floor_y 地面，与 D_Test8 GT 足底热图同几何口径）
 
 The ``--report`` step scores every method against ``bvh_h`` as reference
 (视觉判据: 脚离地) and writes ``comparison.csv`` / ``comparison.png``
@@ -60,16 +62,26 @@ for path in (REPO_ROOT, SCRIPT_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from anysole.data.pressure import load_session_pressure  # noqa: E402
+from anysole.data.smpl_io import (  # noqa: E402
+    estimate_floor_y,
+    load_smpl,
+    smpl_vertices_from_archive_params,
+)
+from anysole.data.workspace_adapter import (  # noqa: E402
+    load_shared_session,
+    shared_bvh_path,
+    shared_smpl_path,
+)
 from anysole.types import (  # noqa: E402
     CONTACT_SUM_THRESH,
     GAIT_ROOT,
+    JOINT_NAMES,
     SEQ_ROOT,
     WORKSPACE_ROOT,
 )
+from anysole.utils.geometry import fk_pose6d_np  # noqa: E402
+from Baselines.utils.motion_io import load_motion  # noqa: E402
 from loguru import logger as log  # noqa: E402
-
-from _bvh_aligner_pose import parse_bvh_aligner  # noqa: E402
 
 # ---- 本地路径解析（原 results_display/script/cli_common.py 的最小子集，
 # 该库属展示层公共件，工具层不反向依赖）----
@@ -154,36 +166,51 @@ def select_dirs(args: argparse.Namespace) -> list[Path]:
     return dirs
 
 
-def load_aligned(seq_dir: Path) -> dict:
-    """Meta + BVH world joints (m) + 48-cell CSV sums on the 40 Hz grid."""
-    meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
-    n = int(meta["n_frames"])
-    t_grid = float(meta["visual_start_s"]) + np.arange(n, dtype=np.float64) / FPS
-    out = load_session_pressure(meta, t_grid)
-    parsed = parse_bvh_aligner(resolve_path(meta["bvh_path"]), trim_leading_seconds=0.0)
-    joints_src, frame_time, names = parsed["joints"], parsed["frame_time"], parsed["names"]
-    t_mocap = t_grid - float(meta["offset_s"])
-    src_t = np.arange(joints_src.shape[0], dtype=np.float64) * float(frame_time)
-    pts = np.empty((n,) + joints_src.shape[1:], dtype=np.float64)
-    clipped = np.clip(t_mocap, src_t[0], src_t[-1])
-    for j in range(joints_src.shape[1]):
-        for a in range(3):
-            pts[:, j, a] = np.interp(clipped, src_t, joints_src[:, j, a])
-    pts = np.asarray(pts, dtype=np.float32)
-    if pts.size and float(np.ptp(pts[0], axis=0).max()) > 5.0:
-        pts = pts * 0.01
+def load_aligned(seq_dir: Path, want_smpl: bool = False) -> dict:
+    """Meta + BVH world joints (m) + 48-cell sums on the shared facts 40 Hz grid.
+
+    shared facts 契约：session.json + frames.npz（mocap_time_s 对齐帧轴）+
+    pressure_48.npz（raw 48 格/脚）；旧 align_meta.json 布局已废弃。
+    ``want_smpl=True`` 时附加 ``smpl_h``（(n, 2) 足底最低顶点离地高度，
+    smpl_contact 方案用；SMPL 缺失时为 None 由该方案报错跳过）。
+    """
+    shared = load_shared_session(seq_dir.name)
+    meta = shared["meta"]
+    n = int(len(shared["frames"]["frame_id"]))
+    mocap_t = np.asarray(shared["frames"]["mocap_time_s"], dtype=np.float64)[:n]
+    left48 = np.asarray(shared["pressure"]["left48"], dtype=np.float32)[:n]
+    right48 = np.asarray(shared["pressure"]["right48"], dtype=np.float32)[:n]
+    motion = load_motion(shared_bvh_path(shared), query_t=mocap_t)
+    pts = np.asarray(motion["joints"], dtype=np.float32)
+    if pts.ndim != 3 or pts.shape[0] != n:
+        raise ValueError(f"{seq_dir.name}: BVH joints shape {pts.shape} != ({n}, J, 3)")
     floor = float(np.percentile(pts[:, :, 2], 5))
-    return {
+    ctx = {
         "meta": meta,
         "n": n,
         "pts": pts,
-        "names": names,
+        "names": motion["names"],
         "floor": floor,
-        "sums_l": out["left48"].sum(axis=1).astype(np.float64),
-        "sums_r": out["right48"].sum(axis=1).astype(np.float64),
-        "left48": out["left48"],
-        "right48": out["right48"],
+        "sums_l": left48.sum(axis=1).astype(np.float64),
+        "sums_r": right48.sum(axis=1).astype(np.float64),
+        "left48": left48,
+        "right48": right48,
     }
+    if want_smpl:
+        try:
+            smpl_path = shared_smpl_path(shared)
+            smpl = load_smpl(smpl_path, query_t=mocap_t)
+            joints_yup = fk_pose6d_np(smpl["pose_6d"], smpl["trans_m"],
+                                      smpl["offsets_m"], smpl["parents"])
+            verts = smpl_vertices_from_archive_params(smpl["poses_aa"],
+                                                      smpl["model_trans_m"],
+                                                      smpl["betas"])
+            floor_y = float(estimate_floor_y(joints_yup))
+            ctx["smpl_h"] = _smpl_foot_heights(verts, joints_yup, floor_y)
+        except (FileNotFoundError, ValueError) as exc:
+            log.warning(f"{seq_dir.name}: SMPL mesh unavailable ({exc}); smpl_contact skipped")
+            ctx["smpl_h"] = None
+    return ctx
 
 
 def foot_signal(ctx: dict, side: str) -> tuple[np.ndarray, np.ndarray]:
@@ -311,6 +338,47 @@ def m_pat_offset(ctx: dict, patient_offsets: dict | None) -> np.ndarray:
         thr = CONTACT_SUM_THRESH if offset is None else float(offset) + CONTACT_SUM_THRESH
         out[:, k] = (sums > thr).astype(np.float32)
     return out
+
+
+# --- SMPL 网格足底接触（2026-10-15）------------------------------------------
+# 与 D_Test8 GT 足底热图同几何口径：随足 2D 系（跟→趾 × 内外侧，S5091 实测
+# 标定 s ∈ [-0.06, 0.20]m / lat ±0.07m），取踝以下足部顶点，接触 = 最低点
+# 离地 < 2cm（estimate_floor_y 地面，共享实现）。无迟滞；SMPL 缺失时方案报错。
+
+SMPL_CONTACT_DZ = 0.02      # 足底最低顶点离地阈值 (m)
+SMPL_S0, SMPL_S1 = -0.06, 0.20
+SMPL_LAT = 0.07
+SMPL_ANKLE_DZ = 0.005       # 只取踝关节以下的足部顶点
+_SMPL_ANKLE = (JOINT_NAMES.index("left_ankle"), JOINT_NAMES.index("right_ankle"))
+_SMPL_FOOT = (JOINT_NAMES.index("left_foot"), JOINT_NAMES.index("right_foot"))
+
+
+def _smpl_foot_heights(verts: np.ndarray, joints_yup: np.ndarray,
+                       floor_y: float) -> np.ndarray:
+    """(n, 2) 每帧每脚足底最低顶点离地高度（无足部顶点时为 +1m）。"""
+    n = verts.shape[0]
+    out = np.full((n, 2), 1.0, dtype=np.float64)
+    for t in range(n):
+        for k, (aj, fj) in enumerate(zip(_SMPL_ANKLE, _SMPL_FOOT)):
+            ankle = joints_yup[t, aj]
+            d = joints_yup[t, fj][[0, 2]] - ankle[[0, 2]]
+            d = d / (np.linalg.norm(d) + 1e-9)
+            perp = np.array([-d[1], d[0]])
+            rel = verts[t][:, [0, 2]] - ankle[[0, 2]][None]
+            s = rel @ d
+            lat = rel @ perp
+            sel = ((verts[t][:, 1] < float(ankle[1]) + SMPL_ANKLE_DZ)
+                   & (s >= SMPL_S0 - 0.01) & (s <= SMPL_S1 + 0.01)
+                   & (np.abs(lat) <= SMPL_LAT + 0.01))
+            if sel.any():
+                out[t, k] = float(verts[t][sel, 1].min()) - floor_y
+    return out
+
+
+def m_smpl_contact(ctx: dict) -> np.ndarray:
+    if ctx.get("smpl_h") is None:
+        raise ValueError("SMPL mesh unavailable for this session")
+    return (ctx["smpl_h"] < SMPL_CONTACT_DZ).astype(np.float32)
 
 
 # --- F6: 运动学状态机 + 标定压力 + 软标签（2026-09-18） ------------------------
@@ -460,6 +528,7 @@ METHODS: dict[str, dict] = {
     "motion_f6": {"desc": "F6 运动学状态机: v>0.6离地 / v<0.3&|az|<3 或承重落地 / h>=20cm无压力否决", "fn": lambda ctx, po: m_motion_f6(ctx)},
     "pressure_f6": {"desc": "F6 承重: 逐格离地基线90分位 + corrected和 + 迟滞阈值", "fn": lambda ctx, po: m_pressure_f6(ctx)},
     "f6_soft": {"desc": "F6 软标签: 中间 4 档软值 {0.05,0.3,0.7,0.95}, 导出二值 == motion_f6", "fn": lambda ctx, po: m_f6_soft(ctx)},
+    "smpl_contact": {"desc": "SMPL 网格足底: 足部最低顶点离地 <2cm 判接触", "fn": lambda ctx, po: m_smpl_contact(ctx)},
 }
 METHOD_NAMES = list(METHODS)
 
@@ -469,7 +538,7 @@ def patient_offsets(seq_dirs_list: list[Path]) -> dict:
     BVH-airborne frames across all their sessions (pat_offset template)."""
     by_patient: dict[str, list[Path]] = {}
     for seq_dir in seq_dirs_list:
-        meta = json.loads((seq_dir / "align_meta.json").read_text())
+        meta = json.loads((seq_dir / "session.json").read_text())
         by_patient.setdefault(meta["subject"], []).append(seq_dir)
     offsets: dict[str, dict[str, float]] = {}
     for patient, dirs in by_patient.items():
@@ -517,6 +586,8 @@ def apply_method(ctx: dict, method: str, po: dict | None) -> tuple[np.ndarray, t
     elif method == "pressure_f6":
         pipe = _f6_pipeline(ctx)
         thr_l, thr_r = pipe["left"]["thr_lo"], pipe["right"]["thr_lo"]
+    elif method == "smpl_contact":
+        thr_l = thr_r = SMPL_CONTACT_DZ
     return contact, (thr_l, thr_r)
 
 
@@ -546,6 +617,7 @@ def ensure_labels(dirs: list[Path], methods: list[str], force: bool = False) -> 
     if not dirs or not methods:
         return
     po = patient_offsets(dirs) if "pat_offset" in methods else None
+    want_smpl = "smpl_contact" in methods
     n_written = n_skipped = 0
     for seq_dir in dirs:
         ctx = None
@@ -556,7 +628,7 @@ def ensure_labels(dirs: list[Path], methods: list[str], force: bool = False) -> 
                 continue
             try:
                 if ctx is None:
-                    ctx = load_aligned(seq_dir)
+                    ctx = load_aligned(seq_dir, want_smpl=want_smpl)
                 contact, (thr_l, thr_r) = apply_method(ctx, method, po)
             except (FileNotFoundError, ValueError) as exc:
                 log.warning(f"{seq_dir.name} [{method}]: {exc}")

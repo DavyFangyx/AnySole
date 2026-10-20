@@ -87,8 +87,16 @@ _TRAIN_STORE_TRUE = TRAIN_STORE_TRUE
 
 
 def _append_train_args(command: list[str], spec: dict[str, Any]) -> None:
+    train_args = spec.get("train_args") or {}
+    unmapped = [k for k in train_args if k not in _TRAIN_FLAG_MAP]
+    if unmapped:
+        # Silent drops here produce runs missing structural provenance
+        # (2026-10-17 V3_3G carrier_from incident) — fail loudly instead.
+        raise RuntimeError(
+            "train_args keys without a CLI mapping in TRAIN_ARG_FLAG_MAP: %s"
+            % ", ".join(sorted(unmapped)))
     for key, flag in _TRAIN_FLAG_MAP.items():
-        value = (spec.get("train_args") or {}).get(key)
+        value = train_args.get(key)
         if value is None:
             continue
         if key in _TRAIN_STORE_TRUE:
@@ -100,8 +108,11 @@ def _append_train_args(command: list[str], spec: dict[str, Any]) -> None:
             command += [flag, str(value)]
 
 
-def _write_initial_manifest(registry: dict[str, Any], experiment_id: str, model_id: str, root: Path) -> Path:
+def _write_initial_manifest(registry: dict[str, Any], experiment_id: str, model_id: str, root: Path,
+                            train_overrides: dict[str, Any] | None = None) -> Path:
     spec = _merge_model_spec(registry, model_id)
+    if train_overrides:
+        spec["train_args"] = {**(spec.get("train_args") or {}), **train_overrides}
     # V3_3C fine-tune: the sanctioned provenance is the BASE ckpt passed to
     # --init-from (deliberate exception to the 2026-09-24 no-warm-start
     # independence rule; see z_note/multimodal_fusion/后续实验设计.md).
@@ -124,6 +135,7 @@ def _write_initial_manifest(registry: dict[str, Any], experiment_id: str, model_
         "checkpoint_source": str(source or ""),
         "checkpoint_source_sha256": sha256_file(source) if source else None,
         "fine_tune_base": bool(init_from),
+        "train_overrides": dict(train_overrides or {}),
     }
     path = root / "run_manifest.json"
     write_json(path, manifest)
@@ -139,8 +151,13 @@ def _update_manifest(path: Path, **updates: Any) -> None:
     write_json(path, payload)
 
 
-def _train_command(registry: dict[str, Any], model_id: str) -> list[str]:
+def _train_command(registry: dict[str, Any], model_id: str,
+                   train_overrides: dict[str, Any] | None = None) -> list[str]:
     spec = _merge_model_spec(registry, model_id)
+    if train_overrides:
+        # V6_1A occ_mix：conf 直写开关（OCC_MIX/P_OCC/P_NULLV/P_NULLT）
+        # 注入 train_args（MODELS 表默认不带 = 默认关）。
+        spec["train_args"] = {**(spec.get("train_args") or {}), **train_overrides}
     config = config_path(registry, model_id)
     modal = str(spec.get("modal", "anysolev2"))
     contact = str(spec.get("contact_method", "joint_and"))
@@ -205,8 +222,11 @@ def _train_command(registry: dict[str, Any], model_id: str) -> list[str]:
     return command
 
 
-def _materialize_checkpoint(registry: dict[str, Any], experiment_id: str, model_id: str, root: Path, log: Path, force: bool) -> Path:
+def _materialize_checkpoint(registry: dict[str, Any], experiment_id: str, model_id: str, root: Path, log: Path, force: bool,
+                             train_overrides: dict[str, Any] | None = None) -> Path:
     spec = _merge_model_spec(registry, model_id)
+    if train_overrides:
+        spec["train_args"] = {**(spec.get("train_args") or {}), **train_overrides}
     train = bool(spec.get("train", False))
     if train:
         contact = str(spec.get("contact_method", "joint_and"))
@@ -225,7 +245,7 @@ def _materialize_checkpoint(registry: dict[str, Any], experiment_id: str, model_
             existing = next((candidate for candidate in candidates if candidate.is_file()), None)
             if existing is not None:
                 return existing
-        command = _train_command(registry, model_id)
+        command = _train_command(registry, model_id, train_overrides)
         code = _command_log(command, log)
         if code != 0:
             raise RuntimeError("training failed for %s (exit %d); see %s" % (model_id, code, log))
@@ -284,7 +304,8 @@ def _formal_eval(registry: dict[str, Any], model_id: str, root: Path, ckpt: Path
             raise RuntimeError("formal %s evaluation failed for %s; see %s" % (split, model_id, log))
 
 
-def _run_model(registry: dict[str, Any], experiment_id: str, model_id: str, force: bool = False) -> Path:
+def _run_model(registry: dict[str, Any], experiment_id: str, model_id: str, force: bool = False,
+               train_overrides: dict[str, Any] | None = None) -> Path:
     root = model_root(registry, experiment_id, model_id)
     root.mkdir(parents=True, exist_ok=True)
     snapshot = config_path(registry, model_id)
@@ -293,10 +314,11 @@ def _run_model(registry: dict[str, Any], experiment_id: str, model_id: str, forc
     (root / "git.sha").write_text(git_sha() + "\n", encoding="utf-8")
     (root / "started_at").write_text(time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n", encoding="utf-8")
     write_json(root / "effective_config.json", _merge_model_spec(registry, model_id))
-    manifest = _write_initial_manifest(registry, experiment_id, model_id, root)
+    manifest = _write_initial_manifest(registry, experiment_id, model_id, root, train_overrides)
     log = root / "run.log"
     try:
-        ckpt = _materialize_checkpoint(registry, experiment_id, model_id, root, log, force)
+        ckpt = _materialize_checkpoint(registry, experiment_id, model_id, root, log, force,
+                                       train_overrides)
         (root / "checkpoint_used.txt").write_text(str(ckpt) + "\n", encoding="utf-8")
         _formal_eval(registry, model_id, root, ckpt, log)
         _update_manifest(
@@ -415,13 +437,18 @@ def _validate_model_capabilities(registry: dict[str, Any], experiment_id: str) -
             )
 
 
-def _print_dry_run(registry: dict[str, Any], experiment_id: str, model_id: str) -> None:
+def _print_dry_run(registry: dict[str, Any], experiment_id: str, model_id: str,
+                   train_overrides: dict[str, Any] | None = None) -> None:
     """Print the exact commands a model_run task would execute, without running them."""
     spec = _merge_model_spec(registry, model_id)
+    if train_overrides:
+        spec["train_args"] = {**(spec.get("train_args") or {}), **train_overrides}
     root = model_root(registry, experiment_id, model_id)
     print("# task model_run  experiment=%s  model=%s  run_name=%s" % (experiment_id, model_id, model_run_name(registry, model_id)))
+    if train_overrides:
+        print("# train_overrides %s" % train_overrides)
     if spec.get("train"):
-        print("$ " + subprocess.list2cmdline(_train_command(registry, model_id)))
+        print("$ " + subprocess.list2cmdline(_train_command(registry, model_id, train_overrides)))
     else:
         try:
             ckpt = checkpoint_path(registry, experiment_id, model_id)
@@ -458,10 +485,20 @@ def _run_task(
         model_id = str(values.get("MODEL_ID", "")).strip()
         if not model_id:
             raise ValueError("TASK=model_run without MODEL_ID")
+        # V6_1A occ_mix：conf 直写开关（默认关）。OCC_MIX=true 时注入
+        # train_args；P_OCC/P_NULLV/P_NULLT 覆盖预注册默认 0.2/0.1/0.1。
+        train_overrides: dict[str, Any] = {}
+        if str(values.get("OCC_MIX", "false")).strip().lower() in {"1", "true", "yes", "on"}:
+            train_overrides["occ_mix"] = True
+            for conf_key, arg_key in (("P_OCC", "p_occ"), ("P_NULLV", "p_nullV"),
+                                      ("P_NULLT", "p_nullT")):
+                if conf_key in values:
+                    train_overrides[arg_key] = float(values[conf_key])
         if dry_run:
-            _print_dry_run(registry, experiment_id, model_id)
+            _print_dry_run(registry, experiment_id, model_id, train_overrides)
             return
-        root = _run_model(registry, experiment_id, model_id, force=force)
+        root = _run_model(registry, experiment_id, model_id, force=force,
+                          train_overrides=train_overrides)
         if str(experiment_spec(registry, experiment_id).get("kind")) == "rho_grid":
             _rho_grid(registry, experiment_id, model_id, root, root / "run.log")
     elif task == "rho_grid":

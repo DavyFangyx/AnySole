@@ -48,14 +48,34 @@ TRAIN_ARG_FLAG_MAP = {
     "config_probs": "--config-probs",
     "lambda_pose": "--lambda-pose",
     "lambda_kp": "--lambda-kp",
+    "lambda_pos": "--lambda-pos",
     "lambda_traj": "--lambda-traj",
     "lambda_trec": "--lambda-trec",
     "lambda_vrec": "--lambda-vrec",
     "lambda_con": "--lambda-con",
+    "lambda_contact": "--lambda-contact",
+    "lambda_nll": "--lambda-nll",
+    "lambda_prior_pose": "--lambda-prior-pose",
+    "lambda_prior_nll": "--lambda-prior-nll",
+    "lambda_prior_traj": "--lambda-prior-traj",
+    "lambda_air": "--lambda-air",
+    "lambda_foot_res": "--lambda-foot-res",
+    "lambda_phase": "--lambda-phase",
+    "lambda_cop": "--lambda-cop",
+    "g_floor_src": "--g-floor-src",
+    "carrier_from": "--carrier-from",
     "tau_max": "--tau-max",
     "tau_fixed": "--tau-fixed",
+    "beta": "--beta",
+    # V6_1A occ_mix (2026-10-19)：训练侧增强开关（默认关——MODELS
+    # train_args 不带即关；conf 直写 OCC_MIX=true 时由 runner 注入）。
+    "occ_mix": "--occ-mix",
+    "p_occ": "--p-occ",
+    "p_nullV": "--p-nullv",
+    "p_nullT": "--p-nullt",
+    "occ_a3_monitor": "--occ-a3-monitor",
 }
-TRAIN_STORE_TRUE = {"assign_cluster"}
+TRAIN_STORE_TRUE = {"assign_cluster", "occ_mix", "occ_a3_monitor"}
 
 
 def _parse_value(raw: str) -> Any:
@@ -325,7 +345,7 @@ def effective_variant(spec: dict[str, Any]) -> str:
     for key in ("lambda_assign", "lambda_assign_ent", "lambda_assign_conc",
                 "lambda_assign_dead", "assign_dead_beta", "assign_temp_init",
                 "assign_temp_final", "assign_anneal_frac", "assign_lock_frac",
-                "assign_lr_mult", "lambda_sigma", "sigma_freeze_frac",
+                "assign_lr_mult", "lambda_sigma", "lambda_pos", "sigma_freeze_frac",
                 "lr_warmup_frac", "grad_clip", "loss_cap"):
         if key in args:
             cfg[key] = float(args[key])

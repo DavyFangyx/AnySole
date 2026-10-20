@@ -211,7 +211,25 @@ K9/K10/K11/K14 多个分区文件，供 V4B 及对照使用。若文件缺失，
 python configs/z_gen/all_models.py --models V4B
 ```
 
-## 5. C1–M3 分析与数据对应关系
+## 5. `vdegrad`：V 削弱实验组（难度轴）
+
+一条命令生成整个实验组（两套件 × 8 配置，cam3 基准行复用既有结果不重发）：
+
+```bash
+python configs/z_gen/vdegrad.py               # 两套件全部任务（21 conf）
+python configs/z_gen/vdegrad.py --suite V3_3B --models V3_3B_cam1
+```
+
+| 套件 | 实验表 | 模型 | 任务 |
+|---|---|---|---|
+| V3_3B 融合主线 | `singlemodal_eval_cams` | `V3_3B_cam1/2/4` + `_vonly` 专才 | 6 conf |
+| V3_3B 融合主线 | `singlemodal_eval_occl` | `V3_3B_cam3_occ010/020/030/050` + `_vonly` | 8 conf |
+| V3_3D 干净通道 | `position_test_vdegrad` | `V3_3D_cam1/2/4` + `V3_3D_cam3_occ010/020/030/050` | 7 conf |
+
+每配置自训自测（训练与测试同配置数据）；分析入口
+`results_display/script/vdegrad.py`（产出 `Test6_VdegradTest/{V3_3B,V3_3D}/`）。
+
+## 6. C1–M3 分析与数据对应关系
 
 C1–M3 不生成 queue conf，只读取 `results/`：
 
@@ -237,13 +255,13 @@ C1–M3 不生成 queue conf，只读取 `results/`：
 > 同步自任务书 `missing_rate_experiment_plan.md`；此前的跨模态表征对齐类实验（F_V–F_T
 > 相似度、错位时刻）已取消，不在本表。
 
-## 6. 运行命令
+## 7. 运行命令
 
 ```bash
 cd /data/fangyuxuan/projects/gait
 python configs/z_gen/all_models.py
 python configs/z_gen/singlemodal_eval.py --models V3_3B
 python configs/z_gen/rho_grid_eval.py --models V3_3B
-CUDA_VISIBLE_DEVICES=7 bash configs/bg.sh
+CUDA_VISIBLE_DEVICES=4 bash configs/bg.sh
 python configs/tools/status.py
 ```

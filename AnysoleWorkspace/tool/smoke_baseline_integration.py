@@ -139,7 +139,7 @@ def compile_sources() -> int:
         "Baselines/VP-MoCap/PoseTransOpt/app/optimize.py",
         "Baselines/VP-MoCap/PoseTransOpt/lib/initial_trans/initial_trans.py",
         "Baselines/Step2Motion/src/test.py",
-        "results_display/script/r_test1_visualize_mmvp.py",
+        "results_display/script/legacy/r_test1_visualize_mmvp.py",
     ]
     for value in paths:
         path = ROOT / value

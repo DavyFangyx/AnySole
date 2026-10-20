@@ -43,7 +43,37 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V3_2": ModelEntry("V3_2", "v3_2", "9-part pose head"),
     "V3_3A": ModelEntry("V3_3A", "v3_3a", "9-part + soft A"),
     "V3_3B": ModelEntry("V3_3B", "v3_3b", "9-part + soft A + sigma gate"),
+    "V3_3B_denoised": ModelEntry("V3_3B_denoised", "v3_3b_denoised",
+                                 "V3_3B on handoff denoised pressure (2026-10-17)"),
     "V3_3C": ModelEntry("V3_3C", "v3_3c", "frozen-V (V3_3B_vonly base) + zero-init T-residual"),
+    "V3_3D": ModelEntry("V3_3D", "v3_3d", "frozen-V + joint position head (position-space T channel)"),
+    "V3_3E": ModelEntry("V3_3E", "v3_3e", "constraint fusion: pure-V pose + T contact head + T pose prior"),
+    "V3_3E_denoised": ModelEntry("V3_3E_denoised", "v3_3e_denoised",
+                                 "V3_3E on handoff denoised pressure (2026-10-17)"),
+    "V3_3F": ModelEntry("V3_3F", "v3_3f", "diffusion prior (V cond) + T contact/ground guidance + leg-chain refinement"),
+    "V3_3F_denoised": ModelEntry("V3_3F_denoised", "v3_3f_denoised",
+                                 "V3_3F on handoff denoised pressure (2026-10-17)"),
+    "V3_3G": ModelEntry("V3_3G", "v3_3g", "frozen E carrier + T contact stream + part-wise observation layer"),
+    "V3_3H": ModelEntry("V3_3H", "v3_3h", "single-generator regression + T physical state + residual channels"),
+    "V3_3H_v2": ModelEntry("V3_3H_v2", "v3_3h",
+                           "V3_3H + T-stream aux pressure reconstruction (命题 2 载体依赖修复)"),
+    "V3_3H_v3": ModelEntry("V3_3H_v3", "v3_3h",
+                           "V3_3H_v2 + first-order foot residual head (命题 2 兑现通道)"),
+    "V3_3H_v5": ModelEntry("V3_3H_v5", "v3_3h",
+                           "V3_3H_v3 − 穿透通道（无锚版：不消费任何 floor 输入）"),
+    "V3_3H_v6": ModelEntry("V3_3H_v6", "v3_3h",
+                           "V3_3H_v5 + 残差头落点改踝 7/8（错误一修复：足关节是叶节点、"
+                           "改自身旋转不移动任何关键点；踝旋转经 127 mm 杠杆 ≈ 平移足）"),
+    "V5_1": ModelEntry("V5_1", "v5_1",
+                       "V5_1A: frozen E carrier + V/T dual z experts (PoE) + "
+                       "FiLM lower-limb injection (2026-10-19)"),
+    "V4_1": ModelEntry("V4_1", "v4_1",
+                       "V4_1A: frozen E carrier + part-token gated position "
+                       "correction (2026-10-19)"),
+    "V5_1_occmix": ModelEntry("V5_1_occmix", "v5_1",
+                              "V5_1A + V6_1A occ_mix 对照（训练侧 V 失效态混合，2026-10-20）"),
+    "V4_1_occmix": ModelEntry("V4_1_occmix", "v4_1",
+                              "V4_1A + V6_1A occ_mix 对照（训练侧 V 失效态混合，2026-10-20）"),
     "V3_4a": ModelEntry("V3_4a", "v3_4a", "9-part on f2"),
     "V3_4b": ModelEntry("V3_4b", "v3_4b", "9-part soft A on f2"),
     "V3_4c": ModelEntry("V3_4c", "v3_4c", "9-part soft A + sigma gate on f2"),
@@ -65,6 +95,138 @@ MODEL_REGISTRY.update({
     f"V3_3B_cam3_occ{occ}": ModelEntry(f"V3_3B_cam3_occ{occ}", "v3_3b",
                                        f"V3_3B on cam3 with bottom {int(occ) / 10:g}% of "
                                        f"the person bbox occluded (V-degradation experiment)")
+    for occ in ("010", "020", "030", "050")
+})
+
+
+# V3_3E 削弱首组（2026-10-17）：cam3 + occ010 两配置自训自测。
+MODEL_REGISTRY.update({
+    f"V3_3E_cam3_occ{occ}": ModelEntry(f"V3_3E_cam3_occ{occ}", "v3_3e",
+                                       f"V3_3E on cam3 with bottom {int(occ) / 10:g}% occluded "
+                                       f"(V-degradation suite)")
+    for occ in ("010",)
+})
+
+# V3_3F 削弱首组（2026-10-17）：同一 v3_3f 结构入口；冻结 vonly V 编码器由
+# 入口按名称尾缀推导（V3_3B_vonly / V3_3B_cam3_occ010_vonly），数据根差异
+# 由 v1_cam3_occ010.yaml 按名尾缀推导。
+MODEL_REGISTRY.update({
+    f"V3_3F_cam3_occ{occ}": ModelEntry(f"V3_3F_cam3_occ{occ}", "v3_3f",
+                                       f"V3_3F on cam3 with bottom {int(occ) / 10:g}% occluded "
+                                       f"(V-degradation suite)")
+    for occ in ("010",)
+})
+
+# V3_3G 削弱首组（2026-10-17）：同一 v3_3g 结构入口；carrier_from 按名称
+# 尾缀指向该配置的 E v2.1 ckpt_best（registry 的 train_args 携带），数据根
+# 差异由 v1_cam3_occ010.yaml 按名尾缀推导。
+MODEL_REGISTRY.update({
+    f"V3_3G_cam3_occ{occ}": ModelEntry(f"V3_3G_cam3_occ{occ}", "v3_3g",
+                                       f"V3_3G on cam3 with bottom {int(occ) / 10:g}% occluded "
+                                       f"(V-degradation suite)")
+    for occ in ("010",)
+})
+
+# V3_3H 削弱首组（2026-10-17）：同一 v3_3h 结构入口；冻结 vonly V 编码器由
+# 入口按名称尾缀推导（V3_3B_vonly / V3_3B_cam3_occ010_vonly），数据根差异
+# 由 v1_cam3_occ010.yaml 按名尾缀推导。
+MODEL_REGISTRY.update({
+    f"V3_3H_cam3_occ{occ}": ModelEntry(f"V3_3H_cam3_occ{occ}", "v3_3h",
+                                       f"V3_3H on cam3 with bottom {int(occ) / 10:g}% occluded "
+                                       f"(V-degradation suite)")
+    for occ in ("010",)
+})
+
+# V3_3H_v2 削弱首组（2026-10-19）：同入口，名称尾缀推导同 V3_3H。
+MODEL_REGISTRY.update({
+    f"V3_3H_v2_cam3_occ{occ}": ModelEntry(f"V3_3H_v2_cam3_occ{occ}", "v3_3h",
+                                          f"V3_3H_v2 on cam3 with bottom {int(occ) / 10:g}% occluded")
+    for occ in ("010",)
+})
+
+# V3_3H_v3 削弱首组（2026-10-19）：同入口。
+MODEL_REGISTRY.update({
+    f"V3_3H_v3_cam3_occ{occ}": ModelEntry(f"V3_3H_v3_cam3_occ{occ}", "v3_3h",
+                                          f"V3_3H_v3 on cam3 with bottom {int(occ) / 10:g}% occluded")
+    for occ in ("010",)
+})
+
+# V3_3H_v5 削弱首组（2026-10-19）：同入口。
+MODEL_REGISTRY.update({
+    f"V3_3H_v5_cam3_occ{occ}": ModelEntry(f"V3_3H_v5_cam3_occ{occ}", "v3_3h",
+                                          f"V3_3H_v5 on cam3 with bottom {int(occ) / 10:g}% occluded")
+    for occ in ("010",)
+})
+
+# V3_3H_v6 削弱首组（2026-10-20）：同入口（错误一修复的 occ010 对照）。
+MODEL_REGISTRY.update({
+    f"V3_3H_v6_cam3_occ{occ}": ModelEntry(f"V3_3H_v6_cam3_occ{occ}", "v3_3h",
+                                          f"V3_3H_v6 on cam3 with bottom {int(occ) / 10:g}% occluded")
+    for occ in ("010",)
+})
+
+# V3_3H_v5 难度轴扩展（2026-10-19）：cam1/cam2/cam4 + occ020 无锚配置
+# （T 价值区 = V 失效条件的无锚对照实验）。
+MODEL_REGISTRY.update({
+    f"V3_3H_v5_cam{cam}": ModelEntry(f"V3_3H_v5_cam{cam}", "v3_3h",
+                                     f"V3_3H_v5 (no-anchor) on camera {cam}")
+    for cam in (1, 2, 4)
+})
+MODEL_REGISTRY["V3_3H_v5_cam3_occ020"] = ModelEntry(
+    "V3_3H_v5_cam3_occ020", "v3_3h",
+    "V3_3H_v5 (no-anchor) on cam3 with bottom 2% occluded")
+
+# V3_3H_v5 全网格扩展（2026-10-20）：cam{1,2,4} × occ{010,020}。
+MODEL_REGISTRY.update({
+    f"V3_3H_v5_cam{cam}_occ{occ}": ModelEntry(f"V3_3H_v5_cam{cam}_occ{occ}", "v3_3h",
+                                              f"V3_3H_v5 (no-anchor) on cam{cam} with bottom "
+                                              f"{int(occ) / 10:g}% occluded")
+    for cam in (1, 2, 4) for occ in ("010", "020")
+})
+
+# V5_1 削弱首组（2026-10-19）：同一 v5_1 结构入口；carrier_from 按名称
+# 尾缀指向该配置的 E v2.1 ckpt_best（registry 的 train_args 携带），数据根
+# 差异由 v1_cam3_occ010.yaml 按名尾缀推导。
+MODEL_REGISTRY.update({
+    f"V5_1_cam3_occ{occ}": ModelEntry(f"V5_1_cam3_occ{occ}", "v5_1",
+                                      f"V5_1 on cam3 with bottom {int(occ) / 10:g}% occluded "
+                                      f"(V-degradation suite)")
+    for occ in ("010",)
+})
+
+# V4_1/V5_1 V 失效梯度组（2026-10-20）：occ020/030/050，载体 = cam3 E v2.1
+#（无 E 各档 ckpt；V5_1A §3 occ050 裁定口径），数据根由 runner 按尾缀推导。
+MODEL_REGISTRY.update({
+    f"{_grad_base}_cam3_occ{_occ}": ModelEntry(
+        f"{_grad_base}_cam3_occ{_occ}", _grad_mod,
+        f"{_grad_base} on cam3 occ{_occ}（载体 = cam3 E v2.1，V 失效梯度档）")
+    for _grad_base, _grad_mod in (("V5_1", "v5_1"), ("V4_1", "v4_1"))
+    for _occ in ("020", "030", "050")
+})
+
+# V4_1 削弱首组（2026-10-19）：同一 v4_1 结构入口；carrier_from 按名称
+# 尾缀指向该配置的 E v2.1 ckpt_best（registry 的 train_args 携带），数据根
+# 差异由 v1_cam3_occ010.yaml 按名尾缀推导。
+MODEL_REGISTRY.update({
+    f"V4_1_cam3_occ{occ}": ModelEntry(f"V4_1_cam3_occ{occ}", "v4_1",
+                                      f"V4_1 on cam3 with bottom {int(occ) / 10:g}% occluded "
+                                      f"(V-degradation suite)")
+    for occ in ("010",)
+})
+
+
+# V3_3D 削弱套件（2026-10-15）：同一 v3_3d 结构入口，每配置一份冻结基底
+# （该配置 vonly 专才 + 该配置主模型受过训 foot_conv，build_v3_3c_base.py
+# 逐配置合成）；数据根差异由 v1_cam{N}/v1_cam3_occ{N}.yaml 按名尾缀推导。
+MODEL_REGISTRY.update({
+    f"V3_3D_cam{cam}": ModelEntry(f"V3_3D_cam{cam}", "v3_3d",
+                                  f"V3_3D on camera {cam} (V-degradation suite)")
+    for cam in (1, 2, 4)
+})
+MODEL_REGISTRY.update({
+    f"V3_3D_cam3_occ{occ}": ModelEntry(f"V3_3D_cam3_occ{occ}", "v3_3d",
+                                       f"V3_3D on cam3 with bottom {int(occ) / 10:g}% occluded "
+                                       f"(V-degradation suite)")
     for occ in ("010", "020", "030", "050")
 })
 

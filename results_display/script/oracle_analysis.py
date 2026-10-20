@@ -38,7 +38,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from anysole.types import PART_NAMES
+from anysole.types import JOINT_HIERARCHY
 from utils.mpl_fonts import setup_cjk_fonts
 
 setup_cjk_fonts()
@@ -60,13 +60,12 @@ DPI = 200
 
 
 def _regions() -> list[tuple[str, str, str]]:
-    """(row_id, window key, label) — overall + 9 parts + 4 aggregates."""
+    """(row_id, window key, label) — overall + the JOINT_HIERARCHY levels."""
     rows = [("overall", "pa_mpjpe_mm", "Overall")]
-    for pname in PART_NAMES:
-        rows.append(("part_%s" % pname, "PA-MPJPE_part_%s" % pname, pname))
-    for rid, label in (("upper", "Upper"), ("lower", "Lower"),
-                       ("anklefoot", "Ankle-foot"), ("hands", "Hands")):
-        rows.append((rid, "PA-MPJPE_%s" % rid, label))
+    for name in JOINT_HIERARCHY:
+        if name == "overall":
+            continue
+        rows.append((name, "PA-MPJPE_%s" % name, name))
     return rows
 
 

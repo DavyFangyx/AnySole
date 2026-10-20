@@ -15,6 +15,12 @@ from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.data.smpl_io import pelvis_to_smpl_trans, smpl24_pose6d_to_poses, smpl_archive_metadata
 from anysole.utils.diffusion import GaussianDiffusion
 from anysole.utils.geometry import f2_to_world, fk_pose6d, positions_to_6d_np, rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np
+from anysole.utils.constraints import apply_v3e_constraints
+from anysole.utils.constraints_g import apply_v3g_constraints
+from anysole.utils.constraints_h import apply_v3h
+from anysole.models.common.model_v3h import apply_foot_residual
+from anysole.models.common.model_v3f import sample_v3f
+from anysole.models.common.model_v5_1 import v5_1_z_src
 from anysole.models import AnySoleModel, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_INSOLE_DRIFT, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2, MODEL_NAMES
 from anysole.train import condition_inputs, load_config, move_batch, resolve_device
 from anysole.ablations.insole_drift.templates import load_template_bank
@@ -204,6 +210,23 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         metavar="MODE[,MODE...]",
         help="Evaluation mode(s): VT2M, V2M, T2M; omitted means all three.",
+    )
+    parser.add_argument(
+        "--z-src",
+        default=None,
+        choices=("V", "VT", "T"),
+        metavar="Z",
+        help="V5_1A 判据 ③ T 参与干预：VT 行的 z 来源覆写（V = 禁 T 专家，"
+             "z 固定为 g_V 输出；T = 反向对照）。常规跑不加此旗标；两次跑"
+             "（常规 vs --z-src V）的 VT2M 行逐会话配对比较 = 干预实验。",
+    )
+    parser.add_argument(
+        "--null-t",
+        action="store_true",
+        help="V4_1A 判据 ③ T 参与干预（null-T 注入）：三条件前向的 T 输入"
+             "整窗置零；训练正确的修正分支应输出 ≈0 → VT2M 行读数退回"
+             "V2M（两次跑——常规 vs --null-t——的 VT2M 行逐会话配对比较"
+             "= 干预实验）。非 V4_1 模型忽略（打印提示）。",
     )
     parser.add_argument(
         "--write-motion",
@@ -403,6 +426,23 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         build_cfg["tw"] = tw
         build_cfg["dropout"] = dropout
         build_cfg["pose_layers"] = pose_layers
+        # V3_3F: the denoiser depth is a hyperparameter — read it from the
+        # checkpoint like pose_layers (the yaml config only carries the
+        # default).
+        build_cfg["denoise_layers"] = int(saved_config.get("denoise_layers", 4))
+        # V3_3G: the frozen carrier is structural provenance recorded in the
+        # ckpt config at training time (2026-10-18 incident: building from the
+        # yaml config dropped it and the formal eval died on the missing key).
+        if saved_config.get("carrier_from"):
+            build_cfg["carrier_from"] = str(saved_config["carrier_from"])
+        if saved_config.get("g_floor_src"):
+            build_cfg["g_floor_src"] = str(saved_config["g_floor_src"])
+        # model_name is structural provenance for entry-based builds
+        # (2026-10-19 V3_3H_v2 incident: V3_3H_v2/v3 heads are selected by
+        # the model_name prefix — dropping it built a headless model and the
+        # strict load died on unexpected keys).
+        if saved_config.get("model_name"):
+            build_cfg["model_name"] = str(saved_config["model_name"])
         part_joints = saved_config.get("part_joints")
         model = entry.build(
             build_cfg,
@@ -435,7 +475,7 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
     model.noise_scaled = bool(saved_config.get("noise_scaled", False))
     # V4A: the assignment softmax temperature must match the checkpoint's
     # final annealed value (default 1.0 = the plain V3-3 softmax).
-    if getattr(model.pose_head, "soft_parts", False) and bool(saved_config.get("assign_cluster", False)):
+    if getattr(getattr(model, "pose_head", None), "soft_parts", False) and bool(saved_config.get("assign_cluster", False)):
         model.pose_head.set_assign_temp(float(saved_config.get("assign_temp_final", 1.0)))
     model.eval()
     return model
@@ -575,7 +615,26 @@ def _evaluate_one(
     sample_steps = int(args.sample_steps or config["diffusion_sample_steps"])
     model.diffusion_abar_top = float(diffusion.alphas_cumprod[diffusion.n_train_steps - 1])
     pos_mode = checkpoint_modal == MODEL_ANYSOLEV1_POS
-    regress_mode = checkpoint_modal == MODEL_ANYSOLEV2
+    regress_mode = checkpoint_modal == MODEL_ANYSOLEV2 \
+        and not bool(checkpoint.get("config", {}).get("v3f", False))
+    v3e_mode = bool(checkpoint.get("config", {}).get("v3e", False))
+    v3g_mode = bool(checkpoint.get("config", {}).get("v3g", False))
+    v3h_mode = bool(checkpoint.get("config", {}).get("v3h", False))
+    v5_1_mode = bool(checkpoint.get("config", {}).get("v5_1", False))
+    v4_1_mode = bool(checkpoint.get("config", {}).get("v4_1", False))
+    # V5_1A 判据 ③ T 参与干预（--z-src）：VT 行的 z_PoE 换成指定来源
+    # （V = 禁 T 专家；T = 反向对照）。与常规 VT 行逐会话配对比较 =
+    # 干预实验读数。非 V5_1 模型忽略（打印提示）。
+    z_src_override = getattr(args, "z_src", None)
+    if z_src_override and not v5_1_mode:
+        print("NOTE: --z-src %s ignored for non-V5_1 checkpoint" % z_src_override)
+        z_src_override = None
+    # V4_1A 判据 ③ null-T 注入（--null-t）：同上口径，T 输入整窗置零。
+    null_t = bool(getattr(args, "null_t", False))
+    if null_t and not v4_1_mode:
+        print("NOTE: --null-t ignored for non-V4_1 checkpoint")
+        null_t = False
+    v3f_mode = bool(checkpoint.get("config", {}).get("v3f", False))
     # F2a: heading/tilt representation — world pose/trans recovered via
     # geometry.f2_to_world before FK metrics and SMPL export.
     f2_repr = bool(checkpoint.get("config", {}).get("f2_repr", False))
@@ -725,14 +784,43 @@ def _evaluate_one(
                     batch["config_id"] = config_id
                     assert_batch_shapes(batch, batch_size, tw=tw)
                     v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+                    if v3f_mode:
+                        # V3_3F: T stays live under every condition (the
+                        # contact head reads the real stream; conditions are
+                        # sampler switches).  condition_inputs already zeroed
+                        # V for T2M — exactly the unconditional pass.
+                        t_raw, t_phys = batch["T_raw"], batch["T_phys"]
+                    if v5_1_mode or v4_1_mode:
+                        # V5_1A/V4_1A：T 流输入三条件恒定（g_T/接触头/XAttn
+                        # 恒读真实压力，判据 ③ 干预实验要求同输入比
+                        # 来源）；V 零化保留（T2M 行）。
+                        t_raw, t_phys = batch["T_raw"], batch["T_phys"]
+                    if null_t:
+                        # V4_1A 判据 ③ null-T 注入（--null-t）：T 输入整窗
+                        # 置零（三条件），VT 行修正分支应输出 ≈0。
+                        t_raw = torch.zeros_like(t_raw)
+                        t_phys = torch.zeros_like(t_phys)
+                        t_s2m = torch.zeros_like(t_s2m)
                     v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
-                    if regress_mode:
+                    if v3f_mode:
+                        out = sample_v3f(
+                            model, v_feat, t_raw, t_phys,
+                            anchor=batch["trans_anchor"][:, None, :],
+                            floor_y=batch["floor_y"],
+                            offsets=batch["offsets"], parents=batch["parents"],
+                            use_t=config_value != CONFIG_V,
+                            refine=config_value != CONFIG_V,
+                            diffusion=diffusion, steps=sample_steps, eta=0.0,
+                            device=device)
+                        pred_pose = out["x0_hat"]
+                    elif regress_mode:
                         # F0b: single regression forward — no DDIM chain.
                         # E6.4 continuation is diffusion-era and never applies
                         # here (F3 replaces it with Hann blending); the FADE=4
                         # crossfade below stays.
+                        z_kw = {"z_src": v5_1_z_src(config_value, z_src_override)} if v5_1_mode else {}
                         out = model(v_feat, t_raw, t_phys, config_id,
-                                    batch.get("session_id"), T_s2m=t_s2m, **v_kw)
+                                    batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw)
                         pred_pose = out["x0_hat"]
                     else:
                         cond = {
@@ -771,8 +859,77 @@ def _evaluate_one(
                             batch["trans_anchor"],
                         )
                     else:
-                        pred_trans_world = pred_trans + anchor
-                        pred_pose_w = pred_pose
+                        if v3e_mode:
+                            # V3_3E: VT exports the constraint-processed
+                            # prediction; V/T export the two raw streams.
+                            if config_value == CONFIG_VT:
+                                pred_pose_w, pred_trans_world = apply_v3e_constraints(
+                                    out["x0_hat"], pred_trans + anchor,
+                                    batch["floor_y"],
+                                    batch["offsets"], batch["parents"])
+                            elif config_value == CONFIG_V:
+                                pred_pose_w = pred_pose
+                                pred_trans_world = pred_trans + anchor
+                            else:
+                                pred_pose_w = out["x0_prior"]
+                                pred_trans_world = out["trans_prior"] + anchor
+                        elif v3g_mode:
+                            # V3_3G: VT = 分部观测层 on the V stream; V = raw
+                            # carrier (= E); T = T prior + 观测层.  floor_src
+                            # stays the registered default "gt" (E v2.1 口径).
+                            if config_value == CONFIG_VT:
+                                pred_pose_w, pred_trans_world = apply_v3g_constraints(
+                                    out["x0_hat"], pred_trans + anchor,
+                                    out["contact_logits"],
+                                    batch["offsets"], batch["parents"],
+                                    floor_y=batch["floor_y"])
+                            elif config_value == CONFIG_V:
+                                pred_pose_w = pred_pose
+                                pred_trans_world = pred_trans + anchor
+                            else:
+                                pred_pose_w, pred_trans_world = apply_v3g_constraints(
+                                    out["x0_prior"], out["trans_prior"] + anchor,
+                                    out["contact_logits"],
+                                    batch["offsets"], batch["parents"],
+                                    floor_y=batch["floor_y"])
+                        elif v3h_mode:
+                            # V3_3H: VT = 残差通道 on the V stream; V = raw
+                            # V tower; T = null-V 先验 + 残差通道 (H 无 T 塔
+                            # ——同一 V 塔、V 已在上游零化).  floor_src stays
+                            # the registered default "gt" (E v2.1 口径).
+                            # V3_3H_v3：VT/T 行先应用一阶足部残差。
+                            pose_vt = apply_foot_residual(
+                                out["x0_hat"], out["foot_res"],
+                                landing=str(getattr(model, "res_landing", "foot"))) if out.get("foot_res") is not None else out["x0_hat"]
+                            if config_value == CONFIG_VT:
+                                pred_pose_w, pred_trans_world = apply_v3h(
+                                    bool(getattr(model, "no_anchor", False)),
+                                    pose_vt, pred_trans + anchor,
+                                    out["contact_logits"],
+                                    batch["offsets"], batch["parents"],
+                                    floor_y=batch["floor_y"])
+                            elif config_value == CONFIG_V:
+                                pred_pose_w = pred_pose
+                                pred_trans_world = pred_trans + anchor
+                            else:
+                                pred_pose_w, pred_trans_world = apply_v3h(
+                                    bool(getattr(model, "no_anchor", False)),
+                                    pose_vt, pred_trans + anchor,
+                                    out["contact_logits"],
+                                    batch["offsets"], batch["parents"],
+                                    floor_y=batch["floor_y"])
+                        elif v4_1_mode:
+                            # V4_1A: 姿态输出/渲染用 pose_v（修正只进评估
+                            # 软骨架）；T2M 行导出 T 先验流。
+                            if config_value == CONFIG_T:
+                                pred_pose_w = out["x0_prior"]
+                                pred_trans_world = out["trans_prior"] + anchor
+                            else:
+                                pred_pose_w = pred_pose
+                                pred_trans_world = pred_trans + anchor
+                        else:
+                            pred_trans_world = pred_trans + anchor
+                            pred_pose_w = pred_pose
                         gt_pose_w = batch["pose_gt"]
                     gt_trans_world = batch["trans_gt"] + anchor
                     pred_kp = fk_pose6d(pred_pose_w, pred_trans_world, batch["offsets"], batch["parents"])
@@ -871,6 +1028,8 @@ def _evaluate_one(
         brief_out=metrics_out,
         v2t_out_dir=motion_out,
         dump_detail=args.dump_detail,
+        z_src_override=z_src_override,
+        null_t=null_t,
     )
     if not final_metrics:
         raise RuntimeError(

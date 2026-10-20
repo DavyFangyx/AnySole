@@ -22,9 +22,10 @@ from anysole.models.common.embeddings import SharedEmbeddings
 from anysole.models.common.encoders import ModalEncoders
 from anysole.models.common.fusion import FusionTransformer
 from anysole.models.common.pose_head import PoseHead
+from anysole.models.common.position_head import PositionHead
 from anysole.models.common.t_residual import TResidualBranch
 from anysole.models.common.traj_head import TrajHead
-from anysole.types import CONFIG_VT, D_MODEL, POSE_DIM, TW
+from anysole.types import CONFIG_VT, D_MODEL, FPS, POSE_DIM, TW
 
 
 MODEL_ANYSOLEV2 = "anysolev2"
@@ -36,7 +37,7 @@ class AnySoleModelV2(nn.Module):
                  tactile_direct=False, no_imu=False, v_input="hrnet",
                  t_encoder="linear", f2_repr=False, pose_parts=3,
                  soft_parts=False, gate="none", part_joints=None,
-                 residual_t=False):
+                 residual_t=False, position_head=False):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -51,14 +52,19 @@ class AnySoleModelV2(nn.Module):
         self.soft_parts = bool(soft_parts)
         self.gate = str(gate)
         self.residual_t = bool(residual_t)
+        self.position_head = bool(position_head)
+        if self.position_head and self.residual_t:
+            raise ValueError("position_head and residual_t are mutually exclusive (V3_3D vs V3_3C)")
+        if self.position_head and self.f2_repr:
+            raise ValueError("position_head requires f2_repr=False (V3_3D)")
         if self.v_input not in ("hrnet", "hmr_gvhmr"):
             raise ValueError("v_input must be 'hrnet' or 'hmr_gvhmr', got %r" % self.v_input)
-        if self.tactile_input not in ("raw108", "s2m50"):
-            raise ValueError("tactile_input must be 'raw108' or 's2m50', got %r" % self.tactile_input)
+        if self.tactile_input not in ("raw108", "s2m50", "denoised108"):
+            raise ValueError("tactile_input must be 'raw108', 's2m50' or 'denoised108', got %r" % self.tactile_input)
         if self.t_encoder not in ("linear", "foot_conv"):
             raise ValueError("t_encoder must be 'linear' or 'foot_conv', got %r" % self.t_encoder)
-        if self.t_encoder == "foot_conv" and self.tactile_input != "raw108":
-            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108' (F4a)")
+        if self.t_encoder == "foot_conv" and self.tactile_input not in ("raw108", "denoised108"):
+            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108'/denoised108 (F4a)")
         if self.tactile_direct and self.tactile_input != "s2m50":
             raise ValueError("tactile_direct requires tactile_input='s2m50'")
         if self.no_imu and self.tactile_input != "s2m50":
@@ -81,6 +87,9 @@ class AnySoleModelV2(nn.Module):
         self.aux_heads = AuxHeads(dim=d, tw=tw)
         # V3_3C: frozen-V corrector reading the tactile stream only.
         self.t_residual = TResidualBranch(d, POSE_DIM) if self.residual_t else None
+        # V3_3D: joint position-space readout of the pre-fusion tokens.
+        self.position_head = PositionHead(d, tw, nhead=nhead, dropout=dropout) \
+            if self.position_head else None
 
     def forward(self, V_feat, T_raw, T_phys, config_id, subject_ids=None, T_s2m=None,
                 V_hmr=None, mask_v=None, mask_t=None):
@@ -103,13 +112,14 @@ class AnySoleModelV2(nn.Module):
             raise ValueError("V_hmr is required when v_input='hmr_gvhmr'")
         v_tok, t_tok = self.encoders(V_feat, T_tac, config_id, V_hmr=V_hmr,
                                      mask_v=mask_v, mask_t=mask_t)
-        if self.t_residual is not None:
-            # V3_3C: the frozen base never sees the real tactile stream — it
-            # runs in its V-only regime under every condition (the fused F is
-            # bit-identical to its V-only F), and the real t_tok reaches the
-            # model only through the residual branch.  This is what makes the
-            # init-time guarantee exact: out == base V-only output, and the
-            # branch can only add what the tactile stream carries.
+        if self.t_residual is not None or self.position_head is not None:
+            # V3_3C/V3_3D: the frozen base never sees the real tactile stream
+            # — it runs in its V-only regime under every condition (the fused
+            # F is bit-identical to its V-only F), and the real t_tok reaches
+            # the model only through the residual/position branch.  This is
+            # what makes the init-time guarantee exact: out == base V-only
+            # output, and the branch can only add what the tactile stream
+            # carries.
             fused = self.fusion(v_tok, self.embeddings.null_t.expand_as(t_tok))
         else:
             fused = self.fusion(v_tok, t_tok)
@@ -134,6 +144,16 @@ class AnySoleModelV2(nn.Module):
             ).to(x0_hat.dtype).view(-1, 1, 1)
             x0_hat = x0_hat + t_present * residual
         v_hat, trans_hat = self.traj_head(fused)
+        pos_corr = None
+        if self.position_head is not None:
+            # V3_3D: the corrected root velocity (zero-init dv keeps trans_hat
+            # bit-identical to the frozen base at init) and the pelvis-relative
+            # six-joint position correction (meters).  The head is active under
+            # every condition — the encoders already null-replaced the missing
+            # stream — so the V-only/T-only outputs get the same readout.
+            pos_corr, v_corr = self.position_head(v_tok, t_tok)
+            v_hat = v_hat + v_corr
+            trans_hat = torch.cumsum(v_hat[..., :3], dim=1) / float(FPS)
         pressure_hat, vfeat_hat = self.aux_heads(fused)
         out = {
             "x0_hat": x0_hat,
@@ -153,6 +173,10 @@ class AnySoleModelV2(nn.Module):
             # V3_3C: detached tactile correction (zero under V-only/T-only;
             # smoke tests and probes read this).
             "x0_residual": residual.detach() if residual is not None else None,
+            # V3_3D: pelvis-relative six-joint position correction (meters);
+            # eval_protocol applies it to the FK keypoints (soft skeleton),
+            # losses.py supervises it (L_pos).
+            "pos_corr": pos_corr,
         }
         if self.gate == "sigma":
             # Beta-NLL sigma supervision inputs (losses.py): the last layer's

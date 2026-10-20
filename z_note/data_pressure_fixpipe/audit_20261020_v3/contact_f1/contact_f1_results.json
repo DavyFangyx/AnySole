@@ -1,0 +1,1231 @@
+{
+  "split_col": "val",
+  "n_split_ids": 36,
+  "n_sessions": 36,
+  "n_loaded": 36,
+  "load_fail": [],
+  "gt_missing": [],
+  "gt_len_mismatch": [],
+  "gt_degenerate_excl_by_foot": {
+    "left": 16,
+    "right": 16
+  },
+  "methods": [
+    "tactile_abs",
+    "tactile_rel",
+    "tactile_gmm",
+    "pressure_f6"
+  ],
+  "versions": [
+    "raw108",
+    "denoised108_v2",
+    "denoised108_v3"
+  ],
+  "gt": "f6_soft binarized >0.5 (load_labels 同口径)",
+  "exclusion_rule": "GT foot all-0 or all-1 -> excl",
+  "f1_definition": "binary F1, contact=positive; pooled + per-session mean",
+  "summary": {
+    "tactile_abs": {
+      "raw108": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 4828,
+          "fp": 2179,
+          "fn": 3,
+          "precision": 0.6890252604538318,
+          "recall": 0.9993790105568205,
+          "f1_pooled": 0.8156783240412232,
+          "f1_mean": 0.8122917166328998,
+          "f1_std": 0.032995410876740495
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 4035,
+          "fp": 925,
+          "fn": 857,
+          "precision": 0.813508064516129,
+          "recall": 0.8248160261651676,
+          "f1_pooled": 0.8191230207064555,
+          "f1_mean": 0.8044502313776934,
+          "f1_std": 0.1471802353246742
+        }
+      },
+      "denoised108_v2": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 4819,
+          "fp": 1931,
+          "fn": 12,
+          "precision": 0.713925925925926,
+          "recall": 0.9975160422272822,
+          "f1_pooled": 0.832225196442449,
+          "f1_mean": 0.8272924689222455,
+          "f1_std": 0.055862343723163135
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3985,
+          "fp": 920,
+          "fn": 907,
+          "precision": 0.8124362895005097,
+          "recall": 0.8145952575633688,
+          "f1_pooled": 0.8135143411248342,
+          "f1_mean": 0.7969334746634307,
+          "f1_std": 0.14992999831791815
+        }
+      },
+      "denoised108_v3": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 4819,
+          "fp": 1931,
+          "fn": 12,
+          "precision": 0.713925925925926,
+          "recall": 0.9975160422272822,
+          "f1_pooled": 0.832225196442449,
+          "f1_mean": 0.8272924689222455,
+          "f1_std": 0.055862343723163135
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3985,
+          "fp": 920,
+          "fn": 907,
+          "precision": 0.8124362895005097,
+          "recall": 0.8145952575633688,
+          "f1_pooled": 0.8135143411248342,
+          "f1_mean": 0.7969334746634307,
+          "f1_std": 0.14992999831791815
+        }
+      }
+    },
+    "tactile_rel": {
+      "raw108": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3447,
+          "fp": 558,
+          "fn": 1384,
+          "precision": 0.8606741573033708,
+          "recall": 0.7135168702132064,
+          "f1_pooled": 0.7802172928927117,
+          "f1_mean": 0.767729416893148,
+          "f1_std": 0.16093738637141833
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3228,
+          "fp": 600,
+          "fn": 1664,
+          "precision": 0.8432601880877743,
+          "recall": 0.659852820932134,
+          "f1_pooled": 0.7403669724770642,
+          "f1_mean": 0.7069710619970191,
+          "f1_std": 0.20631484043828482
+        }
+      },
+      "denoised108_v2": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3387,
+          "fp": 602,
+          "fn": 1444,
+          "precision": 0.8490849837051893,
+          "recall": 0.701097081349617,
+          "f1_pooled": 0.7680272108843537,
+          "f1_mean": 0.7567074920681103,
+          "f1_std": 0.15506861824807672
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 2944,
+          "fp": 547,
+          "fn": 1948,
+          "precision": 0.8433113720996849,
+          "recall": 0.6017988552739166,
+          "f1_pooled": 0.7023738518430157,
+          "f1_mean": 0.6611980064759957,
+          "f1_std": 0.2132739533646265
+        }
+      },
+      "denoised108_v3": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3387,
+          "fp": 602,
+          "fn": 1444,
+          "precision": 0.8490849837051893,
+          "recall": 0.701097081349617,
+          "f1_pooled": 0.7680272108843537,
+          "f1_mean": 0.7567074920681103,
+          "f1_std": 0.15506861824807672
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3264,
+          "fp": 587,
+          "fn": 1628,
+          "precision": 0.8475720592054012,
+          "recall": 0.6672117743254292,
+          "f1_pooled": 0.746654466430287,
+          "f1_mean": 0.7188263640599646,
+          "f1_std": 0.1720619140337678
+        }
+      }
+    },
+    "tactile_gmm": {
+      "raw108": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3660,
+          "fp": 641,
+          "fn": 1171,
+          "precision": 0.850964891885608,
+          "recall": 0.7576071206789484,
+          "f1_pooled": 0.8015768725361366,
+          "f1_mean": 0.7850796315895014,
+          "f1_std": 0.15894028968096852
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3967,
+          "fp": 872,
+          "fn": 925,
+          "precision": 0.8197974788179376,
+          "recall": 0.8109157808667212,
+          "f1_pooled": 0.8153324427088686,
+          "f1_mean": 0.8003449652194107,
+          "f1_std": 0.15143117276257237
+        }
+      },
+      "denoised108_v2": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3600,
+          "fp": 703,
+          "fn": 1231,
+          "precision": 0.8366256100395073,
+          "recall": 0.7451873318153591,
+          "f1_pooled": 0.7882636303919422,
+          "f1_mean": 0.7722414592353142,
+          "f1_std": 0.15572459183758786
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3906,
+          "fp": 873,
+          "fn": 986,
+          "precision": 0.8173258003766478,
+          "recall": 0.7984464431725266,
+          "f1_pooled": 0.8077758246303381,
+          "f1_mean": 0.7917681256303403,
+          "f1_std": 0.15334886757311256
+        }
+      },
+      "denoised108_v3": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3600,
+          "fp": 703,
+          "fn": 1231,
+          "precision": 0.8366256100395073,
+          "recall": 0.7451873318153591,
+          "f1_pooled": 0.7882636303919422,
+          "f1_mean": 0.7722414592353142,
+          "f1_std": 0.15572459183758786
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3915,
+          "fp": 877,
+          "fn": 977,
+          "precision": 0.8169866444073456,
+          "recall": 0.8002861815208504,
+          "f1_pooled": 0.808550185873606,
+          "f1_mean": 0.7926019924204162,
+          "f1_std": 0.15343050337468037
+        }
+      }
+    },
+    "pressure_f6": {
+      "raw108": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3543,
+          "fp": 358,
+          "fn": 1288,
+          "precision": 0.9082286593181236,
+          "recall": 0.7333885323949493,
+          "f1_pooled": 0.8114979386165826,
+          "f1_mean": 0.7885439222657046,
+          "f1_std": 0.16946653375406667
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3399,
+          "fp": 430,
+          "fn": 1493,
+          "precision": 0.8876991381561765,
+          "recall": 0.6948078495502862,
+          "f1_pooled": 0.7794977640178878,
+          "f1_mean": 0.7488058238958234,
+          "f1_std": 0.18803935861050827
+        }
+      },
+      "denoised108_v2": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3435,
+          "fp": 423,
+          "fn": 1396,
+          "precision": 0.890357698289269,
+          "recall": 0.7110329124404885,
+          "f1_pooled": 0.7906548509609851,
+          "f1_mean": 0.7683304240957785,
+          "f1_std": 0.16629870729217333
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3327,
+          "fp": 476,
+          "fn": 1565,
+          "precision": 0.8748356560610044,
+          "recall": 0.6800899427636958,
+          "f1_pooled": 0.765267395054629,
+          "f1_mean": 0.7334281956607758,
+          "f1_std": 0.19117690320478942
+        }
+      },
+      "denoised108_v3": {
+        "left": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3435,
+          "fp": 423,
+          "fn": 1396,
+          "precision": 0.890357698289269,
+          "recall": 0.7110329124404885,
+          "f1_pooled": 0.7906548509609851,
+          "f1_mean": 0.7683304240957785,
+          "f1_std": 0.16629870729217333
+        },
+        "right": {
+          "n_incl": 20,
+          "n_excl": 16,
+          "tp": 3310,
+          "fp": 458,
+          "fn": 1582,
+          "precision": 0.8784501061571125,
+          "recall": 0.6766148814390842,
+          "f1_pooled": 0.7644341801385682,
+          "f1_mean": 0.7328610340948576,
+          "f1_std": 0.18729000153890582
+        }
+      }
+    }
+  },
+  "per_session": {
+    "S13011": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S13013": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S13021": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.824607329842932,
+          "tactile_abs/denoised108_v2": 0.9692307692307692,
+          "tactile_abs/denoised108_v3": 0.9692307692307692,
+          "tactile_rel/raw108": 0.9393939393939393,
+          "tactile_rel/denoised108_v2": 0.9411764705882353,
+          "tactile_rel/denoised108_v3": 0.9411764705882353,
+          "tactile_gmm/raw108": 0.9655172413793104,
+          "tactile_gmm/denoised108_v2": 0.9592169657422512,
+          "tactile_gmm/denoised108_v3": 0.9592169657422512,
+          "pressure_f6/raw108": 0.9672131147540983,
+          "pressure_f6/denoised108_v2": 0.9623567921440261,
+          "pressure_f6/denoised108_v3": 0.9623567921440261
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.9533011272141708,
+          "tactile_abs/denoised108_v2": 0.9615384615384615,
+          "tactile_abs/denoised108_v3": 0.9615384615384615,
+          "tactile_rel/raw108": 0.9490968801313628,
+          "tactile_rel/denoised108_v2": 0.9559543230016314,
+          "tactile_rel/denoised108_v3": 0.9559543230016314,
+          "tactile_gmm/raw108": 0.9533011272141708,
+          "tactile_gmm/denoised108_v2": 0.9615384615384615,
+          "tactile_gmm/denoised108_v3": 0.9615384615384615,
+          "pressure_f6/raw108": 0.9576547231270358,
+          "pressure_f6/denoised108_v2": 0.9627228525121555,
+          "pressure_f6/denoised108_v3": 0.9627228525121555
+        }
+      }
+    },
+    "S13023": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8321377331420373,
+          "tactile_abs/denoised108_v2": 0.9038461538461539,
+          "tactile_abs/denoised108_v3": 0.9038461538461539,
+          "tactile_rel/raw108": 0.9511754068716094,
+          "tactile_rel/denoised108_v2": 0.9454545454545454,
+          "tactile_rel/denoised108_v3": 0.9454545454545454,
+          "tactile_gmm/raw108": 0.9466192170818505,
+          "tactile_gmm/denoised108_v2": 0.9477477477477477,
+          "tactile_gmm/denoised108_v3": 0.9477477477477477,
+          "pressure_f6/raw108": 0.9568345323741008,
+          "pressure_f6/denoised108_v2": 0.9534050179211468,
+          "pressure_f6/denoised108_v3": 0.9534050179211468
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.9488054607508531,
+          "tactile_abs/denoised108_v2": 0.9556313993174061,
+          "tactile_abs/denoised108_v3": 0.9556313993174061,
+          "tactile_rel/raw108": 0.9163636363636364,
+          "tactile_rel/denoised108_v2": 0.9202898550724637,
+          "tactile_rel/denoised108_v3": 0.9202898550724637,
+          "tactile_gmm/raw108": 0.9488054607508531,
+          "tactile_gmm/denoised108_v2": 0.9556313993174061,
+          "tactile_gmm/denoised108_v3": 0.9556313993174061,
+          "pressure_f6/raw108": 0.9507042253521127,
+          "pressure_f6/denoised108_v2": 0.9488536155202822,
+          "pressure_f6/denoised108_v3": 0.9488536155202822
+        }
+      }
+    },
+    "S13061": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S13062": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S13063": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S13071": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8258064516129032,
+          "tactile_abs/denoised108_v2": 0.8258064516129032,
+          "tactile_abs/denoised108_v3": 0.8258064516129032,
+          "tactile_rel/raw108": 0.7175572519083969,
+          "tactile_rel/denoised108_v2": 0.7364341085271318,
+          "tactile_rel/denoised108_v3": 0.7364341085271318,
+          "tactile_gmm/raw108": 0.6877470355731224,
+          "tactile_gmm/denoised108_v2": 0.7063492063492064,
+          "tactile_gmm/denoised108_v3": 0.7063492063492064,
+          "pressure_f6/raw108": 0.7354260089686099,
+          "pressure_f6/denoised108_v2": 0.7079646017699115,
+          "pressure_f6/denoised108_v3": 0.7079646017699115
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.7326007326007327,
+          "tactile_abs/denoised108_v2": 0.7481481481481482,
+          "tactile_abs/denoised108_v3": 0.7481481481481482,
+          "tactile_rel/raw108": 0.6825396825396826,
+          "tactile_rel/denoised108_v2": 0.6255506607929515,
+          "tactile_rel/denoised108_v3": 0.6693548387096774,
+          "tactile_gmm/raw108": 0.7286245353159851,
+          "tactile_gmm/denoised108_v2": 0.736842105263158,
+          "tactile_gmm/denoised108_v3": 0.7340823970037453,
+          "pressure_f6/raw108": 0.6818181818181819,
+          "pressure_f6/denoised108_v2": 0.6724890829694323,
+          "pressure_f6/denoised108_v3": 0.6696035242290748
+        }
+      }
+    },
+    "S13072": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.794425087108014,
+          "tactile_abs/denoised108_v2": 0.794425087108014,
+          "tactile_abs/denoised108_v3": 0.794425087108014,
+          "tactile_rel/raw108": 0.6,
+          "tactile_rel/denoised108_v2": 0.6243902439024389,
+          "tactile_rel/denoised108_v3": 0.6243902439024389,
+          "tactile_gmm/raw108": 0.6160714285714286,
+          "tactile_gmm/denoised108_v2": 0.6301369863013698,
+          "tactile_gmm/denoised108_v3": 0.6301369863013698,
+          "pressure_f6/raw108": 0.5502645502645502,
+          "pressure_f6/denoised108_v2": 0.5918367346938775,
+          "pressure_f6/denoised108_v3": 0.5918367346938775
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.7559055118110236,
+          "tactile_abs/denoised108_v2": 0.7171314741035856,
+          "tactile_abs/denoised108_v3": 0.7171314741035856,
+          "tactile_rel/raw108": 0.7075471698113208,
+          "tactile_rel/denoised108_v2": 0.5510204081632654,
+          "tactile_rel/denoised108_v3": 0.6816143497757847,
+          "tactile_gmm/raw108": 0.7569721115537849,
+          "tactile_gmm/denoised108_v2": 0.7154471544715446,
+          "tactile_gmm/denoised108_v3": 0.7154471544715446,
+          "pressure_f6/raw108": 0.6600985221674877,
+          "pressure_f6/denoised108_v2": 0.6763285024154589,
+          "pressure_f6/denoised108_v3": 0.6889952153110048
+        }
+      }
+    },
+    "S13073": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.7849056603773585,
+          "tactile_abs/denoised108_v2": 0.7849056603773585,
+          "tactile_abs/denoised108_v3": 0.7849056603773585,
+          "tactile_rel/raw108": 0.7087378640776699,
+          "tactile_rel/denoised108_v2": 0.7317073170731707,
+          "tactile_rel/denoised108_v3": 0.7317073170731707,
+          "tactile_gmm/raw108": 0.7014218009478673,
+          "tactile_gmm/denoised108_v2": 0.6944444444444444,
+          "tactile_gmm/denoised108_v3": 0.6944444444444444,
+          "pressure_f6/raw108": 0.6775956284153005,
+          "pressure_f6/denoised108_v2": 0.6885245901639345,
+          "pressure_f6/denoised108_v3": 0.6885245901639345
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.6696428571428572,
+          "tactile_abs/denoised108_v2": 0.6905829596412556,
+          "tactile_abs/denoised108_v3": 0.6905829596412556,
+          "tactile_rel/raw108": 0.48888888888888893,
+          "tactile_rel/denoised108_v2": 0.48554913294797686,
+          "tactile_rel/denoised108_v3": 0.5759162303664921,
+          "tactile_gmm/raw108": 0.660633484162896,
+          "tactile_gmm/denoised108_v2": 0.6968325791855203,
+          "tactile_gmm/denoised108_v3": 0.6968325791855203,
+          "pressure_f6/raw108": 0.41916167664670656,
+          "pressure_f6/denoised108_v2": 0.5028571428571429,
+          "pressure_f6/denoised108_v3": 0.49411764705882355
+        }
+      }
+    },
+    "S13082": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.6919191919191919,
+          "tactile_abs/denoised108_v2": 0.6919191919191919,
+          "tactile_abs/denoised108_v3": 0.6919191919191919,
+          "tactile_rel/raw108": 0.4262295081967213,
+          "tactile_rel/denoised108_v2": 0.4232365145228216,
+          "tactile_rel/denoised108_v3": 0.4232365145228216,
+          "tactile_gmm/raw108": 0.4251968503937008,
+          "tactile_gmm/denoised108_v2": 0.416988416988417,
+          "tactile_gmm/denoised108_v3": 0.416988416988417,
+          "pressure_f6/raw108": 0.4576271186440678,
+          "pressure_f6/denoised108_v2": 0.44255319148936173,
+          "pressure_f6/denoised108_v3": 0.44255319148936173
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.44285714285714284,
+          "tactile_abs/denoised108_v2": 0.4411764705882353,
+          "tactile_abs/denoised108_v3": 0.4411764705882353,
+          "tactile_rel/raw108": 0.1262135922330097,
+          "tactile_rel/denoised108_v2": 0.11940298507462686,
+          "tactile_rel/denoised108_v3": 0.38938053097345127,
+          "tactile_gmm/raw108": 0.4444444444444444,
+          "tactile_gmm/denoised108_v2": 0.44280442804428044,
+          "tactile_gmm/denoised108_v3": 0.4476534296028881,
+          "pressure_f6/raw108": 0.47058823529411764,
+          "pressure_f6/denoised108_v2": 0.4602510460251046,
+          "pressure_f6/denoised108_v3": 0.4545454545454546
+        }
+      }
+    },
+    "S13092": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8280871670702179,
+          "tactile_abs/denoised108_v2": 0.8280871670702179,
+          "tactile_abs/denoised108_v3": 0.8280871670702179,
+          "tactile_rel/raw108": 0.6618444846292947,
+          "tactile_rel/denoised108_v2": 0.6470588235294118,
+          "tactile_rel/denoised108_v3": 0.6470588235294118,
+          "tactile_gmm/raw108": 0.8024883359253498,
+          "tactile_gmm/denoised108_v2": 0.799373040752351,
+          "tactile_gmm/denoised108_v3": 0.799373040752351,
+          "pressure_f6/raw108": 0.7549668874172185,
+          "pressure_f6/denoised108_v2": 0.7348993288590604,
+          "pressure_f6/denoised108_v3": 0.7348993288590604
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.7113237639553429,
+          "tactile_abs/denoised108_v2": 0.7692307692307693,
+          "tactile_abs/denoised108_v3": 0.7692307692307693,
+          "tactile_rel/raw108": 0.6075471698113208,
+          "tactile_rel/denoised108_v2": 0.6804511278195489,
+          "tactile_rel/denoised108_v3": 0.7572156196943972,
+          "tactile_gmm/raw108": 0.7092651757188497,
+          "tactile_gmm/denoised108_v2": 0.7692307692307693,
+          "tactile_gmm/denoised108_v3": 0.7692307692307693,
+          "pressure_f6/raw108": 0.6921739130434783,
+          "pressure_f6/denoised108_v2": 0.780569514237856,
+          "pressure_f6/denoised108_v3": 0.780569514237856
+        }
+      }
+    },
+    "S13093": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8028004667444574,
+          "tactile_abs/denoised108_v2": 0.8028004667444574,
+          "tactile_abs/denoised108_v3": 0.8028004667444574,
+          "tactile_rel/raw108": 0.43697478991596633,
+          "tactile_rel/denoised108_v2": 0.4205298013245033,
+          "tactile_rel/denoised108_v3": 0.4205298013245033,
+          "tactile_gmm/raw108": 0.510236220472441,
+          "tactile_gmm/denoised108_v2": 0.47058823529411764,
+          "tactile_gmm/denoised108_v3": 0.47058823529411764,
+          "pressure_f6/raw108": 0.41379310344827586,
+          "pressure_f6/denoised108_v2": 0.37109374999999994,
+          "pressure_f6/denoised108_v3": 0.37109374999999994
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.48948948948948945,
+          "tactile_abs/denoised108_v2": 0.4931921331316187,
+          "tactile_abs/denoised108_v3": 0.4931921331316187,
+          "tactile_rel/raw108": 0.40066777963272115,
+          "tactile_rel/denoised108_v2": 0.32358674463937626,
+          "tactile_rel/denoised108_v3": 0.3710575139146567,
+          "tactile_gmm/raw108": 0.487218045112782,
+          "tactile_gmm/denoised108_v2": 0.48170731707317066,
+          "tactile_gmm/denoised108_v3": 0.48170731707317066,
+          "pressure_f6/raw108": 0.35714285714285715,
+          "pressure_f6/denoised108_v2": 0.32079207920792074,
+          "pressure_f6/denoised108_v3": 0.3421588594704684
+        }
+      }
+    },
+    "S13101": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S13102": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S13103": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S13112": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8295081967213115,
+          "tactile_abs/denoised108_v2": 0.8295081967213115,
+          "tactile_abs/denoised108_v3": 0.8295081967213115,
+          "tactile_rel/raw108": 0.8285077951002227,
+          "tactile_rel/denoised108_v2": 0.8080357142857143,
+          "tactile_rel/denoised108_v3": 0.8080357142857143,
+          "tactile_gmm/raw108": 0.8595744680851064,
+          "tactile_gmm/denoised108_v2": 0.8344086021505378,
+          "tactile_gmm/denoised108_v3": 0.8344086021505378,
+          "pressure_f6/raw108": 0.8712446351931331,
+          "pressure_f6/denoised108_v2": 0.8337028824833703,
+          "pressure_f6/denoised108_v3": 0.8337028824833703
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.888888888888889,
+          "tactile_abs/denoised108_v2": 0.8759398496240602,
+          "tactile_abs/denoised108_v3": 0.8759398496240602,
+          "tactile_rel/raw108": 0.7874999999999999,
+          "tactile_rel/denoised108_v2": 0.8279999999999998,
+          "tactile_rel/denoised108_v3": 0.7574468085106382,
+          "tactile_gmm/raw108": 0.8930581613508443,
+          "tactile_gmm/denoised108_v2": 0.8652751423149905,
+          "tactile_gmm/denoised108_v3": 0.8780487804878049,
+          "pressure_f6/raw108": 0.8450704225352111,
+          "pressure_f6/denoised108_v2": 0.8531187122736418,
+          "pressure_f6/denoised108_v3": 0.7958333333333333
+        }
+      }
+    },
+    "S13113": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8408037094281299,
+          "tactile_abs/denoised108_v2": 0.8408037094281299,
+          "tactile_abs/denoised108_v3": 0.8408037094281299,
+          "tactile_rel/raw108": 0.7605042016806722,
+          "tactile_rel/denoised108_v2": 0.726890756302521,
+          "tactile_rel/denoised108_v3": 0.726890756302521,
+          "tactile_gmm/raw108": 0.7686116700201208,
+          "tactile_gmm/denoised108_v2": 0.7389558232931727,
+          "tactile_gmm/denoised108_v3": 0.7389558232931727,
+          "pressure_f6/raw108": 0.7883817427385892,
+          "pressure_f6/denoised108_v2": 0.6785714285714287,
+          "pressure_f6/denoised108_v3": 0.6785714285714287
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8301886792452831,
+          "tactile_abs/denoised108_v2": 0.8241379310344829,
+          "tactile_abs/denoised108_v3": 0.8241379310344829,
+          "tactile_rel/raw108": 0.6265560165975104,
+          "tactile_rel/denoised108_v2": 0.5161290322580645,
+          "tactile_rel/denoised108_v3": 0.6042553191489363,
+          "tactile_gmm/raw108": 0.8301886792452831,
+          "tactile_gmm/denoised108_v2": 0.8241379310344829,
+          "tactile_gmm/denoised108_v3": 0.8229166666666667,
+          "pressure_f6/raw108": 0.5308924485125859,
+          "pressure_f6/denoised108_v2": 0.518348623853211,
+          "pressure_f6/denoised108_v3": 0.5381165919282511
+        }
+      }
+    },
+    "S14011": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S14012": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S14013": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S14022": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8494623655913979,
+          "tactile_abs/denoised108_v2": 0.930780559646539,
+          "tactile_abs/denoised108_v3": 0.930780559646539,
+          "tactile_rel/raw108": 0.9140893470790378,
+          "tactile_rel/denoised108_v2": 0.9122203098106713,
+          "tactile_rel/denoised108_v3": 0.9122203098106713,
+          "tactile_gmm/raw108": 0.9553719008264463,
+          "tactile_gmm/denoised108_v2": 0.9622331691297208,
+          "tactile_gmm/denoised108_v3": 0.9622331691297208,
+          "pressure_f6/raw108": 0.9324324324324325,
+          "pressure_f6/denoised108_v2": 0.9306260575296108,
+          "pressure_f6/denoised108_v3": 0.9306260575296108
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.961082910321489,
+          "tactile_abs/denoised108_v2": 0.9628378378378378,
+          "tactile_abs/denoised108_v3": 0.9628378378378378,
+          "tactile_rel/raw108": 0.9361702127659575,
+          "tactile_rel/denoised108_v2": 0.9323843416370107,
+          "tactile_rel/denoised108_v3": 0.9323843416370107,
+          "tactile_gmm/raw108": 0.9551724137931035,
+          "tactile_gmm/denoised108_v2": 0.9551724137931035,
+          "tactile_gmm/denoised108_v3": 0.9551724137931035,
+          "pressure_f6/raw108": 0.9601386481802426,
+          "pressure_f6/denoised108_v2": 0.9565217391304348,
+          "pressure_f6/denoised108_v3": 0.9565217391304348
+        }
+      }
+    },
+    "S14033": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8026666666666666,
+          "tactile_abs/denoised108_v2": 0.8026666666666666,
+          "tactile_abs/denoised108_v3": 0.8026666666666666,
+          "tactile_rel/raw108": 0.8194444444444444,
+          "tactile_rel/denoised108_v2": 0.7972270363951472,
+          "tactile_rel/denoised108_v3": 0.7972270363951472,
+          "tactile_gmm/raw108": 0.821917808219178,
+          "tactile_gmm/denoised108_v2": 0.7972508591065292,
+          "tactile_gmm/denoised108_v3": 0.7972508591065292,
+          "pressure_f6/raw108": 0.8636363636363636,
+          "pressure_f6/denoised108_v2": 0.8371278458844134,
+          "pressure_f6/denoised108_v3": 0.8371278458844134
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8806451612903227,
+          "tactile_abs/denoised108_v2": 0.8705501618122977,
+          "tactile_abs/denoised108_v3": 0.8705501618122977,
+          "tactile_rel/raw108": 0.8344594594594594,
+          "tactile_rel/denoised108_v2": 0.7180451127819549,
+          "tactile_rel/denoised108_v3": 0.8338983050847457,
+          "tactile_gmm/raw108": 0.8824476650563607,
+          "tactile_gmm/denoised108_v2": 0.8705501618122977,
+          "tactile_gmm/denoised108_v3": 0.8705501618122977,
+          "pressure_f6/raw108": 0.7746741154562383,
+          "pressure_f6/denoised108_v2": 0.7533460803059272,
+          "pressure_f6/denoised108_v3": 0.7533460803059272
+        }
+      }
+    },
+    "S14061": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S14062": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S14063": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S14071": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8271186440677966,
+          "tactile_abs/denoised108_v2": 0.8271186440677966,
+          "tactile_abs/denoised108_v3": 0.8271186440677966,
+          "tactile_rel/raw108": 0.7777777777777778,
+          "tactile_rel/denoised108_v2": 0.7241379310344828,
+          "tactile_rel/denoised108_v3": 0.7241379310344828,
+          "tactile_gmm/raw108": 0.7829787234042553,
+          "tactile_gmm/denoised108_v2": 0.7372881355932204,
+          "tactile_gmm/denoised108_v3": 0.7372881355932204,
+          "pressure_f6/raw108": 0.807511737089202,
+          "pressure_f6/denoised108_v2": 0.7407407407407407,
+          "pressure_f6/denoised108_v3": 0.7407407407407407
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8032786885245902,
+          "tactile_abs/denoised108_v2": 0.7428571428571429,
+          "tactile_abs/denoised108_v3": 0.7428571428571429,
+          "tactile_rel/raw108": 0.7009345794392523,
+          "tactile_rel/denoised108_v2": 0.6851851851851852,
+          "tactile_rel/denoised108_v3": 0.6384976525821596,
+          "tactile_gmm/raw108": 0.7796610169491525,
+          "tactile_gmm/denoised108_v2": 0.7257383966244725,
+          "tactile_gmm/denoised108_v3": 0.7226890756302521,
+          "pressure_f6/raw108": 0.826530612244898,
+          "pressure_f6/denoised108_v2": 0.7604166666666666,
+          "pressure_f6/denoised108_v3": 0.776595744680851
+        }
+      }
+    },
+    "S14072": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8333333333333333,
+          "tactile_abs/denoised108_v2": 0.8333333333333333,
+          "tactile_abs/denoised108_v3": 0.8333333333333333,
+          "tactile_rel/raw108": 0.96875,
+          "tactile_rel/denoised108_v2": 0.9490196078431372,
+          "tactile_rel/denoised108_v3": 0.9490196078431372,
+          "tactile_gmm/raw108": 0.9767441860465116,
+          "tactile_gmm/denoised108_v2": 0.9575289575289576,
+          "tactile_gmm/denoised108_v3": 0.9575289575289576,
+          "pressure_f6/raw108": 0.9843749999999999,
+          "pressure_f6/denoised108_v2": 0.96875,
+          "pressure_f6/denoised108_v3": 0.96875
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.9323843416370107,
+          "tactile_abs/denoised108_v2": 0.9420289855072462,
+          "tactile_abs/denoised108_v3": 0.9420289855072462,
+          "tactile_rel/raw108": 0.8951612903225806,
+          "tactile_rel/denoised108_v2": 0.8713692946058093,
+          "tactile_rel/denoised108_v3": 0.8749999999999999,
+          "tactile_gmm/raw108": 0.9594095940959411,
+          "tactile_gmm/denoised108_v2": 0.9552238805970148,
+          "tactile_gmm/denoised108_v3": 0.9552238805970148,
+          "pressure_f6/raw108": 0.8943089430894308,
+          "pressure_f6/denoised108_v2": 0.8987854251012146,
+          "pressure_f6/denoised108_v3": 0.9024390243902439
+        }
+      }
+    },
+    "S14073": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.7986798679867987,
+          "tactile_abs/denoised108_v2": 0.7986798679867987,
+          "tactile_abs/denoised108_v3": 0.7986798679867987,
+          "tactile_rel/raw108": 0.7407407407407408,
+          "tactile_rel/denoised108_v2": 0.7183673469387755,
+          "tactile_rel/denoised108_v3": 0.7183673469387755,
+          "tactile_gmm/raw108": 0.7250996015936254,
+          "tactile_gmm/denoised108_v2": 0.7109375,
+          "tactile_gmm/denoised108_v3": 0.7109375,
+          "pressure_f6/raw108": 0.7605633802816902,
+          "pressure_f6/denoised108_v2": 0.7523809523809524,
+          "pressure_f6/denoised108_v3": 0.7523809523809524
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.7452471482889734,
+          "tactile_abs/denoised108_v2": 0.696969696969697,
+          "tactile_abs/denoised108_v3": 0.696969696969697,
+          "tactile_rel/raw108": 0.5233644859813084,
+          "tactile_rel/denoised108_v2": 0.45794392523364486,
+          "tactile_rel/denoised108_v3": 0.5315315315315314,
+          "tactile_gmm/raw108": 0.700787401574803,
+          "tactile_gmm/denoised108_v2": 0.6771653543307086,
+          "tactile_gmm/denoised108_v3": 0.6771653543307086,
+          "pressure_f6/raw108": 0.7192982456140351,
+          "pressure_f6/denoised108_v2": 0.5523809523809524,
+          "pressure_f6/denoised108_v3": 0.5497630331753555
+        }
+      }
+    },
+    "S14091": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8202764976958524,
+          "tactile_abs/denoised108_v2": 0.8189158016147635,
+          "tactile_abs/denoised108_v3": 0.8189158016147635,
+          "tactile_rel/raw108": 0.5462962962962964,
+          "tactile_rel/denoised108_v2": 0.5638629283489096,
+          "tactile_rel/denoised108_v3": 0.5638629283489096,
+          "tactile_gmm/raw108": 0.5462962962962964,
+          "tactile_gmm/denoised108_v2": 0.5687789799072642,
+          "tactile_gmm/denoised108_v3": 0.5687789799072642,
+          "pressure_f6/raw108": 0.5761589403973508,
+          "pressure_f6/denoised108_v2": 0.6045751633986928,
+          "pressure_f6/denoised108_v3": 0.6045751633986928
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.6796657381615598,
+          "tactile_abs/denoised108_v2": 0.6179775280898878,
+          "tactile_abs/denoised108_v3": 0.6179775280898878,
+          "tactile_rel/raw108": 0.555921052631579,
+          "tactile_rel/denoised108_v2": 0.49586776859504134,
+          "tactile_rel/denoised108_v3": 0.5254515599343186,
+          "tactile_gmm/raw108": 0.6552706552706553,
+          "tactile_gmm/denoised108_v2": 0.5911047345767575,
+          "tactile_gmm/denoised108_v3": 0.5911047345767575,
+          "pressure_f6/raw108": 0.5906040268456376,
+          "pressure_f6/denoised108_v2": 0.506896551724138,
+          "pressure_f6/denoised108_v3": 0.5077720207253885
+        }
+      }
+    },
+    "S14092": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8270509977827051,
+          "tactile_abs/denoised108_v2": 0.8298109010011123,
+          "tactile_abs/denoised108_v3": 0.8298109010011123,
+          "tactile_rel/raw108": 0.862629246676514,
+          "tactile_rel/denoised108_v2": 0.844574780058651,
+          "tactile_rel/denoised108_v3": 0.844574780058651,
+          "tactile_gmm/raw108": 0.8633720930232559,
+          "tactile_gmm/denoised108_v2": 0.8459302325581397,
+          "tactile_gmm/denoised108_v3": 0.8459302325581397,
+          "pressure_f6/raw108": 0.8771929824561403,
+          "pressure_f6/denoised108_v2": 0.858806404657933,
+          "pressure_f6/denoised108_v3": 0.858806404657933
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8779840848806366,
+          "tactile_abs/denoised108_v2": 0.8682795698924732,
+          "tactile_abs/denoised108_v3": 0.8682795698924732,
+          "tactile_rel/raw108": 0.8345978755690442,
+          "tactile_rel/denoised108_v2": 0.7968992248062016,
+          "tactile_rel/denoised108_v3": 0.822289156626506,
+          "tactile_gmm/raw108": 0.8695652173913043,
+          "tactile_gmm/denoised108_v2": 0.8524137931034482,
+          "tactile_gmm/denoised108_v3": 0.8524137931034482,
+          "pressure_f6/raw108": 0.8686868686868687,
+          "pressure_f6/denoised108_v2": 0.843338213762811,
+          "pressure_f6/denoised108_v3": 0.8458149779735683
+        }
+      }
+    },
+    "S14093": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.7832512315270935,
+          "tactile_abs/denoised108_v2": 0.7842170160295932,
+          "tactile_abs/denoised108_v3": 0.7842170160295932,
+          "tactile_rel/raw108": 0.9417637271214643,
+          "tactile_rel/denoised108_v2": 0.8966666666666667,
+          "tactile_rel/denoised108_v3": 0.8966666666666667,
+          "tactile_gmm/raw108": 0.9452736318407959,
+          "tactile_gmm/denoised108_v2": 0.8973509933774835,
+          "tactile_gmm/denoised108_v3": 0.8973509933774835,
+          "pressure_f6/raw108": 0.9540983606557377,
+          "pressure_f6/denoised108_v2": 0.9081967213114754,
+          "pressure_f6/denoised108_v3": 0.9081967213114754
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.921944035346097,
+          "tactile_abs/denoised108_v2": 0.9191616766467067,
+          "tactile_abs/denoised108_v3": 0.9191616766467067,
+          "tactile_rel/raw108": 0.880952380952381,
+          "tactile_rel/denoised108_v2": 0.870307167235495,
+          "tactile_rel/denoised108_v3": 0.8664383561643835,
+          "tactile_gmm/raw108": 0.9294478527607363,
+          "tactile_gmm/denoised108_v2": 0.924731182795699,
+          "tactile_gmm/denoised108_v3": 0.924731182795699,
+          "pressure_f6/raw108": 0.9424920127795527,
+          "pressure_f6/denoised108_v2": 0.9125596184419714,
+          "pressure_f6/denoised108_v3": 0.9111111111111111
+        }
+      }
+    },
+    "S14102": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S14103": {
+      "left": {
+        "gt_degenerate": true,
+        "f1": {}
+      },
+      "right": {
+        "gt_degenerate": true,
+        "f1": {}
+      }
+    },
+    "S14111": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8123924268502581,
+          "tactile_abs/denoised108_v2": 0.8123924268502581,
+          "tactile_abs/denoised108_v3": 0.8123924268502581,
+          "tactile_rel/raw108": 0.9124423963133641,
+          "tactile_rel/denoised108_v2": 0.8853211009174311,
+          "tactile_rel/denoised108_v3": 0.8853211009174311,
+          "tactile_gmm/raw108": 0.9464285714285715,
+          "tactile_gmm/denoised108_v2": 0.9159292035398231,
+          "tactile_gmm/denoised108_v3": 0.9159292035398231,
+          "pressure_f6/raw108": 0.960352422907489,
+          "pressure_f6/denoised108_v2": 0.923076923076923,
+          "pressure_f6/denoised108_v3": 0.923076923076923
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.9500998003992016,
+          "tactile_abs/denoised108_v2": 0.9440000000000001,
+          "tactile_abs/denoised108_v3": 0.9440000000000001,
+          "tactile_rel/raw108": 0.8792710706150341,
+          "tactile_rel/denoised108_v2": 0.7015706806282723,
+          "tactile_rel/denoised108_v3": 0.8798185941043084,
+          "tactile_gmm/raw108": 0.9535353535353536,
+          "tactile_gmm/denoised108_v2": 0.9473684210526316,
+          "tactile_gmm/denoised108_v3": 0.9473684210526316,
+          "pressure_f6/raw108": 0.9621848739495799,
+          "pressure_f6/denoised108_v2": 0.9491525423728814,
+          "pressure_f6/denoised108_v3": 0.9446808510638298
+        }
+      }
+    },
+    "S14112": {
+      "left": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.8366013071895425,
+          "tactile_abs/denoised108_v2": 0.8366013071895425,
+          "tactile_abs/denoised108_v3": 0.8366013071895425,
+          "tactile_rel/raw108": 0.8397291196388261,
+          "tactile_rel/denoised108_v2": 0.8378378378378378,
+          "tactile_rel/denoised108_v3": 0.8378378378378378,
+          "tactile_gmm/raw108": 0.854625550660793,
+          "tactile_gmm/denoised108_v2": 0.8533916849015318,
+          "tactile_gmm/denoised108_v3": 0.8533916849015318,
+          "pressure_f6/raw108": 0.8812095032397408,
+          "pressure_f6/denoised108_v2": 0.8774193548387097,
+          "pressure_f6/denoised108_v3": 0.8774193548387097
+        }
+      },
+      "right": {
+        "gt_degenerate": false,
+        "f1": {
+          "tactile_abs/raw108": 0.9136690647482015,
+          "tactile_abs/denoised108_v2": 0.8972972972972973,
+          "tactile_abs/denoised108_v3": 0.8972972972972973,
+          "tactile_rel/raw108": 0.8056680161943319,
+          "tactile_rel/denoised108_v2": 0.6884531590413944,
+          "tactile_rel/denoised108_v3": 0.7887323943661972,
+          "tactile_gmm/raw108": 0.9090909090909092,
+          "tactile_gmm/denoised108_v2": 0.8864468864468864,
+          "tactile_gmm/denoised108_v3": 0.8925318761384335,
+          "pressure_f6/raw108": 0.8718929254302104,
+          "pressure_f6/denoised108_v2": 0.8388349514563107,
+          "pressure_f6/denoised108_v3": 0.8336594911937377
+        }
+      }
+    }
+  }
+}

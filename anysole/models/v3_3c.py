@@ -10,8 +10,8 @@ small T-residual branch on VT windows.
 - STRUCTURE is identical to V3_3B plus ``residual_t=True``, so the checkpoint
   config records the branch flag and eval/infer structure validation passes.
 - build() freezes every base parameter (requires_grad_(False)) and unfreezes
-  only ``t_residual``; train.py constructs the optimizer after ``--init-from``,
-  so the optimizer contains branch parameters only.
+  only ``t_residual``; frozen params keep grad None forever, so although the
+  optimizer holds every parameter, only the branch ever updates.
 - The frozen base runs in its V-only regime under every condition (model_v2
   feeds the fusion a null tactile stream whenever the branch exists), so the
   real tactile stream reaches the model only through the branch.

@@ -108,12 +108,12 @@ class ModalEncoders(nn.Module):
             embeddings = SharedEmbeddings(dim=dim, tw=tw)
         if v_input not in ("hrnet", "hmr_gvhmr"):
             raise ValueError("v_input must be 'hrnet' or 'hmr_gvhmr', got %r" % v_input)
-        if tactile_input not in ("raw108", "s2m50"):
-            raise ValueError("tactile_input must be 'raw108' or 's2m50', got %r" % tactile_input)
+        if tactile_input not in ("raw108", "s2m50", "denoised108"):
+            raise ValueError("tactile_input must be 'raw108', 's2m50' or 'denoised108', got %r" % tactile_input)
         if t_encoder not in ("linear", "foot_conv"):
             raise ValueError("t_encoder must be 'linear' or 'foot_conv', got %r" % t_encoder)
-        if t_encoder == "foot_conv" and tactile_input != "raw108":
-            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108' (F4a)")
+        if t_encoder == "foot_conv" and tactile_input not in ("raw108", "denoised108"):
+            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108'/denoised108 (F4a)")
         if tactile_direct and tactile_input != "s2m50":
             raise ValueError("tactile_direct requires tactile_input='s2m50'")
         if no_imu and tactile_input != "s2m50":

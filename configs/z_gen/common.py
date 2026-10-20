@@ -32,6 +32,22 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "SPECIALISTS": ["vonly", "tonly"],
         "REQUIRES": [],
     },
+    # 交接包降噪压力重训（2026-10-17）：V3_3B 同结构，tactile_input=
+    # denoised108（v3_3b_denoised 入口固定）。只训主线——探针实验读主线
+    # 三条件，不需要专才；T 流换了数据源，旧 V3_3B_tonly 不再等价。
+    "singlemodal_eval_denoised": {
+        "KIND": "singlemodal_compare",
+        "MODEL_IDS": ["V3_3B_denoised"],
+        "SPECIALISTS": [],
+        "REQUIRES": [],
+    },
+    # 降噪压力 E/F（2026-10-17）：同协议，主线 only。
+    "singlemodal_eval_denoised_ef": {
+        "KIND": "singlemodal_compare",
+        "MODEL_IDS": ["V3_3E_denoised", "V3_3F_denoised"],
+        "SPECIALISTS": [],
+        "REQUIRES": [],
+    },
     # 四相机扩展 D2 (2026-10-12): same protocol on the three new cameras.
     # tonly is deliberately absent -- the T stream is camera-independent and
     # the shared V3_3B_tonly specialist serves all four cameras.
@@ -63,6 +79,97 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
     "residual_test": {
         "KIND": "model_suite",
         "MODEL_IDS": ["V3_3C"],
+        "REQUIRES": [],
+    },
+    "position_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3D"],
+        "REQUIRES": [],
+    },
+    # V3_3D 削弱套件（2026-10-15）：8 配置 ×（训练 + val + test）事务；
+    # cam3 基准行 = position_test/V3_3D。每配置自训自测，与 V3_3B 套件同协议。
+    # V3_3B occ010 生产评估补跑（2026-10-18）：ckpt 已训（10-13），
+    # metrics 缺失——只补评估。
+    "v3b_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3B_cam3_occ010"],
+        "REQUIRES": [],
+    },
+    # V3_3E 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
+    "v3e_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3E", "V3_3E_cam3_occ010"],
+        "REQUIRES": [],
+    },
+    # V3_3F 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
+    "v3f_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3F", "V3_3F_cam3_occ010"],
+        "REQUIRES": [],
+    },
+    # V3_3G 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
+    "v3g_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3G", "V3_3G_cam3_occ010"],
+        "REQUIRES": [],
+    },
+    # V3_3H 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
+    "v3h_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3H", "V3_3H_cam3_occ010"],
+        "REQUIRES": [],
+    },
+    # V3_3H_v2 首组（2026-10-19）：命题 2 载体依赖修复（T 流 aux 重建）。
+    "v3h2_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3H_v2", "V3_3H_v2_cam3_occ010"],
+        "REQUIRES": [],
+    },
+    # V3_3H_v3 首组（2026-10-19）：v2 + 一阶足部残差头（命题 2 兑现通道）。
+    "v3h3_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3H_v3", "V3_3H_v3_cam3_occ010"],
+        "REQUIRES": [],
+    },
+    # V3_3H_v5 无锚版全网格（2026-10-20）：4 相机 × 3 遮挡 = 12 格
+    # （T 价值区 = V 失效条件的无锚对照；cam{1,2,4}_occ{010,020} 的
+    # 遮挡缓存由 extract_hrnet 生成）。
+    "v3h5_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3H_v5", "V3_3H_v5_cam3_occ010", "V3_3H_v5_cam3_occ020",
+                      "V3_3H_v5_cam1", "V3_3H_v5_cam1_occ010", "V3_3H_v5_cam1_occ020",
+                      "V3_3H_v5_cam2", "V3_3H_v5_cam2_occ010", "V3_3H_v5_cam2_occ020",
+                      "V3_3H_v5_cam4", "V3_3H_v5_cam4_occ010", "V3_3H_v5_cam4_occ020"],
+        "REQUIRES": [],
+    },
+    # V3_3H_v6 首组（2026-10-20）：v5 + 残差头落点改踝（错误一修复），
+    # cam3 基准 + cam3+occ010，自训自测。
+    "v3h6_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3H_v6", "V3_3H_v6_cam3_occ010"],
+        "REQUIRES": [],
+    },
+    # V5_1 首组（2026-10-19，V5_1A方案）：cam3 基准 + cam3+occ010，
+    # 自训自测（载体按配置装载该配置的 E v2.1 ckpt_best）。
+    "v5_1_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V5_1", "V5_1_cam3_occ010", "V5_1_occmix_cam3_occ010"],
+        "REQUIRES": [],
+    },
+    # V4_1 首组（2026-10-19，V4_1A方案）：cam3 基准 + cam3+occ010，
+    # 自训自测（载体按配置装载该配置的 E v2.1 ckpt_best）。V6_1A occ_mix
+    # 为可选增强开关（conf 直写 OCC_MIX=true/P_OCC/P_NULLV/P_NULLT），
+    # 默认关——不为 V6_1A 单独立项训练 run。
+    "v4_1_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V4_1", "V4_1_cam3_occ010", "V4_1_occmix_cam3_occ010"],
+        "REQUIRES": [],
+    },
+    "position_test_vdegrad": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3D_cam1", "V3_3D_cam2", "V3_3D_cam4",
+                      "V3_3D_cam3_occ010", "V3_3D_cam3_occ020",
+                      "V3_3D_cam3_occ030", "V3_3D_cam3_occ050"],
         "REQUIRES": [],
     },
 }
@@ -215,9 +322,10 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
             f"GRID_SEED={task_model.split('|')[2]}" if task == "rho_grid" else "",
             f"RHO_V={task_model.split('|')[3]}" if task == "rho_grid" else "",
             f"RHO_T={task_model.split('|')[4]}" if task == "rho_grid" else "",
-            # Generated tasks are explicit rerun requests.  The runner reads
-            # this flag and disables checkpoint/grid reuse for this task.
-            "FORCE=true",
+            # Generated tasks reuse existing checkpoints by default; the
+            # runner only retrains when an explicit FORCE=true is set
+            # (it skips the checkpoint/grid reuse check then).
+            "FORCE=false",
         ]
         path.write_text("\n".join(line for line in lines if line) + "\n", encoding="utf-8")
         print(f"[queue] {path}")

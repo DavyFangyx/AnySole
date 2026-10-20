@@ -348,10 +348,10 @@ E 系列关键数：tau0 145（起点）→ 66（E2）→ 23-31（E3）→ 12（
    t_tok | T              87.8    86.5   100.0    101.9    98.1    88.4
    Δ_input = PA(vt)−PA(v_tok)：all +1.14 / lower −0.78 / anklefoot −1.82 /
      l_foot −1.07 / r_foot −2.56（T 对脚/踝有 1~2.6mm 边际信息，上身 +2.0 为负）
-   Δ_fusion = PA(F|VT)−PA(F|V)：all +3.37 / lower +2.98 / anklefoot +3.09 /
-     l_foot +3.19 / r_foot +2.98（T 存在使融合表征全线受损 ~3mm）
+   Δ_fusion = PA(F|VT)−PA(F|V)：all +13.06 / lower +8.74 / anklefoot +9.07 /
+     l_foot +9.49 / r_foot +8.65（T 存在使融合表征全线受损 8.7~13.1mm）
    → 判定落「边际」档：两条同时成立——①输入级 T 对脚/踝有少量信息（<3mm 门槛，
-     不足以支撑"追互补精度"）；②融合 encoder 把 T 存在变成 ~3mm 读出损失，
+     不足以支撑"追互补精度"）；②融合 encoder 把 T 存在变成 8.7~13.1mm 读出损失，
      模型非线性头部分补偿（VT2M 49.1 vs ridge 61.4）后仍 VT > V 2~7mm
      （val 49.1/42.0，test 43.4/41.4）——即 C2「interference 17/19」的机制。
 

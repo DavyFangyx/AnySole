@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from anysole.data.dataset import (
@@ -20,17 +21,25 @@ from anysole.data.dataset import (
     sample_config_ids,
 )
 from anysole.utils.diffusion import GaussianDiffusion
-from anysole.utils.losses import compute_losses
+from anysole.utils.losses import (
+    compute_losses,
+    compute_losses_v3f,
+    compute_losses_v4_1,
+    compute_losses_v5_1,
+    per_sample_contact_bce,
+)
 from anysole.models import AnySoleModel, MODEL_NAMES, MODEL_ANYSOLEV1, MODEL_ANYSOLEV1_POS, MODEL_ANYSOLEV2
 from anysole.types import (
     CONFIG_PROBS,
     CONFIG_T,
     CONFIG_V,
+    CONFIG_VT,
     DEFAULT_CONFIG_PATH,
     FOOT_JOINTS,
     GAIT_ROOT,
     HRNET_CACHE_ROOT,
     JOINT_PROTOCOL_CHECKSUM,
+    KNEE_ANKLE_FOOT_JOINTS,
     MOTION_PROTOCOL,
     N_JOINTS,
     PART_NAMES,
@@ -38,6 +47,7 @@ from anysole.types import (
     SEQ_ROOT,
     SMPL_ROOTS,
     SPLIT_CSV,
+    STATE_DIM,
     T_S2M_DIM,
     WORKSPACE_ROOT,
     anysole_model_dir,
@@ -49,6 +59,13 @@ from anysole.data.workspace_adapter import ADAPTER_VERSION, sha256_file
 from AnysoleWorkspace.tool.workspace import resolve_uri
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.utils.geometry import f2_to_world, fk_pose6d
+from anysole.utils.constraints import apply_v3e_constraints
+from anysole.utils.constraints_g import apply_v3g_constraints
+from anysole.utils.constraints_h import apply_v3h
+from anysole.models.common.model_v3f import _split_state, sample_v3f
+from anysole.models.common.model_v3h import apply_foot_residual
+from anysole.models.common.model_v5_1 import v5_1_z_src
+from anysole.data.occ_mix import SRC_CAM3, SRC_OCC, grouped_mean
 from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.types import CONFIG_NAMES
 
@@ -68,6 +85,8 @@ DEFAULT_CONFIG = {
     "diffusion_train_steps": 1000,
     "diffusion_sample_steps": 50,
     "pose_layers": 6,
+    "denoise_layers": 4,        # V3_3F: denoiser transformer depth
+    "v_cond_dropout": 0.1,      # V3_3F: V-condition dropout (the unconditional pass)
     # ---- E6.x 系列开关（默认值保持既有行为；E3 基础用 noise_scaled=false +
     # lr_schedule=constant，详见 model_fix_note/archived/E6x_series_plan.md）----
     "pose_repr": "6d",          # E6.1: "pos" = 根局部位置表示
@@ -106,6 +125,18 @@ DEFAULT_CONFIG = {
     "wandb_eval_interval": 5,
     "wandb_experiment_tag": "anysole_v1",
 }
+
+# V5_1A z 通道监控键（epoch 均值；V5_1A方案.md 判据③ 分歧审计 +
+# G 前科接触读数塌缩）。batch 级累计进 epoch_sums，epoch 末打印
+# 一行 + wandb 记 z/*；正式判读以 test 面板与分歧审计 JSON 为准。
+_V5_1_Z_KEYS = (
+    "z_div_contact",     # |sigmoid(logit_gT) − sigmoid(logit_gV)| 均值
+    "z_div_phase",       # |μ_T − μ_V| 相位通道（phase_mask 掩码）
+    "z_div_cop",         # |μ_T − μ_V| CoP 通道（cop_mask 掩码）
+    "z_poe_prob_std",    # sigmoid(logit_poe) 批内 std（→0 = G 前科形态）
+    "z_air_recall",      # PoE 接触读数的 air recall（G/H 前科诊断项）
+    "z_logsig_gap",      # (log σ_T − log σ_V) 均值（精度分化方向）
+)
 
 
 def load_config(path: Path) -> Dict[str, object]:
@@ -195,6 +226,32 @@ def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt
             count += flat.shape[0]
     if count == 0:
         raise RuntimeError("cannot fit pose stats: training loader is empty")
+    mean = sums / count
+    var = (sumsq / count - mean.square()).clamp(min=0.0)
+    return mean.float(), var.sqrt().float()
+
+
+def fit_state_stats(loader: DataLoader, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """V3_3F: per-component mean/std of the diffused state [pose|trans|contact].
+
+    One pass over the training loader; the values normalize the full state to
+    unit scale before diffusing (MDM convention) and are frozen for the run.
+    """
+    sums = torch.zeros(STATE_DIM, dtype=torch.float64, device=device)
+    sumsq = torch.zeros(STATE_DIM, dtype=torch.float64, device=device)
+    count = 0
+    with torch.no_grad():
+        for raw_batch in loader:
+            state = torch.cat(
+                [raw_batch["pose_gt"], raw_batch["trans_gt"], raw_batch["contact_gt"]],
+                dim=-1,
+            ).to(device=device, dtype=torch.float64, non_blocking=True)
+            flat = state.reshape(-1, STATE_DIM)
+            sums += flat.sum(dim=0)
+            sumsq += flat.square().sum(dim=0)
+            count += flat.shape[0]
+    if count == 0:
+        raise RuntimeError("cannot fit state stats: training loader is empty")
     mean = sums / count
     var = (sumsq / count - mean.square()).clamp(min=0.0)
     return mean.float(), var.sqrt().float()
@@ -297,6 +354,7 @@ def warn_legacy_output_checkpoint(out_dir: Path) -> None:
     """Warn when a run directory contains a non-current motion checkpoint."""
     candidates = [Path(out_dir) / "ckpt_last.pt", Path(out_dir) / "ckpt_best.pt"]
     legacy = []
+    v3f_ckpt = False
     for candidate in candidates:
         if not candidate.is_file():
             continue
@@ -305,6 +363,11 @@ def warn_legacy_output_checkpoint(out_dir: Path) -> None:
             state = old.get("model", {}) if isinstance(old, dict) else {}
             dim = int(getattr(state.get("pose_head.pose_mean"), "shape", (0,))[0])
             cfg = old.get("config", {}) if isinstance(old, dict) else {}
+            if cfg.get("v3f", False):
+                # V3_3F has no pose_head; its diffused state dim (149) is not
+                # POSE_DIM and would false-positive the legacy protocol check.
+                v3f_ckpt = True
+                continue
             joints = int(cfg.get("motion_n_joints", dim // 6 if dim else 0))
             protocol = str(cfg.get("motion_protocol", ""))
             checksum = str(cfg.get("joint_protocol_checksum", ""))
@@ -317,11 +380,15 @@ def warn_legacy_output_checkpoint(out_dir: Path) -> None:
                 )
         except Exception as exc:
             print("WARNING: could not inspect existing output checkpoint %s: %s" % (candidate, exc))
-    if legacy:
+    if legacy or v3f_ckpt:
         print("=" * 79)
-        print("WARNING: output directory contains legacy checkpoints: %s" % ", ".join(legacy))
-        print("         They are not resumable/evaluable under the current SMPL-24 joint tree")
-        print("         and will be replaced by this run.")
+        if legacy:
+            print("WARNING: output directory contains legacy checkpoints: %s" % ", ".join(legacy))
+            print("         They are not resumable/evaluable under the current SMPL-24 joint tree")
+            print("         and will be replaced by this run.")
+        if v3f_ckpt:
+            print("NOTE: output directory contains V3_3F checkpoints (state-space model, no pose_head);")
+            print("      the legacy SMPL-24 pose-head protocol check does not apply and is skipped.")
         print("         Until the first new checkpoint is saved, do not treat this directory as a new result.")
         print("=" * 79)
 
@@ -489,6 +556,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="E6.7: override yaml loss weight lambda_pose.")
     parser.add_argument("--lambda-kp", type=float, default=None, metavar="W",
                         help="E6.7: override yaml loss weight lambda_kp.")
+    parser.add_argument("--lambda-pos", type=float, default=None, metavar="W",
+                        help="V3_3D: override yaml loss weight lambda_pos (position-head L_pos).")
     parser.add_argument("--lambda-traj", type=float, default=None, metavar="W",
                         help="E6.7: override yaml loss weight lambda_traj.")
     parser.add_argument("--lambda-trec", type=float, default=None, metavar="W",
@@ -497,6 +566,46 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="E6.7: override yaml loss weight lambda_vrec.")
     parser.add_argument("--lambda-con", type=float, default=None, metavar="W",
                         help="E6.7: override yaml loss weight lambda_con.")
+    parser.add_argument("--lambda-contact", type=float, default=None, metavar="W",
+                        help="V3_3E: override yaml loss weight lambda_contact (T contact head BCE).")
+    parser.add_argument("--lambda-nll", type=float, default=None, metavar="W",
+                        help="V3_3E: override yaml loss weight lambda_nll (V pose sigma NLL).")
+    parser.add_argument("--lambda-prior-pose", type=float, default=None, metavar="W",
+                        help="V3_3E: override yaml loss weight lambda_prior_pose (T prior pose MSE).")
+    parser.add_argument("--lambda-prior-nll", type=float, default=None, metavar="W",
+                        help="V3_3E: override yaml loss weight lambda_prior_nll (T prior sigma NLL).")
+    parser.add_argument("--lambda-prior-traj", type=float, default=None, metavar="W",
+                        help="V3_3E: override yaml loss weight lambda_prior_traj (T prior trajectory).")
+    parser.add_argument("--lambda-air", type=float, default=None, metavar="W",
+                        help="V3_3G: override yaml loss weight lambda_air (swing/air-frame contact BCE weight).")
+    parser.add_argument("--lambda-foot-res", type=float, default=None, metavar="W",
+                        help="V3_3H_v3: override yaml loss weight lambda_foot_res "
+                             "(first-order foot residual head).")
+    parser.add_argument("--lambda-phase", type=float, default=None, metavar="W",
+                        help="V5_1: override yaml loss weight lambda_phase (z 专家相位 μ "
+                             "监督，掩码跳过；单点预注册 1.0).")
+    parser.add_argument("--lambda-cop", type=float, default=None, metavar="W",
+                        help="V5_1: override yaml loss weight lambda_cop (z 专家 CoP μ "
+                             "监督，接触帧掩码；单点预注册 1.0).")
+    parser.add_argument("--g-floor-src", type=str, default=None, choices=("gt", "t"),
+                        help="V3_3G: observation-layer floor source (gt = E v2.1 口径, default; t = T-derived diagnostic).")
+    parser.add_argument("--carrier-from", type=Path, default=None,
+                        help="V3_3G: E v2.1 ckpt_best whose V stream is the frozen carrier.")
+    parser.add_argument("--beta", type=float, default=None, metavar="B",
+                        help="V4_1A: kin-mask beta (pre-registered sweep {0, 1.0, 2.0}; "
+                             "default 1.0 from the entry).")
+    parser.add_argument("--occ-mix", action="store_true",
+                        help="V6_1A occ_mix: window-level structured-dropout augmentation "
+                             "(default off; --p-occ/--p-nullv/--p-nullt tune it).")
+    parser.add_argument("--p-occ", type=float, default=None, metavar="P",
+                        help="V6_1A occ_mix: P(occ010 source window) (default 0.2).")
+    parser.add_argument("--p-nullv", type=float, default=None, metavar="P",
+                        help="V6_1A occ_mix: P(null-V window) (default 0.1).")
+    parser.add_argument("--p-nullt", type=float, default=None, metavar="P",
+                        help="V6_1A occ_mix: P(null-T window) (default 0.1).")
+    parser.add_argument("--occ-a3-monitor", action="store_true",
+                        help="V6_1A A3 val 分层监控（窗口级 VT2M<=V2M 占比 "
+                             "occ vs cam3 对照；默认关，仅 occ_mix 启用时有效).")
     parser.add_argument("--lambda-pose-vel", type=float, default=None, metavar="W",
                         help="E6.7: override yaml loss weight lambda_pose_vel (E6.2, pos mode).")
     parser.add_argument("--lambda-bone", type=float, default=None, metavar="W",
@@ -569,10 +678,106 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _evaluate_v3f(model, diffusion, loader, config, device):
+    """V3_3F val dashboard: the three conditions are sampler switches.
+
+    VT2M = V cond + T guidance + refinement; V2M = V cond only; T2M =
+    unconditional (V zeroed) + T guidance + refinement.  The T stream is
+    live under every condition (the contact head reads the real stream).
+    """
+    result = {}
+    sample_steps = int(config["diffusion_sample_steps"])
+    with torch.inference_mode():
+        for config_value, config_name in zip((CONFIG_VT, CONFIG_V, CONFIG_T), CONFIG_NAMES):
+            totals = {"mpjpe": 0.0, "root_ate": 0.0, "n": 0,
+                      "tp": 0, "fp": 0, "fn": 0, "tn": 0,
+                      "foot_slide_sum": 0.0, "foot_slide_n": 0}
+            tau0_mpjpe = 0.0
+            first_batch = True
+            for raw_batch in loader:
+                batch = move_batch(raw_batch, device)
+                bsz = batch["pose_gt"].shape[0]
+                v_feat = batch["V_feat"].clone()
+                if config_value == CONFIG_T:
+                    v_feat.zero_()
+                anchor = batch["trans_anchor"][:, None, :]
+                out = sample_v3f(
+                    model, v_feat, batch["T_raw"], batch["T_phys"],
+                    anchor=anchor, floor_y=batch["floor_y"],
+                    offsets=batch["offsets"], parents=batch["parents"],
+                    use_t=config_value != CONFIG_V,
+                    refine=config_value != CONFIG_V,
+                    diffusion=diffusion, steps=sample_steps, device=device)
+                pred_pose = out["x0_hat"]
+                pred_trans = out["trans_hat"] + anchor
+                gt_trans = batch["trans_gt"] + anchor
+                pred_kp = fk_pose6d(pred_pose, pred_trans, batch["offsets"], batch["parents"])
+                totals["mpjpe"] += float(torch.linalg.vector_norm(
+                    pred_kp - batch["kp_gt"], dim=-1).mean().item()) * bsz * 1000.0
+                if first_batch:
+                    # tau=0 clean-input reconstruction (the ckpt_best tracker):
+                    # x_tau = the clean normalized state, denoised at tau=0.
+                    x0_n = model.denoiser.normalize(torch.cat(
+                        [batch["pose_gt"], batch["trans_gt"], batch["contact_gt"]], dim=-1))
+                    zero = torch.zeros(bsz, device=device, dtype=torch.long)
+                    out0 = model(v_feat, batch["T_raw"], batch["T_phys"], x0_n, zero)
+                    pose0 = _split_state(model.denoiser.unnormalize(out0["x0_hat"]))[0]
+                    kp0 = fk_pose6d(pose0, gt_trans, batch["offsets"], batch["parents"])
+                    tau0_mpjpe = float(torch.linalg.vector_norm(
+                        kp0 - batch["kp_gt"], dim=-1).mean().item()) * 1000.0
+                    first_batch = False
+                pred_rel = pred_trans - pred_trans[:, :1]
+                gt_rel = gt_trans - gt_trans[:, :1]
+                totals["root_ate"] += float(torch.linalg.vector_norm(
+                    pred_rel - gt_rel, dim=-1).mean().item()) * bsz
+                # The contact row measures the T contact head itself (the
+                # guidance/refinement input), the V3_3E convention.
+                pred_contact = torch.sigmoid(out["contact_logits"]) > 0.5
+                gt_contact = batch["contact_gt"] > 0.5
+                totals["tp"] += int((pred_contact & gt_contact).sum().item())
+                totals["fp"] += int((pred_contact & ~gt_contact).sum().item())
+                totals["fn"] += int((~pred_contact & gt_contact).sum().item())
+                totals["tn"] += int((~pred_contact & ~gt_contact).sum().item())
+                foot = pred_kp[:, :, FOOT_JOINTS, :][:, :, :, [0, 2]]
+                speed = torch.linalg.vector_norm(foot[:, 1:] - foot[:, :-1], dim=-1) * 1000.0
+                slide = speed[pred_contact[:, 1:]]
+                if slide.numel():
+                    totals["foot_slide_sum"] += float(slide.sum().item())
+                    totals["foot_slide_n"] += int(slide.numel())
+                totals["n"] += bsz
+            count = max(totals["n"], 1)
+            p = totals["tp"] / max(totals["tp"] + totals["fp"], 1)
+            r = totals["tp"] / max(totals["tp"] + totals["fn"], 1)
+            air_recall = totals["tn"] / max(totals["tn"] + totals["fp"], 1)
+            result.update({
+                f"val/mpjpe/{config_name}": totals["mpjpe"] / count,
+                f"val/root_ate/{config_name}": totals["root_ate"] / count,
+                f"val/contact_f1/{config_name}": 2 * p * r / max(p + r, 1e-8),
+                f"val/contact_recall/{config_name}": r,
+                f"val/air_recall/{config_name}": air_recall,
+                f"val/contact_balanced_acc/{config_name}": 0.5 * (r + air_recall),
+                f"val/foot_slide/{config_name}": totals["foot_slide_sum"] / max(totals["foot_slide_n"], 1),
+                f"val/tau0_mpjpe/{config_name}": tau0_mpjpe})
+    result["val/gap_mpjpe_dropT"] = result["val/mpjpe/V"] - result["val/mpjpe/VT"]
+    result["val/gap_mpjpe_dropV"] = result["val/mpjpe/T"] - result["val/mpjpe/VT"]
+    return result
+
+
 def _evaluate(model, diffusion, loader, config, device):
     """Return the epoch-level VT/V/T metrics used by the training dashboard."""
+    # V3_3F has no pose_head — route before the first pose_head access
+    # (the pos_mode probe below would raise AttributeError).  The model
+    # attribute is the source of truth (the caller's config may not carry
+    # the v3f flag, e.g. the yaml config alone).
+    if getattr(model, "v3f", False):
+        return _evaluate_v3f(model, diffusion, loader, config, device)
     pos_mode = getattr(model.pose_head, "repr", "6d") == "pos"
     regress_mode = str(config.get("modal")) == MODEL_ANYSOLEV2
+    v3e_mode = bool(config.get("v3e"))
+    v3g_mode = bool(config.get("v3g"))
+    v3h_mode = bool(config.get("v3h"))
+    v5_1_mode = bool(config.get("v5_1"))
+    v4_1_mode = bool(config.get("v4_1"))
     f2_mode = bool(config.get("f2_repr", False))
     result = {}
     with torch.inference_mode():
@@ -585,10 +790,16 @@ def _evaluate(model, diffusion, loader, config, device):
                 bsz = batch["pose_gt"].shape[0]
                 cid = torch.full((bsz,), config_value, device=device, dtype=torch.long)
                 v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, cid)
+                if v5_1_mode or v4_1_mode:
+                    # V5_1A/V4_1A：T 流输入三条件恒定（g_T/接触头/XAttn
+                    # 恒读真实压力；干预实验要求同输入比来源）——恢复被
+                    # condition_inputs 零化的 T；V 零化保留（T2M 行）。
+                    t_raw, t_phys = batch["T_raw"], batch["T_phys"]
                 v_kw = {"V_hmr": batch.get("V_hmr")} if str(config.get("v_input", "hrnet")) == "hmr_gvhmr" else {}
                 if regress_mode:
                     # F0b: single forward, no DDIM sampling.
-                    out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m, **v_kw)
+                    z_kw = {"z_src": v5_1_z_src(config_value)} if v5_1_mode else {}
+                    out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw)
                     pred_pose = out["x0_hat"]
                 else:
                     warm_prior = None
@@ -608,6 +819,71 @@ def _evaluate(model, diffusion, loader, config, device):
                 anchor = batch["trans_anchor"][:, None, :]
                 pred_trans = out["trans_hat"] + anchor
                 gt_trans = batch["trans_gt"] + anchor
+                if v3e_mode:
+                    # V3_3E: the three dashboard conditions are three readouts
+                    # of one forward — raw V pose, constraint-processed VT,
+                    # T pose prior.  The forward itself ignores config_id.
+                    if config_value == CONFIG_VT:
+                        pred_pose, pred_trans = apply_v3e_constraints(
+                            out["x0_hat"], out["trans_hat"] + anchor,
+                            batch["floor_y"],
+                            batch["offsets"], batch["parents"])
+                    elif config_value == CONFIG_V:
+                        pred_pose, pred_trans = out["x0_hat"], out["trans_hat"] + anchor
+                    else:
+                        pred_pose, pred_trans = out["x0_prior"], out["trans_prior"] + anchor
+                elif v3g_mode:
+                    # V3_3G: VT = 分部观测层 on the V stream; V = raw carrier
+                    # (= E); T = the T prior + 观测层 (observation-only sanity).
+                    # floor_src stays the registered default "gt" (E v2.1 口径).
+                    if config_value == CONFIG_VT:
+                        pred_pose, pred_trans = apply_v3g_constraints(
+                            out["x0_hat"], out["trans_hat"] + anchor,
+                            out["contact_logits"],
+                            batch["offsets"], batch["parents"],
+                            floor_y=batch["floor_y"])
+                    elif config_value == CONFIG_V:
+                        pred_pose, pred_trans = out["x0_hat"], out["trans_hat"] + anchor
+                    else:
+                        pred_pose, pred_trans = apply_v3g_constraints(
+                            out["x0_prior"], out["trans_prior"] + anchor,
+                            out["contact_logits"],
+                            batch["offsets"], batch["parents"],
+                            floor_y=batch["floor_y"])
+                elif v3h_mode:
+                    # V3_3H: VT = 残差通道 on the V stream; V = raw V tower;
+                    # T = null-V 先验 + 残差通道 (H 无 T 塔——同一 V 塔、V 已
+                    # 在上游零化)。floor_src stays the registered default
+                    # "gt" (E v2.1 口径)。V3_3H_v3：VT/T 行先应用一阶足部
+                    # 残差（V2M 行不应用——零税）。
+                    pose_vt = apply_foot_residual(
+                        out["x0_hat"], out["foot_res"],
+                        landing=str(getattr(model, "res_landing", "foot"))) if out.get("foot_res") is not None else out["x0_hat"]
+                    if config_value == CONFIG_VT:
+                        pred_pose, pred_trans = apply_v3h(
+                            bool(getattr(model, "no_anchor", False)),
+                            pose_vt, out["trans_hat"] + anchor,
+                            out["contact_logits"],
+                            batch["offsets"], batch["parents"],
+                            floor_y=batch["floor_y"])
+                    elif config_value == CONFIG_V:
+                        pred_pose, pred_trans = out["x0_hat"], out["trans_hat"] + anchor
+                    else:
+                        pred_pose, pred_trans = apply_v3h(
+                            bool(getattr(model, "no_anchor", False)),
+                            pose_vt, out["trans_hat"] + anchor,
+                            out["contact_logits"],
+                            batch["offsets"], batch["parents"],
+                            floor_y=batch["floor_y"])
+                elif v4_1_mode:
+                    # V4_1A: V2M = V 载体（修正不应用）；VT2M = V + pos_corr
+                    # 软骨架（下方 FK 块按条件应用）；T2M = 先验 + pos_corr_prior。
+                    if config_value == CONFIG_VT:
+                        pred_pose, pred_trans = out["x0_hat"], out["trans_hat"] + anchor
+                    elif config_value == CONFIG_V:
+                        pred_pose, pred_trans = out["x0_hat"], out["trans_hat"] + anchor
+                    else:
+                        pred_pose, pred_trans = out["x0_prior"], out["trans_prior"] + anchor
                 n = bsz
                 if pos_mode:
                     # E6.1: compare in the metric space directly (23 joints,
@@ -631,6 +907,30 @@ def _evaluate(model, diffusion, loader, config, device):
                         pred_trans = world_trans
                     else:
                         pred_kp = fk_pose6d(pred_pose, pred_trans, batch["offsets"], batch["parents"])
+                        if v4_1_mode:
+                            # V4_1A 软骨架按条件应用（契约 1 守卫生效：
+                            # V2M 行不加修正——V3_3D 遗留块对 v4_1 禁用）。
+                            if config_value == CONFIG_VT:
+                                corr = out["pos_corr"]
+                            elif config_value == CONFIG_T:
+                                corr = out["pos_corr_prior"]
+                            else:
+                                corr = None
+                            if corr is not None:
+                                pred_kp = pred_kp.clone()
+                                pred_kp[:, :, KNEE_ANKLE_FOOT_JOINTS, :] = (
+                                    pred_kp[:, :, KNEE_ANKLE_FOOT_JOINTS, :]
+                                    + corr.reshape(bsz, -1, len(KNEE_ANKLE_FOOT_JOINTS), 3)
+                                )
+                        elif out.get("pos_corr") is not None:
+                            # V3_3D: the val dashboard sees the corrected skeleton
+                            # (soft skeleton), so ckpt_best tracks the position
+                            # head's contribution, not the frozen base's constant.
+                            pred_kp = pred_kp.clone()
+                            pred_kp[:, :, KNEE_ANKLE_FOOT_JOINTS, :] = (
+                                pred_kp[:, :, KNEE_ANKLE_FOOT_JOINTS, :]
+                                + out["pos_corr"].reshape(bsz, -1, len(KNEE_ANKLE_FOOT_JOINTS), 3)
+                            )
                     totals["mpjpe"] += float(torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1).mean().item()) * n * 1000.0
                 if first_batch and not regress_mode:
                     # tau=0 clean-input reconstruction MPJPE on one batch (no
@@ -657,7 +957,13 @@ def _evaluate(model, diffusion, loader, config, device):
                 gt_rel = gt_trans - gt_trans[:, :1]
                 totals["root_ate"] += float(torch.linalg.vector_norm(pred_rel - gt_rel, dim=-1).mean().item()) * n
                 if not pos_mode:
-                    pred_contact = soft_contact_from_keypoints(pred_kp, batch["floor_y"]) > 0.5
+                    if (v3e_mode or v3g_mode or v3h_mode or v5_1_mode or v4_1_mode) and config_value == CONFIG_VT and out.get("contact_logits") is not None:
+                        # V3_3E/G/H/V5_1: the val dashboard contact row measures
+                        # the T contact head itself (the residual/observation
+                        # layer's gate input / G 配方接触头).
+                        pred_contact = torch.sigmoid(out["contact_logits"]) > 0.5
+                    else:
+                        pred_contact = soft_contact_from_keypoints(pred_kp, batch["floor_y"]) > 0.5
                     gt_contact = batch["contact_gt"] > 0.5
                     tp = (pred_contact & gt_contact).sum().item()
                     fp = (pred_contact & ~gt_contact).sum().item()
@@ -700,6 +1006,74 @@ def _evaluate(model, diffusion, loader, config, device):
     result["val/gap_mpjpe_dropT"] = result["val/mpjpe/V"] - result["val/mpjpe/VT"]
     result["val/gap_mpjpe_dropV"] = result["val/mpjpe/T"] - result["val/mpjpe/VT"]
     return result
+
+
+def _occ_a3_monitor(model, loader, config, device):
+    """V6_1A A3 val 分层监控（开关 occ_a3_monitor，默认关；方案 §4.1）。
+
+    窗口级 VT2M ≤ V2M 占比按窗源分组（occ 组 vs cam3 组对照）：val
+    loader 同挂 occ 标签，输入按标签来源喂（vz/tz 置零；occ 源已在
+    dataset 侧选定）。VT 行 = 结构线读出：V4_1A 软骨架（x0_hat +
+    pos_corr 六关节）；V5_1A z_src="VT"（二次前向）；其余模型退回
+    V 行同读数（占比 0.5，无信号）。"""
+    v4_1_mode = bool(config.get("v4_1", False))
+    v5_1_mode = bool(config.get("v5_1", False))
+    v_hmr_mode = str(getattr(model, "v_input", "hrnet")) == "hmr_gvhmr"
+    stats = {"cam3": [0, 0], "occ": [0, 0]}
+    with torch.inference_mode():
+        for raw_batch in loader:
+            batch = move_batch(raw_batch, device)
+            if batch.get("occ_src") is None:
+                continue
+            bsz = batch["pose_gt"].shape[0]
+            cid = torch.zeros(bsz, dtype=torch.long, device=device)  # VT 行
+            v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, cid)
+            if v4_1_mode or v5_1_mode:
+                t_raw, t_phys = batch["T_raw"], batch["T_phys"]
+            vz = batch["occ_v_zeroed"].view(-1, 1, 1).to(device, dtype=torch.bool)
+            tz = batch["occ_t_zeroed"].view(-1, 1, 1).to(device, dtype=torch.bool)
+            v_feat = torch.where(vz, torch.zeros_like(v_feat), v_feat)
+            t_raw = torch.where(tz, torch.zeros_like(t_raw), t_raw)
+            t_phys = torch.where(tz, torch.zeros_like(t_phys), t_phys)
+            t_s2m = torch.where(tz, torch.zeros_like(t_s2m), t_s2m)
+            v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
+            anchor = batch["trans_anchor"][:, None, :]
+            if v5_1_mode:
+                out_v = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"),
+                              T_s2m=t_s2m, **v_kw, **{"z_src": "V"})
+                out_vt = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"),
+                               T_s2m=t_s2m, **v_kw, **{"z_src": "VT"})
+                kp_v = fk_pose6d(out_v["x0_hat"], out_v["trans_hat"] + anchor,
+                                 batch["offsets"], batch["parents"])
+                kp_vt = fk_pose6d(out_vt["x0_hat"], out_vt["trans_hat"] + anchor,
+                                  batch["offsets"], batch["parents"])
+            else:
+                out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"),
+                            T_s2m=t_s2m, **v_kw)
+                kp_v = fk_pose6d(out["x0_hat"], out["trans_hat"] + anchor,
+                                 batch["offsets"], batch["parents"])
+                if v4_1_mode and out.get("pos_corr") is not None:
+                    kp_vt = kp_v.clone()
+                    kp_vt[:, :, KNEE_ANKLE_FOOT_JOINTS, :] = (
+                        kp_vt[:, :, KNEE_ANKLE_FOOT_JOINTS, :]
+                        + out["pos_corr"].reshape(bsz, -1, len(KNEE_ANKLE_FOOT_JOINTS), 3))
+                else:
+                    kp_vt = kp_v
+            err_v = torch.linalg.vector_norm(kp_v - batch["kp_gt"], dim=-1).mean(dim=(-1, -2))
+            err_vt = torch.linalg.vector_norm(kp_vt - batch["kp_gt"], dim=-1).mean(dim=(-1, -2))
+            vt_le_v = err_vt <= err_v
+            src = batch["occ_src"].to(device)
+            for src_val, name in ((SRC_CAM3, "cam3"), (SRC_OCC, "occ")):
+                mask = src == src_val
+                if bool(mask.any()):
+                    stats[name][0] += int(vt_le_v[mask].sum().item())
+                    stats[name][1] += int(mask.sum().item())
+    return {
+        "val/occ_a3/vt_le_v_frac_cam3": stats["cam3"][0] / max(stats["cam3"][1], 1),
+        "val/occ_a3/vt_le_v_frac_occ": stats["occ"][0] / max(stats["occ"][1], 1),
+        "val/occ_a3/n_cam3": stats["cam3"][1],
+        "val/occ_a3/n_occ": stats["occ"][1],
+    }
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -764,9 +1138,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["model_name"] = args.model_name
         config.update(entry.STRUCTURE)
         config.update(getattr(entry, "CONFIG_EXTRA", {}))
+    v3f_mode = bool(config.get("v3f", False))
+    v3h_mode = bool(config.get("v3h", False))
+    v5_1_mode = bool(config.get("v5_1", False))
+    v4_1_mode = bool(config.get("v4_1", False))
     if config.get("modal", MODEL_ANYSOLEV1) not in MODEL_NAMES:
         raise ValueError("Unknown modal %r; expected one of %s" % (config.get("modal"), MODEL_NAMES))
-    if config.get("modal") == MODEL_ANYSOLEV2 and (
+    if config.get("modal") == MODEL_ANYSOLEV2 and not v3f_mode and (
         args.tau_max is not None
         or args.tau_fixed is not None
         or bool(config.get("warm_start", False))
@@ -861,11 +1239,39 @@ def main(argv: Optional[List[str]] = None) -> int:
     config.setdefault("assign_anneal", 1.0)
     if args.lr_warmup_frac is not None:
         config["lr_warmup_frac"] = float(args.lr_warmup_frac)
-    for key in ("lambda_pose", "lambda_kp", "lambda_traj", "lambda_trec", "lambda_vrec",
-                "lambda_con", "lambda_pose_vel", "lambda_bone"):
+    for key in ("lambda_pose", "lambda_kp", "lambda_pos", "lambda_traj", "lambda_trec", "lambda_vrec",
+                "lambda_con", "lambda_pose_vel", "lambda_bone",
+                "lambda_contact", "lambda_nll", "lambda_prior_pose",
+                "lambda_prior_nll", "lambda_prior_traj", "lambda_air",
+                "lambda_foot_res", "lambda_phase", "lambda_cop"):
         value = getattr(args, key)
         if value is not None:
             config[key] = float(value)
+    if args.g_floor_src is not None:
+        config["g_floor_src"] = str(args.g_floor_src)
+    if args.carrier_from is not None:
+        config["carrier_from"] = str(args.carrier_from)
+    if args.beta is not None:
+        config["beta"] = float(args.beta)
+    if args.occ_mix:
+        config["occ_mix"] = True
+    if args.occ_a3_monitor:
+        config["occ_a3_monitor"] = True
+    for key, value in (("p_occ", args.p_occ), ("p_nullV", args.p_nullv),
+                       ("p_nullT", args.p_nullt)):
+        if value is not None:
+            config[key] = float(value)
+    # V6_1A occ_mix (2026-10-19)：训练侧增强，默认关。启用后 train/val
+    # dataset 均按标签采样（val 同挂标签供 A3 分层监控）。必须在本 args
+    # →config 段之后计算（早于 --occ-mix 映射会恒为 None——2026-10-20
+    # 冒烟事故根因）。
+    occ_mix_kwargs = None
+    if bool(config.get("occ_mix", False)):
+        occ_mix_kwargs = {
+            "p_occ": float(config.get("p_occ", 0.2)),
+            "p_nullV": float(config.get("p_nullV", 0.1)),
+            "p_T": float(config.get("p_nullT", 0.1)),
+        }
     config["motion_protocol"] = MOTION_PROTOCOL
     config["motion_n_joints"] = int(N_JOINTS)
     config["motion_pose_dim"] = int(POSE_DIM)
@@ -887,6 +1293,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             f2_repr=bool(config.get("f2_repr", False)),
             smpl_roots=config.get("smpl_roots"),
             cam_id=int(config.get("cam_id", 3)),
+            load_v5_1_gt=v5_1_mode,
+            occ_mix=occ_mix_kwargs,
         )
     except FileNotFoundError as exc:
         if "HRNet cache" in str(exc):
@@ -910,10 +1318,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)))
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs)
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:
+        if v5_1_mode and "V5_1 GT CoP cache" in str(exc):
+            # V5_1A：z 通道 GT 缺失时 val 必须失败而非静默禁用——ckpt_best
+            # 只由 val 面板选出，静默禁用 = 整轮训练无 best 快照。
+            raise
+        if occ_mix_kwargs and "occ010 cache" in str(exc):
+            # V6_1A：occ 缓存缺失时 val 同样必须失败（ckpt_best 只由 val
+            # 面板选出；occ_mix 增强运行不允许静默退化为普通 val）。
+            raise
         print("validation disabled: %s" % exc)
     wandb_run = None
     if str(config.get("wandb_mode", "disabled")) != "disabled":
@@ -946,7 +1362,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise RuntimeError("W&B monitoring requested but wandb is not installed") from exc
     model_kw = {}
     modal = str(config.get("modal", MODEL_ANYSOLEV1))
-    regress_mode = modal == MODEL_ANYSOLEV2
+    regress_mode = modal == MODEL_ANYSOLEV2 and not v3f_mode
     # Keep model variants independent in the centralized results tree. An
     # explicit --out-dir remains authoritative for custom experiments.
     # Otherwise the dir is INFERRED (2026-09-22): model-name + contact-method
@@ -988,6 +1404,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         part_joints = tuple(tuple(int(j) for j in g) for g in config["part_joints"]) \
             if config.get("part_joints") else None
         model = entry.build(config, part_joints=part_joints).to(device)
+        # Entries that compute build-time provenance (V3_3G carrier sha256)
+        # stash it in CONFIG_EXTRA during build — fold it into the config so
+        # every checkpoint records it.
+        config.update(getattr(entry, "CONFIG_EXTRA", {}) or {})
     else:
         if modal == "anysolev1_insole_drift" or bool(config.get("use_insole_drift", False)):
             templates, subject_map = load_template_bank(config["template_path"])
@@ -1038,12 +1458,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     # noise_scaled is a config knob now: E3 base = False (unscaled N(0,1)
     # noise, the regime whose output was verified good), E4+ = True.  Saved in
     # every checkpoint so eval/infer match the sampling init scale.
-    config["noise_scaled"] = bool(config.get("noise_scaled", True))
+    # V3_3F: the state is normalized before diffusing, so unit noise is the
+    # matching scale (the E4 noise_scaled machinery applies to raw-pose
+    # diffusion only).
+    if v3f_mode:
+        config["noise_scaled"] = False
+    else:
+        config["noise_scaled"] = bool(config.get("noise_scaled", True))
     model.noise_scaled = config["noise_scaled"]
     # Pose stats live on the pose head; guard kept defensively (the V3
     # structure always has one, but a missing head must fail loudly elsewhere,
     # not here).
-    if model.pose_head is not None:
+    if getattr(model, "pose_head", None) is not None:
         pose_mean, pose_std = fit_pose_stats(
             loader, device, key="pose_gt_pos" if pos_mode else "pose_gt"
         )
@@ -1051,6 +1477,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("pose stats: mean %.4f +/- %.4f, std %.4f +/- %.4f (dims floored at 1e-2: %d/%d)"
               % (pose_mean.mean().item(), pose_mean.std().item(), pose_std.mean().item(),
                  pose_std.std().item(), int((pose_std <= 1e-2).sum().item()), pose_mean.shape[0]))
+    if v3f_mode:
+        state_mean, state_std = fit_state_stats(loader, device)
+        model.denoiser.set_stats(state_mean, state_std)
+        print("v3f state stats: mean %.4f +/- %.4f, std %.4f +/- %.4f (dims floored at 1e-2: %d/%d)"
+              % (state_mean.mean().item(), state_mean.std().item(), state_std.mean().item(),
+                 state_std.std().item(), int((state_std <= 1e-2).sum().item()), state_mean.shape[0]))
     if bool(config.get("f2_repr", False)):
         # F2a: per-dim traj stats balance psi_dot / v_h / h inside the
         # trajectory loss; saved with the checkpoint for eval reference.
@@ -1137,7 +1569,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             group["lr"] = epoch_lr * float(group.get("assign_mult", 1.0))
         epoch_start_step = global_step
         nonfinite_skips = 0
-        epoch_sums = {"loss_total": 0.0, "loss_pose": 0.0, "loss_traj": 0.0, "loss_con": 0.0, "loss_kp": 0.0, "loss_pose_vel": 0.0, "loss_bone": 0.0, "loss_assign": 0.0, "loss_sigma": 0.0, "loss_Trec_Tmissing": 0.0, "loss_Vrec_Vmissing": 0.0, "grad_norm": 0.0, "n": 0, "n_tmissing": 0, "n_vmissing": 0}
+        epoch_sums = {"loss_total": 0.0, "loss_pose": 0.0, "loss_traj": 0.0, "loss_con": 0.0, "loss_kp": 0.0, "loss_pos": 0.0, "loss_pose_vel": 0.0, "loss_bone": 0.0, "loss_assign": 0.0, "loss_sigma": 0.0, "loss_contact": 0.0, "loss_phase": 0.0, "loss_cop": 0.0, "loss_Trec_Tmissing": 0.0, "loss_Vrec_Vmissing": 0.0, "grad_norm": 0.0, "n": 0, "n_tmissing": 0, "n_vmissing": 0}
+        # V6_1A A1/A2 窗源分层累计（occ_mix 启用时；key -> [sum, count]）。
+        occ_acc: Dict[str, tuple] = {}
+        # epoch_sums 的损失键映射：L_corr_prior 只在 v4_1_mode 存在
+        # （compute_losses_v4_1 独有）——按模式隔离，其余模式损失 dict
+        # 无此键，混入会 KeyError（2026-10-20 V5_1A 队列竞态事故）。
+        loss_pairs = [("loss", "loss_total"), ("L_pose", "loss_pose"),
+                      ("L_traj", "loss_traj"), ("L_con", "loss_con"),
+                      ("L_kp", "loss_kp"), ("L_pos", "loss_pos"),
+                      ("L_pose_vel", "loss_pose_vel"), ("L_bone", "loss_bone"),
+                      ("L_assign", "loss_assign"), ("L_sigma", "loss_sigma"),
+                      ("L_contact", "loss_contact"), ("L_phase", "loss_phase"),
+                      ("L_cop", "loss_cop")]
+        if v4_1_mode:
+            loss_pairs.append(("L_corr_prior", "loss_corr_prior"))
+            epoch_sums["loss_corr_prior"] = 0.0
         for raw_batch in loader:
             batch = move_batch(raw_batch, device)
             batch_size = batch["pose_gt"].shape[0]
@@ -1145,6 +1592,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             batch["config_id"] = config_id
             assert_batch_shapes(batch, batch_size, tw=int(config["tw"]))
             v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+            # V6_1A occ_mix：condition_inputs 之后叠加整窗置零（occ_src 已
+            # 在 dataset 侧选定 V_feat 来源；vz/tz 为窗口级标签）。
+            if occ_mix_kwargs and batch.get("occ_v_zeroed") is not None:
+                vz = batch["occ_v_zeroed"].view(-1, 1, 1).to(v_feat.device, dtype=torch.bool)
+                tz = batch["occ_t_zeroed"].view(-1, 1, 1).to(v_feat.device, dtype=torch.bool)
+                v_feat = torch.where(vz, torch.zeros_like(v_feat), v_feat)
+                t_raw = torch.where(tz, torch.zeros_like(t_raw), t_raw)
+                t_phys = torch.where(tz, torch.zeros_like(t_phys), t_phys)
+                t_s2m = torch.where(tz, torch.zeros_like(t_s2m), t_s2m)
             # F1: hmr_gvhmr checkpoints consume the GVHMR channel; V1 models
             # have no V_hmr parameter.
             v_kw = {"V_hmr": batch.get("V_hmr")} if str(config.get("v_input", "hrnet")) == "hmr_gvhmr" else {}
@@ -1162,11 +1618,45 @@ def main(argv: Optional[List[str]] = None) -> int:
             optimizer.zero_grad(set_to_none=True)
             if sigma_freeze_steps:
                 model.pose_head.set_sigma_frozen(global_step < sigma_freeze_steps)
-            if regress_mode:
+            if v3f_mode:
+                # V3_3F: diffuse the full normalized state [pose | trans |
+                # contact]; 10% V zeroing is the unconditional prior pass
+                # (no learned null tokens — 方案 §2.1).
+                x0_n = model.denoiser.normalize(torch.cat(
+                    [batch["pose_gt"], batch["trans_gt"], batch["contact_gt"]], dim=-1))
+                tau = torch.randint(
+                    0, int(config.get("tau_max", config["diffusion_train_steps"])),
+                    (batch_size,), device=device, dtype=torch.long)
+                x_tau = diffusion.q_sample(x0_n, tau)
+                v_drop = torch.rand(batch_size, device=device) < float(config.get("v_cond_dropout", 0.1))
+                v_feat_d = v_feat.clone()
+                v_feat_d[v_drop] = 0.0
+                out = model(v_feat_d, t_raw, t_phys, x_tau, tau, config_id,
+                            batch.get("session_id"), T_s2m=t_s2m, **v_kw)
+            elif regress_mode:
                 # F0b: regression head — no tau sampling, no q_sample, no
                 # x_tau. L_pose applies directly to the regression output
                 # (losses.py unchanged).
-                out = model(v_feat, t_raw, t_phys, config_id, batch.get("session_id"), T_s2m=t_s2m, **v_kw)
+                if v3h_mode and float(config.get("v_cond_dropout", 0.0)) > 0.0:
+                    # V3_3H: V zeroing trains the null-V prior (the T2M
+                    # protocol row — H has no T tower, 方案 §3; no learned
+                    # null tokens).
+                    v_drop = torch.rand(batch_size, device=device) < float(config["v_cond_dropout"])
+                    v_feat = torch.where(v_drop.view(-1, 1, 1),
+                                         torch.zeros_like(v_feat), v_feat)
+                if v5_1_mode:
+                    # V5_1A 条件配比：VT 90% / V 零化 10%（H 口径，T2M 行
+                    # 代价）。零化样本的 V 行（V2M/VT2M）损失按掩码跳过，
+                    # 只监督 T2M 行 + g_T 读出（compute_losses_v5_1 读
+                    # batch["v_zero"]）。T 流三条件恒定，不零化。
+                    v_drop = torch.rand(batch_size, device=device) < float(
+                        config.get("v_cond_dropout", 0.1))
+                    if bool(v_drop.any()):
+                        v_feat = torch.where(v_drop.view(-1, 1, 1),
+                                             torch.zeros_like(v_feat), v_feat)
+                    batch["v_zero"] = v_drop
+                z_kw = {"z_src": "all"} if v5_1_mode else {}
+                out = model(v_feat, t_raw, t_phys, config_id, batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw)
             else:
                 # Test11 τ training-regime knobs: --tau-fixed pins every step to one
                 # noise level (0 = identity-mapping training), --tau-max narrows the
@@ -1198,7 +1688,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 x_tau = diffusion.q_sample(pose_target, tau, noise=noise)
                 out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id,
                             batch.get("session_id"), T_s2m=t_s2m, **v_kw)
-            losses = compute_losses(out, batch, config_id, config)
+            if v3f_mode:
+                losses = compute_losses_v3f(out, x0_n, batch, config)
+            elif v5_1_mode:
+                losses = compute_losses_v5_1(out, batch, config_id, config)
+            elif v4_1_mode:
+                losses = compute_losses_v4_1(out, batch, config_id, config)
+            else:
+                losses = compute_losses(out, batch, config_id, config)
 
             finite = torch.isfinite(losses["loss"]) and torch.isfinite(out["F"]).all()
             if not bool(finite):
@@ -1210,6 +1707,72 @@ def main(argv: Optional[List[str]] = None) -> int:
                 global_step += 1
                 continue
 
+            # V6_1A A1/A2 训练窗分层统计（occ_mix 启用时）：T 分支
+            # per-sample 损失（接触 BCE + 压力重建，未加权）与 L_pose
+            # per-sample 按窗源标签分组（occ vs cam3）。train.py 侧重算
+            # （losses.py 的 per_sample_contact_bce 同公式，注明）。
+            if occ_mix_kwargs and batch.get("occ_src") is not None:
+                with torch.no_grad():
+                    gt = batch["contact_gt"]
+                    pos = gt.float().mean().clamp(1e-4, 1.0 - 1e-4)
+                    pos_weight = ((1.0 - pos) / pos).clamp(0.05, 20.0)
+                    air_w = float(config.get("lambda_air", 0.0))
+                    tbranch = per_sample_contact_bce(
+                        out["contact_logits"], gt, pos_weight, air_w)
+                    if out.get("pressure_hat") is not None:
+                        tbranch = tbranch + (out["pressure_hat"] - batch["T_raw"]).square().flatten(1).mean(dim=1)
+                    lpose_ps = (out["x0_hat"] - batch["pose_gt"]).square().flatten(1).mean(dim=1)
+                    src = batch["occ_src"].to(device)
+                    vz_l = batch["occ_v_zeroed"].to(device)
+                    tz_l = batch["occ_t_zeroed"].to(device)
+                    t_stats = grouped_mean(tbranch, src, vz_l, tz_l)
+                    p_stats = grouped_mean(lpose_ps, src, vz_l, tz_l)
+                    for name, groups in (("tbranch", t_stats), ("lpose", p_stats)):
+                        for src_name in ("cam3", "occ"):
+                            cell = groups[src_name]
+                            if cell["mean"] is not None:
+                                key = "%s%s" % (name, src_name)
+                                occ_acc[key] = (occ_acc.get(key, (0.0, 0))[0] + float(cell["sum"]),
+                                               occ_acc.get(key, (0.0, 0))[1] + int(cell["n"]))
+                    occ_acc["frac_occ"] = (occ_acc.get("frac_occ", (0.0, 0))[0]
+                                           + float((src == SRC_OCC).sum().item()), batch_size)
+                    occ_acc["frac_nullV"] = (occ_acc.get("frac_nullV", (0.0, 0))[0]
+                                             + float(vz_l.sum().item()), batch_size)
+                    occ_acc["frac_nullT"] = (occ_acc.get("frac_nullT", (0.0, 0))[0]
+                                             + float(tz_l.sum().item()), batch_size)
+                    occ_acc["frac_undisturbed"] = (occ_acc.get("frac_undisturbed", (0.0, 0))[0]
+                                                   + float(((src == SRC_CAM3) & (vz_l == 0) & (tz_l == 0)).sum().item()),
+                                                   batch_size)
+            # V5_1A z 通道监控（batch 级累计，无梯度）：专家分歧三通道 +
+            # PoE 接触读数塌缩信号。监控键，不入损失、不进 ckpt。
+            if v5_1_mode:
+                with torch.no_grad():
+                    zs = out["z"]
+                    mu_t, mu_v = zs["mu_gT"], zs["mu_gV"]
+                    prob_t = torch.sigmoid(zs["logit_gT"])
+                    prob_v = torch.sigmoid(zs["logit_gV"])
+                    prob_p = torch.sigmoid(zs["logit_poe"])
+                    pm = batch["phase_mask"].to(mu_t.device).float()
+                    cm = batch["cop_mask"].to(mu_t.device).float()
+                    d_phase = (mu_t[..., 0:4] - mu_v[..., 0:4]).abs().reshape(
+                        *mu_t.shape[:2], 2, 2).mean(dim=-1)     # (B,tw,2)
+                    d_cop = (mu_t[..., 4:8] - mu_v[..., 4:8]).abs().reshape(
+                        *mu_t.shape[:2], 2, 2).mean(dim=-1)
+                    gt_b = batch["contact_gt"].to(prob_p.device) > 0.5
+                    pred = prob_p > 0.5
+                    tp = (pred & gt_b).sum()
+                    fp = (pred & ~gt_b).sum()
+                    tn = (~pred & ~gt_b).sum()
+                    z_now = {
+                        "z_div_contact": (prob_t - prob_v).abs().mean(),
+                        "z_div_phase": (d_phase * pm).sum() / pm.sum().clamp(min=1),
+                        "z_div_cop": (d_cop * cm).sum() / cm.sum().clamp(min=1),
+                        "z_poe_prob_std": prob_p.std(),
+                        "z_air_recall": tn / (tn + fp).clamp(min=1),
+                        "z_logsig_gap": (zs["log_sig_gT"] - zs["log_sig_gV"]).mean(),
+                    }
+                    for key, value in z_now.items():
+                        epoch_sums[key] = epoch_sums.get(key, 0.0) + float(value) * batch_size
             losses["loss"].backward()
             # NaN-grad guard (fix_plan_v3 §2.2): check every parameter BEFORE
             # the clip, because clip_grad_norm_ mixes one non-finite gradient
@@ -1244,7 +1807,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             optimizer.step()
             n = batch_size
             epoch_sums["n"] += n
-            for key, name in (("loss", "loss_total"), ("L_pose", "loss_pose"), ("L_traj", "loss_traj"), ("L_con", "loss_con"), ("L_kp", "loss_kp"), ("L_pose_vel", "loss_pose_vel"), ("L_bone", "loss_bone"), ("L_assign", "loss_assign"), ("L_sigma", "loss_sigma")):
+            for key, name in loss_pairs:
                 epoch_sums[name] += float(losses[key].detach().item()) * n
             n_tmissing = int((config_id == CONFIG_T).sum().item())
             n_vmissing = int((config_id == CONFIG_V).sum().item())
@@ -1258,6 +1821,31 @@ def main(argv: Optional[List[str]] = None) -> int:
                 values = " ".join("%s=%.6f" % (key, value.detach().item()) for key, value in losses.items())
                 print("epoch=%d step=%d %s" % (epoch + 1, global_step, values))
             global_step += 1
+        if occ_mix_kwargs and occ_acc:
+            parts = ["%s=%.4f(n=%d)" % (key, total / max(count, 1), count)
+                     for key, (total, count) in occ_acc.items()]
+            print("occ_mix epoch %d: %s" % (epoch + 1, " ".join(parts)))
+        # V5_1A 机制探针（epoch 级）：film/* = FiLM 偏离恒等幅度与梯度
+        # （兑现瓶颈定位——FiLM 是否收到梯度、是否被推回恒等）；poe/w_* =
+        # PoE 接触合成权重（精度加权是否分化）。z_* 均值见 wandb 块。
+        v5_1_probes = {}
+        if v5_1_mode:
+            with torch.no_grad():
+                film = model.film_layer.mlp
+                v5_1_probes = {
+                    "film/gamma_dev": float((film.bias[: model.d] - 1.0).abs().mean()),
+                    "film/beta_dev": float(film.bias[model.d:].abs().mean()),
+                    "film/w_norm": float(film.weight.norm()),
+                    "film/w_grad_norm": float(film.weight.grad.norm())
+                    if film.weight.grad is not None else 0.0,
+                    "poe/w_V": float(F.softplus(model.logit_w)[0]),
+                    "poe/w_T": float(F.softplus(model.logit_w)[1]),
+                }
+            denom_z = max(epoch_sums["n"], 1)
+            print("v5_1 epoch %d: %s  %s" % (epoch + 1,
+                  "  ".join("%s=%.4f" % (key, epoch_sums[key] / denom_z)
+                            for key in _V5_1_Z_KEYS),
+                  "  ".join("%s=%.4f" % kv for kv in v5_1_probes.items())))
 
         checkpoint = {
             "model": model.state_dict(),
@@ -1288,6 +1876,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if val_loader is not None and (epoch + 1) % eval_interval == 0:
             model.eval()
             eval_results = _evaluate(model, diffusion, val_loader, config, device)
+            if occ_mix_kwargs and bool(config.get("occ_a3_monitor", False)):
+                # V6_1A A3 分层监控（默认关）：窗口级 VT2M ≤ V2M 占比
+                # occ vs cam3 对照（曲线分离方向）。
+                eval_results.update(_occ_a3_monitor(model, val_loader, config, device))
             print("epoch %d eval: %s" % (epoch + 1,
                   "  ".join("%s=%.4f" % (key, value) for key, value in sorted(eval_results.items()))))
             vt_now = eval_results.get("val/tau0_mpjpe/VT")
@@ -1312,13 +1904,28 @@ def main(argv: Optional[List[str]] = None) -> int:
             log["train/steps_per_epoch"] = global_step - epoch_start_step
             log["train/nonfinite_skips"] = nonfinite_skips
             for key, value in epoch_sums.items():
-                if key in ("n", "n_tmissing", "n_vmissing"):
+                if key in ("n", "n_tmissing", "n_vmissing") or key.startswith("z_"):
                     continue
                 metric_denom = denom
                 if key == "loss_Trec_Tmissing": metric_denom = max(epoch_sums["n_tmissing"], 1)
                 if key == "loss_Vrec_Vmissing": metric_denom = max(epoch_sums["n_vmissing"], 1)
                 log[f"train/{key}"] = value / metric_denom
             log["train/lr"] = optimizer.param_groups[0]["lr"]
+            if occ_mix_kwargs and occ_acc:
+                # V6_1A A1/A2 分层日志键（epoch 级）：
+                #   train/occ_a1/tbranch_{cam3,occ}  = T 分支损失（接触 +
+                #       压力重建，未加权）per-sample 组均值；
+                #   train/occ_a2/lpose_{cam3,occ}    = L_pose per-sample
+                #       组均值（操纵检查：occ 窗 V 削弱应 > cam3 窗）；
+                #   train/occ/frac_{occ,nullV,nullT,undisturbed} = 组合占比。
+                for name, prefix in (("tbranch", "train/occ_a1/"), ("lpose", "train/occ_a2/")):
+                    for src_name in ("cam3", "occ"):
+                        key = "%s%s" % (name, src_name)
+                        total, count = occ_acc.get(key, (0.0, 0))
+                        log[prefix + key] = total / max(count, 1)
+                for frac_key in ("frac_occ", "frac_nullV", "frac_nullT", "frac_undisturbed"):
+                    total, count = occ_acc.get(frac_key, (0.0, 0))
+                    log["train/occ/" + frac_key] = total / max(count, 1)
             # V3-3 gate probes (plan §2.3 F4): per-slot mean [g_V, g_T, g_∅]
             # from the last decoder layer, under wandb prefix "gate/".  The
             # assignment matrix itself stays auditable via the smoke/probe
@@ -1344,6 +1951,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 )
                 for k in range(int(loads.shape[0])):
                     log["assign/load_%02d" % k] = float(loads[k])
+            # V5_1A z 通道监控（wandb z/*）：专家分歧 + PoE 接触读数；
+            # film/poe 探针来自 epoch 末（v5_1_probes）。
+            if v5_1_mode:
+                for key in _V5_1_Z_KEYS:
+                    log["z/" + key[2:]] = epoch_sums[key] / denom
+                log.update(v5_1_probes)
             # Optional capped logging (--loss-cap): the first epochs spike far
             # above the converged range (loss_total 30 -> 0.1, loss_pose 1.5 ->
             # 0.01), which stretches the raw charts' y-axis and hides
@@ -1352,7 +1965,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             # Wandb_Analyzer picks up the clipped series directly.
             loss_cap = config.get("loss_cap")
             if loss_cap is not None:
-                for key in ("loss_total", "loss_pose", "loss_traj", "loss_con", "loss_kp",
+                for key in ("loss_total", "loss_pose", "loss_traj", "loss_con", "loss_kp", "loss_pos",
                             "loss_Trec_Tmissing", "loss_Vrec_Vmissing", "grad_norm"):
                     full_key = "train/%s" % key
                     if full_key in log:

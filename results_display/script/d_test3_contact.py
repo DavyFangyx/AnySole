@@ -7,6 +7,11 @@ heatmaps, with a per-foot contact indicator driven by the method's labels
 strip.  Each method gets its own subfolder so variants can be compared side
 by side; labels come from ``contact_<method>.npy`` (see ``AnysoleWorkspace/tool/contact_labels.py``).
 
+Data sources (shared facts 契约, 2026-10-15): session.json + frames.npz +
+pressure_48.npz（raw 48 格/脚 + fake）；GT motion 经 ``load_session_gt``
+（SMPL-24 优先 / BVH 回退，mocap_time_s 对齐）。旧 align_meta.json /
+pressure.npz 布局已废弃。
+
 Outputs land under ``results_display/DataTest/D3Test_contact/<method>/``:
 
     <method>/gif/ or mp4/           animation (tactile + contact badges | GT
@@ -31,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import os
 import sys
 from pathlib import Path
@@ -60,13 +64,11 @@ from utils.mpl_fonts import setup_cjk_fonts  # noqa: E402
 
 setup_cjk_fonts()
 
-from anysole.data.pressure import load_session_pressure  # noqa: E402
+from anysole.data.workspace_adapter import load_shared_session  # noqa: E402
 from anysole.types import CONTACT_SUM_THRESH  # noqa: E402
 from utils.motion_io import load_session_gt  # noqa: E402
 
 # --- Rendering constants, same visual style as Test1's panels. ---
-LEFT_FOOT_BOX = (slice(40, 120), slice(6, 54))
-RIGHT_FOOT_BOX = (slice(40, 120), slice(66, 114))
 PANEL_W = 460
 FOOT_W = 360
 INSOLE_W = 84
@@ -75,9 +77,6 @@ CANVAS_H = 760
 STRIP_H = 120
 TOTAL_W = FOOT_W + PANEL_W
 TOTAL_H = CANVAS_H + STRIP_H
-SENSOR_ROWS = 4
-SENSOR_COLS = 12
-
 LEFT_CONTACT_COL = 6
 RIGHT_CONTACT_COL = 7
 C_RED = (200, 50, 50)
@@ -124,16 +123,6 @@ def parents_to_edges(parents):
     return edges
 
 
-def crop_foot(pressure_t, box):
-    y_slice, x_slice = box
-    block = np.asarray(pressure_t[y_slice, x_slice], dtype=np.float32)
-    if block.shape != (SENSOR_ROWS * 20, SENSOR_COLS * 4):
-        raise ValueError(f"unexpected insole crop {block.shape}")
-    cells = block.reshape(SENSOR_ROWS, 20, SENSOR_COLS, 4).mean(axis=(1, 3))
-    # stored as 4 medial-lateral rows x 12 heel-to-toe columns; rotate to a vertical insole
-    return np.rot90(cells, k=1)
-
-
 def pressure_to_heatmap(cells, vmax=255.0):
     cells = np.clip(np.asarray(cells, dtype=np.float32), 0.0, vmax) / max(vmax, 1e-6)
     rgb = (cm.inferno(cells)[..., :3] * 255.0).astype(np.uint8)
@@ -171,16 +160,6 @@ def project_joints(joints, width, height, margin=70):
     u = width * 0.50 + ground[:, 0] * scale
     v = height * 0.84 - vertical * scale * 1.18 - ground[:, 1] * scale * 0.05
     return np.stack([u, v], axis=1)
-
-
-def load_pressure(seq_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    pressure = np.load(seq_dir / "pressure.npz")["pressure"].astype(np.float32)
-    fake_path = seq_dir / "fake_mask.npy"
-    if fake_path.is_file():
-        fake = np.load(fake_path).astype(np.uint8).reshape(-1)
-    else:
-        fake = np.zeros((pressure.shape[0],), dtype=np.uint8)
-    return pressure, fake
 
 
 def load_gt(seq_dir: Path, n_frames: int, fps: float = 40.0):
@@ -226,6 +205,12 @@ def side_color(on: bool, valid: bool) -> tuple[int, int, int]:
     if not valid:
         return C_GRAY
     return C_RED if on else C_GREEN
+
+
+def foot_block(values48: np.ndarray) -> np.ndarray:
+    """(48,) raw 格 -> 竖直鞋垫 (12, 4)（4×12 行主序 rot90，col0=脚尖，
+    heel 在上，与 D_Test4 显示口径一致）。"""
+    return np.rot90(np.asarray(values48, dtype=np.float32).reshape(4, 12), k=1)
 
 
 def render_tactile_panel(
@@ -557,27 +542,26 @@ def parse_args() -> argparse.Namespace:
 
 
 def analysis_row(session_id: str, seq_dir: Path, fps: float, method: str) -> dict | None:
-    """Compute the summary row without loading pressure.npz / motion.
+    """Compute the summary row without re-rendering the animation.
 
     Used for sessions whose animation already exists, so re-runs without
     ``--force`` still regenerate ``contact_summary.csv``.
     """
-    meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
-    n = int(meta["n_frames"])
+    shared = load_shared_session(session_id)
+    n = int(len(shared["frames"]["frame_id"]))
     cpath = contact_path(seq_dir, method)
     if cpath.is_file():
         contact_raw = np.load(cpath).astype(np.float32)
         n = min(n, contact_raw.shape[0])
-    t_grid = float(meta["visual_start_s"]) + np.arange(n, dtype=np.float64) / float(fps)
     left48 = right48 = None
     csv_available = False
     try:
-        out = load_session_pressure(meta, t_grid)
-        left48, right48 = out["left48"], out["right48"]
+        left48 = np.asarray(shared["pressure"]["left48"], dtype=np.float32)[:n]
+        right48 = np.asarray(shared["pressure"]["right48"], dtype=np.float32)[:n]
         csv_available = True
         n = min(n, left48.shape[0])
     except (FileNotFoundError, ValueError) as exc:
-        log.warning(f"{session_id}: no 48-cell CSV pressure ({exc}); sum/analysis columns will be empty")
+        log.warning(f"{session_id}: no 48-cell pressure ({exc}); sum/analysis columns will be empty")
     if csv_available:
         left48 = left48[:n]
         right48 = right48[:n]
@@ -592,35 +576,25 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, met
         log.info(f"Skip {session_id} [{method}]: outputs already exist under {out_dir}")
         return "skip", analysis_row(session_id, seq_dir, args.fps, method)
 
-    meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
-    pressure, fake = load_pressure(seq_dir)
+    shared = load_shared_session(session_id)
+    n = int(len(shared["frames"]["frame_id"]))
+    left48 = np.asarray(shared["pressure"]["left48"], dtype=np.float32)[:n]
+    right48 = np.asarray(shared["pressure"]["right48"], dtype=np.float32)[:n]
+    fake = np.asarray(shared["pressure"]["fake"], dtype=np.uint8).reshape(-1)[:n]
+    csv_available = True
 
     contact_raw = None
     cpath = contact_path(seq_dir, method)
     if cpath.is_file():
         contact_raw = np.load(cpath).astype(np.float32)
-
-    t_grid = float(meta["visual_start_s"]) + np.arange(pressure.shape[0], dtype=np.float64) / float(args.fps)
-    csv_available = False
-    left48 = right48 = None
-    try:
-        pressure_session = load_session_pressure(meta, t_grid)
-        left48, right48 = pressure_session["left48"], pressure_session["right48"]
-        csv_available = True
-    except (FileNotFoundError, ValueError) as exc:
-        log.warning(f"{session_id}: no 48-cell CSV pressure ({exc}); sum text/analysis columns will be empty")
-
-    n = pressure.shape[0]
     if contact_raw is not None and contact_raw.shape[0] != n:
         log.warning(f"{session_id}: {cpath.name} has {contact_raw.shape[0]} frames vs pressure {n}")
     n = min(n, contact_raw.shape[0]) if contact_raw is not None else n
     if fake.shape[0] != n:
-        log.warning(f"{session_id}: fake_mask has {fake.shape[0]} frames vs pressure {n}")
+        log.warning(f"{session_id}: fake has {fake.shape[0]} frames vs pressure {n}")
         n = min(n, fake.shape[0])
-    if csv_available and left48.shape[0] != n:
-        log.warning(f"{session_id}: CSV pressure has {left48.shape[0]} frames vs pressure {n}")
-        n = min(n, left48.shape[0])
-    pressure = pressure[:n]
+    left48 = left48[:n]
+    right48 = right48[:n]
     fake = fake[:n]
     contact, contact_available = load_contact(seq_dir, n, left48, right48, method)
     if csv_available:
@@ -655,8 +629,8 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, met
 
     frames = []
     for t in frame_ids:
-        left_block = crop_foot(pressure[t], LEFT_FOOT_BOX)
-        right_block = crop_foot(pressure[t], RIGHT_FOOT_BOX)
+        left_block = foot_block(left48[t])
+        right_block = foot_block(right48[t])
         left_sum = float(left48[t].sum()) if csv_available else None
         right_sum = float(right48[t].sum()) if csv_available else None
         frames.append(compose_frame(
@@ -676,7 +650,7 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, met
     log.info(f"Wrote {gen_path}")
     log.info(
         f"{session_id}: rendered={len(frames)} frames, contact L={rate_l:.3f} R={rate_r:.3f}, "
-        f"gt={gt_format if gt_ok else 'missing'}, csv={'ok' if csv_available else 'missing'}"
+        f"gt={gt_format if gt_ok else 'missing'}"
     )
     return "write", row
 
