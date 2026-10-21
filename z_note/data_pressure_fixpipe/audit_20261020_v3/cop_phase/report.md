@@ -1,6 +1,6 @@
 # 审计项 2：COP/相位探针 v3 对比（2026-10-20）
 
-参照：2026-10-19 `audit_20261019/cop_phase/report.md`（三版对比：raw108 / v1 / v2）。本报告只做 v3 收口：v3 与 raw108 / v2 对比，v1 已证与 v2 无差别不纳入。
+参照：2026-10-19 `z_note/归档/审计_压力_20261019/cop_phase/report.md`（三版对比：raw108 / v1 / v2）。本报告只做 v3 收口：v3 与 raw108 / v2 对比，v1 已证与 v2 无差别不纳入。
 
 产物（本目录）：`probe_v5_phase_cop_readout_denoised108_v3.json`（探针原样输出，未改字段）、`run_v3.log`、`compare_probe.py`（对比助手）、`compare_summary.json`（本报告数字的机器可读汇总）。
 

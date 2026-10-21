@@ -5,7 +5,7 @@
 
 ## 一、口径
 
-与 2026-10-19 `audit_20261019/contact_f1/report.md` 完全相同，唯一改动 = 版本集合（v1 已于 10-19 证与 v2 无差别，不再纳入）：
+与 2026-10-19 `z_note/归档/审计_压力_20261019/contact_f1/report.md` 完全相同，唯一改动 = 版本集合（v1 已于 10-19 证与 v2 无差别，不再纳入）：
 
 - **三版数据**（每版只替换 ctx 压力数组 left48/right48/sums_l/sums_r，BVH 关节 / floor / air 信号不变）：
   - `raw108`：shared facts `pressure_48.npz` 的 `left48`/`right48`（生产原值，帧对齐）；

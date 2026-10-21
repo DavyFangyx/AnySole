@@ -1,6 +1,6 @@
 # v3 触觉包审计（2026-10-20，总报告）
 
-**对象**：v3 = `z_note/data_pressure_fixpipe/Tactile_pressure_handoff_20261020_v3`（v2 三项 + 故障格突发清洗，基线之前；`tactile_input=denoised108_v3` 已接线）。对照 = raw108（生产）/ v2。三面审计套件沿用 10-19 口径（audit_20261019/），执行 = 两 agent，主会话逐项独立复核（复核记录见 §4）。
+**对象**：v3 = `z_note/data_pressure_fixpipe/Tactile_pressure_handoff_20261020_v3`（v2 三项 + 故障格突发清洗，基线之前；`tactile_input=denoised108_v3` 已接线）。对照 = raw108（生产）/ v2。三面审计套件沿用 10-19 口径（z_note/归档/审计_压力_20261019/），执行 = 两 agent，主会话逐项独立复核（复核记录见 §4）。
 
 ## 0. 数据层（主会话独立验收）
 

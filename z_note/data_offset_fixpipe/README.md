@@ -4,7 +4,7 @@
 
 ## 口径
 
-**lag 来源**：S1 全库扫描终表 `z_note/对齐扫描归档/s1_scratch/lag_fleet.csv`（s80_final.py 产出；同源 `lag_fleet_final.json`）。结论与公式见 `Baselines/决策/05_R1-R3_风险裁定.md` §三（第 545–549 行）。
+**lag 来源**：S1 全库扫描终表 `z_note/归档/对齐扫描归档/s1_scratch/lag_fleet.csv`（s80_final.py 产出；同源 `lag_fleet_final.json`）。结论与公式见 `Baselines/决策/05_R1-R3_风险裁定.md` §三（第 545–549 行）。
 
 - **终表取列**：`lag_eff_frames` = 已裁定的有效滞后（A 类恒 0）；`conf_class` ∈ A/B/C/D。fleet 表 140 行 = 全库 session。
 - **符号约定**：`UV[i] ≈ kp[i + lag]`；`lag > 0` ⟺ 图像 j 被配到"未来"的动捕姿态（图像偏晚 / GT 超前）→ 修法 `mocap_time_s[j] −= lag·dt`，等价 `offset_s_new = offset_s_old + lag·dt`。
