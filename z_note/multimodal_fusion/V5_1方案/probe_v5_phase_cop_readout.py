@@ -84,13 +84,24 @@ def foot_heat(verts, ankle, foot, floor_y, side="L"):
     return heat
 
 
-def session_gt(sess: dict, seq_root: Path):
+def session_gt(sess: dict, seq_root: Path, corrected_offset: bool = False):
     """GT 相位（每足，运动学触地事件）与 GT CoP（每足，smplx
-    正演 foot_heat → cop_from_grid），返回 dict of arrays (n_frames, ...)。"""
+    正演 foot_heat → cop_from_grid），返回 dict of arrays (n_frames, ...)。
+
+    corrected_offset=True（2026-10-20）：GT 采样时间走修正轴——与
+    AnySoleDataset(corrected_offset=True) 同表同式（B 类平移 lag_eff×0.025，
+    A/C/D 不动）。GT 的直接来源 = shared facts mocap_time_s + SMPL 归档
+    （独立读取路径，非 dataset 内部 GT 缓存），因此此处必须显式应用同一
+    修正，否则 GT 与载体窗内 pose 轴不一致。floor_y 取自 dataset session
+    （载体 build 已按修正轴计算），随修正生效。
+    """
     sid = sess["session_id"]
     shared = load_shared_session(sid, seq_root)
     n_frames = len(shared["frames"]["frame_id"])
     mocap_t = np.asarray(shared["frames"]["mocap_time_s"], dtype=np.float64)[:n_frames]
+    if corrected_offset:
+        from anysole.data.dataset import load_offset_correction
+        mocap_t = mocap_t - load_offset_correction().get(sid, 0.0)
     floor = float(sess["floor_y"])
     smpl = load_smpl(Path(sess["smpl_path"]), query_t=mocap_t)
     joints = fk_pose6d_np(smpl["pose_6d"], smpl["trans_m"], smpl["offsets_m"], smpl["parents"])
@@ -171,7 +182,8 @@ def bootstrap_paired(a, b, n_boot=10000, seed=0):
     return mean, float(np.percentile(dist, 2.5)), float(np.percentile(dist, 97.5))
 
 
-def collect(model, dataset, device, batch_size, seq_root, max_sessions=None):
+def collect(model, dataset, device, batch_size, seq_root, max_sessions=None,
+            corrected_offset: bool = False):
     """逐帧特征 + GT（窗口级收集，GT 按 valid_windows 帧范围裁剪对齐）。
 
     返回 (feats, gt, mask, sess_seq, sess_counts)：会话按首次出现顺序
@@ -209,7 +221,7 @@ def collect(model, dataset, device, batch_size, seq_root, max_sessions=None):
                 sess = dataset.sessions[fi]
                 if sid not in sess_gt_cache:
                     try:
-                        sess_gt_cache[sid] = session_gt(sess, seq_root)
+                        sess_gt_cache[sid] = session_gt(sess, seq_root, corrected_offset)
                         sess_seq.append(sid)
                         sess_counts[sid] = 0
                     except (FileNotFoundError, ValueError) as exc:
@@ -239,9 +251,10 @@ def collect(model, dataset, device, batch_size, seq_root, max_sessions=None):
     return feats, gt, mask, sess_seq, sess_counts
 
 
-def run_probe(model, dataset_tr, dataset_te, device, batch_size, seq_root, max_sessions):
-    F_tr, Y_tr, M_tr, sids_tr, cnt_tr = collect(model, dataset_tr, device, batch_size, seq_root, max_sessions)
-    F_te, Y_te, M_te, sids_te, cnt_te = collect(model, dataset_te, device, batch_size, seq_root, max_sessions)
+def run_probe(model, dataset_tr, dataset_te, device, batch_size, seq_root, max_sessions,
+              corrected_offset: bool = False):
+    F_tr, Y_tr, M_tr, sids_tr, cnt_tr = collect(model, dataset_tr, device, batch_size, seq_root, max_sessions, corrected_offset)
+    F_te, Y_te, M_te, sids_te, cnt_te = collect(model, dataset_te, device, batch_size, seq_root, max_sessions, corrected_offset)
 
     def join(bag):
         return {c: np.concatenate(bag[c], axis=0).astype(np.float64) for c in CHANNELS}
@@ -322,6 +335,9 @@ def main(argv=None):
     ap.add_argument("--tactile-input", default=None,
                     help="覆盖载体 saved config 的 tactile_input；None = 维持现行为 "
                          "（审计 A/B：raw108 / denoised108 / denoised108_v2 / denoised108_v3）")
+    ap.add_argument("--corrected-offset", action="store_true", default=False,
+                    help="GT 采样时间走修正轴（B 类平移 lag_eff×0.025，A/C/D 不动）："
+                         "AnySoleDataset 构造与 session_gt 的 phase/CoP 目标同轴应用")
     args = ap.parse_args(argv)
     device = resolve_device(args.device)
     smoke = args.max_sessions is not None
@@ -344,13 +360,15 @@ def main(argv=None):
             no_imu=bool(saved.get("no_imu", False)),
             v_input=str(saved.get("v_input", "hrnet")),
             f2_repr=bool(saved.get("f2_repr", False)),
+            corrected_offset=bool(args.corrected_offset),
         )
 
     ds_tr = build("train", "train")
     ds_te = build("eval", "val")
     results, lam_chosen, sess_ci = run_probe(model, ds_tr, ds_te, device,
                                              args.batch_size, seq_root,
-                                             args.max_sessions)
+                                             args.max_sessions,
+                                             bool(args.corrected_offset))
     verdict = {}
     for c in CHANNELS:
         for r in READOUTS:
@@ -388,7 +406,9 @@ def main(argv=None):
     if not smoke:
         out = args.out or (REPO / "results/AnySole/probes/probe_v5_phase_cop_readout.json")
         out.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"provenance": {"ckpt": str(args.ckpt), "date": "2026-10-19"},
+        payload = {"provenance": {"ckpt": str(args.ckpt), "date": "2026-10-19",
+                                  "tactile_input": args.tactile_input,
+                                  "corrected_offset": bool(args.corrected_offset)},
                    "results": {f"{c}|{r}": results[(c, r)] for c in CHANNELS for r in READOUTS},
                    "verdict": {f"{c}|{r}|{k}": v for (c, r, k), v in verdict.items()},
                    "n_test_sessions": len(ds_te.session_ids)}

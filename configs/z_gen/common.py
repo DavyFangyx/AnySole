@@ -131,6 +131,68 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "MODEL_IDS": ["V3_3H_v3", "V3_3H_v3_cam3_occ010"],
         "REQUIRES": [],
     },
+    # offset 重同步组（2026-10-20）：cam3 基准 + occ010/020/030/050，
+    # 自训自测（corrected_offset=True）。
+    "offsetfix": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3B_cam3_offfix",
+                      "V3_3B_cam3_occ010_offfix", "V3_3B_cam3_occ020_offfix",
+                      "V3_3B_cam3_occ030_offfix", "V3_3B_cam3_occ050_offfix"],
+        "REQUIRES": [],
+    },
+    # offset 设计组（2026-10-21）：载体先行——E_offfix（V5_1/V4_1 载体）
+    # 与 vonly 专才（V3_3H 载体）；设计主体在载体完成后另批入队。
+    "offsetfix_e": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3E_cam3_offfix", "V3_3E_cam3_occ010_offfix"],
+        "REQUIRES": [],
+    },
+    "offsetfix_vonly": {
+        "KIND": "singlemodal_compare",
+        "MODEL_IDS": ["V3_3B_cam3_offfix", "V3_3B_cam3_occ010_offfix"],
+        "SPECIALISTS": ["vonly"],
+        "REQUIRES": [],
+    },
+    "offsetfix_v5_1": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V5_1_cam3_offfix", "V5_1_cam3_occ010_offfix",
+                      "V5_1_cam3_occ020_offfix", "V5_1_cam3_occ030_offfix",
+                      "V5_1_cam3_occ050_offfix"],
+        "REQUIRES": [],
+    },
+    "offsetfix_v4_1": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V4_1_cam3_offfix", "V4_1_cam3_occ010_offfix"],
+        "REQUIRES": [],
+    },
+    # v2 + offset 设计组（2026-10-21）：V5_1A / V4_1A × cam3/cam3_occ010，
+    # 触觉 = denoised108_v2（corrected_offset=True、载体 = E_offfix 系）。
+    "offsetfix_v45_v2": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V5_1_cam3_offfix_v2", "V5_1_cam3_occ010_offfix_v2",
+                      "V4_1_cam3_offfix_v2", "V4_1_cam3_occ010_offfix_v2"],
+        "REQUIRES": [],
+    },
+    "offsetfix_v3_3h": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3H_cam3_offfix", "V3_3H_cam3_occ010_offfix"],
+        "REQUIRES": [],
+    },
+    # v2/v3 + offset 组（2026-10-20）：同 5 组合，触觉 = denoised108_v2 / _v3。
+    "offsetfix_v2": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3B_cam3_offfix_v2",
+                      "V3_3B_cam3_occ010_offfix_v2", "V3_3B_cam3_occ020_offfix_v2",
+                      "V3_3B_cam3_occ030_offfix_v2", "V3_3B_cam3_occ050_offfix_v2"],
+        "REQUIRES": [],
+    },
+    "offsetfix_v3": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3B_cam3_offfix_v3",
+                      "V3_3B_cam3_occ010_offfix_v3", "V3_3B_cam3_occ020_offfix_v3",
+                      "V3_3B_cam3_occ030_offfix_v3", "V3_3B_cam3_occ050_offfix_v3"],
+        "REQUIRES": [],
+    },
     # V3_3H_v5 无锚版全网格（2026-10-20）：4 相机 × 3 遮挡 = 12 格
     # （T 价值区 = V 失效条件的无锚对照；cam{1,2,4}_occ{010,020} 的
     # 遮挡缓存由 extract_hrnet 生成）。
@@ -147,6 +209,13 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
     "v3h6_test": {
         "KIND": "model_suite",
         "MODEL_IDS": ["V3_3H_v6", "V3_3H_v6_cam3_occ010"],
+        "REQUIRES": [],
+    },
+    # T 增强三组（2026-10-21，T增强三组实验方案.md）：维度 2 显式物理特征
+    # （tphys）+ 维度 3 足-地监督（d8，监督头落地后加入）。
+    "v5_1_tenhance_test": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V5_1_cam3_offfix_tphys", "V5_1_cam3_offfix_d8"],
         "REQUIRES": [],
     },
     # V5_1 首组（2026-10-19，V5_1A方案）：cam3 基准 + cam3+occ010，

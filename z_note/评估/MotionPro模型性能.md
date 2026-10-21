@@ -52,7 +52,7 @@
 
 注：
 - 本项目 MPJPE = `mpjpe_mm`（pelvis 对齐）；PMPJPE 对应 `pa_mpjpe_mm`（账本 PA）；文献对齐口径未必一致，数值不可直接比大小。
-- PVE：本项目 AnySole 不生成 shape（无 beta 输出头），按生成清单裁定不评（`metrics_指标改动说明.md` §2），记 `—`。
+- PVE：本项目 AnySole 不生成 shape（无 beta 输出头），按生成清单裁定不评（`评估配置说明书.md` §1），记 `—`。
 - Accel 对应本项目 `accel_error_m_s2`（预测-真值加速度误差均值，m/s²）。
 - WMPJPE 对应本项目 `global_mpjpe_mm`（账本 Global，世界系 MPJPE）；WAMPJPE 对应 `wa_mpjpe100_mm`（窗口化口径）。
 - RTE 对应本项目 `root_ate_mm`（账本 ATE，逐帧根轨迹绝对误差均值）。

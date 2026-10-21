@@ -50,6 +50,8 @@ def build(config: dict, part_joints=None):
         tw=int(config["tw"]),
         dropout=float(config.get("dropout", 0.1)),
         pose_layers=int(config.get("pose_layers", 6)),
+        t_phys_v2=bool(config.get("t_phys_v2", False)),
+        d8_heads=bool(config.get("d8_heads", False)),
     )
     carrier = str(config.get("carrier_from") or "")
     if not carrier:

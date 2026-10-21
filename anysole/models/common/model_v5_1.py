@@ -293,8 +293,11 @@ def poe_synthesize(params_v, params_t, logit_w):
 
 
 class AnySoleModelV5_1(nn.Module):
-    def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, pose_layers=6):
+    def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, pose_layers=6,
+                 t_phys_v2: bool = False, d8_heads: bool = False):
         super().__init__()
+        self.t_phys_v2 = bool(t_phys_v2)
+        self.d8_heads = bool(d8_heads)
         self.d = d
         self.tw = tw
         self.modal = "anysolev2"  # regress machinery in train/eval
@@ -307,10 +310,18 @@ class AnySoleModelV5_1(nn.Module):
         self.encoders = ModalEncoders(
             self.embeddings, dim=d, tw=tw, tactile_input="raw108",
             tactile_direct=False, no_imu=False, v_input="hrnet",
-            t_encoder="foot_conv",
+            t_encoder="foot_conv", t_phys_v2=t_phys_v2,
         )
         self.v_temporal = _temporal_encoder(d, 4, nhead, dropout=dropout)
         self.t_temporal = _temporal_encoder(d, 4, nhead, dropout=dropout)
+        # 维度 3 足-地监督三头（2026-10-21，T增强三组实验方案.md）：
+        # tcop = 触觉 CoP 自重建（目标 T_phys cop 通道，力>0 掩码）；
+        # strike = 着地模式三分类（T 侧落地事件标签，仅落地帧计损失）；
+        # gtcop = GT CoP 回归（v5_1_gt 数据件，接触帧掩码）。
+        if d8_heads:
+            self.tcop_head = nn.Linear(d, 4)
+            self.strike_head = nn.Linear(d, 6)
+            self.gtcop_head = nn.Linear(d, 4)
         # sigma inits match the E carrier (V=-3 / prior=+3); the sigma heads
         # are frozen and never read — state-dict compatibility only (G 口径).
         self.pose_head = V5_1PoseHead(
@@ -390,6 +401,9 @@ class AnySoleModelV5_1(nn.Module):
         params_t = self.g_T(t_tok)
         zs = poe_synthesize(params_v, params_t, self.logit_w)
         contact_logits = self.contact_head(t_tok)
+        tcop = self.tcop_head(t_tok) if self.d8_heads else None
+        strike_logits = self.strike_head(t_tok) if self.d8_heads else None
+        gtcop = self.gtcop_head(t_tok) if self.d8_heads else None
         # T 先验塔（G 风格，从零）：T2M 行 = 无条件先验 + FiLM(z_T) 的
         # 健全性检查（~90mm 量级参照；G 前科 315.5 防回归——先验塔单独
         # 回归到 315.5，FiLM(z_T) 与 z 多通道监督是防回归结构）。
@@ -427,6 +441,9 @@ class AnySoleModelV5_1(nn.Module):
             "v_prior": v_prior,
             "trans_prior": trans_prior,
             "contact_logits": contact_logits,
+            "tcop": tcop,
+            "strike_logits": strike_logits,
+            "gtcop": gtcop,
             # z 通道读数（损失三读数监督 + 判据 ③ 专家分歧审计）
             "z": zs,
             "logit_w": self.logit_w,

@@ -223,7 +223,9 @@ def _load_split_ids(split: str) -> list[str]:
         ]
 
 
-def _context(session: dict) -> dict:
+def _context(session: dict, corrected_offset: bool = False) -> dict:
+    """corrected_offset=True：GT 采样时间走修正轴（B 类平移，见
+    dataset.load_offset_correction）。触觉压力（视频轴）不动。"""
     frames = session["frames"]
     pressure = session["pressure"]
     n = len(frames["frame_id"])
@@ -232,6 +234,10 @@ def _context(session: dict) -> dict:
     joints_src = np.asarray(parsed["joints"], dtype=np.float64)
     src_t = np.arange(len(joints_src), dtype=np.float64) * float(parsed["frame_time"])
     query_t = np.asarray(frames["mocap_time_s"], dtype=np.float64)
+    if corrected_offset:
+        from anysole.data.dataset import load_offset_correction
+        shift = load_offset_correction().get(session["session_id"], 0.0)
+        query_t = query_t - shift
     points = np.empty((n,) + joints_src.shape[1:], dtype=np.float64)
     clipped = np.clip(query_t, src_t[0], src_t[-1])
     for joint in range(joints_src.shape[1]):
@@ -257,7 +263,11 @@ def _context(session: dict) -> dict:
 
 
 def build_one(session_id: str, methods: list[str], *, force: bool = False,
-              shared_root: Path = SHARED_SESSION_ROOT) -> list[Path]:
+              shared_root: Path = SHARED_SESSION_ROOT,
+              corrected_offset: bool = False,
+              label_method: str | None = None) -> list[Path]:
+    """corrected_offset：GT 采样走修正轴；label_method：落盘名
+    （计算仍用 method，只改输出路径——修正轴标签与原生标签并存）。"""
     session = load_shared_session(session_id, shared_root)
     ctx = None
     outputs = []
@@ -266,24 +276,27 @@ def build_one(session_id: str, methods: list[str], *, force: bool = False,
             raise ValueError(f"unknown contact method {method!r}; choose from {sorted(METHODS)}")
         from anysole.data.workspace_adapter import label_path
 
-        output = label_path(session_id, method)
+        storage = label_method or method
+        output = label_path(session_id, storage)
         if output.is_file() and not force:
             outputs.append(output)
             continue
         if ctx is None:
-            ctx = _context(session)
+            ctx = _context(session, corrected_offset)
         # These methods are pure functions over the adapter context.  No
         # label from another method is read or used as an input.
         contact = np.asarray(METHODS[method](ctx), dtype=np.float32)
         write_label(
             output,
             session=session,
-            method=method,
+            method=storage,
             contact=contact,
             parameters={
                 "source": "shared/facts pressure_48 + raw BVH when required",
                 "bvh_path": str(shared_bvh_path(session)),
                 "semantics": "AnySole legacy method; f6_soft is exported binary (>0.5)",
+                "computed_method": method,
+                "corrected_offset": bool(corrected_offset),
             },
         )
         outputs.append(output)
@@ -298,6 +311,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--methods", default="f6_soft",
                         help="comma-separated methods, or 'all' (default: f6_soft)")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--corrected-offset", action="store_true",
+                        help="GT 采样时间走修正轴（B 类平移，A/C/D 不动）")
+    parser.add_argument("--label-method", default=None,
+                        help="落盘 method 名（缺省 = 同 method）；计算仍用 --methods")
     args = parser.parse_args(argv)
     sessions = list(args.session)
     if args.split:
@@ -306,7 +323,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("provide --session or --split; refusing an implicit full rebuild")
     methods = sorted(METHODS) if args.methods == "all" else [v.strip() for v in args.methods.split(",") if v.strip()]
     for session_id in sessions:
-        paths = build_one(session_id, methods, force=args.force)
+        paths = build_one(session_id, methods, force=args.force,
+                          corrected_offset=args.corrected_offset,
+                          label_method=args.label_method)
         print(f"{session_id}: " + ", ".join(str(path) for path in paths))
     return 0
 

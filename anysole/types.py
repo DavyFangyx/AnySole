@@ -346,11 +346,13 @@ BATCH_SHAPES = {
 }
 
 
-def assert_batch_shapes(batch, batch_size=None, tw=TW):
+def assert_batch_shapes(batch, batch_size=None, tw=TW, t_phys_v2=False):
     """Raise if a training batch is missing a frozen field or has the wrong shape."""
     import torch
 
     for name, expected in BATCH_SHAPES.items():
+        if name == "T_phys" and t_phys_v2:
+            expected = (TW, 20)   # 维度 2（2026-10-21）：T_phys 12→20 维
         if name in ("session_id",):
             continue
         if name in ("V_hmr", "traj_gt_f2", "psi_anchor") and name not in batch:

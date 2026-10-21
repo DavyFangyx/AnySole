@@ -74,8 +74,16 @@ TRAIN_ARG_FLAG_MAP = {
     "p_nullV": "--p-nullv",
     "p_nullT": "--p-nullt",
     "occ_a3_monitor": "--occ-a3-monitor",
+    # offset 重同步（2026-10-20）：B 类 session GT 采样按修正表平移。
+    "corrected_offset": "--corrected-offset",
+    "t_phys_v2": "--t-phys-v2",
+    "d8_heads": "--d8-heads",
+    "lambda_tcop": "--lambda-tcop",
+    "lambda_strike": "--lambda-strike",
+    "lambda_gtcop": "--lambda-gtcop",
 }
-TRAIN_STORE_TRUE = {"assign_cluster", "occ_mix", "occ_a3_monitor"}
+TRAIN_STORE_TRUE = {"assign_cluster", "occ_mix", "occ_a3_monitor",
+                    "corrected_offset", "t_phys_v2", "d8_heads"}
 
 
 def _parse_value(raw: str) -> Any:

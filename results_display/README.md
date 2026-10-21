@@ -361,8 +361,8 @@ crop 区域黄框 / 切割线红线，副标题带 bbox_info 数值）。occ 缓
 
 ```bash
 conda activate touch_gait
-python results_display/script/d_test7_occlusion.py --occ 50 --session S5091
-python results_display/script/d_test7_occlusion.py --occ 50 --split test
+python results_display/script/d_test7_occlusion.py --occ 10 --session S5091
+python results_display/script/d_test7_occlusion.py --occ 10 --split test
 ```
 
 产出（`DataTest/D7Test_occlusion/`）：`<sid>_occ<FFF>.gif/.mp4`。

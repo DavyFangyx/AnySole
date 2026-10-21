@@ -97,6 +97,12 @@ DEFAULT_CONFIG = {
     "warm_start": False,        # E6.5: 采样起点对齐训练边缘分布
     "noise_scaled": False,      # E3 口径（E4 的噪声缩放被证伪）；默认与 anysole/configs/v1.yaml 对齐
     "lr_schedule": "constant",  # E3 口径（E5 的 cosine 被证伪）
+    "corrected_offset": False,  # offset 重同步（2026-10-20）：B 类 session GT 采样按修正表平移
+    "t_phys_v2": False,  # 维度 2 显式物理特征（2026-10-21）：T_phys 12→20 维
+    "d8_heads": False,  # 维度 3 足-地监督三头（2026-10-21）
+    "lambda_tcop": 0.0,
+    "lambda_strike": 0.0,
+    "lambda_gtcop": 0.0,
     "lambda_pose": 3.0,
     "lambda_traj": 1.0,
     "lambda_trec": 0.1,
@@ -587,6 +593,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--lambda-cop", type=float, default=None, metavar="W",
                         help="V5_1: override yaml loss weight lambda_cop (z 专家 CoP μ "
                              "监督，接触帧掩码；单点预注册 1.0).")
+    parser.add_argument("--lambda-tcop", type=float, default=None,
+                        help="维度 3：触觉 CoP 自重建权重")
+    parser.add_argument("--lambda-strike", type=float, default=None,
+                        help="维度 3：着地模式三分类权重")
+    parser.add_argument("--lambda-gtcop", type=float, default=None,
+                        help="维度 3：GT CoP 回归权重")
     parser.add_argument("--g-floor-src", type=str, default=None, choices=("gt", "t"),
                         help="V3_3G: observation-layer floor source (gt = E v2.1 口径, default; t = T-derived diagnostic).")
     parser.add_argument("--carrier-from", type=Path, default=None,
@@ -597,6 +609,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--occ-mix", action="store_true",
                         help="V6_1A occ_mix: window-level structured-dropout augmentation "
                              "(default off; --p-occ/--p-nullv/--p-nullt tune it).")
+    parser.add_argument("--corrected-offset", action="store_true", default=None,
+                        help="offset 重同步 (2026-10-20): B 类 session GT 采样按修正表平移 "
+                             "(mocap_time_s - lag_eff×0.025；A/C/D 不动)。")
+    parser.add_argument("--t-phys-v2", action="store_true", default=None,
+                        help="维度 2：T_phys 12→20 维显式物理特征（着地几何+双足关系）")
+    parser.add_argument("--d8-heads", action="store_true", default=None,
+                        help="维度 3：足-地监督三头（tcop 自重建 + 着地模式 + GT CoP）")
     parser.add_argument("--p-occ", type=float, default=None, metavar="P",
                         help="V6_1A occ_mix: P(occ010 source window) (default 0.2).")
     parser.add_argument("--p-nullv", type=float, default=None, metavar="P",
@@ -1243,7 +1262,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "lambda_con", "lambda_pose_vel", "lambda_bone",
                 "lambda_contact", "lambda_nll", "lambda_prior_pose",
                 "lambda_prior_nll", "lambda_prior_traj", "lambda_air",
-                "lambda_foot_res", "lambda_phase", "lambda_cop"):
+                "lambda_foot_res", "lambda_phase", "lambda_cop",
+                "lambda_tcop", "lambda_strike", "lambda_gtcop"):
         value = getattr(args, key)
         if value is not None:
             config[key] = float(value)
@@ -1255,6 +1275,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["beta"] = float(args.beta)
     if args.occ_mix:
         config["occ_mix"] = True
+    if args.corrected_offset is not None:
+        config["corrected_offset"] = bool(args.corrected_offset)
+    if getattr(args, "t_phys_v2", None) is not None:
+        config["t_phys_v2"] = bool(args.t_phys_v2)
+    if getattr(args, "d8_heads", None) is not None:
+        config["d8_heads"] = bool(args.d8_heads)
     if args.occ_a3_monitor:
         config["occ_a3_monitor"] = True
     for key, value in (("p_occ", args.p_occ), ("p_nullV", args.p_nullv),
@@ -1295,6 +1321,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             cam_id=int(config.get("cam_id", 3)),
             load_v5_1_gt=v5_1_mode,
             occ_mix=occ_mix_kwargs,
+            corrected_offset=bool(config.get("corrected_offset", False)),
+            t_phys_v2=bool(config.get("t_phys_v2", False)),
+            d8_heads=bool(config.get("d8_heads", False)),
         )
     except FileNotFoundError as exc:
         if "HRNet cache" in str(exc):
@@ -1318,7 +1347,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs)
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs, corrected_offset=bool(config.get("corrected_offset", False)), t_phys_v2=bool(config.get("t_phys_v2", False)), d8_heads=bool(config.get("d8_heads", False)))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:
@@ -1581,7 +1610,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                       ("L_pose_vel", "loss_pose_vel"), ("L_bone", "loss_bone"),
                       ("L_assign", "loss_assign"), ("L_sigma", "loss_sigma"),
                       ("L_contact", "loss_contact"), ("L_phase", "loss_phase"),
-                      ("L_cop", "loss_cop")]
+                      ("L_cop", "loss_cop"),
+                      ("L_tcop", "loss_tcop"), ("L_strike", "loss_strike"),
+                      ("L_gtcop", "loss_gtcop")]
         if v4_1_mode:
             loss_pairs.append(("L_corr_prior", "loss_corr_prior"))
             epoch_sums["loss_corr_prior"] = 0.0
@@ -1590,7 +1621,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             batch_size = batch["pose_gt"].shape[0]
             config_id = sample_config_ids(batch_size, probs=config["config_probs"]).to(device)
             batch["config_id"] = config_id
-            assert_batch_shapes(batch, batch_size, tw=int(config["tw"]))
+            assert_batch_shapes(batch, batch_size, tw=int(config["tw"]),
+                        t_phys_v2=bool(config.get("t_phys_v2", False)))
             v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
             # V6_1A occ_mix：condition_inputs 之后叠加整窗置零（occ_src 已
             # 在 dataset 侧选定 V_feat 来源；vz/tz 为窗口级标签）。

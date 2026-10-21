@@ -77,14 +77,56 @@ def _foot_phys(values48: np.ndarray) -> np.ndarray:
     return np.concatenate([cop, force.astype(np.float32), envelope, spatial.astype(np.float32), temporal], axis=1)
 
 
-def physical_tokens(left48: np.ndarray, right48: np.ndarray) -> np.ndarray:
+HULL_THRESH = 0.05   # 与 foot_encoder.CONTACT_AREA_THRESH 同阈值
+
+
+def _hull_feats(values48: np.ndarray) -> np.ndarray:
+    """每足 3 维着地几何（维度 2，2026-10-21）：激活格的沿足长位置
+    （0=跟、1=尖——脚尖先/脚跟先着地的显式编码）、内外侧位置、沿足长
+    散布（平铺 vs 点接触）。零载荷帧全零。"""
+    grid = np.clip(values48.reshape(-1, 4, 12), 0.0, None)
+    active = grid > HULL_THRESH
+    cnt = active.sum(axis=(1, 2))
+    rows = np.arange(4, dtype=np.float32)[None, :, None]
+    cols = np.arange(12, dtype=np.float32)[None, None, :]
+    mean_row = (active * rows).sum(axis=(1, 2)) / np.maximum(cnt, 1.0)
+    mean_col = (active * cols).sum(axis=(1, 2)) / np.maximum(cnt, 1.0)
+    var_col = (active * (cols - mean_col[:, None, None]) ** 2).sum(
+        axis=(1, 2)) / np.maximum(cnt, 1.0)
+    out = np.stack([mean_col / 11.0, mean_row / 3.0,
+                    np.sqrt(var_col) / 11.0], axis=1)
+    out[cnt == 0] = 0.0
+    return out.astype(np.float32)
+
+
+def _foot_phys_v2(left48: np.ndarray, right48: np.ndarray) -> np.ndarray:
+    """维度 2 显式物理特征（2026-10-21）：基础 12 维 + 每足着地几何 3 维
+    + 双足关系 2 维（力比、CoP 距离）= 20 维。"""
+    base = np.concatenate([_foot_phys(left48), _foot_phys(right48)], axis=1)
+    lh = _hull_feats(left48)
+    rh = _hull_feats(right48)
+    lf = np.clip(left48, 0.0, None).sum(axis=1)
+    rf = np.clip(right48, 0.0, None).sum(axis=1)
+    ratio = lf / np.maximum(lf + rf, 1e-6)
+    cl = cop_from_grid(left48)
+    cr = cop_from_grid(right48)
+    dist = np.linalg.norm(cl - cr, axis=1)
+    return np.concatenate([base, lh, rh, ratio[:, None], dist[:, None]],
+                          axis=1).astype(np.float32)
+
+
+def physical_tokens(left48: np.ndarray, right48: np.ndarray,
+                    t_phys_v2: bool = False) -> np.ndarray:
+    if t_phys_v2:
+        return _foot_phys_v2(left48, right48)
     phys = np.concatenate([_foot_phys(left48), _foot_phys(right48)], axis=1)
     if phys.shape[1] != T_PHYS_DIM:
         raise ValueError("T_phys dim %d != %d" % (phys.shape[1], T_PHYS_DIM))
     return phys.astype(np.float32)
 
 
-def load_session_pressure(meta: dict, t_grid: np.ndarray) -> dict:
+def load_session_pressure(meta: dict, t_grid: np.ndarray,
+                          t_phys_v2: bool = False) -> dict:
     rec_dir = FAKE_MARKED_ROOT / meta["date"] / meta["subject"] / meta["rec_name"]
     left = load_pressure_csv(rec_dir / "pressure_left.csv")
     right = load_pressure_csv(rec_dir / "pressure_right.csv")
@@ -101,7 +143,7 @@ def load_session_pressure(meta: dict, t_grid: np.ndarray) -> dict:
     norm_right = np.clip(right48, 0.0, PRESSURE_CLIP) / PRESSURE_CLIP
     return {
         "T_raw": t_raw.astype(np.float32),
-        "T_phys": physical_tokens(norm_left, norm_right),
+        "T_phys": physical_tokens(norm_left, norm_right, t_phys_v2=t_phys_v2),
         "left48": left48,
         "right48": right48,
     }

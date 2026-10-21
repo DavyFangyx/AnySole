@@ -46,7 +46,7 @@ MODELS = {
     # 200ep).  Deliberate, sanctioned exception to the 2026-09-24 no-warm-start
     # independence rule — the base ckpt is the run's provenance (runner writes
     # it into run_manifest.json with sha256).
-    # 2026-10-14 correction (T信息量判定实验.md §5.2): the V3_3B_vonly
+    # 2026-10-14 correction (z_note/multimodal_fusion/Appendix/T信息量判定实验.md §5.2): the V3_3B_vonly
     # specialist's T encoder never received a gradient (bit-identical to
     # random init after 740 epochs), so the original run regressed on random
     # features.  The base is now the derived ckpt built by
@@ -63,7 +63,7 @@ MODELS = {
                               "lr_warmup_frac": 0.05, "grad_clip": 5.0}),
     # V3_3D: frozen-V + joint position head (2026-10-15).  Same synthetic
     # base as V3_3C (vonly V path + the main model's TRAINED foot_conv —
-    # T信息量判定实验.md §5.2); the head is the only trainable part.
+    # z_note/multimodal_fusion/Appendix/T信息量判定实验.md §5.2); the head is the only trainable part.
     # Config sampling stays 0.5/0.25/0.25 — the head is active under every
     # condition, and V-only/T-only rows feed the M1/M2/C3 position-level
     # story.  L_pos (lambda_pos=3.0) + the corrected-root L_traj are the
@@ -280,7 +280,7 @@ for _cam in (1, 2, 3, 4):
     }
 
 # 交接包降噪压力（2026-10-17）：V3_3B 同结构同规格，tactile_input 由
-# v3_3b_denoised 入口固定为 denoised108（z_note/Tactile_pressure_handoff
+# v3_3b_denoised 入口固定为 denoised108（z_note/data_pressure_fixpipe/Tactile_pressure_handoff
 # _20261017_v1 的 baseline_step_corrected 值，帧网格映射与 build_shared
 # 同语义）。
 MODELS["V3_3B_denoised"] = {
@@ -305,6 +305,42 @@ for _occ in ("010", "020", "030", "050"):
         "label": f"V3-3B-cam3-occ{_occ}",
         "name": f"V3_3B_cam3_occ{_occ}",
     }
+
+# offset 重同步组（2026-10-20）：训练规格与 V3_3B 完全一致，唯一差异 =
+# corrected_offset=True（B 类 session GT 采样按 z_note/data_offset_fixpipe
+# 修正表平移，A/C/D 不动）。yaml 尾缀推导兼容 `_offfix` 结尾
+# （_model_v_config_suffix 的 `(?:$|_)`），cam3_offfix → v1_cam3.yaml、
+# cam3_occ{N}_offfix → v1_cam3_occ{N}.yaml。
+MODELS["V3_3B_cam3_offfix"] = {
+    **_V3_3B,
+    "label": "V3-3B-cam3-offfix",
+    "name": "V3_3B_cam3_offfix",
+    "train_args": {**_V3_3B["train_args"], "corrected_offset": True},
+}
+for _occ in ("010", "020", "030", "050"):
+    MODELS[f"V3_3B_cam3_occ{_occ}_offfix"] = {
+        **_V3_3B,
+        "label": f"V3-3B-cam3-occ{_occ}-offfix",
+        "name": f"V3_3B_cam3_occ{_occ}_offfix",
+        "train_args": {**_V3_3B["train_args"], "corrected_offset": True},
+    }
+
+# v2/v3 + offset 组（2026-10-20）：结构 = v3_3b_v2 / v3_3b_v3（tactile_input
+# 由结构固定 denoised108_v2 / denoised108_v3），其余同 offset 组。
+for _ver in ("v2", "v3"):
+    MODELS[f"V3_3B_cam3_offfix_{_ver}"] = {
+        **_V3_3B,
+        "label": f"V3-3B-cam3-offfix-{_ver}",
+        "name": f"V3_3B_cam3_offfix_{_ver}",
+        "train_args": {**_V3_3B["train_args"], "corrected_offset": True},
+    }
+    for _occ in ("010", "020", "030", "050"):
+        MODELS[f"V3_3B_cam3_occ{_occ}_offfix_{_ver}"] = {
+            **_V3_3B,
+            "label": f"V3-3B-cam3-occ{_occ}-offfix-{_ver}",
+            "name": f"V3_3B_cam3_occ{_occ}_offfix_{_ver}",
+            "train_args": {**_V3_3B["train_args"], "corrected_offset": True},
+        }
 
 # V3_3D 削弱套件（2026-10-15）：训练规格与 V3_3D 完全一致；每配置一份合成
 # 冻结基底（该配置 vonly 专才 + 该配置主模型受过训 foot_conv），init_from
@@ -535,3 +571,57 @@ def _load_defaults() -> dict[str, str]:
 
 
 COMMON = _load_defaults()
+
+# offset 设计组（2026-10-21）：E v2.1 / V5_1A / V4_1A / V3_3H 的
+# corrected_offset 版。载体换接：V5_1/V4_1 的 carrier_from → E_offfix
+# （occ020/030/050 沿用 cam3 载体口径）；V3_3H 的 vonly 载体按名推导。
+_E_OFF = ("results/AnySole/V3_3E_cam3_offfix_f6_soft/"
+          "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
+          "checkpoints/ckpt_best.pt")
+_E_OFF_OCC010 = ("results/AnySole/V3_3E_cam3_occ010_offfix_f6_soft/"
+                 "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
+                 "checkpoints/ckpt_best.pt")
+for _name, _base in (("V3_3E_cam3_offfix", "V3_3E"), ("V3_3E_cam3_occ010_offfix", "V3_3E_cam3_occ010")):
+    MODELS[_name] = {**MODELS[_base], "label": _name.replace("_", "-"), "name": _name,
+                     "train_args": {**MODELS[_base]["train_args"], "corrected_offset": True}}
+for _occ, _base_occ, _carrier in (("", "", _E_OFF), ("_occ010", "_cam3_occ010", _E_OFF_OCC010),
+                                  ("_occ020", "_cam3_occ020", _E_OFF), ("_occ030", "_cam3_occ030", _E_OFF),
+                                  ("_occ050", "_cam3_occ050", _E_OFF)):
+    for _prefix, _base_prefix in (("V5_1", "V5_1"), ("V4_1", "V4_1")):
+        _n = f"{_prefix}_cam3{_occ}_offfix"
+        _b = f"{_base_prefix}_cam3{_occ}" if _occ else _prefix
+        if _b not in MODELS:
+            continue
+        MODELS[_n] = {**MODELS[_b], "label": _n.replace("_", "-"), "name": _n,
+                      "train_args": {**MODELS[_b]["train_args"], "corrected_offset": True,
+                                     "carrier_from": _carrier}}
+# T 增强三组（2026-10-21，T增强三组实验方案.md）：
+# V5_1_cam3_offfix_tphys = 维度 2 显式物理特征（T_phys 12→20）；
+# V5_1_cam3_offfix_d8   = 维度 3 足-地监督（占位，监督头落地后启用）。
+MODELS["V5_1_cam3_offfix_tphys"] = {
+    **MODELS["V5_1_cam3_offfix"], "label": "V5-1-cam3-offfix-tphys",
+    "name": "V5_1_cam3_offfix_tphys",
+    "train_args": {**MODELS["V5_1_cam3_offfix"]["train_args"], "t_phys_v2": True}}
+MODELS["V5_1_cam3_offfix_d8"] = {
+    **MODELS["V5_1_cam3_offfix"], "label": "V5-1-cam3-offfix-d8",
+    "name": "V5_1_cam3_offfix_d8",
+    "train_args": {**MODELS["V5_1_cam3_offfix"]["train_args"],
+                   "d8_heads": True, "lambda_tcop": 0.1,
+                   "lambda_strike": 0.1, "lambda_gtcop": 0.1}}
+# v2 + offset 设计组（2026-10-21）：V5_1A / V4_1A × cam3/cam3_occ010 的
+# denoised108_v2 版。与 offset 设计组逐项相同（corrected_offset=True、
+# carrier_from = E_offfix 系），唯一差异 = 结构固定
+# tactile_input=denoised108_v2（v5_1_v2 / v4_1_v2）。
+for _occ in ("", "_occ010"):
+    for _prefix in ("V5_1", "V4_1"):
+        _b = f"{_prefix}_cam3{_occ}_offfix"
+        MODELS[f"{_b}_v2"] = {
+            **MODELS[_b],
+            "label": f"{_b}_v2".replace("_", "-"),
+            "name": f"{_b}_v2",
+        }
+for _occ in ("", "_occ010"):
+    _n = f"V3_3H_cam3{_occ}_offfix"
+    _b = f"V3_3H_cam3{_occ}" if _occ else "V3_3H"
+    MODELS[_n] = {**MODELS[_b], "label": _n.replace("_", "-"), "name": _n,
+                  "train_args": {**MODELS[_b]["train_args"], "corrected_offset": True}}

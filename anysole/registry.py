@@ -70,6 +70,12 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V4_1": ModelEntry("V4_1", "v4_1",
                        "V4_1A: frozen E carrier + part-token gated position "
                        "correction (2026-10-19)"),
+    "V5_1_cam3_offfix_tphys": ModelEntry(
+        "V5_1_cam3_offfix_tphys", "v5_1",
+        "V5_1A + 维度 2 显式物理特征（T_phys 12→20，2026-10-21）"),
+    "V5_1_cam3_offfix_d8": ModelEntry(
+        "V5_1_cam3_offfix_d8", "v5_1",
+        "V5_1A + 维度 3 足-地监督三头（tcop/着地模式/GT CoP，2026-10-21）"),
     "V5_1_occmix": ModelEntry("V5_1_occmix", "v5_1",
                               "V5_1A + V6_1A occ_mix 对照（训练侧 V 失效态混合，2026-10-20）"),
     "V4_1_occmix": ModelEntry("V4_1_occmix", "v4_1",
@@ -98,6 +104,65 @@ MODEL_REGISTRY.update({
     for occ in ("010", "020", "030", "050")
 })
 
+# offset 重同步组（2026-10-20）：V3_3B 同结构同规格，唯一差异 =
+# corrected_offset=True（B 类 session GT 采样按 z_note/data_offset_fixpipe
+# 修正表平移，A/C/D 不动）。数据根推导同 V3_3B_cam3 / _cam3_occ{N}。
+MODEL_REGISTRY.update({
+    "V3_3B_cam3_offfix": ModelEntry("V3_3B_cam3_offfix", "v3_3b",
+                                    "V3_3B on cam3 with corrected mocap offsets "
+                                    "(offset-resync experiment)"),
+    **{
+        f"V3_3B_cam3_occ{occ}_offfix": ModelEntry(
+            f"V3_3B_cam3_occ{occ}_offfix", "v3_3b",
+            f"V3_3B on cam3 occ{occ} with corrected mocap offsets "
+            f"(offset-resync experiment)")
+        for occ in ("010", "020", "030", "050")
+    },
+})
+# v2/v3 + offset 组（2026-10-20）：结构 = v3_3b_v2 / v3_3b_v3（tactile_input
+# 分别固定 denoised108_v2 / denoised108_v3），其余同 offset 组。
+for _entry_name, _struct in (("v2", "v3_3b_v2"), ("v3", "v3_3b_v3")):
+    MODEL_REGISTRY.update({
+        f"V3_3B_cam3_offfix_{_entry_name}": ModelEntry(
+            f"V3_3B_cam3_offfix_{_entry_name}", _struct,
+            f"V3_3B on cam3, corrected offsets, tactile {_entry_name}"),
+        **{
+            f"V3_3B_cam3_occ{occ}_offfix_{_entry_name}": ModelEntry(
+                f"V3_3B_cam3_occ{occ}_offfix_{_entry_name}", _struct,
+                f"V3_3B on cam3 occ{occ}, corrected offsets, tactile {_entry_name}")
+            for occ in ("010", "020", "030", "050")
+        },
+    })
+
+
+
+# offset 设计组（2026-10-21）：V3_3E（E v2.1 载体）/ V5_1A / V4_1A / V3_3H
+# 的 corrected_offset 版。E_offfix 为 V5_1/V4_1 的新载体（v1 载体的
+# offset 重训版）；V3_3H_offfix 的 vonly 载体按名称尾缀推导
+# （V3_3B_cam3_offfix_vonly / V3_3B_cam3_occ010_offfix_vonly，专才由
+# offsetfix_vonly 实验组训练）。
+for _base, _struct, _note in (("V3_3E_cam3_offfix", "v3_3e", "E v2.1 offset 重训（V5_1/V4_1 新载体）"),
+                              ("V3_3E_cam3_occ010_offfix", "v3_3e", "E v2.1 occ010 offset 重训"),
+                              ("V5_1_cam3_offfix", "v5_1", "V5_1A offset"),
+                              ("V5_1_cam3_occ010_offfix", "v5_1", "V5_1A occ010 offset"),
+                              ("V5_1_cam3_occ020_offfix", "v5_1", "V5_1A occ020 offset"),
+                              ("V5_1_cam3_occ030_offfix", "v5_1", "V5_1A occ030 offset"),
+                              ("V5_1_cam3_occ050_offfix", "v5_1", "V5_1A occ050 offset"),
+                              ("V4_1_cam3_offfix", "v4_1", "V4_1A offset"),
+                              ("V4_1_cam3_occ010_offfix", "v4_1", "V4_1A occ010 offset"),
+                              ("V3_3H_cam3_offfix", "v3_3h", "V3_3H offset"),
+                              ("V3_3H_cam3_occ010_offfix", "v3_3h", "V3_3H occ010 offset")):
+    MODEL_REGISTRY[_base] = ModelEntry(_base, _struct, _note + " (2026-10-21)")
+
+# v2 + offset 设计组（2026-10-21）：V5_1A / V4_1A × cam3/cam3_occ010 的
+# denoised108_v2 版。与 offset 设计组逐项相同（corrected_offset=True、
+# 载体 = E_offfix 系），唯一差异 = 结构固定 tactile_input=denoised108_v2
+#（v5_1_v2 / v4_1_v2）。
+for _base, _struct, _note in (("V5_1_cam3_offfix_v2", "v5_1_v2", "V5_1A offset + v2 压力包"),
+                              ("V5_1_cam3_occ010_offfix_v2", "v5_1_v2", "V5_1A occ010 offset + v2 压力包"),
+                              ("V4_1_cam3_offfix_v2", "v4_1_v2", "V4_1A offset + v2 压力包"),
+                              ("V4_1_cam3_occ010_offfix_v2", "v4_1_v2", "V4_1A occ010 offset + v2 压力包")):
+    MODEL_REGISTRY[_base] = ModelEntry(_base, _struct, _note + " (2026-10-21)")
 
 # V3_3E 削弱首组（2026-10-17）：cam3 + occ010 两配置自训自测。
 MODEL_REGISTRY.update({

@@ -45,8 +45,14 @@ FPS = 40.0  # dF/dt per second
 
 class FootConvEncoder(nn.Module):
     def __init__(self, embeddings=None, dim=D_MODEL, tw=TW, nhead=8,
-                 temporal_layers=4, dim_feedforward=1024, dropout=0.1):
+                 temporal_layers=4, dim_feedforward=1024, dropout=0.1,
+                 t_phys_v2: bool = False):
         super().__init__()
+        self.t_phys_v2 = bool(t_phys_v2)
+        # v2: 9 phys（6 基础 + 3 着地几何）+ 2 全局（双足关系）
+        # + 2 编码器内（area、dF/dt）= 13；v1 = FEAT_PER_FOOT（8）。
+        feat_per_foot = (T_PHYS_PER_FOOT + 3 + 2 + 2) if self.t_phys_v2 \
+            else FEAT_PER_FOOT
         if embeddings is None:
             embeddings = SharedEmbeddings(dim=dim, tw=tw)
         self.embeddings = embeddings
@@ -64,7 +70,7 @@ class FootConvEncoder(nn.Module):
         conv_out = 4 * 6 * 64  # 1536
         self.conv_proj = nn.Linear(conv_out, 128)
         self.feat_mlp = nn.Sequential(
-            nn.Linear(FEAT_PER_FOOT, 64),
+            nn.Linear(feat_per_foot, 64),
             nn.GELU(),
             nn.Linear(64, 128),
         )
@@ -99,11 +105,11 @@ class FootConvEncoder(nn.Module):
 
     def _per_foot_inputs(self, x: torch.Tensor):
         """(B, tw, 108) -> grids (B, tw, 2, 4, 12), feats (B, tw, 2, FEAT_PER_FOOT)."""
-        if x.shape[-1] != T_RAW_DIM + T_PHYS_DIM:
+        expect = T_RAW_DIM + (20 if self.t_phys_v2 else T_PHYS_DIM)
+        if x.shape[-1] != expect:
             raise ValueError(
-                "FootConvEncoder expects the raw108 channel (%d-dim), got %d"
-                % (T_RAW_DIM + T_PHYS_DIM, x.shape[-1])
-            )
+                "FootConvEncoder expects the raw108(+v2 phys) channel "
+                "(%d-dim), got %d" % (expect, x.shape[-1]))
         batch, tw = x.shape[0], x.shape[1]
         t_raw = x[..., :T_RAW_DIM]
         t_phys = x[..., T_RAW_DIM:]
@@ -116,10 +122,22 @@ class FootConvEncoder(nn.Module):
         area = (grids > CONTACT_AREA_THRESH).float().mean(dim=(-1, -2))  # (B,tw,2)
         force = grids.sum(dim=(-1, -2))  # (B,tw,2)
         dfdt = torch.diff(force, dim=1, prepend=force[:, :1]) * FPS  # (B,tw,2)
-        phys = torch.stack(
-            [t_phys[..., :T_PHYS_PER_FOOT], t_phys[..., T_PHYS_PER_FOOT:]], dim=2
-        )
-        feats = torch.cat([phys, area.unsqueeze(-1), dfdt.unsqueeze(-1)], dim=-1)
+        if self.t_phys_v2:
+            # 维度 2 布局：base L[0:6]/R[6:12] + hull L[12:15]/R[15:18]
+            # + 全局 [18:20]（力比、CoP 距离，两足共享）
+            phys = torch.stack(
+                [torch.cat([t_phys[..., 0:6], t_phys[..., 12:15]], dim=-1),
+                 torch.cat([t_phys[..., 6:12], t_phys[..., 15:18]], dim=-1)],
+                dim=2)
+            g = t_phys[..., 18:20].unsqueeze(2).expand(-1, -1, 2, -1)
+            feats = torch.cat([phys, g, area.unsqueeze(-1),
+                               dfdt.unsqueeze(-1)], dim=-1)
+        else:
+            phys = torch.stack(
+                [t_phys[..., :T_PHYS_PER_FOOT], t_phys[..., T_PHYS_PER_FOOT:]],
+                dim=2)
+            feats = torch.cat([phys, area.unsqueeze(-1),
+                               dfdt.unsqueeze(-1)], dim=-1)
         return grids, feats
 
     def _per_foot_tokens(self, x: torch.Tensor) -> torch.Tensor:
@@ -167,10 +185,11 @@ class FootConvEncoder(nn.Module):
         return self.stream_norm(self._stream_raw(x))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim != 3 or x.shape[-1] != T_RAW_DIM + T_PHYS_DIM:
+        expect = T_RAW_DIM + (20 if self.t_phys_v2 else T_PHYS_DIM)
+        if x.ndim != 3 or x.shape[-1] != expect:
             raise ValueError(
                 "FootConvEncoder expects (B, tw, %d), got %s"
-                % (T_RAW_DIM + T_PHYS_DIM, tuple(x.shape))
+                % (expect, tuple(x.shape))
             )
         batch, tw = x.shape[0], x.shape[1]
         seq = self._stream_raw(x)

@@ -7,8 +7,8 @@ VP-MoCap (FPP-Net + PoseTransOpt)）在同一套数据、同一份 split、同�
 
 > 2026-09-26 评估整改后的终态协议：主模型与 SMPL 系基线使用原生 **SMPL-24**
 > 对 SMPL GT 评测；Step2Motion 使用原生 **BVH-23** 对 BVH GT 评测；V2T 压力
-> 为四层层级（brief 8 + 叶 5，含接触级）；缺失能力显示 `—`。协议细节见
-> `z_note/评估/EVALUATION_PROTOCOL_AUDIT.md`。
+> 为网格/力/CoP/接触四层层级；缺失能力显示 `—`。协议细节见
+> `z_note/评估/评估配置说明书.md`。
 
 ## 统一前提（所有模型共用）
 
@@ -67,7 +67,7 @@ gait/
 - 基线模型不实现公式：只导出 `predictions/`，公共比较统一由
   `results_display/script/r_test2_compare.py`（compare_core → metrics.py）计算。
 - V2T 压力指标的公共口径在 `compare_core.pressure_metrics`（31×11 归一化网格，
-  四层层级（网格/力/CoP/接触）：表列 brief 8 键、叶 5 键进明细）；主模型训练明细在原生 4×12
+  四层层级（网格/力/CoP/接触）：表列 brief 7 键、叶 5 键进明细）；主模型训练明细在原生 4×12
   布局上计算（`anysole/eval.py:_tactile_corr`）。
 - 各模型对应的启用/不适用指标详见 `results_display/README_metrics.md`。
 
@@ -81,7 +81,7 @@ gait/
 | 跨模型比较与可视化（R_Test1/2/3/4） | `results_display/README.md` |
 | 各模型评价指标与能力矩阵 | `results_display/README_metrics.md` |
 | 后台队列跑实验 | `configs/Z_README.md` |
-| 协议与口径审计 | `z_note/评估/EVALUATION_PROTOCOL_AUDIT.md` |
+| 评估协议与口径 | `z_note/评估/评估配置说明书.md` |
 
 ## 环境
 

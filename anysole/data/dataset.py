@@ -18,6 +18,31 @@ from torch.utils.data import Dataset
 
 from anysole.data.smpl_io import estimate_floor_y, load_smpl, resolve_smpl_path
 from anysole.data.pressure import load_session_pressure, normalize_raw
+
+STRIKE_TH = 100.0   # 落地事件判定：足力和 >100g（CONTACT_SUM_THRESH 同值）
+STRIKE_CELL_TH = 20.0  # 激活格阈值（g）
+
+
+def derive_strike(left48: np.ndarray, right48: np.ndarray):
+    """维度 3 着地模式三分类标签（T 侧派生，2026-10-21）：每足落地事件
+    （力和跨过 STRIKE_TH 的首帧）按首触区沿足长位置分 0=趾先 / 1=中足 /
+    2=跟先。返回 (strike (T,2) int64，非落地帧 -1；mask (T,2) uint8)。"""
+    n = left48.shape[0]
+    strike = np.full((n, 2), -1, dtype=np.int64)
+    smask = np.zeros((n, 2), dtype=np.uint8)
+    cols = np.arange(12, dtype=np.float32)[None, None, :]
+    for f, raw in ((0, left48), (1, right48)):
+        grid = np.clip(raw.reshape(-1, 4, 12), 0.0, None)
+        force = grid.sum(axis=(1, 2))
+        onset = (force[1:] > STRIKE_TH) & (force[:-1] <= STRIKE_TH)
+        active = grid > STRIKE_CELL_TH
+        cnt = active.sum(axis=(1, 2))
+        mean_col = (active * cols).sum(axis=(1, 2)) / np.maximum(cnt, 1.0)
+        cls = np.where(mean_col < 4.0, 0, np.where(mean_col < 8.0, 1, 2))
+        idx = np.where(onset)[0] + 1
+        strike[idx, f] = cls[idx]
+        smask[idx, f] = 1
+    return strike, smask
 from anysole.data.pressure import physical_tokens
 from anysole.data.v5_1_gt import derive_phase_gt, load_cop
 from anysole.data.occ_mix import (
@@ -69,6 +94,44 @@ def load_split_ids(split_csv: Path, column: str) -> List[str]:
             if value:
                 ids.append(value)
     return ids
+
+
+# 视觉↔动捕逐 session 重同步（2026-10-20，offset 修正表）：
+# `corrected_offset: true` 时，B 类 session 的 GT 采样时间按
+# `mocap_time_s − lag_eff_frames×0.025` 平移（A/C/D 类不动）。
+# 表来源 z_note/data_offset_fixpipe/offset_correction.csv（由
+# 对齐扫描终表 lag_fleet.csv 生成，主会话验收通过），只读。
+_OFFSET_CORRECTION_CSV = (
+    Path(__file__).resolve().parents[2]
+    / "z_note" / "data_offset_fixpipe" / "offset_correction.csv"
+)
+_OFFSET_CORRECTION: Dict[str, float] | None = None
+
+
+def load_offset_correction() -> Dict[str, float]:
+    """session_id -> 采样平移秒数（仅 B 类；A/C/D 无条目）。
+
+    公开入口（2026-10-20）：contact_adapter 与探针脚本同表读取，
+    保证修正轴口径唯一。``_load_offset_correction`` 保留为别名。
+    """
+    global _OFFSET_CORRECTION
+    if _OFFSET_CORRECTION is None:
+        if not _OFFSET_CORRECTION_CSV.is_file():
+            raise FileNotFoundError(
+                "%s: corrected_offset requires the offset correction table"
+                % _OFFSET_CORRECTION_CSV)
+        table: Dict[str, float] = {}
+        with _OFFSET_CORRECTION_CSV.open(encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                lag = (row.get("lag_eff_frames") or "").strip()
+                if (row.get("conf_class") or "").strip() == "B" and lag:
+                    table[(row.get("session_id") or "").strip()] = float(lag) * 0.025
+        _OFFSET_CORRECTION = table
+    return _OFFSET_CORRECTION
+
+
+# 旧名别名（勿破坏既有调用；新代码用公开名）。
+_load_offset_correction = load_offset_correction
 
 
 def find_session_dir(seq_root: Path, session_id: str) -> Path:
@@ -192,11 +255,20 @@ class AnySoleDataset(Dataset):
         smpl_roots: Optional[Sequence[Path]] = None,
         cam_id: int = 3,
         load_v5_1_gt: bool = False,
+        d8_heads: bool = False,
         occ_mix: Optional[dict] = None,
+        corrected_offset: bool = False,
+        t_phys_v2: bool = False,
     ):
         self.mode = mode
         self.window_length = int(window_length)
         self.tactile_input = str(tactile_input)
+        # offset 重同步（2026-10-20）：true 时 B 类 session 的 GT 采样按
+        # 修正表平移（mocap_time_s − lag_eff×0.025）；A/C/D 不动。
+        self.corrected_offset = bool(corrected_offset)
+        self.t_phys_v2 = bool(t_phys_v2)
+        if self.corrected_offset:
+            load_offset_correction()
         # 四相机扩展 D2: camera id selects the per-camera GVHMR cache dir
         # (hrnet cache is addressed via cache_root, already camera-scoped).
         self.cam_id = int(cam_id)
@@ -233,6 +305,7 @@ class AnySoleDataset(Dataset):
         # kp_gt + floor_y 同口径）；CoP = smplx 正演数据件（独立构建脚本
         # anysole.data.v5_1_gt 落盘，缺失即报错——训练不按需构建）。
         self.load_v5_1_gt = bool(load_v5_1_gt)
+        self.d8_heads = bool(d8_heads)
         # V6_1A occ_mix（2026-10-19）：窗口级结构化丢弃采样器，默认关
         # （None = 现行为逐位不变）。启用后逐会话装载 occ010 双缓存、
         # __getitem__ 采样窗源并挂标签（occ_src/occ_v_zeroed/occ_t_zeroed）。
@@ -257,6 +330,10 @@ class AnySoleDataset(Dataset):
                 n_frames = len(shared_frames["frame_id"])
                 t_grid = np.asarray(shared_frames["visual_time_s"], dtype=np.float64)
                 t_mocap = np.asarray(shared_frames["mocap_time_s"], dtype=np.float64)
+                if self.corrected_offset:
+                    shift = load_offset_correction().get(session_id, 0.0)
+                    if shift:
+                        t_mocap = t_mocap - shift
                 meta = dict(shared_meta)
                 meta.update({
                     "n_frames": n_frames,
@@ -323,7 +400,8 @@ class AnySoleDataset(Dataset):
                 pressure = {
                     "T_raw": t_raw_source,
                     "T_phys": physical_tokens(
-                        normalize_raw(left48), normalize_raw(right48)
+                        normalize_raw(left48), normalize_raw(right48),
+                        t_phys_v2=self.t_phys_v2,
                     ),
                     "left48": left48,
                     "right48": right48,
@@ -347,7 +425,8 @@ class AnySoleDataset(Dataset):
                     1 - np.asarray(shared["frames"]["valid"], dtype=np.uint8),
                 )
             else:
-                pressure = load_session_pressure(meta, t_grid)
+                pressure = load_session_pressure(meta, t_grid,
+                                                  t_phys_v2=self.t_phys_v2)
                 contact_path = contact_label_path(seq_dir, self.contact_method)
                 if not contact_path.is_file():
                     raise FileNotFoundError(
@@ -501,6 +580,13 @@ class AnySoleDataset(Dataset):
                     session_id,
                     occ_root=default_occ_cache_root(self.cache_root),
                     cam3_array=v_feat)
+            if self.d8_heads:
+                # 维度 3 着地模式标签（2026-10-21）：T 侧落地事件首触区
+                # 三分类（0=趾先 / 1=中足 / 2=跟先），仅落地帧有标签。
+                strike, strike_mask = derive_strike(
+                    pressure["left48"], pressure["right48"])
+                session["strike_gt"] = strike
+                session["strike_mask"] = strike_mask
             if self.load_v5_1_gt:
                 # V5_1A z 通道 GT：相位（探针同口径运动学派生，直接算）+
                 # CoP（smplx 数据件装载，接触帧专用）。掩码全空（近静止
@@ -568,6 +654,9 @@ class AnySoleDataset(Dataset):
             item.update(aug.batch_fields())
         if self.v_input == "hmr_gvhmr":
             item["V_hmr"] = crop("V_hmr")
+        if self.d8_heads:
+            item["strike_gt"] = crop("strike_gt")
+            item["strike_mask"] = crop("strike_mask")
         if self.load_v5_1_gt:
             item["phase_gt"] = crop("phase_gt")
             item["phase_mask"] = crop("phase_mask")

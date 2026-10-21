@@ -59,12 +59,12 @@ class AnySoleModelV2(nn.Module):
             raise ValueError("position_head requires f2_repr=False (V3_3D)")
         if self.v_input not in ("hrnet", "hmr_gvhmr"):
             raise ValueError("v_input must be 'hrnet' or 'hmr_gvhmr', got %r" % self.v_input)
-        if self.tactile_input not in ("raw108", "s2m50", "denoised108"):
-            raise ValueError("tactile_input must be 'raw108', 's2m50' or 'denoised108', got %r" % self.tactile_input)
+        if self.tactile_input not in ("raw108", "s2m50", "denoised108", "denoised108_v2", "denoised108_v3"):
+            raise ValueError("tactile_input must be 'raw108', 's2m50', 'denoised108', 'denoised108_v2' or 'denoised108_v3', got %r" % self.tactile_input)
         if self.t_encoder not in ("linear", "foot_conv"):
             raise ValueError("t_encoder must be 'linear' or 'foot_conv', got %r" % self.t_encoder)
-        if self.t_encoder == "foot_conv" and self.tactile_input not in ("raw108", "denoised108"):
-            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108'/denoised108 (F4a)")
+        if self.t_encoder == "foot_conv" and self.tactile_input not in ("raw108", "denoised108", "denoised108_v2", "denoised108_v3"):
+            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108'/denoised108[_v2/_v3] (F4a)")
         if self.tactile_direct and self.tactile_input != "s2m50":
             raise ValueError("tactile_direct requires tactile_input='s2m50'")
         if self.no_imu and self.tactile_input != "s2m50":
@@ -92,7 +92,7 @@ class AnySoleModelV2(nn.Module):
             if self.position_head else None
 
     def forward(self, V_feat, T_raw, T_phys, config_id, subject_ids=None, T_s2m=None,
-                V_hmr=None, mask_v=None, mask_t=None):
+                V_hmr=None, mask_v=None, mask_t=None, v_tok_override=None):
         """F0b: same inputs as V1 minus the diffusion pair (x_tau, tau).
 
         The visual stream follows ``v_input``: hrnet = V_feat (2051-d);
@@ -101,6 +101,10 @@ class AnySoleModelV2(nn.Module):
         LinearTemporalEncoder or FootConvEncoder per t_encoder); s2m50 =
         T_s2m.  ``mask_v/mask_t`` (bool, B×tw) are the ρ-grid per-frame
         null-token masks (missing-rate 实验 1); None = old path.
+
+        ``v_tok_override``（TTA 实验注入点，2026-10-21）：给定 (B,tw,dim) 张量时
+        跳过视觉编码器的输出，直接用其作为 v_tok（推理时优化的 per-view 变量）；
+        默认 None = 原行为不变。
         """
         if self.tactile_input == "s2m50":
             if T_s2m is None:
@@ -112,6 +116,8 @@ class AnySoleModelV2(nn.Module):
             raise ValueError("V_hmr is required when v_input='hmr_gvhmr'")
         v_tok, t_tok = self.encoders(V_feat, T_tac, config_id, V_hmr=V_hmr,
                                      mask_v=mask_v, mask_t=mask_t)
+        if v_tok_override is not None:
+            v_tok = v_tok_override  # TTA 实验注入点
         if self.t_residual is not None or self.position_head is not None:
             # V3_3C/V3_3D: the frozen base never sees the real tactile stream
             # — it runs in its V-only regime under every condition (the fused

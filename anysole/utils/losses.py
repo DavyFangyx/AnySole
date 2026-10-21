@@ -436,6 +436,36 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         base = out["x0_hat"][..., slots].detach()
         l_foot_res = F.mse_loss(base + out["foot_res"], pose_gt[..., slots])
 
+    # 维度 3 足-地监督三损失（2026-10-21，T增强三组实验方案.md）：只读
+    # t_tok 侧读出，与 z/PoE 结构无关。
+    l_tcop = l_pose.new_zeros(())
+    l_strike = l_pose.new_zeros(())
+    l_gtcop = l_pose.new_zeros(())
+    if out.get("tcop") is not None:
+        tphys = batch.get("T_phys")
+        if _weight(weights, "lambda_tcop", 0.0) > 0.0 and tphys is not None:
+            fmask = tphys[..., [2, 8]] > 0.0                  # (B,tw,2) 力>0
+            tgt = torch.cat([tphys[..., 0:2], tphys[..., 6:8]], -1)  # (B,tw,4)
+            m4 = torch.cat([fmask[..., 0:1], fmask[..., 0:1],
+                            fmask[..., 1:2], fmask[..., 1:2]], dim=-1)
+            if bool(m4.any()):
+                l_tcop = F.mse_loss(out["tcop"][m4], tgt[m4])
+        if _weight(weights, "lambda_strike", 0.0) > 0.0:
+            sm = batch.get("strike_mask")
+            sg = batch.get("strike_gt")
+            if sm is not None and sg is not None and bool(sm.any()):
+                logits = out["strike_logits"].reshape(
+                    *out["strike_logits"].shape[:2], 2, 3)
+                l_strike = F.cross_entropy(logits[sm], sg[sm].long())
+        if _weight(weights, "lambda_gtcop", 0.0) > 0.0:
+            cm = batch.get("cop_mask")
+            cg = batch.get("cop_gt")
+            if cm is not None and cg is not None and bool(cm.any()):
+                m4 = torch.cat([cm[..., 0:1], cm[..., 0:1],
+                                cm[..., 1:2], cm[..., 1:2]], dim=-1)
+                cg4 = cg.reshape(cg.shape[0], cg.shape[1], 4)  # (B,tw,2,2)→(B,tw,4)
+                l_gtcop = F.mse_loss(out["gtcop"][m4], cg4[m4])
+
     total = (
         _weight(weights, "lambda_pose", 1.0) * l_pose
         + _weight(weights, "lambda_traj", 1.0) * l_traj
@@ -454,6 +484,9 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         + _weight(weights, "lambda_prior_nll", 0.0) * l_prior_nll
         + _weight(weights, "lambda_prior_traj", 0.0) * l_prior_traj
         + _weight(weights, "lambda_foot_res", 0.0) * l_foot_res
+        + _weight(weights, "lambda_tcop", 0.0) * l_tcop
+        + _weight(weights, "lambda_strike", 0.0) * l_strike
+        + _weight(weights, "lambda_gtcop", 0.0) * l_gtcop
     )
     return {
         "L_pose": l_pose,
@@ -475,6 +508,9 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         "L_prior_nll": l_prior_nll,
         "L_prior_traj": l_prior_traj,
         "L_foot_res": l_foot_res,
+        "L_tcop": l_tcop,
+        "L_strike": l_strike,
+        "L_gtcop": l_gtcop,
         "L_phase": l_pose.new_zeros(()),   # V5_1 only — uniform log panel
         "L_cop": l_pose.new_zeros(()),
         "loss": total,
@@ -658,6 +694,36 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
     # G 前科 315.5 防回归）。
     l_prior_pose = F.mse_loss(out["x0_prior"], pose_gt)
 
+    # 维度 3 足-地监督三损失（2026-10-21，T增强三组实验方案.md；只读
+    # t_tok 侧读出，与 z/PoE 结构无关）。
+    l_tcop = l_pose.new_zeros(())
+    l_strike = l_pose.new_zeros(())
+    l_gtcop = l_pose.new_zeros(())
+    if out.get("tcop") is not None:
+        tphys = batch.get("T_phys")
+        if _weight(weights, "lambda_tcop", 0.0) > 0.0 and tphys is not None:
+            fmask = tphys[..., [2, 8]] > 0.0                  # (B,tw,2) 力>0
+            tgt = torch.cat([tphys[..., 0:2], tphys[..., 6:8]], -1)  # (B,tw,4)
+            m4 = torch.cat([fmask[..., 0:1], fmask[..., 0:1],
+                            fmask[..., 1:2], fmask[..., 1:2]], dim=-1)
+            if bool(m4.any()):
+                l_tcop = F.mse_loss(out["tcop"][m4], tgt[m4])
+        if _weight(weights, "lambda_strike", 0.0) > 0.0:
+            sm = batch.get("strike_mask")
+            sg = batch.get("strike_gt")
+            if sm is not None and sg is not None and bool(sm.any()):
+                logits = out["strike_logits"].reshape(
+                    *out["strike_logits"].shape[:2], 2, 3)
+                l_strike = F.cross_entropy(logits[sm], sg[sm].long())
+        if _weight(weights, "lambda_gtcop", 0.0) > 0.0:
+            cm = batch.get("cop_mask")
+            cg = batch.get("cop_gt")
+            if cm is not None and cg is not None and bool(cm.any()):
+                m4 = torch.cat([cm[..., 0:1], cm[..., 0:1],
+                                cm[..., 1:2], cm[..., 1:2]], dim=-1)
+                cg4 = cg.reshape(cg.shape[0], cg.shape[1], 4)
+                l_gtcop = F.mse_loss(out["gtcop"][m4], cg4[m4])
+
     total = (
         _weight(weights, "lambda_pose", 3.0) * l_pose
         + _weight(weights, "lambda_traj", 1.0) * l_traj
@@ -665,6 +731,9 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
         + _weight(weights, "lambda_phase", 0.0) * l_phase
         + _weight(weights, "lambda_cop", 0.0) * l_cop
         + _weight(weights, "lambda_prior_pose", 0.0) * l_prior_pose
+        + _weight(weights, "lambda_tcop", 0.0) * l_tcop
+        + _weight(weights, "lambda_strike", 0.0) * l_strike
+        + _weight(weights, "lambda_gtcop", 0.0) * l_gtcop
     )
     zero = l_pose.new_zeros(())
     return {
@@ -689,6 +758,9 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
         "L_foot_res": zero,
         "L_phase": l_phase,
         "L_cop": l_cop,
+        "L_tcop": l_tcop,
+        "L_strike": l_strike,
+        "L_gtcop": l_gtcop,
         "loss": total,
     }
 

@@ -443,6 +443,10 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         # strict load died on unexpected keys).
         if saved_config.get("model_name"):
             build_cfg["model_name"] = str(saved_config["model_name"])
+        # 维度 2/3 结构旗标（2026-10-21）：T_phys 12→20 与 d8 三头是
+        # 训练时结构 provenance，必须从 ckpt config 回放（yaml 缺省 False）。
+        build_cfg["t_phys_v2"] = bool(saved_config.get("t_phys_v2", False))
+        build_cfg["d8_heads"] = bool(saved_config.get("d8_heads", False))
         part_joints = saved_config.get("part_joints")
         model = entry.build(
             build_cfg,
@@ -668,6 +672,9 @@ def _evaluate_one(
         # E6.4: continuation eval uses overlapping windows (stride = tw/2);
         # without it the stride stays non-overlapping (E3 behavior).
         stride=(tw // 2) if (pos_mode and continuation) else None,
+        corrected_offset=bool(checkpoint.get("config", {}).get("corrected_offset", False)),
+                        t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
+                        d8_heads=bool(checkpoint.get("config", {}).get("d8_heads", False)),
     )
     if len(dataset) == 0:
         raise RuntimeError("Evaluation dataset contains no valid windows")
@@ -705,7 +712,8 @@ def _evaluate_one(
                         bsz = batch["pose_gt"].shape[0]
                         config_id = torch.full((bsz,), config_value, device=device, dtype=torch.long)
                         batch["config_id"] = config_id
-                        assert_batch_shapes(batch, bsz, tw=tw)
+                        assert_batch_shapes(batch, bsz, tw=tw,
+                                   t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
                         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
                         v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
                         cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
@@ -746,7 +754,8 @@ def _evaluate_one(
                         batch_size = batch["pose_gt"].shape[0]
                         config_id = torch.full((batch_size,), config_value, device=device, dtype=torch.long)
                         batch["config_id"] = config_id
-                        assert_batch_shapes(batch, batch_size, tw=tw)
+                        assert_batch_shapes(batch, batch_size, tw=tw,
+                            t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
                         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
                         v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
                         cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
@@ -782,7 +791,8 @@ def _evaluate_one(
                     batch_size = batch["pose_gt"].shape[0]
                     config_id = torch.full((batch_size,), config_value, device=device, dtype=torch.long)
                     batch["config_id"] = config_id
-                    assert_batch_shapes(batch, batch_size, tw=tw)
+                    assert_batch_shapes(batch, batch_size, tw=tw,
+                            t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
                     v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
                     if v3f_mode:
                         # V3_3F: T stays live under every condition (the

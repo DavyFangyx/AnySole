@@ -102,18 +102,18 @@ class VEncHMR(nn.Module):
 class ModalEncoders(nn.Module):
     def __init__(self, embeddings, dim=D_MODEL, tw=TW, tactile_input="raw108",
                  tactile_direct=False, no_imu=False, v_input="hrnet",
-                 t_encoder="linear"):
+                 t_encoder="linear", t_phys_v2=False):
         super().__init__()
         if embeddings is None:
             embeddings = SharedEmbeddings(dim=dim, tw=tw)
         if v_input not in ("hrnet", "hmr_gvhmr"):
             raise ValueError("v_input must be 'hrnet' or 'hmr_gvhmr', got %r" % v_input)
-        if tactile_input not in ("raw108", "s2m50", "denoised108"):
-            raise ValueError("tactile_input must be 'raw108', 's2m50' or 'denoised108', got %r" % tactile_input)
+        if tactile_input not in ("raw108", "s2m50", "denoised108", "denoised108_v2", "denoised108_v3"):
+            raise ValueError("tactile_input must be 'raw108', 's2m50', 'denoised108', 'denoised108_v2' or 'denoised108_v3', got %r" % tactile_input)
         if t_encoder not in ("linear", "foot_conv"):
             raise ValueError("t_encoder must be 'linear' or 'foot_conv', got %r" % t_encoder)
-        if t_encoder == "foot_conv" and tactile_input not in ("raw108", "denoised108"):
-            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108'/denoised108 (F4a)")
+        if t_encoder == "foot_conv" and tactile_input not in ("raw108", "denoised108", "denoised108_v2", "denoised108_v3"):
+            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108'/denoised108[_v2/_v3] (F4a)")
         if tactile_direct and tactile_input != "s2m50":
             raise ValueError("tactile_direct requires tactile_input='s2m50'")
         if no_imu and tactile_input != "s2m50":
@@ -131,7 +131,8 @@ class ModalEncoders(nn.Module):
         if t_encoder == "foot_conv":
             # F4a: per-foot grid conv + [left/right/global] temporal tokens
             # on the unchanged 108-dim channel.
-            self.t_enc = FootConvEncoder(embeddings, dim=dim, tw=tw)
+            self.t_enc = FootConvEncoder(embeddings, dim=dim, tw=tw,
+                                          t_phys_v2=t_phys_v2)
         elif tactile_direct:
             # E6.6b: per-group encoding (Step2Motion-style), streams merged.
             # --no-imu: 38-dim input, the two IMU groups are deleted.

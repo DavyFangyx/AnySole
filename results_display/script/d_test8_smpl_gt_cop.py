@@ -74,6 +74,7 @@ from anysole.data.handoff_pressure import (  # noqa: E402
     resample_handoff,
     video_start_for,
 )
+from anysole.data.dataset import load_offset_correction  # noqa: E402
 from anysole.data.pressure import cop_from_grid  # noqa: E402
 from anysole.data.smpl_io import (  # noqa: E402
     load_smpl,
@@ -299,12 +300,18 @@ def render_gt_heat_panel(heat_l: np.ndarray, heat_r: np.ndarray,
 
 def render_tactile_panel(left48: np.ndarray, right48: np.ndarray,
                          source_label: str) -> np.ndarray:
-    """右上：触觉数据热图（source_label = 触觉源，D_Test4 同口径显示）。"""
+    """右上：触觉数据热图（source_label = 触觉源，D_Test4 同口径显示）。
+
+    列序修正（2026-10-21 实锤）：实际数据 col0=跟、col11=趾（串口点序与
+    layout dots 映射反了——离地过渡帧力在标称跟列、跟触地帧力在标称趾列），
+    显示前翻转列使趾端与 GT 面板（趾在下方）对齐。
+    """
     canvas, draw = base_panel(
         "触觉数据热图",
-        f"{source_label} · 0-{int(SENSOR_CLIP)} · 4×12/脚 · col0=脚尖",
+        f"{source_label} · 0-{int(SENSOR_CLIP)} · 4×12/脚 · col0=跟（已翻转为趾下跟上）",
         (230, 230, 235))
-    left_img, right_img = heat_insoles(left48.reshape(4, 12), right48.reshape(4, 12),
+    left_img, right_img = heat_insoles(left48.reshape(4, 12)[:, ::-1],
+                                       right48.reshape(4, 12)[:, ::-1],
                                        SENSOR_CLIP)
     paste_insoles(canvas, draw, left_img, right_img)
     return np.asarray(canvas)
@@ -424,6 +431,17 @@ def render_one(sid: str, args: argparse.Namespace) -> Path | None:
         frame_ids = list(range(0, n_frames, max(args.stride, 1)))
         if args.max_frames:
             frame_ids = frame_ids[: args.max_frames]
+    # 0.5s 时间块模式：连续全速块（覆盖 --stride/--max-frames），块间插
+    # 分隔帧（--block-secs > 0 时生效）。
+    block_ids: dict[int, int] = {}
+    if getattr(args, "block_secs", 0.0) > 0 and not args.frame:
+        n_block = max(int(round(args.block_secs * fps)), 1)
+        ids: list[int] = []
+        for b, start in enumerate(range(0, n_frames, n_block)):
+            for fi in range(start, min(start + n_block, n_frames)):
+                ids.append(fi)
+                block_ids[fi] = b
+        frame_ids = ids
 
     # SMPL 网格（只算渲染帧）：GT 足底热图。
     mesh = None
@@ -431,6 +449,10 @@ def render_one(sid: str, args: argparse.Namespace) -> Path | None:
         smpl_path = shared_smpl_path(shared)
         mocap_t = np.asarray(shared["frames"]["mocap_time_s"], dtype=np.float64)
         mocap_t = mocap_t[:n_frames]
+        if args.corrected_offset:
+            shift = load_offset_correction().get(sid, 0.0)
+            if shift:
+                mocap_t = mocap_t - shift
         # 地面 = archive y=0（g0）。SMPL 足部地面审计 2026-10-19 裁定：判
         # 「陷入/贴地」用 y=0；旧 estimate_floor_y（关节 p5）比物理地面高
         # （S5091=3.6cm）→ GT 恒接触、悬空期 CoP 钉趾端（GT足底×触觉冲突
@@ -504,6 +526,9 @@ def render_one(sid: str, args: argparse.Namespace) -> Path | None:
             trail_t_l.append((float(cop_t_l[0]), float(cop_t_l[1])))
         if force_r > 0:
             trail_t_r.append((float(cop_t_r[0]), float(cop_t_r[1])))
+        # 触觉 CoP 面板 y 轴按真实列序（col0=跟）标注：与 GT 面板同轴对比
+        # 时符号相反——已知口径问题（2026-10-21 登记），cop 公式暂不改
+        #（模型输入一致性优先）。
         t_cop_panel = render_cop_panel(
             trail_t_l[-TRAIL_FRAMES:],
             trail_t_r[-TRAIL_FRAMES:], force_l, force_r,
@@ -513,6 +538,16 @@ def render_one(sid: str, args: argparse.Namespace) -> Path | None:
         frames.append(compose_2x2(gt_panel, tactile, gt_cop_panel, t_cop_panel,
                                   sid, fi, n_frames, bool(valid_flags[fi]),
                                   fps=fps, action=action))
+        # 块间分隔帧（黑帧 + 块号）
+        if block_ids:
+            nxt = frame_ids[step + 1] if step + 1 < len(frame_ids) else None
+            if nxt is not None and block_ids.get(nxt, -1) != block_ids.get(fi, -1):
+                sep, _ = base_panel(
+                    "block %d/%d" % (block_ids[nxt] + 1, max(block_ids.values()) + 1),
+                    "%.1fs" % (nxt / fps), (150, 150, 160))
+                frames.append(compose_2x2(
+                    np.asarray(sep), np.asarray(sep), np.asarray(sep), np.asarray(sep),
+                    sid, fi, n_frames, bool(valid_flags[fi]), fps=fps, action=action))
     if not frames:
         raise RuntimeError(f"{sid}: no frames rendered")
 
@@ -560,6 +595,12 @@ def parse_args() -> argparse.Namespace:
                         "v2（无平滑）、denoised108_v3 = v3（另线落地后可用），"
                         "与 anysole/data/dataset.py 同语义，fake/valid 仍取 "
                         "shared facts）")
+    p.add_argument("--corrected-offset", action="store_true",
+                   help="GT 面板动捕采样按修正表平移（B 类 session，"
+                        "z_note/data_offset_fixpipe/offset_correction.csv）")
+    p.add_argument("--block-secs", type=float, default=0.0,
+                   help="连续全速时间块秒数（>0 时覆盖 --stride/--max-frames，"
+                        "块间插分隔帧；如 0.5）")
     return p.parse_args()
 
 
