@@ -22,7 +22,7 @@ small T-residual branch on VT windows.
   independence rule (no warm-start lineage): the base checkpoint is recorded
   in the run manifest (checkpoint_source + sha256).
 
-See z_note/multimodal_fusion/后续实验设计.md for the experiment design.
+See z_note/multimodal_fusion/Appendix/T信息量判定实验.md §5.1 for the experiment design.
 """
 
 from __future__ import annotations

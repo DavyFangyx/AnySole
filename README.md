@@ -8,7 +8,7 @@ VP-MoCap (FPP-Net + PoseTransOpt)）在同一套数据、同一份 split、同�
 > 2026-09-26 评估整改后的终态协议：主模型与 SMPL 系基线使用原生 **SMPL-24**
 > 对 SMPL GT 评测；Step2Motion 使用原生 **BVH-23** 对 BVH GT 评测；V2T 压力
 > 为四层层级（brief 8 + 叶 5，含接触级）；缺失能力显示 `—`。协议细节见
-> `z_note/EVALUATION_PROTOCOL_AUDIT.md`。
+> `z_note/评估/EVALUATION_PROTOCOL_AUDIT.md`。
 
 ## 统一前提（所有模型共用）
 
@@ -47,7 +47,7 @@ gait/
 ├── configs/                         # 后台训练/实验队列（单一共享队列，见 configs/Z_README.md）
 ├── metrics.py                       # 公共指标公式的唯一实现（各端只 import，不重写）
 ├── tests/                           # 公共指标与协议消费端的数值测试
-└── z_note/                          # 过程文档：评估整改任务书/审计/历史记录
+└── z_note/                          # 过程文档：项目概述/方案与判读/评估/数据管道/归档
 ```
 
 三个结果相关根目录的职责（评估整改任务 02 固定）：
@@ -81,7 +81,7 @@ gait/
 | 跨模型比较与可视化（R_Test1/2/3/4） | `results_display/README.md` |
 | 各模型评价指标与能力矩阵 | `results_display/README_metrics.md` |
 | 后台队列跑实验 | `configs/Z_README.md` |
-| 协议与口径审计 | `z_note/EVALUATION_PROTOCOL_AUDIT.md` |
+| 协议与口径审计 | `z_note/评估/EVALUATION_PROTOCOL_AUDIT.md` |
 
 ## 环境
 

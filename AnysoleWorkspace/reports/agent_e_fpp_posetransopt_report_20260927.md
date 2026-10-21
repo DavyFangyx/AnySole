@@ -1,6 +1,6 @@
 # Agent E Wave 2 交付报告：FPP-Net 与 PoseTransOpt 语义保真适配
 
-任务：`z_note/重构执行/05_AgentE_FPPNet与PoseTransOpt适配.md`
+任务：05_AgentE_FPPNet与PoseTransOpt适配（任务书已归档删除，本报告为执行记录）
 状态：complete（F0/V5、V1、V2、V3 全修；数据生产 140/140 完成；smoke 与契约测试 9/9 通过；正式全量训练待主 Agent 调度）
 
 ## 1. 修改文件

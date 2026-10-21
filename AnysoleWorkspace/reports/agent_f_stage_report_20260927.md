@@ -1,6 +1,6 @@
 # Agent F Wave 2 交付报告：pressure_toolkit 语义保真适配
 
-任务：`z_note/重构执行/06_AgentF_pressure_toolkit适配.md`
+任务：06_AgentF_pressure_toolkit适配（任务书已归档删除，本报告为执行记录）
 状态：**complete**（生产全量 fitting 待上游前端：SAM3.1 索引完整化、CLIFF 单人前端）
 
 ## 修改文件

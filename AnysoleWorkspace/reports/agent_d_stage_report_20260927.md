@@ -1,6 +1,6 @@
 # Agent D Wave 2 交付报告（Step2Motion 适配）
 
-任务：`z_note/重构执行/04_AgentD_Step2Motion适配.md`（S1 canonical split、S2 指标关节组、S3 压力增益）
+任务：04_AgentD_Step2Motion适配（任务书已归档删除，本报告为执行记录）（S1 canonical split、S2 指标关节组、S3 压力增益）
 状态：complete
 
 ## 修改文件

@@ -103,7 +103,7 @@ ANYSOLE_MOTION_CAPS = {
 }
 ANYSOLE_V2T_CAPS = {**ANYSOLE_MOTION_CAPS, "pressure_prediction": True}
 # 评估资格以各模型生成清单为唯一依据（2026-09-27 用户裁定，见
-# z_note/metrics_指标改动说明.md §2）：AnySole 不生成 shape/表面，PVE 一律
+# z_note/评估/metrics_指标改动说明.md §2）：AnySole 不生成 shape/表面，PVE 一律
 # 不适用（此前 pose-only + GT beta 的批准例外已废除）；pressure_toolkit 的
 # 拟合表面属其 pipeline 原生生成，PVE 可评估。
 ANYSOLE_APPROVED = ()

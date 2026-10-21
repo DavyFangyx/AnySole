@@ -4,7 +4,7 @@
 One conf (TASK=model_run): the runner trains V3_3C for 200 epochs starting
 from the V3_3B_vonly specialist ckpt_best (--init-from; a deliberate,
 sanctioned exception to the 2026-09-24 no-warm-start independence rule —
-z_note/multimodal_fusion/后续实验设计.md), then runs the formal val/test
+z_note/multimodal_fusion/Appendix/T信息量判定实验.md §5.1), then runs the formal val/test
 evaluation.  The run manifest records the base checkpoint as provenance
 (checkpoint_source + sha256, fine_tune_base=true).
 """

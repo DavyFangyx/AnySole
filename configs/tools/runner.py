@@ -115,7 +115,7 @@ def _write_initial_manifest(registry: dict[str, Any], experiment_id: str, model_
         spec["train_args"] = {**(spec.get("train_args") or {}), **train_overrides}
     # V3_3C fine-tune: the sanctioned provenance is the BASE ckpt passed to
     # --init-from (deliberate exception to the 2026-09-24 no-warm-start
-    # independence rule; see z_note/multimodal_fusion/后续实验设计.md).
+    # independence rule; see z_note/multimodal_fusion/Appendix/T信息量判定实验.md §5.1).
     init_from = (spec.get("train_args") or {}).get("init_from")
     if init_from:
         source = resolve_path(str(init_from))

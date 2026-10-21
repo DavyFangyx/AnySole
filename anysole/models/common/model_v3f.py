@@ -4,7 +4,7 @@ A fresh, independent architecture — NOT the anysolev2 fusion/gating lineage,
 NOT the V3_3D frozen-base lineage, NOT the V3_3E constraint-fusion lineage
 (no code is shared with V3_3E; its numpy constraint layer stays its own).
 
-Design (z_note/multimodal_fusion/V3_3F方案.md):
+Design (z_note/multimodal_fusion/V3_3方案/V3_3F方案.md):
 - x = [pose 144 | trans 3 | contact 2] per frame, per-component normalized,
   diffused with unit noise (linear T=1000 schedule, x0 prediction, DDIM).
 - Denoiser: DiT-style transformer over frame tokens with a timestep
