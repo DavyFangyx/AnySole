@@ -232,7 +232,7 @@ ANKLE_FOOT_JOINTS = (
     JOINT_NAMES.index("left_foot"), JOINT_NAMES.index("right_foot"),
 )
 # V3_3D position head: the six lower-limb joints whose pelvis-relative
-# positions carry T's measurable increments (T信息量判定实验 §3.2 — the
+# positions carry T's measurable increments (z_note/multimodal_fusion/Appendix/T信息量判定实验.md §3.2 — the
 # probe's direct-regression target set; probe_v33b_info_ceiling_direct.py
 # SIX_JOINTS).  Keep this next to the semantic groups above.
 KNEE_ANKLE_FOOT_JOINTS = (

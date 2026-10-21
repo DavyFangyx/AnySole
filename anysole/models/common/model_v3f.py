@@ -13,7 +13,7 @@ Design (z_note/multimodal_fusion/V3_3方案/V3_3F方案.md):
   no learned null tokens).
 - T grounding layer: contact head (f6_soft, pos-weighted BCE — the ONLY
   supervised T output; root velocity / foot height are NOT regressed — the
-  probe showed both unreadable from t_tok alone, T信息量判定实验 §3.1) plus
+  probe showed both unreadable from t_tok alone, z_note/multimodal_fusion/Appendix/T信息量判定实验.md §3.1) plus
   differentiable contact/ground energies whose root/foot corrections follow
   from the contact constraint mathematically, not from supervision.
 - Sampling: DDIM with optional per-step guidance (E_contact + E_ground in

@@ -377,4 +377,4 @@ ridge_probe_val}.json。
 2026-10-09 裁定：V3_3C 立项，实现方式改为**冻结 V3_3B_vonly 专才 + 零初始化
 T 残差分支**（VT-only 微调 200ep，结构保证 VT ≥ V），替代原从零重训修门控方案；
 配套三实验（冻结残差/物理指标/oracle 分层）设计与判读见
-z_note/multimodal_fusion/T信息量判定实验.md §5。
+z_note/multimodal_fusion/Appendix/T信息量判定实验.md §5。

@@ -3,7 +3,7 @@
 
 Native semantics mirrored from ``Baselines/MotionPRO/lib/util/gen_contact.py``
 (read-only reference; this file re-implements it locally for the extended 4m
-long axis, as ruled in z_note/重构执行/11_T系列_运行时输入与接入方案.md §4.3):
+long axis, as ruled in Baselines/决策/02_T_方案.md §4.3):
 
   * ``carpet_pos`` is (120, 320, 3) on the native 1.25cm pitch
     (``carpet_pos[i, j, 0] = i*scale + 0.5*scale``, ``carpet_pos[i, j, 1] =

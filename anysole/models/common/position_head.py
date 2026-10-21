@@ -1,6 +1,6 @@
 """Position head (V3_3D): the joint position-space readout of [v_tok; t_tok].
 
-Design (T信息量判定实验.md §3.2 残差范式 ridge 界 → 联合读出裁定):
+Design (z_note/multimodal_fusion/Appendix/T信息量判定实验.md §3.2 残差范式 ridge 界 → 联合读出裁定):
 
 - Reads the PRE-FUSION encoder tokens [v_tok; t_tok] concatenated per frame
   (B, tw, 512).  The fusion transformer destroys T's position-level

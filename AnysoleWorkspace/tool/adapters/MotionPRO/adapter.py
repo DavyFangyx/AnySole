@@ -18,7 +18,7 @@ non-zero only in columns 6/7.  The four-level soft-f6 intermediate
 (2026-10-03 ruling: back to the native binary contract, unified with the
 AnySole f6_soft export).
 
-T1 (09-28 user rulings, z_note/重构执行/11_T系列_运行时输入与接入方案.md §4)
+T1 (09-28 user rulings, Baselines/决策/02_T_方案.md §4)
 replaces that raster as the model pressure input with a **virtual carpet**
 (``virtual_carpet``), and adds the missing ``smpl.npy`` supervision producer:
 

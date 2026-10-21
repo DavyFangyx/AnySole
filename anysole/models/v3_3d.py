@@ -2,7 +2,7 @@
 
 The position-space successor of V3_3C.  V3_3C's residual added its
 correction in 144-dim 6D pose space, whose conversion loss eats ~90% of T's
-position-level increments (T信息量判定实验.md §3.2); the residual-paradigm
+position-level increments (z_note/multimodal_fusion/Appendix/T信息量判定实验.md §3.2); the residual-paradigm
 ridge bounds (§3.2 残差范式 ridge 界) additionally showed a FROZEN-V
 additive branch is capped at ~−1mm in any output space — ~90% of T's
 input-level increment (−10.3/−19.9mm on the six-joint relative position /
@@ -32,7 +32,7 @@ can reach it.
   independence rule (no warm-start lineage): the base checkpoint is recorded
   in the run manifest (checkpoint_source + sha256).
 
-See z_note/multimodal_fusion/T信息量判定实验.md §3.2 for the design bounds.
+See z_note/multimodal_fusion/Appendix/T信息量判定实验.md §3.2 for the design bounds.
 """
 
 from __future__ import annotations
