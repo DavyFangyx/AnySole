@@ -164,6 +164,32 @@ for _base, _struct, _note in (("V5_1_cam3_offfix_v2", "v5_1_v2", "V5_1A offset +
                               ("V4_1_cam3_occ010_offfix_v2", "v4_1_v2", "V4_1A occ010 offset + v2 压力包")):
     MODEL_REGISTRY[_base] = ModelEntry(_base, _struct, _note + " (2026-10-21)")
 
+# 新数据验证（2026-10-22）：facts 已固化为 v3+offset，默认口径训练即新数据。
+MODEL_REGISTRY["V3_3B_cam3_v3off"] = ModelEntry(
+    "V3_3B_cam3_v3off", "v3_3b", "V3_3B cam3 on production v3+offset facts (replacement validation)")
+
+# E1 同架构专家对比（2026-10-22，z_note/实验计划.md）：四家族 x 四模型。
+# 统一 = dropout [0.5,0.25,0.25]（3B 基名默认 / 其余 _drop 尾缀）；
+# vonly/tonly = 单模态专家；基名（E/V4_1/V5_1）或 _nodrop（3B）= [1,0,0] VT 专家。
+for _suf, _mod, _note in (("_vonly", "v3_3b", "E1: 3B V-only expert"),
+                          ("_tonly", "v3_3b", "E1: 3B T-only expert"),
+                          ("_nodrop", "v3_3b", "E1: 3B always-dual expert ([1,0,0])"),
+                          ("", "v3_3e", "E1: E always-dual expert ([1,0,0]; new carrier for V4_1/V5_1)"),
+                          ("_drop", "v3_3e", "E1: E unified (dropout)"),
+                          ("_vonly", "v3_3e", "E1: E V-only expert"),
+                          ("_tonly", "v3_3e", "E1: E T-only expert"),
+                          ("", "v4_1", "E1: V4_1A always-dual expert ([1,0,0])"),
+                          ("_drop", "v4_1", "E1: V4_1A unified (dropout)"),
+                          ("_vonly", "v4_1", "E1: V4_1A V-only expert"),
+                          ("_tonly", "v4_1", "E1: V4_1A T-only expert"),
+                          ("", "v5_1", "E1: V5_1A always-dual expert ([1,0,0])"),
+                          ("_drop", "v5_1", "E1: V5_1A unified (dropout)"),
+                          ("_vonly", "v5_1", "E1: V5_1A V-only expert"),
+                          ("_tonly", "v5_1", "E1: V5_1A T-only expert")):
+    _pre = {"v3_3b": "V3_3B_cam3_v3off", "v3_3e": "V3_3E_cam3_v3off",
+            "v4_1": "V4_1_cam3_v3off", "v5_1": "V5_1_cam3_v3off"}[_mod]
+    MODEL_REGISTRY[_pre + _suf] = ModelEntry(_pre + _suf, _mod, _note)
+
 # V3_3E 削弱首组（2026-10-17）：cam3 + occ010 两配置自训自测。
 MODEL_REGISTRY.update({
     f"V3_3E_cam3_occ{occ}": ModelEntry(f"V3_3E_cam3_occ{occ}", "v3_3e",

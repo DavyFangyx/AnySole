@@ -96,44 +96,6 @@ def load_split_ids(split_csv: Path, column: str) -> List[str]:
     return ids
 
 
-# 视觉↔动捕逐 session 重同步（2026-10-20，offset 修正表）：
-# `corrected_offset: true` 时，B 类 session 的 GT 采样时间按
-# `mocap_time_s − lag_eff_frames×0.025` 平移（A/C/D 类不动）。
-# 表来源 z_note/data_offset_fixpipe/offset_correction.csv（由
-# 对齐扫描终表 lag_fleet.csv 生成，主会话验收通过），只读。
-_OFFSET_CORRECTION_CSV = (
-    Path(__file__).resolve().parents[2]
-    / "z_note" / "data_offset_fixpipe" / "offset_correction.csv"
-)
-_OFFSET_CORRECTION: Dict[str, float] | None = None
-
-
-def load_offset_correction() -> Dict[str, float]:
-    """session_id -> 采样平移秒数（仅 B 类；A/C/D 无条目）。
-
-    公开入口（2026-10-20）：contact_adapter 与探针脚本同表读取，
-    保证修正轴口径唯一。``_load_offset_correction`` 保留为别名。
-    """
-    global _OFFSET_CORRECTION
-    if _OFFSET_CORRECTION is None:
-        if not _OFFSET_CORRECTION_CSV.is_file():
-            raise FileNotFoundError(
-                "%s: corrected_offset requires the offset correction table"
-                % _OFFSET_CORRECTION_CSV)
-        table: Dict[str, float] = {}
-        with _OFFSET_CORRECTION_CSV.open(encoding="utf-8-sig", newline="") as handle:
-            for row in csv.DictReader(handle):
-                lag = (row.get("lag_eff_frames") or "").strip()
-                if (row.get("conf_class") or "").strip() == "B" and lag:
-                    table[(row.get("session_id") or "").strip()] = float(lag) * 0.025
-        _OFFSET_CORRECTION = table
-    return _OFFSET_CORRECTION
-
-
-# 旧名别名（勿破坏既有调用；新代码用公开名）。
-_load_offset_correction = load_offset_correction
-
-
 def find_session_dir(seq_root: Path, session_id: str) -> Path:
     matches = sorted(seq_root.glob("*/*/%s" % session_id))
     dirs = [path for path in matches if path.is_dir()]
@@ -257,18 +219,12 @@ class AnySoleDataset(Dataset):
         load_v5_1_gt: bool = False,
         d8_heads: bool = False,
         occ_mix: Optional[dict] = None,
-        corrected_offset: bool = False,
         t_phys_v2: bool = False,
     ):
         self.mode = mode
         self.window_length = int(window_length)
         self.tactile_input = str(tactile_input)
-        # offset 重同步（2026-10-20）：true 时 B 类 session 的 GT 采样按
-        # 修正表平移（mocap_time_s − lag_eff×0.025）；A/C/D 不动。
-        self.corrected_offset = bool(corrected_offset)
         self.t_phys_v2 = bool(t_phys_v2)
-        if self.corrected_offset:
-            load_offset_correction()
         # 四相机扩展 D2: camera id selects the per-camera GVHMR cache dir
         # (hrnet cache is addressed via cache_root, already camera-scoped).
         self.cam_id = int(cam_id)
@@ -330,10 +286,6 @@ class AnySoleDataset(Dataset):
                 n_frames = len(shared_frames["frame_id"])
                 t_grid = np.asarray(shared_frames["visual_time_s"], dtype=np.float64)
                 t_mocap = np.asarray(shared_frames["mocap_time_s"], dtype=np.float64)
-                if self.corrected_offset:
-                    shift = load_offset_correction().get(session_id, 0.0)
-                    if shift:
-                        t_mocap = t_mocap - shift
                 meta = dict(shared_meta)
                 meta.update({
                     "n_frames": n_frames,

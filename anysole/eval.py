@@ -672,7 +672,6 @@ def _evaluate_one(
         # E6.4: continuation eval uses overlapping windows (stride = tw/2);
         # without it the stride stays non-overlapping (E3 behavior).
         stride=(tw // 2) if (pos_mode and continuation) else None,
-        corrected_offset=bool(checkpoint.get("config", {}).get("corrected_offset", False)),
                         t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
                         d8_heads=bool(checkpoint.get("config", {}).get("d8_heads", False)),
     )

@@ -102,6 +102,7 @@ z_note/probes/
 /z_note/data_pressure_fixpipe/Tactile_pressure_handoff_20261017_v1/
 /z_note/data_pressure_fixpipe/Tactile_pressure_handoff_20261017_v2_no_smoothing/
 z_note/data_pressure_fixpipe/Tactile_pressure_handoff_20261020_v3/
+z_note/data_offset_fixpipe/backup/
 
 # HMR2.0 实验线的第三方参考仓库（论文仓库 clone，不进 git；实验文档保留）
 /z_note/HMR2.0/4D-Humans/

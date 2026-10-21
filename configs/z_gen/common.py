@@ -211,6 +211,28 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "MODEL_IDS": ["V3_3H_v6", "V3_3H_v6_cam3_occ010"],
         "REQUIRES": [],
     },
+    # 新数据验证（2026-10-22，主会话 conf 00618）：生产 v3+offset facts
+    # 替换验证——V3_3B_cam3_v3off = E1 的 3B 统一模型行。
+    "v3off_validation": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3B_cam3_v3off"],
+        "REQUIRES": [],
+    },
+    # E1 同架构专家对比（2026-10-22，z_note/实验计划.md）：四家族 x 四模型，
+    # 生产 v3+offset facts。波 1 = E 家族（新载体）+ 3B 家族；波 2 = V4_1/
+    # V5_1 家族（carrier 依赖波 1 的 E 基名 ckpt）。
+    "e1_experts": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3E_cam3_v3off", "V3_3E_cam3_v3off_drop",
+                      "V3_3E_cam3_v3off_vonly", "V3_3E_cam3_v3off_tonly",
+                      "V3_3B_cam3_v3off_vonly", "V3_3B_cam3_v3off_tonly",
+                      "V3_3B_cam3_v3off_nodrop",
+                      "V4_1_cam3_v3off", "V4_1_cam3_v3off_drop",
+                      "V4_1_cam3_v3off_vonly", "V4_1_cam3_v3off_tonly",
+                      "V5_1_cam3_v3off", "V5_1_cam3_v3off_drop",
+                      "V5_1_cam3_v3off_vonly", "V5_1_cam3_v3off_tonly"],
+        "REQUIRES": [],
+    },
     # T 增强三组（2026-10-21，T增强三组实验方案.md）：维度 2 显式物理特征
     # （tphys）+ 维度 3 足-地监督（d8，监督头落地后加入）。
     "v5_1_tenhance_test": {

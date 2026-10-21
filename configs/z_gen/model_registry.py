@@ -315,14 +315,14 @@ MODELS["V3_3B_cam3_offfix"] = {
     **_V3_3B,
     "label": "V3-3B-cam3-offfix",
     "name": "V3_3B_cam3_offfix",
-    "train_args": {**_V3_3B["train_args"], "corrected_offset": True},
+    "train_args": {**_V3_3B["train_args"]},
 }
 for _occ in ("010", "020", "030", "050"):
     MODELS[f"V3_3B_cam3_occ{_occ}_offfix"] = {
         **_V3_3B,
         "label": f"V3-3B-cam3-occ{_occ}-offfix",
         "name": f"V3_3B_cam3_occ{_occ}_offfix",
-        "train_args": {**_V3_3B["train_args"], "corrected_offset": True},
+        "train_args": {**_V3_3B["train_args"]},
     }
 
 # v2/v3 + offset 组（2026-10-20）：结构 = v3_3b_v2 / v3_3b_v3（tactile_input
@@ -332,17 +332,62 @@ for _ver in ("v2", "v3"):
         **_V3_3B,
         "label": f"V3-3B-cam3-offfix-{_ver}",
         "name": f"V3_3B_cam3_offfix_{_ver}",
-        "train_args": {**_V3_3B["train_args"], "corrected_offset": True},
+        "train_args": {**_V3_3B["train_args"]},
     }
     for _occ in ("010", "020", "030", "050"):
         MODELS[f"V3_3B_cam3_occ{_occ}_offfix_{_ver}"] = {
             **_V3_3B,
             "label": f"V3-3B-cam3-occ{_occ}-offfix-{_ver}",
             "name": f"V3_3B_cam3_occ{_occ}_offfix_{_ver}",
-            "train_args": {**_V3_3B["train_args"], "corrected_offset": True},
+            "train_args": {**_V3_3B["train_args"]},
         }
 
+# 新数据验证（2026-10-22）：默认口径 = 生产 v3+offset facts。
+MODELS["V3_3B_cam3_v3off"] = {**_V3_3B, "label": "V3-3B-cam3-v3off",
+                              "name": "V3_3B_cam3_v3off"}
+
+# E1 同架构专家对比（2026-10-22，z_note/实验计划.md）：四家族 x 四模型，
+# 生产 v3+offset facts（无 offfix 分支——offset 已整合）。
+#   统一 = dropout [0.5,0.25,0.25]；vonly/tonly = 同架构单模态专家；
+#   nodrop（3B）/ 基名（E、V4_1、V5_1）= 始终双模态 [1,0,0]（VT 专家）。
+#   V4_1/V5_1 的 carrier_from = 新轴 E（V3_3E_cam3_v3off，随波 1 训练）。
+# 波次（实际执行）：波 1 = E x4；波 2 = 3B x3；波 3 = V4_1/V5_1 x8（闸门 =
+# E 基名完成，载体快照一致）。
+_E1_V3OFF = ("results/AnySole/V3_3E_cam3_v3off_f6_soft/"
+             "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
+             "checkpoints/ckpt_best.pt")
+_V3_3B_V3OFF = MODELS["V3_3B_cam3_v3off"]
 # V3_3D 削弱套件（2026-10-15）：训练规格与 V3_3D 完全一致；每配置一份合成
+for _suf, _cprobs in (("_vonly", [0.0, 1.0, 0.0]), ("_tonly", [0.0, 0.0, 1.0]),
+                     ("_nodrop", [1.0, 0.0, 0.0])):
+    MODELS["V3_3B_cam3_v3off" + _suf] = {
+        **_V3_3B_V3OFF, "label": "V3-3B-cam3-v3off" + _suf.replace("_", "-"),
+        "name": "V3_3B_cam3_v3off" + _suf,
+        "train_args": {**_V3_3B_V3OFF["train_args"], "config_probs": _cprobs}}
+for _suf, _cprobs in (("", [1.0, 0.0, 0.0]), ("_drop", [0.5, 0.25, 0.25]),
+                     ("_vonly", [0.0, 1.0, 0.0]), ("_tonly", [0.0, 0.0, 1.0])):
+    _b = MODELS["V3_3E"]
+    MODELS["V3_3E_cam3_v3off" + _suf] = {
+        **_b, "label": "V3-3E-cam3-v3off" + _suf.replace("_", "-"),
+        "name": "V3_3E_cam3_v3off" + _suf,
+        "train_args": {**_b["train_args"], "config_probs": _cprobs}}
+for _suf, _cprobs in (("", [1.0, 0.0, 0.0]), ("_drop", [0.5, 0.25, 0.25]),
+                     ("_vonly", [0.0, 1.0, 0.0]), ("_tonly", [0.0, 0.0, 1.0])):
+    _b = MODELS["V4_1"]
+    MODELS["V4_1_cam3_v3off" + _suf] = {
+        **_b, "label": "V4-1-cam3-v3off" + _suf.replace("_", "-"),
+        "name": "V4_1_cam3_v3off" + _suf,
+        "train_args": {**_b["train_args"], "config_probs": _cprobs,
+                       "carrier_from": _E1_V3OFF}}
+for _suf, _cprobs in (("", [1.0, 0.0, 0.0]), ("_drop", [0.5, 0.25, 0.25]),
+                     ("_vonly", [0.0, 1.0, 0.0]), ("_tonly", [0.0, 0.0, 1.0])):
+    _b = MODELS["V5_1"]
+    MODELS["V5_1_cam3_v3off" + _suf] = {
+        **_b, "label": "V5-1-cam3-v3off" + _suf.replace("_", "-"),
+        "name": "V5_1_cam3_v3off" + _suf,
+        "train_args": {**_b["train_args"], "config_probs": _cprobs,
+                       "carrier_from": _E1_V3OFF}}
+
 # 冻结基底（该配置 vonly 专才 + 该配置主模型受过训 foot_conv），init_from
 # 指向 results/AnySole/V3_3D_<config>_joint_and/init_base_ttrained.pt。
 _V3_3D = MODELS["V3_3D"]
@@ -583,7 +628,7 @@ _E_OFF_OCC010 = ("results/AnySole/V3_3E_cam3_occ010_offfix_f6_soft/"
                  "checkpoints/ckpt_best.pt")
 for _name, _base in (("V3_3E_cam3_offfix", "V3_3E"), ("V3_3E_cam3_occ010_offfix", "V3_3E_cam3_occ010")):
     MODELS[_name] = {**MODELS[_base], "label": _name.replace("_", "-"), "name": _name,
-                     "train_args": {**MODELS[_base]["train_args"], "corrected_offset": True}}
+                     "train_args": {**MODELS[_base]["train_args"]}}
 for _occ, _base_occ, _carrier in (("", "", _E_OFF), ("_occ010", "_cam3_occ010", _E_OFF_OCC010),
                                   ("_occ020", "_cam3_occ020", _E_OFF), ("_occ030", "_cam3_occ030", _E_OFF),
                                   ("_occ050", "_cam3_occ050", _E_OFF)):
@@ -593,7 +638,7 @@ for _occ, _base_occ, _carrier in (("", "", _E_OFF), ("_occ010", "_cam3_occ010", 
         if _b not in MODELS:
             continue
         MODELS[_n] = {**MODELS[_b], "label": _n.replace("_", "-"), "name": _n,
-                      "train_args": {**MODELS[_b]["train_args"], "corrected_offset": True,
+                      "train_args": {**MODELS[_b]["train_args"],
                                      "carrier_from": _carrier}}
 # T 增强三组（2026-10-21，T增强三组实验方案.md）：
 # V5_1_cam3_offfix_tphys = 维度 2 显式物理特征（T_phys 12→20）；
@@ -624,4 +669,4 @@ for _occ in ("", "_occ010"):
     _n = f"V3_3H_cam3{_occ}_offfix"
     _b = f"V3_3H_cam3{_occ}" if _occ else "V3_3H"
     MODELS[_n] = {**MODELS[_b], "label": _n.replace("_", "-"), "name": _n,
-                  "train_args": {**MODELS[_b]["train_args"], "corrected_offset": True}}
+                  "train_args": {**MODELS[_b]["train_args"]}}

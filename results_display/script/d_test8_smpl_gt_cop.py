@@ -74,7 +74,6 @@ from anysole.data.handoff_pressure import (  # noqa: E402
     resample_handoff,
     video_start_for,
 )
-from anysole.data.dataset import load_offset_correction  # noqa: E402
 from anysole.data.pressure import cop_from_grid  # noqa: E402
 from anysole.data.smpl_io import (  # noqa: E402
     load_smpl,
@@ -449,10 +448,6 @@ def render_one(sid: str, args: argparse.Namespace) -> Path | None:
         smpl_path = shared_smpl_path(shared)
         mocap_t = np.asarray(shared["frames"]["mocap_time_s"], dtype=np.float64)
         mocap_t = mocap_t[:n_frames]
-        if args.corrected_offset:
-            shift = load_offset_correction().get(sid, 0.0)
-            if shift:
-                mocap_t = mocap_t - shift
         # 地面 = archive y=0（g0）。SMPL 足部地面审计 2026-10-19 裁定：判
         # 「陷入/贴地」用 y=0；旧 estimate_floor_y（关节 p5）比物理地面高
         # （S5091=3.6cm）→ GT 恒接触、悬空期 CoP 钉趾端（GT足底×触觉冲突
@@ -595,9 +590,6 @@ def parse_args() -> argparse.Namespace:
                         "v2（无平滑）、denoised108_v3 = v3（另线落地后可用），"
                         "与 anysole/data/dataset.py 同语义，fake/valid 仍取 "
                         "shared facts）")
-    p.add_argument("--corrected-offset", action="store_true",
-                   help="GT 面板动捕采样按修正表平移（B 类 session，"
-                        "z_note/data_offset_fixpipe/offset_correction.csv）")
     p.add_argument("--block-secs", type=float, default=0.0,
                    help="连续全速时间块秒数（>0 时覆盖 --stride/--max-frames，"
                         "块间插分隔帧；如 0.5）")

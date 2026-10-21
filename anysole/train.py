@@ -97,7 +97,6 @@ DEFAULT_CONFIG = {
     "warm_start": False,        # E6.5: 采样起点对齐训练边缘分布
     "noise_scaled": False,      # E3 口径（E4 的噪声缩放被证伪）；默认与 anysole/configs/v1.yaml 对齐
     "lr_schedule": "constant",  # E3 口径（E5 的 cosine 被证伪）
-    "corrected_offset": False,  # offset 重同步（2026-10-20）：B 类 session GT 采样按修正表平移
     "t_phys_v2": False,  # 维度 2 显式物理特征（2026-10-21）：T_phys 12→20 维
     "d8_heads": False,  # 维度 3 足-地监督三头（2026-10-21）
     "lambda_tcop": 0.0,
@@ -609,9 +608,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--occ-mix", action="store_true",
                         help="V6_1A occ_mix: window-level structured-dropout augmentation "
                              "(default off; --p-occ/--p-nullv/--p-nullt tune it).")
-    parser.add_argument("--corrected-offset", action="store_true", default=None,
-                        help="offset 重同步 (2026-10-20): B 类 session GT 采样按修正表平移 "
-                             "(mocap_time_s - lag_eff×0.025；A/C/D 不动)。")
     parser.add_argument("--t-phys-v2", action="store_true", default=None,
                         help="维度 2：T_phys 12→20 维显式物理特征（着地几何+双足关系）")
     parser.add_argument("--d8-heads", action="store_true", default=None,
@@ -1275,8 +1271,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["beta"] = float(args.beta)
     if args.occ_mix:
         config["occ_mix"] = True
-    if args.corrected_offset is not None:
-        config["corrected_offset"] = bool(args.corrected_offset)
     if getattr(args, "t_phys_v2", None) is not None:
         config["t_phys_v2"] = bool(args.t_phys_v2)
     if getattr(args, "d8_heads", None) is not None:
@@ -1321,7 +1315,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             cam_id=int(config.get("cam_id", 3)),
             load_v5_1_gt=v5_1_mode,
             occ_mix=occ_mix_kwargs,
-            corrected_offset=bool(config.get("corrected_offset", False)),
             t_phys_v2=bool(config.get("t_phys_v2", False)),
             d8_heads=bool(config.get("d8_heads", False)),
         )
@@ -1347,7 +1340,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs, corrected_offset=bool(config.get("corrected_offset", False)), t_phys_v2=bool(config.get("t_phys_v2", False)), d8_heads=bool(config.get("d8_heads", False)))
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs, t_phys_v2=bool(config.get("t_phys_v2", False)), d8_heads=bool(config.get("d8_heads", False)))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:
@@ -1840,7 +1833,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             n = batch_size
             epoch_sums["n"] += n
             for key, name in loss_pairs:
-                epoch_sums[name] += float(losses[key].detach().item()) * n
+                if key in losses:  # 结构开关（如 d8 三头）未启用时该损失不存在
+                    epoch_sums[name] = epoch_sums.get(name, 0.0) + float(losses[key].detach().item()) * n
             n_tmissing = int((config_id == CONFIG_T).sum().item())
             n_vmissing = int((config_id == CONFIG_V).sum().item())
             if n_tmissing:
