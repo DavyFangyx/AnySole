@@ -1,9 +1,9 @@
-"""V3_3H (2026-10-17): single-generator regression + T physical state +
+"""V3_Hv1 (2026-10-17): single-generator regression + T physical state +
 residual channels.
 
-Fresh architecture.  V3_3H = 纯 V 回归主干（与 E 同构的已证机器，从零训练）
+Fresh architecture.  V3_Hv1 = 纯 V 回归主干（与 E 同构的已证机器，从零训练）
 + T 接触流（从零）+ 推理侧残差通道（constraints_h.py）。三条件 = 同一前向
-的三种读出（config_id 被忽略，同 V3_3E 协议）。
+的三种读出（config_id 被忽略，同 V3_Ev1 协议）。
 
 - V 主干: v_enc（冻结 vonly 专才编码器，入口装载）-> v_temporal ->
   9-part pose head（144 维 6D，硬划分、无门控、无 soft A）+ traj head
@@ -12,14 +12,14 @@ Fresh architecture.  V3_3H = 纯 V 回归主干（与 E 同构的已证机器，
 - T 侧（证据，不出内容）: foot_conv -> 接触头（每脚 logits，f6_soft，
   air 加权 BCE——接触置信帧是残差通道的闸门）。
 - 训练条件：VT 90% / V 零化 10%（T2M 协议代价——null-V 先验只能靠输入
-  零化训练，无学习参数 null token；V3_3H方案.md §3）。
+  零化训练，无学习参数 null token；V3_H方案.md §3）。
 
 V3HPoseHead / V3HTrajHead / V3HContactHead / _temporal_encoder 与 model_v3e
 的对应部件同构（回归主干 = 已证机器），独立实现：无 sigma 头（H 无
 NLL/回退，sigma 分支整体不携带——state dict 与 E 不共享，无映射要求）。
 
-V3_3H_v3 = v2 + 一阶足部残差头（foot_res_head：t_tok → 每足 6D 残差，
-接触软门控、输出饱和）——命题 2 的兑现通道（V3_3H方案 §3 对照实验）。
+V3_Hv3 = v2 + 一阶足部残差头（foot_res_head：t_tok → 每足 6D 残差，
+接触软门控、输出饱和）——命题 2 的兑现通道（V3_H方案 §3 对照实验）。
 残差只写足关节（10/11）的 6D 槽位，上身/对侧结构上不可被 T 改动；V2M
 行不应用残差（零税），VT/T 行在残差层之前应用。
 """
@@ -42,8 +42,8 @@ from anysole.types import (
 )
 
 # 残差头落点槽位：足关节（10/11）为叶节点，改自身旋转不移动任何关键点
-# （V3_3H设计错误裁定.md §1）；踝关节（7/8）旋转经 127 mm 杠杆 ≈ 平移足
-# 关键点。V3_3H_v6 = 落点改踝（错误一修复），v1–v5 保持足落点。
+# （V3_H设计错误裁定.md §1）；踝关节（7/8）旋转经 127 mm 杠杆 ≈ 平移足
+# 关键点。V3_Hv6 = 落点改踝（错误一修复），v1–v5 保持足落点。
 RES_SLOTS = {
     "foot": (slice(10 * 6, 11 * 6), slice(11 * 6, 12 * 6)),
     "ankle": (slice(7 * 6, 8 * 6), slice(8 * 6, 9 * 6)),
@@ -57,7 +57,7 @@ def apply_foot_residual(pose: torch.Tensor, foot_res: torch.Tensor,
     """零税应用：残差只写落点关节的 6D 槽位，其余部位逐位不变。
 
     pose: (B, tw, 144) 原始 6D 姿态；foot_res: (B, tw, 12)。
-    landing="foot" = 足关节 10/11（v1–v5）；"ankle" = 踝关节 7/8（V3_3H_v6）。
+    landing="foot" = 足关节 10/11（v1–v5）；"ankle" = 踝关节 7/8（V3_Hv6）。
     """
     out = pose.clone()
     s0, s1 = RES_SLOTS[landing]
@@ -146,7 +146,7 @@ class V3HTrajHead(nn.Module):
 
 class V3HContactHead(nn.Module):
     """Per-foot contact logits from the tactile tokens (f6_soft supervision,
-    air-weighted in V3_3H training — contact confidence gates the residual
+    air-weighted in V3_Hv1 training — contact confidence gates the residual
     channels)."""
 
     def __init__(self, dim=D_MODEL):
@@ -183,19 +183,19 @@ class AnySoleModelV3H(nn.Module):
             n_layers=pose_layers)
         self.traj_head = V3HTrajHead(dim=d, tw=tw, nhead=nhead, dropout=dropout)
         self.contact_head = V3HContactHead(dim=d)
-        # V3_3H_v2: aux pressure reconstruction on t_tok (B 的已验证配方，
+        # V3_Hv2: aux pressure reconstruction on t_tok (B 的已验证配方，
         # λ_trec=0.1) — 命题 2 载体依赖修复：T 编码器监督从「仅接触」恢复
         # 为「接触 + 重建」，让 t_tok 保留足部姿态信息。v1（t_rec=False）
         # 无此头，state dict 与 v1 逐键兼容。
         self.t_rec_head = nn.Linear(d, T_RAW_DIM) if t_rec else None
-        # V3_3H_v3: 一阶足部残差头（接触软门控 + 输出饱和）——命题 2 的
+        # V3_Hv3: 一阶足部残差头（接触软门控 + 输出饱和）——命题 2 的
         # 兑现通道；v1/v2 无此头，state dict 逐键兼容。
         self.foot_res_head = nn.Linear(d, FOOT_RES_DIM) if foot_res else None
         self.foot_res = bool(foot_res)
-        # V3_3H_v5：无锚版——地面/穿透通道整体删除（T 不提供绝对高度，
+        # V3_Hv5：无锚版——地面/穿透通道整体删除（T 不提供绝对高度，
         # 模型不消费任何 floor 输入）；推理层只跑支撑通道。
         self.no_anchor = bool(no_anchor)
-        # V3_3H_v6：残差头落点改踝（"ankle"，错误一修复）；v1–v5 = "foot"。
+        # V3_Hv6：残差头落点改踝（"ankle"，错误一修复）；v1–v5 = "foot"。
         self.res_landing = str(res_landing)
         # The frozen vonly v_enc is loaded and frozen by the entry
         # (anysole/models/v3_3h.py, F-line precedent) — no freezing here:
@@ -205,7 +205,7 @@ class AnySoleModelV3H(nn.Module):
                 T_s2m=None, V_hmr=None, mask_v=None, mask_t=None):
         """config_id is accepted for the train/eval call contract and
         deliberately IGNORED — the three eval conditions are three readouts
-        of this one forward (V3_3E protocol); the T2M row runs it with V
+        of this one forward (V3_Ev1 protocol); the T2M row runs it with V
         zeroed upstream.  T stays live under every condition (the contact
         head always reads the real stream)."""
         T_tac = torch.cat([T_raw, T_phys], dim=-1)

@@ -19,12 +19,12 @@
 ## 两组数据生产实验与分析入口
 
 数据生产实验统一由 `configs/` 调度（正式入口见 `configs/Z_README.md`）。当前只有两组：
-`singlemodal_eval` 和 `rho_grid_eval`，主线模型均为 `V3_3B`。任务由
+`singlemodal_eval` 和 `rho_grid_eval`，主线模型均为 `V3_Bv1`。任务由
 `configs/tools/runner.py` 负责完成 checkpoint 准备、val/test 正式评估和结果归档；
 分析脚本不进入队列，只读取这两组结果：
 
 ```text
-results/experiments/singlemodal_eval/<model>/            # V3_3B、V3_3B_vonly、V3_3B_tonly
+results/experiments/singlemodal_eval/<model>/            # V3_Bv1、V3_Bv1_vonly、V3_Bv1_tonly
 results/experiments/rho_grid_eval/<model>/               # 全网格 grid_metrics + npz/ + repr/
 results_display/script/<analysis>.py
 results_display/{Test1_ComplementTest,Test2_MissingTest}/<代号>/<model>/
@@ -121,8 +121,8 @@ results_display/                        # 纯产物目录（实验代码在 scri
     ├── M2_t2v/                         # M2：从 F_T 读出 V 负责分量（branch_* 产物）
     └── M3_rho_grid/                    # M3：ρ 网格连续缺失鲁棒性（heatmap/slices/criteria）
 └── Test6_VdegradTest/                  # 实验六：V 削弱难度轴（V削弱实验报告.md 两套件）
-    ├── V3_3B/                          # 融合主线套件（delta_table / physical_delta / win_rates / delta_panels）
-    └── V3_3D/                          # 干净通道套件（+ decile_table / decile_panels）
+    ├── V3_Bv1/                          # 融合主线套件（delta_table / physical_delta / win_rates / delta_panels）
+    └── V3_Dv1/                          # 干净通道套件（+ decile_table / decile_panels）
 ```
 
 ## 时间对齐约定（动捕 ↔ 触觉/视频）
@@ -443,11 +443,11 @@ python results_display/script/d_test9_bvh_smpl_compare.py --session S11032,S1105
 conda activate touch_gait
 # 单独生成：--models 顶层选中（anysole + 各基线名）、--model-name 选主模型
 
-# ① 选定主模型 + 全部基线（缺省主模型 V3_3B、基线全部）
+# ① 选定主模型 + 全部基线（缺省主模型 V3_Bv1、基线全部）
 python results_display/script/r_test1_visualize.py --model-name V3_4b --models anysole,motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion
 # ② 只要基线（不要主模型）
 python results_display/script/r_test1_visualize.py --models motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion --session S13011
-# ③ 缺省 = 主模型 V3_3B + 全部基线
+# ③ 缺省 = 主模型 V3_Bv1 + 全部基线
 python results_display/script/r_test1_visualize.py --session S13011
 
 # 对比：同 mode 1×N 横排（选中口径同上）
@@ -479,7 +479,7 @@ conda activate touch_gait
 # 三个选择维度：--models 顶层选中（anysole + 各基线注册名）、
 # --model-name 主模型清单、--config-id 配置（缺省 VT2M,V2M,T2M,V2T）
 
-# ① 选定主模型 + 全部基线（主模型缺省 V3_3B，基线缺省全部）
+# ① 选定主模型 + 全部基线（主模型缺省 V3_Bv1，基线缺省全部）
 python results_display/script/r_test2_compare.py --model-name V3_4b --models motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion,mmvp_fpp-net --by-mode
 
 # ② 只要基线（不要主模型）
@@ -490,7 +490,7 @@ python results_display/script/r_test2_compare.py --model-name V3_4b --models any
 
 # 全部主模型 + 全部基线（--models 缺省 all = anysole + 全部 5 个基线，无需再写）
 python results_display/script/r_test2_compare.py \
-  --model-name F0b,F4a,F2,F2p4,V3_2,V3_3A,V3_3B,V3_4a,V3_4b,V3_4c,V4A --by-mode
+  --model-name F0b,F4a,F2,F2p4,V3_2,V3_3A,V3_Bv1,V3_4a,V3_4b,V3_4c,V4A --by-mode
 
 # 正式 36-session test 集（缺省 val 迭代集）
 python results_display/script/r_test2_compare.py --split test --by-mode --force
@@ -558,7 +558,7 @@ V2T 指标统一到每脚 31×11 网格（AnySole 的 4×12 在评估层重采�
 
 ```bash
 conda activate touch_gait
-# 默认 anysole(V3_3B) + FPP-Net，全部 test 会话；--models 选中谁评估谁
+# 默认 anysole(V3_Bv1) + FPP-Net，全部 test 会话；--models 选中谁评估谁
 python results_display/script/r_test4_v2t.py --source archives --split test
 python results_display/script/r_test4_v2t.py --source archives --session S10103
 ```
@@ -580,7 +580,7 @@ python results_display/script/r_test4_v2t.py --source archives --session S10103
 ## 主线模型互补性与缺失输入实验（C1–M3，注册式全链路）
 
 正式入口见 `configs/Z_README.md`。当前由 `configs` 生成两组数据任务
-（主线模型 `V3_3B`），再由 `results_display/` 的分析脚本读取结果并出图；
+（主线模型 `V3_Bv1`），再由 `results_display/` 的分析脚本读取结果并出图；
 C1–M3 不再生成调度 conf。
 
 | 代号 | 任务书实验 | 回答的问题 | 脚本 |
@@ -601,11 +601,11 @@ token（与 config 级 null 逐字节一致；四角 = VT2M/V2M/T2M/纯先验，
 
 ```bash
 conda activate touch_gait
-python configs/z_gen/rho_grid_eval.py --models V3_3B
+python configs/z_gen/rho_grid_eval.py --models V3_Bv1
 CUDA_VISIBLE_DEVICES=4 bash configs/bg.sh
 ```
 
-产出（`results/experiments/rho_grid_eval/V3_3B/`）：
+产出（`results/experiments/rho_grid_eval/V3_Bv1/`）：
 - `grid_metrics[_<split>].json` —— 全格指标 + corner_check
 - `npz/<session>_rhoV<rV>_rhoT<rT>[_s<seed>].npz` —— eval_motion 同格式（接 R_Test1 动画）
 - `repr/<session>_..._repr.npz` —— F/t_tok/v_tok 表征
@@ -617,15 +617,15 @@ conda activate touch_gait
 python results_display/script/rho_grid_analysis.py --split test
 ```
 
-前端输出在 `results_display/Test2_MissingTest/M3_rho_grid/V3_3B/`（`heatmap.png` / `slices.png` /
+前端输出在 `results_display/Test2_MissingTest/M3_rho_grid/V3_Bv1/`（`heatmap.png` / `slices.png` /
 `corner_check.csv` / `criteria.json`）。
 
 ### C1–M2 分量分析
 
 三份明细文件（主线、V 专才、T 专才）由 `singlemodal_eval` 队列任务落盘到
-`results/experiments/singlemodal_eval/{V3_3B,V3_3B_vonly,V3_3B_tonly}/metrics/<split>.json`，
+`results/experiments/singlemodal_eval/{V3_Bv1,V3_Bv1_vonly,V3_Bv1_tonly}/metrics/<split>.json`，
 入口脚本按 registry 自动定位，无需手工传路径；M1/M2 另读
-`results/experiments/rho_grid_eval/V3_3B/grid_metrics[_<split>].json` 作空输入先验。
+`results/experiments/rho_grid_eval/V3_Bv1/grid_metrics[_<split>].json` 作空输入先验。
 实现收敛在 `utils/component_analysis.py`，仍可单独按 `--c1/--c2/--c3/--m1/--m2` 调用：
 
 ```bash
@@ -640,10 +640,10 @@ python results_display/script/dropout_ablation.py --split val
 python results_display/script/v2t_upper.py --split val
 # M2（需 rho_grid 已跑完）
 python results_display/script/trust.py --split val
-# --split 默认 test；--model V3_3B 限定模型
+# --split 默认 test；--model V3_Bv1 限定模型
 ```
 
-输出：`results_display/{Test1_ComplementTest,Test2_MissingTest}/<代号>/V3_3B/`（代号 =
+输出：`results_display/{Test1_ComplementTest,Test2_MissingTest}/<代号>/V3_Bv1/`（代号 =
 C1_specialist / C2_fusion / C3_missing_branch / M1_v2t / M2_t2v）。
 
 ## V 削弱难度轴（Test6_VdegradTest）
@@ -654,19 +654,19 @@ C1_specialist / C2_fusion / C3_missing_branch / M1_v2t / M2_t2v）。
 ```bash
 conda activate touch_gait
 python results_display/script/vdegrad.py                # 两套件全部（缺省）
-python results_display/script/vdegrad.py --suite V3_3B  # 融合主线套件
+python results_display/script/vdegrad.py --suite V3_Bv1  # 融合主线套件
 ```
 
-口径（V削弱实验报告.md §1）：Δ = VT − V（负 = 加触觉更优）；V3_3B 套件的
+口径（V削弱实验报告.md §1）：Δ = VT − V（负 = 加触觉更优）；V3_Bv1 套件的
 V/VT 列 = 主线模型 V2M/VT2M 条件（cam3 基准行的全局 MPJPE/地面穿透不在主线
-test.json，CSV 留空、图中标 n/a）；V3_3D 套件同两条件 + 全配置 val decile 分层
+test.json，CSV 留空、图中标 n/a）；V3_Dv1 套件同两条件 + 全配置 val decile 分层
 （oracle 上限 / VT 胜率 / d10·d1 Δ，与 `oracle_analysis.py` 同一计算）。胜率 =
 协议指标行中 VT 优于 V 的占比（平局计半，行数记于 CSV）。
 
-产出（`Test6_VdegradTest/{V3_3B,V3_3D}/`）：`delta_table.csv`（PA/踝足 PA
+产出（`Test6_VdegradTest/{V3_Bv1,V3_Dv1}/`）：`delta_table.csv`（PA/踝足 PA
 V·VT·Δ）、`physical_delta.csv`（全局 MPJPE/地面穿透/根轨迹 ATE Δ）、
 `win_rates.csv`、`delta_panels.png`（按符号着色的 Δ 条形图）、
-`analysis_summary.json`；V3_3D 另有 `decile_table.csv` + `decile_panels.png`。
+`analysis_summary.json`；V3_Dv1 另有 `decile_table.csv` + `decile_panels.png`。
 
 ## 附录：训练侧 dropout 开关（两个独立旋钮）
 

@@ -19,7 +19,7 @@
 ## CLI 参数与支持空间（注释版）
 
 ```text
-# --model-name: F0b/F4a/F2/F2p4/V3_2/V3_3A/V3_3B/V3_4a/V3_4b/V3_4c/V4A/V4B
+# --model-name: F0b/F4a/F2/F2p4/V3_2/V3_3A/V3_Bv1/V3_4a/V3_4b/V3_4c/V4A/V4B
 #   每个名字对应 anysole/models/<name>.py 入口脚本，结构由入口固定
 # --contact-method: 接触标签生成/读取方案，不是输入特征 concat 开关；当前主线为 joint_and
 # --variant: 显式覆盖变体目录名（仅特殊用途）；省略时由 train 自动生成
@@ -50,7 +50,7 @@
 
 - **模型目录 = `{模型版本}_{contact-method}`**（全部 SMPL-24）：
   `F0b_joint_and` / `F4a_joint_and` / `F2_joint_and` / `F2p4_joint_and` /
-  `V3_2_joint_and` / `V3_3A_joint_and` / `V3_3B_joint_and` /
+  `V3_2_joint_and` / `V3_3A_joint_and` / `V3_Bv1_joint_and` /
   `V3_4a_joint_and` / `V3_4b_joint_and` / `V3_4c_joint_and` /
   `V4A_joint_and` / `V4B_joint_and`。
 - **独立性（2026-09-24）**：每个模型的**结构**由 `anysole/models/`
@@ -120,7 +120,7 @@
 | F2p4 | `f2p4.py` | f2 + foot_conv | grad-clip 5.0 |
 | V3_2 | `v3_2.py` | foot_conv + 9 部位硬分组 | lr-warmup 0.05、grad-clip 5.0 |
 | V3_3A | `v3_3a.py` | + soft A 矩阵 | + λ_assign 0.05 |
-| V3_3B | `v3_3b.py` | + σ 门控 | + λ_assign 0.05 |
+| V3_Bv1 | `v3_3b.py` | + σ 门控 | + λ_assign 0.05 |
 | V3_4a | `v3_4a.py` | f2 + foot_conv + 9 部位 | lr-warmup 0.05、grad-clip 5.0 |
 | V3_4b | `v3_4b.py` | + soft A | + λ_assign 0.05 |
 | V3_4c | `v3_4c.py` | + σ 门控 | + λ_assign 0.05、λ_sigma 0.01、σ_freeze 0.1 |
@@ -286,17 +286,17 @@
 
 # ② 评估 / ③④ 可视化：--model-name 换 V3_3A
 
-# ===== V3_3B：叠加 σ 门控（从零） =====
+# ===== V3_Bv1：叠加 σ 门控（从零） =====
 # ① 训练
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m anysole.train \
   --contact-method joint_and \
   --lambda-assign 0.05 --lr-warmup-frac 0.05 \
   --epochs 740 --grad-clip 5.0 \
-  --model-name V3_3B \
+  --model-name V3_Bv1 \
   --wandb_mode online --wandb_experiment_tag v33b_jointand \
   --wandb_eval_interval 10 --loss-cap 1.0 --device cuda:7
 
-# ② 评估 / ③④ 可视化：--model-name 换 V3_3B
+# ② 评估 / ③④ 可视化：--model-name 换 V3_Bv1
 
 # 训练前 smoke（数值验收，§8.4）
 /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python z_note/probes/smoke_v33_soft_gate.py \

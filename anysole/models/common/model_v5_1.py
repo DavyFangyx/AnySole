@@ -1,7 +1,7 @@
-"""V5_1A (2026-10-19): frozen E v2.1 carrier + V/T dual z experts + PoE
+"""V5_Av1 (2026-10-19): frozen E v2.1 carrier + V/T dual z experts + PoE
 synthesis + FiLM lower-limb injection.
 
-Fresh architecture (V5_1A方案.md = the authoritative design).  V5_1A =
+Fresh architecture (V5_A方案.md = the authoritative design).  V5_Av1 =
 E 的回归载体（冻结继承，286 键装载自 E v2.1 ckpt_best）+ 从零训练的
 g_V/g_T 双 z 专家（各读出 接触 logit 2 + 相位 (cos,sin) 4 + CoP 4，
 全通道 10 维；相位保留 = 用户裁定 2026-10-19，探针未过闸结论留存备查）
@@ -14,7 +14,7 @@ g_V/g_T 双 z 专家（各读出 接触 logit 2 + 相位 (cos,sin) 4 + CoP 4，
 量级，G 前科 315.5 防回归）。
 
 三条件 = 同一前向的三种 z 来源读出（z_src 开关；config_id 被忽略，
-同 V3_3E 协议）：
+同 V3_Ev1 协议）：
   V2M  = Dec(x_V; FiLM(z_V))          z_V   = g_V(V)
   VT2M = Dec(x_V; FiLM(z_PoE))        z_PoE = PoE(g_V(V), g_T(T))
   T2M  = Dec(x_T; FiLM(z_T))          z_T   = g_T(T)（T 先验塔 = null-V
@@ -50,7 +50,7 @@ from anysole.types import (
     TW,
 )
 
-# z 通道结构（V5_1A §2.2，通道证据分级）：
+# z 通道结构（V5_Av1 §2.2，通道证据分级）：
 #   接触（每足 1）伯努利 logit | 相位（每足 2）(cos 2πφ, sin 2πφ) 高斯
 #   | CoP（每足 2）0-1 网格坐标高斯。全通道 10 维。
 # 相位保留裁定（2026-10-19）：探针未过闸但先看完整形态效果，相位不进
@@ -74,7 +74,7 @@ LOG_SIG_CLAMP = 3.0   # 连续专家 log σ 钳位 [-3, 3]：p(z) 不参数化�
 # ModalEncoders, both encoder heads, both pose heads); every path is frozen
 # so the carrier load is complete and the T stream shares the frozen token
 # space (the trained v_enc and its embeddings are coupled).  Same scope as
-# V3_3G (2026-10-17).
+# V3_Gv1 (2026-10-17).
 CARRIER_PREFIXES = (
     "embeddings.",
     "encoders.embeddings.",
@@ -108,7 +108,7 @@ def _temporal_encoder(dim: int, n_layers: int, nhead: int = 8,
         return nn.TransformerEncoder(layer, **kwargs)
 
 
-class V5_1PoseHead(nn.Module):
+class V5_Av1PoseHead(nn.Module):
     """[copied from model_v3e, 2026-10-19 — the carrier head, plus one
     structural hook] Pure single-stream 9-part pose head: part queries decode
     ONE memory stream, per-part unembeds emit the part's joints in 6D plus a
@@ -116,11 +116,11 @@ class V5_1PoseHead(nn.Module):
 
     The only addition over the E verbatim class: ``forward(mem, film=None)``
     — an optional callable applied to the part features BEFORE the part
-    Linear (FiLM injection point, V5_1A §2.2).  ``film=None`` reproduces the
+    Linear (FiLM injection point, V5_Av1 §2.2).  ``film=None`` reproduces the
     E forward bit-exactly, and the hook registers no parameters, so the
     state dict is key-identical to E (zero-mapping carrier load).
 
-    Sigma heads are frozen at init in V5_1 (E carrier state, not read)."""
+    Sigma heads are frozen at init in V5_Av1 (E carrier state, not read)."""
 
     def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8,
                  dim_feedforward=1024, dropout=0.1, n_layers=6,
@@ -177,10 +177,10 @@ class V5_1PoseHead(nn.Module):
         return pose, sig
 
 
-class V5_1TrajHead(nn.Module):
+class V5_Av1TrajHead(nn.Module):
     """[copied from model_v3e + the same film hook] Single-stream
     root-trajectory regression (velocity -> cumsum).  ``film`` applies to the
-    encoder output feature (proj 前，V5_1A 注入点：根轨迹头输出特征)."""
+    encoder output feature (proj 前，V5_Av1 注入点：根轨迹头输出特征)."""
 
     def __init__(self, dim=D_MODEL, tw=TW, nhead=8, dim_feedforward=1024,
                  dropout=0.1):
@@ -200,7 +200,7 @@ class V5_1TrajHead(nn.Module):
 
 class V3EContactHead(nn.Module):
     """[copied from model_v3e] Per-foot contact logits from the tactile
-    tokens (f6_soft supervision, air-weighted in V5_1 training — G 配方，
+    tokens (f6_soft supervision, air-weighted in V5_Av1 training — G 配方，
     λ_air=2.0：G 针对 air recall 前科的开关)。"""
 
     def __init__(self, dim=D_MODEL):
@@ -213,7 +213,7 @@ class V3EContactHead(nn.Module):
 
 
 class ZExpert(nn.Module):
-    """z 专家（V5_1A §2.2，从零）：MLP(tok → z 参数)。
+    """z 专家（V5_Av1 §2.2，从零）：MLP(tok → z 参数)。
 
     输出 (B, tw, 18) = 接触 logits 2 | 连续 μ 8 | 连续 log σ 8。
     每分量被各自 GT 监督校准（监督规则 §3：接触三读数、相位/CoP 只监督
@@ -233,7 +233,7 @@ class ZExpert(nn.Module):
 
 
 class FiLMLayer(nn.Module):
-    """h' = h + (γ(z)−1) ⊙ h + β(z)，z → (γ, β) 轻量 MLP（V5_1A §2.2）。
+    """h' = h + (γ(z)−1) ⊙ h + β(z)，z → (γ, β) 轻量 MLP（V5_Av1 §2.2）。
 
     零初始化：weight=0、bias=[1…1, 0…0] → 任意输入下 γ≡1、β≡0，训练起点
     逐位恒等（契约 1 的结构保证，与输入无关）。加法形式（而非 γ⊙h+β）
@@ -257,7 +257,7 @@ class FiLMLayer(nn.Module):
 
 
 def poe_synthesize(params_v, params_t, logit_w):
-    """PoE 闭式合成（V5_1A §2.2，零参数 + 接触温度权重）。
+    """PoE 闭式合成（V5_Av1 §2.2，零参数 + 接触温度权重）。
 
     params_v / params_t: (logits (B,tw,2), mu (B,tw,8), log_sig (B,tw,8))。
     logit_w: (2,) 可学习非负标量（softplus 参数化；等价于常先验
@@ -292,7 +292,7 @@ def poe_synthesize(params_v, params_t, logit_w):
     }
 
 
-class AnySoleModelV5_1(nn.Module):
+class AnySoleModelV5_Av1(nn.Module):
     def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, pose_layers=6,
                  t_phys_v2: bool = False, d8_heads: bool = False):
         super().__init__()
@@ -324,14 +324,14 @@ class AnySoleModelV5_1(nn.Module):
             self.gtcop_head = nn.Linear(d, 4)
         # sigma inits match the E carrier (V=-3 / prior=+3); the sigma heads
         # are frozen and never read — state-dict compatibility only (G 口径).
-        self.pose_head = V5_1PoseHead(
+        self.pose_head = V5_Av1PoseHead(
             self.embeddings, dim=d, tw=tw, nhead=nhead, dropout=dropout,
             n_layers=pose_layers, sigma_init=-3.0)
-        self.prior_head = V5_1PoseHead(
+        self.prior_head = V5_Av1PoseHead(
             self.embeddings, dim=d, tw=tw, nhead=nhead, dropout=dropout,
             n_layers=pose_layers, sigma_init=3.0)
-        self.traj_head = V5_1TrajHead(dim=d, tw=tw, nhead=nhead, dropout=dropout)
-        self.prior_traj = V5_1TrajHead(dim=d, tw=tw, nhead=nhead, dropout=dropout)
+        self.traj_head = V5_Av1TrajHead(dim=d, tw=tw, nhead=nhead, dropout=dropout)
+        self.prior_traj = V5_Av1TrajHead(dim=d, tw=tw, nhead=nhead, dropout=dropout)
         self.contact_head = V3EContactHead(dim=d)
         # z 专家（从零）：g_V 读冻结 v_tok（冻结图上的轻量读出），g_T 读
         # 从零 foot_conv 的 t_tok。
@@ -345,7 +345,7 @@ class AnySoleModelV5_1(nn.Module):
         # Carrier rule: the V stream is frozen at construction.  The E
         # ckpt_best weights are loaded by the entry (anysole/models/v5_1.py);
         # freezing here makes the carrier identity load-independent.
-        # 冻结范围（V5_1A §3）：V 流 286 键全冻结；训练 = foot_conv +
+        # 冻结范围（V5_Av1 §3）：V 流 286 键全冻结；训练 = foot_conv +
         # g_V + g_T + FiLM + PoE 权重 + t_temporal/prior 塔/接触头。
         for name, param in self.named_parameters():
             if name.startswith(CARRIER_PREFIXES):
@@ -384,7 +384,7 @@ class AnySoleModelV5_1(nn.Module):
                 T_s2m=None, V_hmr=None, mask_v=None, mask_t=None, z_src="all"):
         """config_id is accepted for the train/eval call contract and
         deliberately IGNORED — the three eval conditions are three readouts
-        of one forward selected by ``z_src`` (V5_1A §2.3；T 流输入三条件
+        of one forward selected by ``z_src`` (V5_Av1 §2.3；T 流输入三条件
         恒定——g_T 始终读真实压力).
 
         z_src: "all"（训练，一次前向出三读数——x0_hat = VT2M 行）|

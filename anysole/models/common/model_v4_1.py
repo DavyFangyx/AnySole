@@ -1,7 +1,7 @@
-"""V4_1A (2026-10-19): frozen E v2.1 carrier + T contact stream + part-token
+"""V4_Av1 (2026-10-19): frozen E v2.1 carrier + T contact stream + part-token
 gated correction branch (position space).
 
-Fresh architecture.  z_note/multimodal_fusion/V4_1方案/V4_1A方案.md.  The one
+Fresh architecture.  z_note/multimodal_fusion/V4_方案/V4_A方案.md.  The one
 generator is the frozen E V-stream (286 keys); T mounts only on the four
 reachable part-token slots (l/r_foot d_kin=0, l/r_leg d_kin=2 — the upper
 parts are structurally deleted, no T path) through a zero-initialized
@@ -24,7 +24,7 @@ correction branch that writes ONLY the six lower-limb joint positions
   （MLP(c_T (B,tw,2) -> (B,tw,4)，输出层零初始化；Δz = tanh(a_p) ⊙ XAttn_p）
   -> z'_p = z_p + Δz_p -> 每部位线性位置修正头（零初始化）-> 六关节骨盆
   相对位置残差 Δx（18 维，KNEE_ANKLE_FOOT_JOINTS 顺序）-> SG-7 平滑。
-  软骨架评估: x_corr = FK(pose_v) 在六关节处替换为 FK + Δx（V3_3D 同款，
+  软骨架评估: x_corr = FK(pose_v) 在六关节处替换为 FK + Δx（V3_Dv1 同款，
   build_corrected_skeleton）。
 - 三条件 = 同一前向的三种读出（config_id 被忽略，E/G 同款）: V2M = V 流
   （不应用修正）、VT2M = V 流 + pos_corr、T2M = 先验流 + pos_corr_prior。
@@ -76,7 +76,7 @@ CARRIER_PREFIXES = (
 )
 
 # Reachable part-token slots (PART_NAMES order) + part-level kinematic hops
-# to the same-side foot (V4_1A方案 §2.2 d_kin 表).  root/torso/headneck/
+# to the same-side foot (V4_A方案 §2.2 d_kin 表).  root/torso/headneck/
 # l_arm/r_arm are structurally deleted — they never feed the correction
 # branch (no T path by construction, no parameters).
 REACH_PART_NAMES = ("l_leg", "r_leg", "l_foot", "r_foot")
@@ -102,9 +102,9 @@ class V41PoseHead(nn.Module):
     Pure single-stream 9-part pose head: part queries decode ONE memory
     stream (no modality views, no gates), per-part unembeds emit the part's
     joints in 6D plus a per-joint log-sigma.  Hard PART_JOINTS partition.
-    Sigma heads are frozen at init in V4_1 (E carrier state, not read).
+    Sigma heads are frozen at init in V4_Av1 (E carrier state, not read).
 
-    V4_1 addition: ``forward(mem, return_z=True)`` also returns the decoder
+    V4_Av1 addition: ``forward(mem, return_z=True)`` also returns the decoder
     part tokens z (B, tw, n_parts, dim) — the slot BEFORE out_parts, i.e.
     the correction branch's mount point.  Signature-only change; the state
     dict is key-identical to model_v3e's V3EPoseHead."""
@@ -149,7 +149,7 @@ class V41PoseHead(nn.Module):
     def forward(self, mem, return_z: bool = False):
         """mem: (B, tw, dim).  Returns (pose (B,tw,POSE_DIM), log_sigma), or
         (pose, log_sigma, z (B,tw,n_parts,dim)) with return_z — the z slots
-        are the part tokens the V4_1 correction branch mounts on."""
+        are the part tokens the V4_Av1 correction branch mounts on."""
         B = mem.shape[0]
         q = self.query.expand(B, -1, -1, -1).reshape(B, self.tw * self.n_parts, self.dim)
         z = self.decoder(q, mem).reshape(B, self.tw, self.n_parts, self.dim)
@@ -196,14 +196,14 @@ class V41ContactHead(nn.Module):
 
 
 class PartXAttn(nn.Module):
-    """XAttn 联合读出（V4_1A方案 §2.2 修正分支 1/2）.
+    """XAttn 联合读出（V4_A方案 §2.2 修正分支 1/2）.
 
     One multi-head attention layer (nhead=8): q = the reachable part tokens
     z_p (B, tw, 4, dim) — the pose-head decoder slots of l_leg/r_leg/
     l_foot/r_foot — kv = the SAME-FRAME tactile token t_tok.  Frame-local
     (masked): a part token attends only to its own frame, so t and v part
     tokens interact inside one layer without a cross-frame path and without
-    the frozen-V additive-residual paradigm (V4_1A方案 联合读出规则).
+    the frozen-V additive-residual paradigm (V4_Av1方案 联合读出规则).
 
     Kinematic soft mask: the attention logits get the FIXED per-part bias
     bias_p = -beta * d_kin(p) (foot d=0, leg d=2).  With one tactile key per
@@ -255,7 +255,7 @@ class PartXAttn(nn.Module):
 
 
 class ContactGate(nn.Module):
-    """接触门控 a_p（V4_1A方案 §2.2 修正分支 2）.
+    """接触门控 a_p（V4_A方案 §2.2 修正分支 2）.
 
     MLP(contact logits c_T (B,tw,2) -> per-reachable-part scalar (B,tw,4));
     the output layer is zero-initialized, so the gate is exactly 0 at init
@@ -275,15 +275,15 @@ class ContactGate(nn.Module):
 
 
 class PositionCorrHeads(nn.Module):
-    """位置修正头（V4_1A方案 §2.2 修正分支 3）.
+    """位置修正头（V4_A方案 §2.2 修正分支 3）.
 
     Per-reachable-part linear heads on z'_p -> six-joint pelvis-relative
     position residual Δx (18 dims), in KNEE_ANKLE_FOOT_JOINTS order
-    (lk, rk, la, ra, lf, rf — the V3_3D pos_corr convention):
+    (lk, rk, la, ra, lf, rf — the V3_Dv1 pos_corr convention):
       l_leg slot -> left knee (3); r_leg slot -> right knee (3);
       l_foot slot -> left ankle + left foot (6); r_foot slot -> right (6).
     Weight AND bias zero-initialized: the whole correction branch outputs
-    exactly 0 at init -> x_corr ≡ FK(pose_v) (contract 1, V3_3C/D 同款
+    exactly 0 at init -> x_corr ≡ FK(pose_v) (contract 1, V3_Cv1/D 同款
     结构保证先例)."""
 
     def __init__(self, dim=D_MODEL):
@@ -308,7 +308,7 @@ class PositionCorrHeads(nn.Module):
 
 
 class SG7Smooth(nn.Module):
-    """SG-7 平滑（V4_1A方案 §2.2 修正分支 3，G/H 同款防抖动税）.
+    """SG-7 平滑（V4_A方案 §2.2 修正分支 3，G/H 同款防抖动税）.
 
     Fixed Savitzky-Golay (window 7, order 2) along time applied to the
     correction output.  Coefficient-equivalent to constraints._sg_smooth's
@@ -338,8 +338,8 @@ class SG7Smooth(nn.Module):
 
 
 def build_corrected_skeleton(pose, trans, offsets, parents, pos_corr):
-    """软骨架（V4_1A方案 §2.2 修正分支 4）: FK(pose) with the six
-    KNEE_ANKLE_FOOT_JOINTS positions replaced by FK + Δx (V3_3D 同款).
+    """软骨架（V4_A方案 §2.2 修正分支 4）: FK(pose) with the six
+    KNEE_ANKLE_FOOT_JOINTS positions replaced by FK + Δx (V3_Dv1 同款).
 
     pose: (B, tw, 144); trans: (B, tw, 3); offsets: (B, 24, 3) or (24, 3);
     parents: (B, 24) or (24,); pos_corr: (B, tw, 18).
@@ -389,7 +389,7 @@ class AnySoleModelV41(nn.Module):
         self.contact_head = V41ContactHead(dim=d)
         # Correction branch (from zero).  ONE branch instance, two readouts:
         # VT2M reads the pose-head part tokens, T2M reads the prior-head part
-        # tokens (V4_1A方案 §2.3) — the same mechanism, different source.
+        # tokens (V4_A方案 §2.3) — the same mechanism, different source.
         self.corr_attn = PartXAttn(dim=d, tw=tw, nhead=nhead, dropout=dropout,
                                    beta=beta)
         self.contact_gate = ContactGate(n_reach=len(REACH_PARTS))
@@ -424,7 +424,7 @@ class AnySoleModelV41(nn.Module):
                 T_s2m=None, V_hmr=None, mask_v=None, mask_t=None):
         """config_id is accepted for the train/eval call contract and
         deliberately IGNORED — both streams always live, and the three eval
-        conditions are three readouts of this one forward (V3_3E protocol;
+        conditions are three readouts of this one forward (V3_Ev1 protocol;
         the switch acts on the correction branch only).  T stays live under
         every condition (contact head / XAttn always read the real stream).
         """

@@ -1,6 +1,6 @@
-# V3_3H 方案：物理残差归零（2026-10-17 裁定）
+# V3_Hv1 方案：物理残差归零（2026-10-17 裁定）
 
-V3_3H = 回归式单生成器 + T 物理状态 + 残差通道单遍应用（v1 两通道）。三条件 = 同一回归塔的三个读数。独立模型：不 import E/F/G 任何管线代码；只继承两件已验证物——f6_soft 接触标签（数据）与 vonly 编码器权重（V 特征）。与 V3_3G 的关系：同一数据基座（cam3 + occ010、f6_soft、三条件协议）上不同技术理念的独立实现——G 前馈因式化「完整流形，分部证据」，H 反馈纠偏「完整流形，残差归零」；两线无依赖。
+V3_Hv1 = 回归式单生成器 + T 物理状态 + 残差通道单遍应用（v1 两通道）。三条件 = 同一回归塔的三个读数。独立模型：不 import E/F/G 任何管线代码；只继承两件已验证物——f6_soft 接触标签（数据）与 vonly 编码器权重（V 特征）。与 V3_Gv1 的关系：同一数据基座（cam3 + occ010、f6_soft、三条件协议）上不同技术理念的独立实现——G 前馈因式化「完整流形，分部证据」，H 反馈纠偏「完整流形，残差归零」；两线无依赖。
 
 ## 1. 设计理念与规则（由已定位证据导出）
 
@@ -35,7 +35,7 @@ T2M = 残差层(null-V 前向的 pose_v, trans_hat, contact_logits)（V 输入�
 
 ### 2.2 V 塔（生成，单生成者）
 
-- **v_enc（冻结）**：`ModalEncoders.v_enc`——HRNet 特征 (B,tw,2051) → v_tok (B,tw,256)。权重复制自每配置的 vonly 专才 ckpt_best（V3_3H → V3_3B_vonly、V3_3H_cam3_occ010 → V3_3B_cam3_occ010_vonly），14 键冻结，入口装载 + sha256 provenance；embeddings 不冻结（time_pe 正弦、模态行随 T 流训练，F 线先例）。
+- **v_enc（冻结）**：`ModalEncoders.v_enc`——HRNet 特征 (B,tw,2051) → v_tok (B,tw,256)。权重复制自每配置的 vonly 专才 ckpt_best（V3_Hv1 → V3_Bv1_vonly、V3_Hv1_cam3_occ010 → V3_Bv1_cam3_occ010_vonly），14 键冻结，入口装载 + sha256 provenance；embeddings 不冻结（time_pe 正弦、模态行随 T 流训练，F 线先例）。
 - **v_temporal**：4 层 pre-LN TransformerEncoder（nhead=8、ff=1024、gelu），从零训练。
 - **V3HPoseHead**：9 部位硬划分（PART_JOINTS）、6 层 TransformerDecoder 单流交叉注意力，无门控、无 soft A、无 sigma 分支（H 无 NLL/回退）；输出 pose_v (B,tw,144)（pose_mean/std 归一化同 E 机器）。**无 T 姿态塔、无先验头——H 与 E 的结构性区别：E 的 T 塔复刻生成（T2M 级），H 的 T 侧不出内容。**
 - **V3HTrajHead**：2 层时序 encoder → 每帧速度 → cumsum 轨迹 trans_hat (B,tw,3)。
@@ -74,10 +74,10 @@ T 流输入三条件恒定（接触头始终读真实压力），开关只作用
 
 | 模型（载体） | V2M PA | VT2M PA | **ΔPA** | V2M Pen | VT2M Pen | **ΔPen** | V2M Global | **ΔGlobal** | V2M ATE | **ΔATE** | V2M Slide | **ΔSlide** |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| V3_3B（共享表征融合，回归） | 41.12 | 42.23 | **+1.10** | 27.45 | 21.13 | **−6.32** | 81.13 | **−5.19** | 54.14 | **−7.39** | 10.53 | **−0.65** |
-| V3_3E v2.1（双流约束，回归） | 38.58 | 38.58 | **0.00** | 27.47 | 16.73 | **−10.74** | 71.58 | **−2.72** | 42.48 | **−0.73** | 8.86 | **−0.54** |
-| V3_3F（扩散先验+引导） | 47.93 | 47.06 | **−0.87** | 27.26 | 26.45 | **−0.81** | 111.97 | **+1.21** | 87.26 | **+2.53** | 30.50 | **+14.36** |
-| **V3_3H（单生成回归+残差，本文）** | 40.32 | 40.30 | **−0.013** | 25.90 | 15.98 | **−9.92** | 76.35 | **−3.02** | 47.21 | **−1.60** | 9.67 | **−0.56** |
+| V3_Bv1（共享表征融合，回归） | 41.12 | 42.23 | **+1.10** | 27.45 | 21.13 | **−6.32** | 81.13 | **−5.19** | 54.14 | **−7.39** | 10.53 | **−0.65** |
+| V3_Ev1 v2.1（双流约束，回归） | 38.58 | 38.58 | **0.00** | 27.47 | 16.73 | **−10.74** | 71.58 | **−2.72** | 42.48 | **−0.73** | 8.86 | **−0.54** |
+| V3_Fv1（扩散先验+引导） | 47.93 | 47.06 | **−0.87** | 27.26 | 26.45 | **−0.81** | 111.97 | **+1.21** | 87.26 | **+2.53** | 30.50 | **+14.36** |
+| **V3_Hv1（单生成回归+残差，本文）** | 40.32 | 40.30 | **−0.013** | 25.90 | 15.98 | **−9.92** | 76.35 | **−3.02** | 47.21 | **−1.60** | 9.67 | **−0.56** |
 
 判读（绝对口径）：
 - **B**：底盘中强（PA 41.1），兑现最大（Global −5.2 / ATE −7.4 / Pen −6.3）但付 PA 税 +1.10——税随 T 进入共享表征而来（融合污染定位）；
@@ -105,7 +105,7 @@ occ010 两配置方向一致（H：PA −0.014 / Pen −9.00 / Global −2.56 / 
 
 ## 4. 落地文件与实现状态（2026-10-17）
 
-- 文件：`anysole/utils/constraints_h.py`（残差层：穿透 + 支撑 + floor_src 开关）；`anysole/models/common/model_v3h.py`（V 塔 + 接触头，无 T 塔、无 sigma）；`anysole/models/v3_3h.py`（入口，冻结 vonly v_enc 装载 + provenance）；`train.py` / `eval.py` / `eval_protocol.py`（v3h 分支 + 训练 V 零化 10%）；`registry.py` + `configs/z_gen/model_registry.py`（V3_3H 双配置）+ `configs/z_gen/v3h.py` + `common.py`（v3h_test）。
-- 队列：`configs/queue/00545__v3h_test__V3_3H.conf`、`00546__v3h_test__V3_3H_cam3_occ010.conf`（FORCE=false）。
+- 文件：`anysole/utils/constraints_h.py`（残差层：穿透 + 支撑 + floor_src 开关）；`anysole/models/common/model_v3h.py`（V 塔 + 接触头，无 T 塔、无 sigma）；`anysole/models/v3_3h.py`（入口，冻结 vonly v_enc 装载 + provenance）；`train.py` / `eval.py` / `eval_protocol.py`（v3h 分支 + 训练 V 零化 10%）；`registry.py` + `configs/z_gen/model_registry.py`（V3_Hv1 双配置）+ `configs/z_gen/v3h.py` + `common.py`（v3_hv1_test）。
+- 队列：`configs/queue/00545__v3_hv1_test__V3_Hv1.conf`、`00546__v3_hv1_test__V3_Hv1_cam3_occ010.conf`（FORCE=false）。
 - 冒烟（/tmp，不留产物）全过：imports/注册表、entry 构建（14 冻结 v_enc 键）、VT+null-V 前向、GT 上通道数学（踝关节唯一写入/只升不降/偏航纯水平 dh<6e-8/GT≈恒等）、t-floor 双口径（12.4mm gap + 自锚定退化复现）、足部通道证伪测量。
 - 未 commit；训练规模与 GPU 分配待用户跑（与 G 线错开）。

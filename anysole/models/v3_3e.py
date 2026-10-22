@@ -1,7 +1,7 @@
-"""V3_3E entry: constraint-fusion model (ruled 2026-10-17).
+"""V3_Ev1 entry: constraint-fusion model (ruled 2026-10-17).
 
 Fresh architecture — NOT the anysolev2 fusion/gating lineage and NOT the
-V3_3D frozen-base lineage.  Independent model (2026-09-24 restructure):
+V3_Dv1 frozen-base lineage.  Independent model (2026-09-24 restructure):
 the structure is fixed here; every training run starts from random init.
 
 Structure summary (model_v3e.py):
@@ -31,7 +31,7 @@ CONFIG_EXTRA: dict = {}
 
 
 def build(config: dict, part_joints=None):
-    """Construct the V3_3E network from the effective train config."""
+    """Construct the V3_Ev1 network from the effective train config."""
     return AnySoleModelV3E(
         d=int(config["d_model"]),
         tw=int(config["tw"]),

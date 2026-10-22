@@ -1,4 +1,4 @@
-"""V3_3G entry: regression carrier (frozen E V-stream) + part-wise
+"""V3_Gv1 entry: regression carrier (frozen E V-stream) + part-wise
 observation layer (2026-10-17).
 
 Fresh architecture (2026-09-24 independence restructure): the structure is
@@ -38,7 +38,7 @@ CONFIG_EXTRA: dict = {}
 
 
 def build(config: dict, part_joints=None):
-    """Construct the V3_3G network; load and freeze the E V-stream carrier."""
+    """Construct the V3_Gv1 network; load and freeze the E V-stream carrier."""
     model = AnySoleModelV3G(
         d=int(config["d_model"]),
         tw=int(config["tw"]),
@@ -48,7 +48,7 @@ def build(config: dict, part_joints=None):
     carrier = str(config.get("carrier_from") or "")
     if not carrier:
         raise ValueError(
-            "V3_3G requires carrier_from (the E v2.1 ckpt_best whose V stream "
+            "V3_Gv1 requires carrier_from (the E v2.1 ckpt_best whose V stream "
             "is the frozen carrier); the registry entries carry it per config")
     ckpt = torch.load(carrier, map_location="cpu")
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt

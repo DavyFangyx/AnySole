@@ -343,7 +343,7 @@ class _Accum:
 
 
 def _apply_pos_corr(pred_kp: torch.Tensor, seq: dict) -> torch.Tensor:
-    """V3_3D soft skeleton: replace the six lower-limb joint positions with
+    """V3_Dv1 soft skeleton: replace the six lower-limb joint positions with
     the position head's corrected ones (base FK + pelvis-relative dpos,
     world axes — the probe's target convention).  No-op without the head."""
     corr = seq.get("pos_corr")
@@ -470,7 +470,7 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
 
     # ---- contact ----
     if seq.get("contact_pred") is not None:
-        # V3_3E: the T contact head's own prediction (the constraint layer's
+        # V3_Ev1: the T contact head's own prediction (the constraint layer's
         # input), not the kinematic fallback.
         pred_contact = seq["contact_pred"] > 0.5
     else:
@@ -630,19 +630,19 @@ def _evaluate_config(
     v_hmr_mode = str(getattr(model, "v_input", "hrnet")) == "hmr_gvhmr"
     # F2a: heading/tilt representation.
     f2_repr = bool(getattr(model, "f2_repr", False))
-    # V3_3E: the three conditions are three readouts of one forward.
+    # V3_Ev1: the three conditions are three readouts of one forward.
     v3e_mode = bool(getattr(model, "v3e", False))
-    # V3_3G: same protocol; the observation layer replaces E's constraints.
+    # V3_Gv1: same protocol; the observation layer replaces E's constraints.
     v3g_mode = bool(getattr(model, "v3g", False))
-    # V3_3H: same protocol; the residual channels replace E's constraints,
+    # V3_Hv1: same protocol; the residual channels replace E's constraints,
     # and the T2M row is the null-V prior (V zeroed upstream) + channels.
     v3h_mode = bool(getattr(model, "v3h", False))
-    # V3_3F: the three conditions are sampler switches on one prior.
+    # V3_Fv1: the three conditions are sampler switches on one prior.
     v3f_mode = bool(getattr(model, "v3f", False))
-    # V5_1A: the three conditions are z-source readouts of one forward
+    # V5_Av1: the three conditions are z-source readouts of one forward
     # (z_src 开关 + T 流三条件恒定); 无推理侧约束层（无锚-几何组件）。
     v5_1_mode = bool(getattr(model, "v5_1", False))
-    # V4_1A: 同一前向三种读出（config_id 被忽略，E/G 同款）; V2M = V
+    # V4_Av1: 同一前向三种读出（config_id 被忽略，E/G 同款）; V2M = V
     # 载体（修正不应用）、VT2M = V + pos_corr 软骨架（seq 层应用）、
     # T2M = 先验 + pos_corr_prior。
     v4_1_mode = bool(getattr(model, "v4_1", False))
@@ -665,11 +665,11 @@ def _evaluate_config(
                 # T2M — exactly the unconditional pass.
                 t_raw, t_phys = batch["T_raw"], batch["T_phys"]
             if v5_1_mode or v4_1_mode:
-                # V5_1A/V4_1A：T 流输入三条件恒定（g_T/接触头/XAttn 恒读
+                # V5_Av1/V4_Av1：T 流输入三条件恒定（g_T/接触头/XAttn 恒读
                 # 真实压力）。
                 t_raw, t_phys = batch["T_raw"], batch["T_phys"]
             if null_t:
-                # V4_1A 判据 ③ null-T 注入（eval --null-t）：T 输入整窗
+                # V4_Av1 判据 ③ null-T 注入（eval --null-t）：T 输入整窗
                 # 置零后前向，训练正确的修正分支应输出 ≈0 → VT 行读数
                 # 退回 V2M（两次跑配对比较 = 干预实验读数）。
                 t_raw = torch.zeros_like(t_raw)
@@ -715,7 +715,7 @@ def _evaluate_config(
             if not v3f_mode:
                 v3e_contact = None
             if v3e_mode:
-                # V3_3E condition selection: VT = constraint layer on the
+                # V3_Ev1 condition selection: VT = constraint layer on the
                 # full forward, V = raw V pose, T = the T pose prior.
                 if config_value == CONFIG_VT:
                     pred_pose, pred_trans_w = apply_v3e_constraints(
@@ -728,7 +728,7 @@ def _evaluate_config(
                 else:
                     pred_pose, pred_trans_w = out["x0_prior"], out["trans_prior"] + anchor
             elif v3g_mode:
-                # V3_3G condition selection: VT = 分部观测层 on the V stream,
+                # V3_Gv1 condition selection: VT = 分部观测层 on the V stream,
                 # V = raw carrier (= E), T = T prior + 观测层.  floor_src
                 # stays the registered default "gt" (E v2.1 口径).
                 if config_value == CONFIG_VT:
@@ -747,11 +747,11 @@ def _evaluate_config(
                         batch["offsets"], batch["parents"],
                         floor_y=batch["floor_y"])
             elif v3h_mode:
-                # V3_3H condition selection: VT = 残差通道 on the V stream,
+                # V3_Hv1 condition selection: VT = 残差通道 on the V stream,
                 # V = raw V tower, T = null-V 先验 + 残差通道 (H 无 T 塔——
                 # 同一 V 塔、V 已由 condition_inputs 零化).  floor_src stays
                 # the registered default "gt" (E v2.1 口径).
-                # V3_3H_v3：VT/T 行先应用一阶足部残差（V2M 行不应用）。
+                # V3_Hv3：VT/T 行先应用一阶足部残差（V2M 行不应用）。
                 pose_vt = apply_foot_residual(
                     out["x0_hat"], out["foot_res"],
                     landing=str(getattr(model, "res_landing", "foot"))) if out.get("foot_res") is not None else out["x0_hat"]
@@ -773,7 +773,7 @@ def _evaluate_config(
                         batch["offsets"], batch["parents"],
                         floor_y=batch["floor_y"])
             elif v5_1_mode:
-                # V5_1A condition selection: 三行直接读 z_src 选定的读出
+                # V5_Av1 condition selection: 三行直接读 z_src 选定的读出
                 # （前向已按条件切换；无推理侧约束层——无锚-几何组件，
                 # 穿透/Global 行只作报告）。VT 行接触读数 = G 配方接触头。
                 if config_value == CONFIG_VT:
@@ -781,7 +781,7 @@ def _evaluate_config(
                 pred_pose, pred_trans_w = out["x0_hat"], out["trans_hat"] + anchor
                 v4_1_corr = None
             elif v4_1_mode:
-                # V4_1A condition selection: 三读出 + 修正分支开关。
+                # V4_Av1 condition selection: 三读出 + 修正分支开关。
                 # V2M = V 载体（修正不应用，契约 1 守卫）；VT2M = V +
                 # pos_corr（seq 层软骨架）；T2M = 先验 + pos_corr_prior。
                 if config_value == CONFIG_VT:
@@ -825,8 +825,8 @@ def _evaluate_config(
                 }
             else:
                 if v4_1_mode:
-                    # V4_1A 契约 1：V2M 行 seq 修正必须为 None（v4_1_corr
-                    # 按条件为空）——不得回退到 out["pos_corr"]（V3_3D
+                    # V4_Av1 契约 1：V2M 行 seq 修正必须为 None（v4_1_corr
+                    # 按条件为空）——不得回退到 out["pos_corr"]（V3_Dv1
                     # 遗留口径会污染 V2M 行）。
                     seq_pos_corr = (v4_1_corr.reshape(-1, v4_1_corr.shape[-1])
                                     if v4_1_corr is not None else None)

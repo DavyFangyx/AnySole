@@ -1,10 +1,10 @@
 # 审计面 2：CoP/相位 ridge 读出（GT 修正轴，2026-10-20）
 
 **对象**：与审计面 1 同条件——tactile = raw108（视频轴，不动），GT（相位/
-CoP 目标）建在修正轴上。载体 = E（V3_3B_denoised ckpt，编码器冻结）。
+CoP 目标）建在修正轴上。载体 = E（V3_Bv1_denoised ckpt，编码器冻结）。
 
 **产物**（本目录）：
-- `probe_v5_phase_cop_readout_raw108_offset.json`（修正轴跑，V3_3B，CPU）、
+- `probe_v5_phase_cop_readout_raw108_offset.json`（修正轴跑，V3_Bv1，CPU）、
   `probe_run_offset.log`
 - `probe_v5_phase_cop_readout_raw108_ctrl.json`（未修正对照，同 ckpt 同设备）、
   `probe_run_ctrl.log`
@@ -14,7 +14,7 @@ CoP 目标）建在修正轴上。载体 = E（V3_3B_denoised ckpt，编码器�
 
 ## 口径
 
-- 探针：`z_note/multimodal_fusion/V5_1方案/probe_v5_phase_cop_readout.py`。
+- 探针：`z_note/multimodal_fusion/V5_方案/probe_v5_phase_cop_readout.py`。
   本次唯一改动 = 新增 `--corrected-offset`（store_true，缺省 False），贯穿
   所有 GT 消费路径：① `AnySoleDataset(..., corrected_offset=args.corrected_offset)`
   （载体窗内 kp_gt/floor_y 等随修正）；② `session_gt()` 的 mocap_t 同样
@@ -30,13 +30,13 @@ CoP 目标）建在修正轴上。载体 = E（V3_3B_denoised ckpt，编码器�
   预计算文件（dataset 训练用的 `v5_1_gt.load_cop` npz 才是独立文件，
   本探针未使用）。故按任务口径「贯穿所有 GT 消费路径」在 session_gt 内
   显式应用同一表同一式修正（未改变任何公式/阈值）。
-- 载体 ckpt：`results/AnySole/V3_3B_denoised_joint_and/tw20_st20_lr0.0001_
+- 载体 ckpt：`results/AnySole/V3_Bv1_denoised_joint_and/tw20_st20_lr0.0001_
   lp3_lt1_lk1_la0.05_ls0.01_sf0.1_wu0.05_gc5_ep740_bs256_sd1/checkpoints/
   ckpt_best.pt`（存在，saved config：contact_method=joint_and；
   `--tactile-input raw108` 覆盖）。**与 10-19 载体不同**：10-19 JSON
-  provenance = `V3_3E_f6_soft`（cuda:3）。因此 raw108 读出与「T 可读」判据
+  provenance = `V3_Ev1_f6_soft`（cuda:3）。因此 raw108 读出与「T 可读」判据
   （const−raw108）不含编码器，跨 ckpt 直接可比；v_tok/vt 读出跨 ckpt
-  **不可比**（编码器权重不同），本审计以同 ckpt 同设备（V3_3B，CPU）的
+  **不可比**（编码器权重不同），本审计以同 ckpt 同设备（V3_Bv1，CPU）的
   未修正对照（ctrl）作 v_tok 一致性基准。
 - 运行：`--device cpu`（任务要求；本机 GPU 训练占用，全程未碰 GPU）。
 - 如实登记：JSON `provenance.date` 为脚本硬编码 "2026-10-19"（脚本既有
@@ -97,8 +97,8 @@ V 更强（raw108 − v_tok，同 ckpt ctrl↔offset）：
 | cop_L | **−0.0016 [−0.0021, −0.0011]** | **−0.0015 [−0.0025, −0.0003]** | 同（显著为负） |
 | cop_R | +0.0003 [−0.0008, +0.0014] | −0.0011 [−0.0023, +0.0000] | 同（不显著） |
 
-vt>const（同 ckpt ctrl↔offset；注意 ctrl 的 vt 是 V3_3B 编码器，与 ref
-的 V3_3E 格局不同属 ckpt 效应，不作跨 ckpt 比）：
+vt>const（同 ckpt ctrl↔offset；注意 ctrl 的 vt 是 V3_Bv1 编码器，与 ref
+的 V3_Ev1 格局不同属 ckpt 效应，不作跨 ckpt 比）：
 
 | 通道 | ctrl | offset | 格局 |
 |---|---|---|---|
@@ -112,13 +112,13 @@ vt>const（同 ckpt ctrl↔offset；注意 ctrl 的 vt 是 V3_3B 编码器，与
 任务预期「raw108_offset 的 v_tok 读出应与未修正版在设备漂移量级内一致」。
 **如实报告：不一致，且原因明确、非缺陷。** 数字与分解：
 
-1. **对照复现验证（先行）**：ctrl（未修正，同 ckpt V3_3B，CPU）vs
-   ref（10-19，V3_3E，GPU）的 raw108 读出与 T 可读 verdict **逐位全等**
+1. **对照复现验证（先行）**：ctrl（未修正，同 ckpt V3_Bv1，CPU）vs
+   ref（10-19，V3_Ev1，GPU）的 raw108 读出与 T 可读 verdict **逐位全等**
    （mse 差 = 0.000e+00 ×4 通道；verdict 三元组 == True）——管道确定性成立，
    ctrl 可作为同条件基准。
 2. **ckpt 效应分解**：ctrl−ref 的 v_tok 读出差 = +0.00455 / +0.00255 /
    −4.77e-5 / +6.57e-5（phase_L/R、cop_L/R）——即 10-19 载体是
-   V3_3E_f6_soft（JSON provenance 证据），任务口径中的 V3_3B 是不同编码器，
+   V3_Ev1_f6_soft（JSON provenance 证据），任务口径中的 V3_Bv1 是不同编码器，
    v_tok 特征本身因权重不同而不同。设备漂移参考（v3 审计实测 CPU↔GPU
    同 ckpt ≤1.6e-9 results / ≤4.1e-9 verdict）远小于该量级。
 3. **GT 轴效应分解（本检查的主体）**：offset−ctrl 的 v_tok 读出差 =
@@ -148,10 +148,10 @@ vt>const（同 ckpt ctrl↔offset；注意 ctrl 的 vt 是 V3_3B 编码器，与
    与 raw108 同向。
 3. **V 更强格局零翻转**：4 通道 raw108−v_tok 判定 ctrl↔offset 全同号
    同判定（cop_L 显著为负维持）。vt>const 的 phase_R 翻转（显著→不显著）
-   为同 ckpt 内 GT 轴效应，但该格的 ctrl 显著态本身是 V3_3B ckpt 下的
-   状态（10-19 V3_3E 下即不显著），不跨 ckpt 外推。
+   为同 ckpt 内 GT 轴效应，但该格的 ctrl 显著态本身是 V3_Bv1 ckpt 下的
+   状态（10-19 V3_Ev1 下即不显著），不跨 ckpt 外推。
 4. **载体 ckpt 与 10-19 不同（如实登记）**：本跑按任务口径用
-   V3_3B_denoised_joint_and，10-19 JSON provenance 为 V3_3E_f6_soft。
+   V3_Bv1_denoised_joint_and，10-19 JSON provenance 为 V3_Ev1_f6_soft。
    本审计的所有主结论（表 1 raw108 行、表 3 T 可读列）不含编码器，
    不受该差异影响；v_tok/vt 的跨 ckpt 比较不可行，已在口径与一致性
    检查中显式分解。

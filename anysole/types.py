@@ -190,7 +190,7 @@ V_HMR_IMG_DIM = 1024 # HMR2 ViT backbone features
 V_HMR_MISC_DIM = 5   # bbox_info 3 + q_V 2
 FUSE_LEN = 40  # V(20) + combined T(20)
 N_CONTACT = 2
-# V3_3F: the diffused state = [pose 6D | root trajectory (anchor-relative,
+# V3_Fv1: the diffused state = [pose 6D | root trajectory (anchor-relative,
 # world axes) | soft contact per foot], normalized per component.
 STATE_DIM = POSE_DIM + 3 + N_CONTACT
 
@@ -216,7 +216,7 @@ JOINT_PROTOCOL_CHECKSUM = hashlib.sha256(json.dumps(
 
 LEFT_LEG_JOINTS = (1, 4, 7, 10)
 RIGHT_LEG_JOINTS = (2, 5, 8, 11)
-# V3_3F: the refinement layer's optimization variables — the full leg chain
+# V3_Fv1: the refinement layer's optimization variables — the full leg chain
 # (hip/knee/ankle/foot per side).  Upper-body joints are structurally absent
 # from this set, so T-driven corrections can never touch them.
 LEG_JOINTS = LEFT_LEG_JOINTS + RIGHT_LEG_JOINTS
@@ -231,7 +231,7 @@ ANKLE_FOOT_JOINTS = (
     JOINT_NAMES.index("left_ankle"), JOINT_NAMES.index("right_ankle"),
     JOINT_NAMES.index("left_foot"), JOINT_NAMES.index("right_foot"),
 )
-# V3_3D position head: the six lower-limb joints whose pelvis-relative
+# V3_Dv1 position head: the six lower-limb joints whose pelvis-relative
 # positions carry T's measurable increments (z_note/multimodal_fusion/Appendix/T信息量判定实验.md §3.2 — the
 # probe's direct-regression target set; probe_v33b_info_ceiling_direct.py
 # SIX_JOINTS).  Keep this next to the semantic groups above.

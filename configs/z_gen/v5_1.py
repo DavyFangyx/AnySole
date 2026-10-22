@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate the V5_1 first-group queue tasks (2026-10-19, V5_1A方案).
+"""Generate the V5_Av1 first-group queue tasks (2026-10-19, V5_Av1方案).
 
 Two configs, self-trained and self-tested per config:
-  V5_1               cam3 base (v1.yaml roots);
-  V5_1_cam3_occ010   cam3 + bottom 10% bbox occlusion (v1_cam3_occ010.yaml).
+  V5_Av1               cam3 base (v1.yaml roots);
+  V5_Av1_cam3_occ010   cam3 + bottom 10% bbox occlusion (v1_cam3_occ010.yaml).
 """
 
 from __future__ import annotations
@@ -14,16 +14,16 @@ from common import emit_experiment
 from model_registry import MODELS
 
 SUITES = {
-    "V5_1": [
-        ("v5_1_test", ["V5_1", "V5_1_cam3_occ010", "V5_1_occmix_cam3_occ010"]),
+    "V5_Av1": [
+        ("v5_1_test", ["V5_Av1", "V5_Av1_cam3_occ010", "V5_Av1_occmix_cam3_occ010"]),
     ],
 }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", default="V5_1",
-                        help="comma-separated suite IDs (default: V5_1)")
+    parser.add_argument("--suite", default="V5_Av1",
+                        help="comma-separated suite IDs (default: V5_Av1)")
     parser.add_argument("--models", default="",
                         help="comma-separated model IDs to subset the group")
     args = parser.parse_args()

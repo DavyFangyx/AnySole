@@ -1,4 +1,4 @@
-"""V3_3E constraint layer (v2.1, inference-only, zero parameters).
+"""V3_Ev1 constraint layer (v2.1, inference-only, zero parameters).
 
 v1 audit (2026-10-17, probe_v33e_ablate + official test) -> v2.1 rulings:
 - 回退缺陷: the inverse-variance fallback gave the T prior ~48% weight

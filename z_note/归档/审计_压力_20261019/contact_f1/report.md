@@ -37,7 +37,7 @@
   - L196–199：`tactile_input` 合法集合加入 `denoised108_v2`；
   - L288–306：`denoised108` / `denoised108_v2` 共用分支，按名字映射 package v1/v2，调用显式传 `package=` 与 `root=handoff_root(package)`。
 - raw108 分支（L283–285）与接触标签装载零改动；`denoised108` 行为与修复前等价（修复前该路径因包路径不存在必然抛 FileNotFoundError，修复后可用）。
-- 说明：上述两文件在本次修改前已有他人未提交改动（V5_1 GT、cam_id 等），本任务只改了上面列出的行。
+- 说明：上述两文件在本次修改前已有他人未提交改动（V5_Av1 GT、cam_id 等），本任务只改了上面列出的行。
 
 ## 四、接线自测（数值验证）
 

@@ -1,12 +1,12 @@
-"""T-residual branch (V3_3C): a frozen-V corrector reading only the tactile
+"""T-residual branch (V3_Cv1): a frozen-V corrector reading only the tactile
 token stream.
 
 The branch consumes the frozen ``t_tok`` (B, tw, 256) and outputs a per-frame
 correction in native 6D pose space (B, tw, 144).  The final layer is
 zero-initialized so the correction is exactly zero at init — combined with
 model_v2's residual regime (the frozen base runs in its V-only mode under
-every condition; the real tactile stream feeds only this branch), the V3_3C
-output starts bit-identical to the frozen V3_3B_vonly base's V-only output
+every condition; the real tactile stream feeds only this branch), the V3_Cv1
+output starts bit-identical to the frozen V3_Bv1_vonly base's V-only output
 (VT == V at step 0); the trained model can then only improve on the base
 where the tactile stream carries signal.
 

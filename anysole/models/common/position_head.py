@@ -1,4 +1,4 @@
-"""Position head (V3_3D): the joint position-space readout of [v_tok; t_tok].
+"""Position head (V3_Dv1): the joint position-space readout of [v_tok; t_tok].
 
 Design (z_note/multimodal_fusion/Appendix/T信息量判定实验.md §3.2 残差范式 ridge 界 → 联合读出裁定):
 
@@ -20,7 +20,7 @@ Design (z_note/multimodal_fusion/Appendix/T信息量判定实验.md §3.2 残差
         traj head's v_hat before the cumsum — T's realized-value channel
         (实验 2: global MPJPE / root ATE / ground penetration).
 - Zero final layers ⇒ at init the corrected outputs are bit-identical to the
-  frozen base (the V3_3C structural guarantee, now in position space).
+  frozen base (the V3_Cv1 structural guarantee, now in position space).
 - Active under every condition (VT / V-only / T-only): the encoders' null
   replacement handles the missing stream, so the head is trained with the
   same config sampling as the main model (0.5 / 0.25 / 0.25).

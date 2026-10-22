@@ -2,9 +2,9 @@
 
 读取三个 JSON：
   ref     = audit_20261019/cop_phase/probe_v5_phase_cop_readout_raw108.json
-            （未修正；载体 V3_3E_f6_soft ckpt，cuda:3，10-19）
-  ctrl    = 本审计同载体同设备（V3_3B_denoised ckpt，cpu）未修正对照
-  offset  = 本审计同载体同设备（V3_3B_denoised ckpt，cpu）修正轴
+            （未修正；载体 V3_Ev1_f6_soft ckpt，cuda:3，10-19）
+  ctrl    = 本审计同载体同设备（V3_Bv1_denoised ckpt，cpu）未修正对照
+  offset  = 本审计同载体同设备（V3_Bv1_denoised ckpt，cpu）修正轴
 输出：
   - 表1：results mse_test（4 通道 × 3 读出 × 3 版本）+ const/lam/n_valid；
   - 差表：offset−ref、offset−ctrl（results mse + verdict 三元组）；
@@ -41,11 +41,11 @@ def sig(ci) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ref", type=Path, required=True,
-                    help="10-19 raw108 JSON（未修正，V3_3E，GPU）")
+                    help="10-19 raw108 JSON（未修正，V3_Ev1，GPU）")
     ap.add_argument("--ctrl", type=Path, required=True,
-                    help="本审计未修正对照（V3_3B，CPU）")
+                    help="本审计未修正对照（V3_Bv1，CPU）")
     ap.add_argument("--offset", type=Path, required=True,
-                    help="本审计修正轴（V3_3B，CPU）")
+                    help="本审计修正轴（V3_Bv1，CPU）")
     ap.add_argument("--out", type=Path,
                     default=Path(__file__).parent / "compare_offset_summary.json")
     args = ap.parse_args()

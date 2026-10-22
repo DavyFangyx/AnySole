@@ -11,8 +11,8 @@
     raw108−v_tok，vt>const）。
 
 口径事实（如实登记）：anchor 的 provenance.ckpt =
-V3_3B_denoised_joint_and；v2/v3 本跑按任务指定 ckpt =
-V3_3B_joint_and。raw108 读出（特征 = T 拼接）与 T 可读判据（const−raw108）
+V3_Bv1_denoised_joint_and；v2/v3 本跑按任务指定 ckpt =
+V3_Bv1_joint_and。raw108 读出（特征 = T 拼接）与 T 可读判据（const−raw108）
 不含编码器 → 三版直接可比；v_tok/vt 读出含编码器 → anchor↔v2/v3 跨 ckpt
 不可比（v2↔v3 同 ckpt 可比）。
 只读，不修改任何输入 JSON。

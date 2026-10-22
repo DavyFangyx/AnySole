@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""V5_1A §4.2 前置探针：相位/CoP 可读性（2026-10-19）.
+"""V5_Av1 §4.2 前置探针：相位/CoP 可读性（2026-10-19）.
 
 零训练 ridge：从 T 侧 raw108 与 V 侧 v_tok（E v2.1 ckpt_best 冻结编码器）
 读出每足 (cos, sin) 相位嵌入与 CoP 网格坐标。
@@ -13,12 +13,12 @@
   foot_heat，provenance 注明）→ cop_from_grid（与触觉 CoP 同公式同单位
   0-1 网格坐标）；只统计接触帧（和值 > 0）；
 - 特征：raw108 = [T_raw 96 | T_phys 12]（dataset 归一化口径）；v_tok =
-  E encoders 单次前向（V5_1A 载体同源）；窗口级收集、按帧拼接
+  E encoders 单次前向（V5_Av1 载体同源）；窗口级收集、按帧拼接
   （tw = stride 不重叠；窗帧范围取 dataset.valid_windows 保证 GT 对齐）；
 - ridge：λ 网格 1e-3~1e5 对数 17 档；TRAIN 内 80/20 留出选参（会话级
   连续切分）→ 全量 TRAIN 重拟 → TEST（val ≡ test）打分；常数基线 =
   TRAIN 有效帧均值；
-- 判据（V5_1A §4.2 逐通道独立）：启用门槛 = raw108 误差显著低于常数基线
+- 判据（V5_Av1 §4.2 逐通道独立）：启用门槛 = raw108 误差显著低于常数基线
   （逐会话配对 bootstrap 95% CI）；V 强语义 = v_tok 误差显著低于 raw108；
   停用门槛 = raw108 不优于常数。
 
@@ -317,7 +317,7 @@ def run_probe(model, dataset_tr, dataset_te, device, batch_size, seq_root, max_s
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", type=Path,
-                    default=REPO / "results/AnySole/V3_3E_f6_soft/"
+                    default=REPO / "results/AnySole/V3_Ev1_f6_soft/"
                             "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
                             "checkpoints/ckpt_best.pt")
     ap.add_argument("--device", default="cuda:3")

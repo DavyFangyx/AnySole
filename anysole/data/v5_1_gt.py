@@ -1,7 +1,7 @@
-"""V5_1A z 通道 GT（相位 / CoP）——口径唯一来源（2026-10-19）。
+"""V5_Av1 z 通道 GT（相位 / CoP）——口径唯一来源（2026-10-19）。
 
-派生口径逐段复制自 `z_note/multimodal_fusion/V5_1方案/
-probe_v5_phase_cop_readout.py`（2026-10-19 实测落定的前置探针，V5_1A
+派生口径逐段复制自 `z_note/multimodal_fusion/V5_方案/
+probe_v5_phase_cop_readout.py`（2026-10-19 实测落定的前置探针，V5_Av1
 §4.2），provenance 注明：
 
 - GT 相位（每足归一化周期相位）：GT 足关节（10/11）世界高 < floor_y
@@ -57,7 +57,7 @@ GT_S0, GT_S1, GT_LAT = 0.10, 0.16, 0.045   # foot_heat 网格边界（D8 口径�
 GT_ANKLE_DZ = 0.02
 MIN_CYCLE_SPAN = 10           # 相位周期最短帧数（噪声触地不计数）
 
-V5_1_GT_ROOT = ANYSOLE_INPUT_ROOT / "gt_v5_1"
+V5_Av1_GT_ROOT = ANYSOLE_INPUT_ROOT / "gt_v5_1"
 
 
 def derive_phase_gt(kp_gt: np.ndarray, floor_y: float) -> dict:
@@ -145,7 +145,7 @@ def session_cop_gt(shared: dict, motion: dict, floor: float, n_frames: int):
 
 
 def cop_path(session_id: str) -> Path:
-    return V5_1_GT_ROOT / ("%s.npz" % session_id)
+    return V5_Av1_GT_ROOT / ("%s.npz" % session_id)
 
 
 def build_one(session_id: str, seq_root: Path, *, force: bool = False) -> Path:
@@ -189,7 +189,7 @@ def load_cop(session_id: str, n_frames: int) -> tuple:
     path = cop_path(session_id)
     if not path.is_file():
         raise FileNotFoundError(
-            f"Missing V5_1 GT CoP cache {path}. Run "
+            f"Missing V5_Av1 GT CoP cache {path}. Run "
             f"`python -m anysole.data.v5_1_gt --session {session_id}`."
         )
     data = dict(np.load(path, allow_pickle=True))
@@ -217,7 +217,7 @@ def _split_ids(split: str) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     from anysole.types import SEQ_ROOT  # local: avoid top-level import weight
 
-    parser = argparse.ArgumentParser(description="Build V5_1 GT CoP caches from shared facts.")
+    parser = argparse.ArgumentParser(description="Build V5_Av1 GT CoP caches from shared facts.")
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--session", action="append", default=[])
     scope.add_argument("--split", default=None,

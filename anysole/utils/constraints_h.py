@@ -1,6 +1,6 @@
-"""V3_3H residual layer (v1, inference-only, zero parameters).
+"""V3_Hv1 residual layer (v1, inference-only, zero parameters).
 
-设计规则（V3_3H方案.md §1/§2.3）——「完整流形，残差归零」：
+设计规则（V3_H方案.md §1/§2.3）——「完整流形，残差归零」：
 - 反馈规则：T 先定义物理状态（接触、地面），修正由 V 假设与该状态的
   物理残差驱动；残差为零则修正为零（零税双保险）。
 - 通道规则：每条通道 = (坐标, 残差, 方向, 增益, 饱和)，单遍应用、
@@ -29,7 +29,7 @@
 滚动（GT 接触帧与竖直方向夹角均值偏差 0.50 rad、足关节局部"足底法向"
 均值偏差 0.20 rad、p95 0.44 rad），不存在稳定的平足几何参照；任何固定
 参照的朝向对齐都会在 GT 正确姿态上产生偏置。足部姿态兑现整体移入一阶
-对照实验（T 特征残差头，V3_3H方案.md §3）。
+对照实验（T 特征残差头，V3_H方案.md §3）。
 """
 
 from __future__ import annotations
@@ -180,7 +180,7 @@ def apply_v3h_noanchor(
     offsets: torch.Tensor,
     parents: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """V3_3H_v5 无锚版：只留 gauge-free 的支撑通道（接触门控踝-偏航阻尼）。
+    """V3_Hv5 无锚版：只留 gauge-free 的支撑通道（接触门控踝-偏航阻尼）。
 
     地面/穿透通道整体删除——T 提供不了绝对高度（gauge 自由度），模型
     不再消费任何 floor 输入；穿透/全局/ATE 成为纯观测值（底盘误差全额
@@ -196,7 +196,7 @@ def apply_v3h_noanchor(
 def apply_v3h(no_anchor: bool, pose: torch.Tensor, trans: torch.Tensor,
               contact_logits: torch.Tensor, offsets: torch.Tensor,
               parents: torch.Tensor, floor_y: torch.Tensor = None):
-    """V3_3H 推理层分派：no_anchor=True 只跑支撑通道（不消费 floor）；
+    """V3_Hv1 推理层分派：no_anchor=True 只跑支撑通道（不消费 floor）；
     否则穿透 + 支撑（gt/t floor 开关）。"""
     if no_anchor:
         return apply_v3h_noanchor(pose, trans, contact_logits, offsets, parents)

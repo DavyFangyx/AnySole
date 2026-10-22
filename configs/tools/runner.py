@@ -91,7 +91,7 @@ def _append_train_args(command: list[str], spec: dict[str, Any]) -> None:
     unmapped = [k for k in train_args if k not in _TRAIN_FLAG_MAP]
     if unmapped:
         # Silent drops here produce runs missing structural provenance
-        # (2026-10-17 V3_3G carrier_from incident) — fail loudly instead.
+        # (2026-10-17 V3_Gv1 carrier_from incident) — fail loudly instead.
         raise RuntimeError(
             "train_args keys without a CLI mapping in TRAIN_ARG_FLAG_MAP: %s"
             % ", ".join(sorted(unmapped)))
@@ -113,7 +113,7 @@ def _write_initial_manifest(registry: dict[str, Any], experiment_id: str, model_
     spec = _merge_model_spec(registry, model_id)
     if train_overrides:
         spec["train_args"] = {**(spec.get("train_args") or {}), **train_overrides}
-    # V3_3C fine-tune: the sanctioned provenance is the BASE ckpt passed to
+    # V3_Cv1 fine-tune: the sanctioned provenance is the BASE ckpt passed to
     # --init-from (deliberate exception to the 2026-09-24 no-warm-start
     # independence rule; see z_note/multimodal_fusion/Appendix/T信息量判定实验.md §5.1).
     init_from = (spec.get("train_args") or {}).get("init_from")
@@ -155,7 +155,7 @@ def _train_command(registry: dict[str, Any], model_id: str,
                    train_overrides: dict[str, Any] | None = None) -> list[str]:
     spec = _merge_model_spec(registry, model_id)
     if train_overrides:
-        # V6_1A occ_mix：conf 直写开关（OCC_MIX/P_OCC/P_NULLV/P_NULLT）
+        # V6_Av1 occ_mix：conf 直写开关（OCC_MIX/P_OCC/P_NULLV/P_NULLT）
         # 注入 train_args（MODELS 表默认不带 = 默认关）。
         spec["train_args"] = {**(spec.get("train_args") or {}), **train_overrides}
     config = config_path(registry, model_id)
@@ -485,7 +485,7 @@ def _run_task(
         model_id = str(values.get("MODEL_ID", "")).strip()
         if not model_id:
             raise ValueError("TASK=model_run without MODEL_ID")
-        # V6_1A occ_mix：conf 直写开关（默认关）。OCC_MIX=true 时注入
+        # V6_Av1 occ_mix：conf 直写开关（默认关）。OCC_MIX=true 时注入
         # train_args；P_OCC/P_NULLV/P_NULLT 覆盖预注册默认 0.2/0.1/0.1。
         train_overrides: dict[str, Any] = {}
         if str(values.get("OCC_MIX", "false")).strip().lower() in {"1", "true", "yes", "on"}:

@@ -51,7 +51,7 @@ T敏感性指标分类.md（社区口径）的实现载体，探针 1 的全面�
 特征源 = { ckpt: <路径>, 层: v_tok/t_tok（编码器输出）, 条件前向: 编码后 null 替换 }
 ```
 
-写入输出 JSON 的 provenance 字段。默认：V3_3B 生产 ckpt_best（探针 1
+写入输出 JSON 的 provenance 字段。默认：V3_Bv1 生产 ckpt_best（探针 1
 同源、三条件前向已验证）。**更换 ckpt → 全部读数重跑，旧读数作废**。
 最终取值：待定。
 
@@ -74,4 +74,4 @@ T敏感性指标分类.md（社区口径）的实现载体，探针 1 的全面�
 - 产物：`results/AnySole/probes/probe_info_panel.json`（三条件 × 10 项 +
   PA 部位 × 两路径 + Δprobe CI + Δmodel 对照）；特征缓存
   `.info_panel_cache/feats.pt`（38420 训练帧 / 12520 测试帧）；
-- 特征源：V3_3B 生产 ckpt_best（方案 §4 默认值）。
+- 特征源：V3_Bv1 生产 ckpt_best（方案 §4 默认值）。

@@ -28,48 +28,48 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
     },
     "singlemodal_eval": {
         "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_3B"],
+        "MODEL_IDS": ["V3_Bv1"],
         "SPECIALISTS": ["vonly", "tonly"],
         "REQUIRES": [],
     },
-    # 交接包降噪压力重训（2026-10-17）：V3_3B 同结构，tactile_input=
+    # 交接包降噪压力重训（2026-10-17）：V3_Bv1 同结构，tactile_input=
     # denoised108（v3_3b_denoised 入口固定）。只训主线——探针实验读主线
-    # 三条件，不需要专才；T 流换了数据源，旧 V3_3B_tonly 不再等价。
+    # 三条件，不需要专才；T 流换了数据源，旧 V3_Bv1_tonly 不再等价。
     "singlemodal_eval_denoised": {
         "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_3B_denoised"],
+        "MODEL_IDS": ["V3_Bv1_denoised"],
         "SPECIALISTS": [],
         "REQUIRES": [],
     },
     # 降噪压力 E/F（2026-10-17）：同协议，主线 only。
     "singlemodal_eval_denoised_ef": {
         "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_3E_denoised", "V3_3F_denoised"],
+        "MODEL_IDS": ["V3_Ev1_denoised", "V3_Fv1_denoised"],
         "SPECIALISTS": [],
         "REQUIRES": [],
     },
     # 四相机扩展 D2 (2026-10-12): same protocol on the three new cameras.
     # tonly is deliberately absent -- the T stream is camera-independent and
-    # the shared V3_3B_tonly specialist serves all four cameras.
+    # the shared V3_Bv1_tonly specialist serves all four cameras.
     "singlemodal_eval_cams": {
         "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_3B_cam1", "V3_3B_cam2", "V3_3B_cam4"],
+        "MODEL_IDS": ["V3_Bv1_cam1", "V3_Bv1_cam2", "V3_Bv1_cam4"],
         "SPECIALISTS": ["vonly"],
         "REQUIRES": [],
     },
     # V-degradation 遮挡组 (2026-10-13): cam3 with the bottom fraction of the
     # person bbox occluded.  tonly is absent for the same reason as the camera
-    # group -- the T stream is occlusion-independent, V3_3B_tonly serves all.
+    # group -- the T stream is occlusion-independent, V3_Bv1_tonly serves all.
     "singlemodal_eval_occl": {
         "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_3B_cam3_occ010", "V3_3B_cam3_occ020",
-                      "V3_3B_cam3_occ030", "V3_3B_cam3_occ050"],
+        "MODEL_IDS": ["V3_Bv1_cam3_occ010", "V3_Bv1_cam3_occ020",
+                      "V3_Bv1_cam3_occ030", "V3_Bv1_cam3_occ050"],
         "SPECIALISTS": ["vonly"],
         "REQUIRES": [],
     },
     "rho_grid_eval": {
         "KIND": "rho_grid",
-        "MODEL_IDS": ["V3_3B"],
+        "MODEL_IDS": ["V3_Bv1"],
         "REQUIRES": [],
         "RHOS": "0,20,40,60,80,100",
         "TRAIN_REPR_RHOS": "0,100",
@@ -78,195 +78,195 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
     },
     "residual_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3C"],
+        "MODEL_IDS": ["V3_Cv1"],
         "REQUIRES": [],
     },
     "position_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3D"],
+        "MODEL_IDS": ["V3_Dv1"],
         "REQUIRES": [],
     },
-    # V3_3D 削弱套件（2026-10-15）：8 配置 ×（训练 + val + test）事务；
-    # cam3 基准行 = position_test/V3_3D。每配置自训自测，与 V3_3B 套件同协议。
-    # V3_3B occ010 生产评估补跑（2026-10-18）：ckpt 已训（10-13），
+    # V3_Dv1 削弱套件（2026-10-15）：8 配置 ×（训练 + val + test）事务；
+    # cam3 基准行 = position_test/V3_Dv1。每配置自训自测，与 V3_Bv1 套件同协议。
+    # V3_Bv1 occ010 生产评估补跑（2026-10-18）：ckpt 已训（10-13），
     # metrics 缺失——只补评估。
     "v3b_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3B_cam3_occ010"],
+        "MODEL_IDS": ["V3_Bv1_cam3_occ010"],
         "REQUIRES": [],
     },
-    # V3_3E 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
+    # V3_Ev1 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
     "v3e_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3E", "V3_3E_cam3_occ010"],
+        "MODEL_IDS": ["V3_Ev1", "V3_Ev1_cam3_occ010"],
         "REQUIRES": [],
     },
-    # V3_3F 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
+    # V3_Fv1 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
     "v3f_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3F", "V3_3F_cam3_occ010"],
+        "MODEL_IDS": ["V3_Fv1", "V3_Fv1_cam3_occ010"],
         "REQUIRES": [],
     },
-    # V3_3G 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
+    # V3_Gv1 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
     "v3g_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3G", "V3_3G_cam3_occ010"],
+        "MODEL_IDS": ["V3_Gv1", "V3_Gv1_cam3_occ010"],
         "REQUIRES": [],
     },
-    # V3_3H 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
+    # V3_Hv1 首组（2026-10-17）：cam3 基准 + cam3+occ010，自训自测。
     "v3h_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3H", "V3_3H_cam3_occ010"],
+        "MODEL_IDS": ["V3_Hv1", "V3_Hv1_cam3_occ010"],
         "REQUIRES": [],
     },
-    # V3_3H_v2 首组（2026-10-19）：命题 2 载体依赖修复（T 流 aux 重建）。
+    # V3_Hv2 首组（2026-10-19）：命题 2 载体依赖修复（T 流 aux 重建）。
     "v3h2_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3H_v2", "V3_3H_v2_cam3_occ010"],
+        "MODEL_IDS": ["V3_Hv2", "V3_Hv2_cam3_occ010"],
         "REQUIRES": [],
     },
-    # V3_3H_v3 首组（2026-10-19）：v2 + 一阶足部残差头（命题 2 兑现通道）。
+    # V3_Hv3 首组（2026-10-19）：v2 + 一阶足部残差头（命题 2 兑现通道）。
     "v3h3_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3H_v3", "V3_3H_v3_cam3_occ010"],
+        "MODEL_IDS": ["V3_Hv3", "V3_Hv3_cam3_occ010"],
         "REQUIRES": [],
     },
     # offset 重同步组（2026-10-20）：cam3 基准 + occ010/020/030/050，
     # 自训自测（corrected_offset=True）。
     "offsetfix": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3B_cam3_offfix",
-                      "V3_3B_cam3_occ010_offfix", "V3_3B_cam3_occ020_offfix",
-                      "V3_3B_cam3_occ030_offfix", "V3_3B_cam3_occ050_offfix"],
+        "MODEL_IDS": ["V3_Bv1_cam3_offfix",
+                      "V3_Bv1_cam3_occ010_offfix", "V3_Bv1_cam3_occ020_offfix",
+                      "V3_Bv1_cam3_occ030_offfix", "V3_Bv1_cam3_occ050_offfix"],
         "REQUIRES": [],
     },
-    # offset 设计组（2026-10-21）：载体先行——E_offfix（V5_1/V4_1 载体）
-    # 与 vonly 专才（V3_3H 载体）；设计主体在载体完成后另批入队。
+    # offset 设计组（2026-10-21）：载体先行——E_offfix（V5_Av1/V4_Av1 载体）
+    # 与 vonly 专才（V3_Hv1 载体）；设计主体在载体完成后另批入队。
     "offsetfix_e": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3E_cam3_offfix", "V3_3E_cam3_occ010_offfix"],
+        "MODEL_IDS": ["V3_Ev1_cam3_offfix", "V3_Ev1_cam3_occ010_offfix"],
         "REQUIRES": [],
     },
     "offsetfix_vonly": {
         "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_3B_cam3_offfix", "V3_3B_cam3_occ010_offfix"],
+        "MODEL_IDS": ["V3_Bv1_cam3_offfix", "V3_Bv1_cam3_occ010_offfix"],
         "SPECIALISTS": ["vonly"],
         "REQUIRES": [],
     },
     "offsetfix_v5_1": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V5_1_cam3_offfix", "V5_1_cam3_occ010_offfix",
-                      "V5_1_cam3_occ020_offfix", "V5_1_cam3_occ030_offfix",
-                      "V5_1_cam3_occ050_offfix"],
+        "MODEL_IDS": ["V5_Av1_cam3_offfix", "V5_Av1_cam3_occ010_offfix",
+                      "V5_Av1_cam3_occ020_offfix", "V5_Av1_cam3_occ030_offfix",
+                      "V5_Av1_cam3_occ050_offfix"],
         "REQUIRES": [],
     },
     "offsetfix_v4_1": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V4_1_cam3_offfix", "V4_1_cam3_occ010_offfix"],
+        "MODEL_IDS": ["V4_Av1_cam3_offfix", "V4_Av1_cam3_occ010_offfix"],
         "REQUIRES": [],
     },
-    # v2 + offset 设计组（2026-10-21）：V5_1A / V4_1A × cam3/cam3_occ010，
+    # v2 + offset 设计组（2026-10-21）：V5_Av1 / V4_Av1 × cam3/cam3_occ010，
     # 触觉 = denoised108_v2（corrected_offset=True、载体 = E_offfix 系）。
     "offsetfix_v45_v2": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V5_1_cam3_offfix_v2", "V5_1_cam3_occ010_offfix_v2",
-                      "V4_1_cam3_offfix_v2", "V4_1_cam3_occ010_offfix_v2"],
+        "MODEL_IDS": ["V5_Av1_cam3_offfix_v2", "V5_Av1_cam3_occ010_offfix_v2",
+                      "V4_Av1_cam3_offfix_v2", "V4_Av1_cam3_occ010_offfix_v2"],
         "REQUIRES": [],
     },
     "offsetfix_v3_3h": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3H_cam3_offfix", "V3_3H_cam3_occ010_offfix"],
+        "MODEL_IDS": ["V3_Hv1_cam3_offfix", "V3_Hv1_cam3_occ010_offfix"],
         "REQUIRES": [],
     },
     # 新数据验证（2026-10-22）：生产 v3+offset facts 的替换验证。
     "v3off_validation": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3B_cam3_v3off"],
+        "MODEL_IDS": ["V3_Bv1_cam3_v3off"],
         "REQUIRES": [],
     },
     # v2/v3 + offset 组（2026-10-20）：同 5 组合，触觉 = denoised108_v2 / _v3。
     "offsetfix_v2": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3B_cam3_offfix_v2",
-                      "V3_3B_cam3_occ010_offfix_v2", "V3_3B_cam3_occ020_offfix_v2",
-                      "V3_3B_cam3_occ030_offfix_v2", "V3_3B_cam3_occ050_offfix_v2"],
+        "MODEL_IDS": ["V3_Bv1_cam3_offfix_v2",
+                      "V3_Bv1_cam3_occ010_offfix_v2", "V3_Bv1_cam3_occ020_offfix_v2",
+                      "V3_Bv1_cam3_occ030_offfix_v2", "V3_Bv1_cam3_occ050_offfix_v2"],
         "REQUIRES": [],
     },
     "offsetfix_v3": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3B_cam3_offfix_v3",
-                      "V3_3B_cam3_occ010_offfix_v3", "V3_3B_cam3_occ020_offfix_v3",
-                      "V3_3B_cam3_occ030_offfix_v3", "V3_3B_cam3_occ050_offfix_v3"],
+        "MODEL_IDS": ["V3_Bv1_cam3_offfix_v3",
+                      "V3_Bv1_cam3_occ010_offfix_v3", "V3_Bv1_cam3_occ020_offfix_v3",
+                      "V3_Bv1_cam3_occ030_offfix_v3", "V3_Bv1_cam3_occ050_offfix_v3"],
         "REQUIRES": [],
     },
-    # V3_3H_v5 无锚版全网格（2026-10-20）：4 相机 × 3 遮挡 = 12 格
+    # V3_Hv5 无锚版全网格（2026-10-20）：4 相机 × 3 遮挡 = 12 格
     # （T 价值区 = V 失效条件的无锚对照；cam{1,2,4}_occ{010,020} 的
     # 遮挡缓存由 extract_hrnet 生成）。
     "v3h5_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3H_v5", "V3_3H_v5_cam3_occ010", "V3_3H_v5_cam3_occ020",
-                      "V3_3H_v5_cam1", "V3_3H_v5_cam1_occ010", "V3_3H_v5_cam1_occ020",
-                      "V3_3H_v5_cam2", "V3_3H_v5_cam2_occ010", "V3_3H_v5_cam2_occ020",
-                      "V3_3H_v5_cam4", "V3_3H_v5_cam4_occ010", "V3_3H_v5_cam4_occ020"],
+        "MODEL_IDS": ["V3_Hv5", "V3_Hv5_cam3_occ010", "V3_Hv5_cam3_occ020",
+                      "V3_Hv5_cam1", "V3_Hv5_cam1_occ010", "V3_Hv5_cam1_occ020",
+                      "V3_Hv5_cam2", "V3_Hv5_cam2_occ010", "V3_Hv5_cam2_occ020",
+                      "V3_Hv5_cam4", "V3_Hv5_cam4_occ010", "V3_Hv5_cam4_occ020"],
         "REQUIRES": [],
     },
-    # V3_3H_v6 首组（2026-10-20）：v5 + 残差头落点改踝（错误一修复），
+    # V3_Hv6 首组（2026-10-20）：v5 + 残差头落点改踝（错误一修复），
     # cam3 基准 + cam3+occ010，自训自测。
     "v3h6_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3H_v6", "V3_3H_v6_cam3_occ010"],
+        "MODEL_IDS": ["V3_Hv6", "V3_Hv6_cam3_occ010"],
         "REQUIRES": [],
     },
     # 新数据验证（2026-10-22，主会话 conf 00618）：生产 v3+offset facts
-    # 替换验证——V3_3B_cam3_v3off = E1 的 3B 统一模型行。
+    # 替换验证——V3_Bv1_cam3_v3off = E1 的 3B 统一模型行。
     "v3off_validation": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3B_cam3_v3off"],
+        "MODEL_IDS": ["V3_Bv1_cam3_v3off"],
         "REQUIRES": [],
     },
     # E1 同架构专家对比（2026-10-22，z_note/实验计划.md）：四家族 x 四模型，
-    # 生产 v3+offset facts。波 1 = E 家族（新载体）+ 3B 家族；波 2 = V4_1/
-    # V5_1 家族（carrier 依赖波 1 的 E 基名 ckpt）。
+    # 生产 v3+offset facts。波 1 = E 家族（新载体）+ 3B 家族；波 2 = V4_Av1/
+    # V5_Av1 家族（carrier 依赖波 1 的 E 基名 ckpt）。
     "e1_experts": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3E_cam3_v3off", "V3_3E_cam3_v3off_drop",
-                      "V3_3E_cam3_v3off_vonly", "V3_3E_cam3_v3off_tonly",
-                      "V3_3B_cam3_v3off_vonly", "V3_3B_cam3_v3off_tonly",
-                      "V3_3B_cam3_v3off_nodrop",
-                      "V4_1_cam3_v3off", "V4_1_cam3_v3off_drop",
-                      "V4_1_cam3_v3off_vonly", "V4_1_cam3_v3off_tonly",
-                      "V5_1_cam3_v3off", "V5_1_cam3_v3off_drop",
-                      "V5_1_cam3_v3off_vonly", "V5_1_cam3_v3off_tonly"],
+        "MODEL_IDS": ["V3_Ev1_cam3_v3off", "V3_Ev1_cam3_v3off_drop",
+                      "V3_Ev1_cam3_v3off_vonly", "V3_Ev1_cam3_v3off_tonly",
+                      "V3_Bv1_cam3_v3off_vonly", "V3_Bv1_cam3_v3off_tonly",
+                      "V3_Bv1_cam3_v3off_nodrop",
+                      "V4_Av1_cam3_v3off", "V4_Av1_cam3_v3off_drop",
+                      "V4_Av1_cam3_v3off_vonly", "V4_Av1_cam3_v3off_tonly",
+                      "V5_Av1_cam3_v3off", "V5_Av1_cam3_v3off_drop",
+                      "V5_Av1_cam3_v3off_vonly", "V5_Av1_cam3_v3off_tonly"],
         "REQUIRES": [],
     },
     # T 增强三组（2026-10-21，T增强三组实验方案.md）：维度 2 显式物理特征
     # （tphys）+ 维度 3 足-地监督（d8，监督头落地后加入）。
     "v5_1_tenhance_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V5_1_cam3_offfix_tphys", "V5_1_cam3_offfix_d8"],
+        "MODEL_IDS": ["V5_Av1_cam3_offfix_tphys", "V5_Av1_cam3_offfix_d8"],
         "REQUIRES": [],
     },
-    # V5_1 首组（2026-10-19，V5_1A方案）：cam3 基准 + cam3+occ010，
+    # V5_Av1 首组（2026-10-19，V5_Av1方案）：cam3 基准 + cam3+occ010，
     # 自训自测（载体按配置装载该配置的 E v2.1 ckpt_best）。
     "v5_1_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V5_1", "V5_1_cam3_occ010", "V5_1_occmix_cam3_occ010"],
+        "MODEL_IDS": ["V5_Av1", "V5_Av1_cam3_occ010", "V5_Av1_occmix_cam3_occ010"],
         "REQUIRES": [],
     },
-    # V4_1 首组（2026-10-19，V4_1A方案）：cam3 基准 + cam3+occ010，
-    # 自训自测（载体按配置装载该配置的 E v2.1 ckpt_best）。V6_1A occ_mix
+    # V4_Av1 首组（2026-10-19，V4_Av1方案）：cam3 基准 + cam3+occ010，
+    # 自训自测（载体按配置装载该配置的 E v2.1 ckpt_best）。V6_Av1 occ_mix
     # 为可选增强开关（conf 直写 OCC_MIX=true/P_OCC/P_NULLV/P_NULLT），
-    # 默认关——不为 V6_1A 单独立项训练 run。
+    # 默认关——不为 V6_Av1 单独立项训练 run。
     "v4_1_test": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V4_1", "V4_1_cam3_occ010", "V4_1_occmix_cam3_occ010"],
+        "MODEL_IDS": ["V4_Av1", "V4_Av1_cam3_occ010", "V4_Av1_occmix_cam3_occ010"],
         "REQUIRES": [],
     },
     "position_test_vdegrad": {
         "KIND": "model_suite",
-        "MODEL_IDS": ["V3_3D_cam1", "V3_3D_cam2", "V3_3D_cam4",
-                      "V3_3D_cam3_occ010", "V3_3D_cam3_occ020",
-                      "V3_3D_cam3_occ030", "V3_3D_cam3_occ050"],
+        "MODEL_IDS": ["V3_Dv1_cam1", "V3_Dv1_cam2", "V3_Dv1_cam4",
+                      "V3_Dv1_cam3_occ010", "V3_Dv1_cam3_occ020",
+                      "V3_Dv1_cam3_occ030", "V3_Dv1_cam3_occ050"],
         "REQUIRES": [],
     },
 }

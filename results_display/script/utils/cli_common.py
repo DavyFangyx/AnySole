@@ -198,7 +198,7 @@ def add_common_args(
     split: bool = True,
     seq_root: bool = False,
     modal: bool = False,
-    modal_default: str = "V3_3B",
+    modal_default: str = "V3_Bv1",
     variant: bool = False,
     contact_method: bool = False,
     contact_method_default: str = "joint_and",

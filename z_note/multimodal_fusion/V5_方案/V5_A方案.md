@@ -1,20 +1,20 @@
-# V5_1A 方案（2026-10-19 设计；首批结果 2026-10-20 落定：零税成立、T 位姿兑现 = 零、主承诺待 occ050）
+# V5_Av1 方案（2026-10-19 设计；首批结果 2026-10-20 落定：零税成立、T 位姿兑现 = 零、主承诺待 occ050）
 
-独立回归式模型（`anysole/models/common/model_v5_1.py`）：**冻结 E v2.1 载体 + V/T 双 z 专家（专家乘积合成低维可解释潜变量）+ FiLM 注入下肢与根轨迹头**。三条件 = 同一前向的三种 z 来源读出（V2M = Dec(x_V; z_V)、VT2M = Dec(x_V; z_PoE)、T2M = 先验塔 Dec(x_T; z_T)）。与现有模型的关系：载体 = E v2.1（G 同源口径）；与 V4_1A（`V4_1A方案.md`，部位 token 门控）/V6_1A（`V6_1A方案.md`，模态平衡训练）同源（专家三路线，分属 V4_1/V5_1/V6_1 三文件夹）；不 import E/F/G/H 管线代码，只继承两件已验证物——f6_soft 接触标签（数据）与 E v2.1 的 V 流权重（载体）。
+独立回归式模型（`anysole/models/common/model_v5_1.py`）：**冻结 E v2.1 载体 + V/T 双 z 专家（专家乘积合成低维可解释潜变量）+ FiLM 注入下肢与根轨迹头**。三条件 = 同一前向的三种 z 来源读出（V2M = Dec(x_V; z_V)、VT2M = Dec(x_V; z_PoE)、T2M = 先验塔 Dec(x_T; z_T)）。与现有模型的关系：载体 = E v2.1（G 同源口径）；与 V4_Av1（`V4_A方案.md`，部位 token 门控）/V6_Av1（`V6_A方案.md`，模态平衡训练）同源（专家三路线，分属 V4_Av1/V5_Av1/V6_Av1 三文件夹）；不 import E/F/G/H 管线代码，只继承两件已验证物——f6_soft 接触标签（数据）与 E v2.1 的 V 流权重（载体）。
 
 ## 1. 设计主张与机制规则
 
-**理念：「共享低维潜变量，专家乘积注入」。** T 通过低维可解释潜变量 z（接触/相位/CoP）以专家乘积注入解码，结构上只影响下肢与根轨迹：T 与 V 各自读出同一组足部状态 z，PoE 精度加权合成，FiLM 只挂下肢部位与根轨迹头——「T 只服务足部、其余部位纯视觉」成为模型结构事实（V4_1 设计意图），而非训练结果。
+**理念：「共享低维潜变量，专家乘积注入」。** T 通过低维可解释潜变量 z（接触/相位/CoP）以专家乘积注入解码，结构上只影响下肢与根轨迹：T 与 V 各自读出同一组足部状态 z，PoE 精度加权合成，FiLM 只挂下肢部位与根轨迹头——「T 只服务足部、其余部位纯视觉」成为模型结构事实（V4_Av1 设计意图），而非训练结果。
 
 | 规则 | 证据 |
 |---|---|
 | 通道规则：T 永不进 V 表征、永不进共享融合层；T 的唯一通路 = g_T → z → FiLM（下肢 + 根轨迹） | 载体冻结继承 = 结构保证；B 形态融合税 +13（范围声明：证伪对象为 B 形态融合，不作融合路线一般性否定） |
 | 注入规则（部位分裂 + 空间）：FiLM 只挂 9 部位姿态头下肢四部位（l_leg/r_leg/l_foot/r_foot）+ 根轨迹头；无 FiLM 部位（root/torso/headneck/两臂）逐位恒等。根轨迹头 = 位置空间注入点——z 语义（接触/CoP 坐标）本身是位置空间量，不经姿态空间转述 | 探针 PA 部位分裂：正信号只在足部（anklefoot/r_foot 显著为负）、上身/手无（符号口径）；T 增量在位置空间（联合读出界 −10.3/−19.9），姿态空间转换损耗 ~90%（判定实验 §3.1） |
 | 零税契约：FiLM 零初始化（γ=1/β=0）→ 训练起点 VT2M ≡ V2M ≡ E v2.1 逐位；上肢免疫 = 无 FiLM 部件的结构保证 | 结构保证（契约 1）；实测判据①：PA Δ −0.0005 / −0.024，cam3 无 FiLM 部位 PA 逐位恒等至浮点级 |
-| 全局缺口裁定：z 不设根轨迹专用通道；目标 = 命题 2 足部兑现 + V 失效条件下接管；全局增量 = 足部信息经地面接触向上传递（V4_1 §4 口径），由根轨迹头 FiLM 承担传导（Global/ATE 行 = 报告项非承诺） | 命题 1（Global/ATE 增量，T 最强硬证据）成立但接触/相位/CoP 均非根轨迹通道；H 的 Global 兑现 = GT 锚燃料（污染口径），传导假设待干净测试——V5_1A 的根轨迹 FiLM 即该测试 |
+| 全局缺口裁定：z 不设根轨迹专用通道；目标 = 命题 2 足部兑现 + V 失效条件下接管；全局增量 = 足部信息经地面接触向上传递（V4_Av1 §4 口径），由根轨迹头 FiLM 承担传导（Global/ATE 行 = 报告项非承诺） | 命题 1（Global/ATE 增量，T 最强硬证据）成立但接触/相位/CoP 均非根轨迹通道；H 的 Global 兑现 = GT 锚燃料（污染口径），传导假设待干净测试——V5_Av1 的根轨迹 FiLM 即该测试 |
 | 载体规则：载体 = 回归（E v2.1 底座，V2M 38.58 账本最强层）；兑现幅度随载体强度递减，弱载体数字只引符号 | 性能对照账本载体分层（E=G 38.58 / H 40.32 / 3B 41.12 / F 47.93） |
 | 监督规则：z 全分量有监督（接触 f6_soft；相位/CoP 按通道启用），各专家被监督校准；T 是否实际参与由干预实验独立验收 | G 闸门失效前科（接触概率≈常数、T 消失）；实测：T 编码器保活（occ010 contact_head f1 0.733→0.903 随真实 T 变好）与位姿零响应并存 → 失效点定位在 FiLM 端（§4.2） |
-| 组合规则：与 V6_1A（模态平衡训练）组合——V 结构化丢弃（p≈0.2–0.3）使 p(z|V) 置信变宽，T 专家在 V 失效时接管；与 V4_1A 互补——V4_1A = 部位 token 门控，V5_1A = 潜变量瓶颈 | V 削弱实验：occ050（下肢全失）踝足翻转为真增益、胜率 64%/71%（弱载体读数，只引符号） |
+| 组合规则：与 V6_Av1（模态平衡训练）组合——V 结构化丢弃（p≈0.2–0.3）使 p(z|V) 置信变宽，T 专家在 V 失效时接管；与 V4_Av1 互补——V4_Av1 = 部位 token 门控，V5_Av1 = 潜变量瓶颈 | V 削弱实验：occ050（下肢全失）踝足翻转为真增益、胜率 64%/71%（弱载体读数，只引符号） |
 
 ## 2. 模型结构
 
@@ -42,7 +42,7 @@ FiLM 只作用于姿态头下肢四部位输出特征与根轨迹头输出特征
 ### 2.2 组件
 
 - **状态与维度**：V 输入 (B, tw, 2051)；T 输入 raw108 = [96 原始 | 12 物理]；d_model=256、tw=20、pose=144 维 6D（SMPL-24 关节 × 6）、traj=3 维（anchor 相对、世界轴）；三条件同一次前向（z 来源开关，config_id 被忽略）。
-- **载体（裁定 = 冻结继承，G 口径；286 键装载自 E v2.1 ckpt_best）**：v_enc + v_temporal（4 层）+ V3EPoseHead（9 部位 query 解码 6 层，sigma 头冻结保留不读出）+ V3ETrajHead 全冻结。权重来源：cam3 → `V3_3E_f6_soft`、occ010 → `V3_3E_cam3_occ010_f6_soft`；provenance 记录进 ckpt config（源路径 + sha256）。头部类逐字复制自 model_v3e（provenance 注明）。冻结理由：① V2M 底盘 = E v2.1 生产口径 38.58/39.64 直接对标（账本最强回归层），微调打破跨模型底盘可比性；② 通道规则的结构保证——T 监督梯度只经 g_T/FiLM 进系统，V 流权重不接触 T 梯度；③ G/H 冻结继承先例。V 流解冻微调不进 v1，V6_1A 组合档的载体策略在 V6_1A 裁定。
+- **载体（裁定 = 冻结继承，G 口径；286 键装载自 E v2.1 ckpt_best）**：v_enc + v_temporal（4 层）+ V3EPoseHead（9 部位 query 解码 6 层，sigma 头冻结保留不读出）+ V3ETrajHead 全冻结。权重来源：cam3 → `V3_Ev1_f6_soft`、occ010 → `V3_Ev1_cam3_occ010_f6_soft`；provenance 记录进 ckpt config（源路径 + sha256）。头部类逐字复制自 model_v3e（provenance 注明）。冻结理由：① V2M 底盘 = E v2.1 生产口径 38.58/39.64 直接对标（账本最强回归层），微调打破跨模型底盘可比性；② 通道规则的结构保证——T 监督梯度只经 g_T/FiLM 进系统，V 流权重不接触 T 梯度；③ G/H 冻结继承先例。V 流解冻微调不进 v1，V6_Av1 组合档的载体策略在 V6_Av1 裁定。
 - **z 专家（从零）**：g_V = MLP(v_tok → z 参数)（读冻结 v_tok，冻结图上的轻量读出）；g_T = MLP(t_tok → z 参数)，t_tok 来自从零 foot_conv（per-foot 网格卷积 + 时间 token）。每分量输出 (μ, log σ)（接触分量 = 每脚 logit）。log σ 钳位 [-3,3]（防单专家精度爆炸接管 PoE）。
 - **z 结构（通道证据分级）**：
 
@@ -71,7 +71,7 @@ x_V 三条件同源（V 流冻结）；开关只作用 z 来源与读出塔。T 
 ## 3. 训练
 
 - 开工门槛：前置探针（§4.4）过闸后才启动训练——已落定（2026-10-19）。
-- 数据：cam3 ∪ cam3_occ010 共享窗（E/G/H 同基座），自训自测；f6_soft 接触标签。已训 5 配置：cam3 / occ010 / occ020 / occ050 / occmix（+ occ030 排队）。occ050 附加配置 = V 失效接管判据的直接读数（载体同装载 cam3 E v2.1 冻结，FiLM/z 专家在 occ050 数据上训练），与 V6_1A 组合档共用；occmix = V6_1A 组合档数据件（occ_mix 接入面）。
+- 数据：cam3 ∪ cam3_occ010 共享窗（E/G/H 同基座），自训自测；f6_soft 接触标签。已训 5 配置：cam3 / occ010 / occ020 / occ050 / occmix（+ occ030 排队）。occ050 附加配置 = V 失效接管判据的直接读数（载体同装载 cam3 E v2.1 冻结，FiLM/z 专家在 occ050 数据上训练），与 V6_Av1 组合档共用；occmix = V6_Av1 组合档数据件（occ_mix 接入面）。
 - 条件配比：config_probs [1,0,0]（全 VT 窗；V2M 与 VT2M 行同批监督；T2M 行经 L_prior_pose 训练）——设计稿「VT 90% / V 零化 10%」未执行：先验塔构造下 V 零化窗不再必要（§4.5 ④）。
 - 损失：L_pose 3.0（6D MSE，V2M 行 + VT2M 行）+ L_traj 1.0（VT 行）+ L_contact 1.0（f6_soft pos-weighted BCE + air 加权 λ_air=2.0，G 针对 air recall 前科的配方；接触分量三读数均监督——g_V、g_T、PoE 合成，另加 contact_head 诊断头）+ L_phase 1.0 / L_cop 1.0（只监督各专家 μ，PoE 合成由闭式决定不额外监督；CoP 监督只在接触帧生效）+ L_prior_pose 1.0（先验塔，健全性不参与承诺）；L_prior_traj 0（先验轨迹头未训练——T2M 行 Global/ATE 不可判读）。
 - 冻结范围：V 流 286 键全冻结；训练 = foot_conv + g_V + g_T + FiLM + PoE 权重 + t_temporal/prior 塔/contact_head（实现扩展，§4.5 ②）。
@@ -115,7 +115,7 @@ occmix 第三配置（2026-10-20 test 落盘）：PA Δ −0.000、MPJPE Δ −0
 
 ### 4.2 跨模型定位
 
-零税 −0.0005 / −0.024（cam3 上无 FiLM 部位 PA 逐位恒等至 0.002mm 浮点级）+ 位置类 Δ 全表 ≤0.15mm → **T 位姿兑现 = 零**；contact_head 随真实 T 读数显著变化（occ010 f1 0.733→0.903）→「z 专家保活、位姿零响应」并存 = **兑现瓶颈定位在 FiLM 端**（z 有信号、位姿无响应）。对照 G：G 死在闸门（接触概率≈常数），V5_1A 死在兑现端——监督保活防御生效、兑现路径无梯度动力（载体已处账本最优层，L_pose 下 FiLM 偏离恒等的边际收益为零，零初始化把它推回恒等）。这是预注册内的结局——真正考场 = V 失效配置（occ050/occmix），occ050 未出数。全表见各面板 test.json。
+零税 −0.0005 / −0.024（cam3 上无 FiLM 部位 PA 逐位恒等至 0.002mm 浮点级）+ 位置类 Δ 全表 ≤0.15mm → **T 位姿兑现 = 零**；contact_head 随真实 T 读数显著变化（occ010 f1 0.733→0.903）→「z 专家保活、位姿零响应」并存 = **兑现瓶颈定位在 FiLM 端**（z 有信号、位姿无响应）。对照 G：G 死在闸门（接触概率≈常数），V5_Av1 死在兑现端——监督保活防御生效、兑现路径无梯度动力（载体已处账本最优层，L_pose 下 FiLM 偏离恒等的边际收益为零，零初始化把它推回恒等）。这是预注册内的结局——真正考场 = V 失效配置（occ050/occmix），occ050 未出数。全表见各面板 test.json。
 
 ### 4.3 预注册判据与实测
 
@@ -132,9 +132,9 @@ occmix 第三配置（2026-10-20 test 落盘）：PA Δ −0.000、MPJPE Δ −0
 
 ### 4.4 前置探针（相位/CoP 过闸判据，已落定 2026-10-19）
 
-- 口径：零训练 ridge（全面探针管线同款——TRAIN λ 网格 80/20 留出选参、test 36 会话、配对 bootstrap 95% CI）。特征 = V 侧 v_tok（E v2.1 生产 ckpt_best 冻结编码器，V5_1A 载体同源）+ T 侧 raw108 原始压力（探针 B 同口径——特征不经编码器监督吸收，命题 2 载体依赖教训：接触 BCE 单一化 t_tok）。
+- 口径：零训练 ridge（全面探针管线同款——TRAIN λ 网格 80/20 留出选参、test 36 会话、配对 bootstrap 95% CI）。特征 = V 侧 v_tok（E v2.1 生产 ckpt_best 冻结编码器，V5_Av1 载体同源）+ T 侧 raw108 原始压力（探针 B 同口径——特征不经编码器监督吸收，命题 2 载体依赖教训：接触 BCE 单一化 t_tok）。
 - 目标量：相位 GT = GT 足轨迹触地事件派生的每足归一化周期相位，以 (cos 2πφ, sin 2πφ) 二维嵌入为读出目标；CoP GT = D_Test8 几何管线（smplx 正演 GT 网格 → 离地 <2cm 顶点计数 4×12 网格 → cop_from_grid，网格坐标 0-1），只统计接触帧。
-- 判据（逐通道独立）：启用门槛 = T 可读（ridge 从 raw108 读出显著优于常数基线）；语义判读 = V 强（V 读出显著优于 T）→ PoE 精度加权自然让位，T 专家预期低精度——冗余不是失败而是设计语义（V 失效时 T 接管价值保留，即 V6_1A 组合的主旨）；停用门槛 = T 不可读（不优于常数基线）→ 该通道停用、不进 z（接触通道不受影响）。
+- 判据（逐通道独立）：启用门槛 = T 可读（ridge 从 raw108 读出显著优于常数基线）；语义判读 = V 强（V 读出显著优于 T）→ PoE 精度加权自然让位，T 专家预期低精度——冗余不是失败而是设计语义（V 失效时 T 接管价值保留，即 V6_Av1 组合的主旨）；停用门槛 = T 不可读（不优于常数基线）→ 该通道停用、不进 z（接触通道不受影响）。
 
 **实测落定（`z_note/probes/probe_v5_phase_cop_readout.py`，JSON：`results/AnySole/probes/probe_v5_phase_cop_readout.json`）**：
 - **CoP 通道：半过闸**——cop_L T 可读显著（0.0064 < 常数 0.0076，CI 排除 0）且**显著优于 V**（唯一 T>V 通道，压力质心 = T 直接测量）；cop_R 未过闸（左右脚不对称，登记待查）。CoP 进 z（左过闸、右按记录跟踪）；
@@ -150,7 +150,7 @@ occmix 第三配置（2026-10-20 test 落盘）：PA Δ −0.000、MPJPE Δ −0
 
 ## 5. 落地文件与实现状态（2026-10-20）
 
-- 文件：`anysole/models/common/model_v5_1.py`（载体冻结装载 + g_V/g_T z 专家 + PoE 合成 + FiLM + 先验塔/接触头；头部类复制自 model_v3e，provenance 注明）→ `anysole/models/v5_1.py`（入口，carrier 装载冻结 + 完整性校验 + sha256 provenance）→ `anysole/utils/losses.py`（接触 air 加权；相位/CoP 通道损失）→ `train.py` / `eval.py` / `eval_protocol.py`（v5_1 分支 + z_src 开关 + --z-src override 干预接口）→ `registry.py` + `configs/z_gen/model_registry.py`（V5_1 多配置）+ `configs/z_gen/v5_1.py` + `common.py`（v5_1_test）。
+- 文件：`anysole/models/common/model_v5_1.py`（载体冻结装载 + g_V/g_T z 专家 + PoE 合成 + FiLM + 先验塔/接触头；头部类复制自 model_v3e，provenance 注明）→ `anysole/models/v5_1.py`（入口，carrier 装载冻结 + 完整性校验 + sha256 provenance）→ `anysole/utils/losses.py`（接触 air 加权；相位/CoP 通道损失）→ `train.py` / `eval.py` / `eval_protocol.py`（v5_1 分支 + z_src 开关 + --z-src override 干预接口）→ `registry.py` + `configs/z_gen/model_registry.py`（V5_Av1 多配置）+ `configs/z_gen/v5_1.py` + `common.py`（v5_1_test）。
 - 队列：done 00554（cam3）/ 00555（occ010）/ 00562（occmix）——test 面板已落盘；running 00564（occ020）/ 00566（occ050）/ 00568（occ030）——occ050 截至 10-20 上午 ~246/740。
 - 前置探针脚本 + JSON 已落定（§4.4）；D_Test8 GT CoP 管线抽为训练侧数据件（现为只读展示件 `results_display/script/d_test8_smpl_gt_cop.py`）待做。
 - 冒烟（/tmp 不留产物）全过；未 commit。

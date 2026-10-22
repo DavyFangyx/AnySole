@@ -139,10 +139,10 @@ def export_session(row: dict, force: bool) -> str:
     # 协议 GT 的 pelvis = transl（根）、其余关节 = 父相对 offset 的 FK——用同一
     # 函数对象保证与 protocol_gt 关节定义完全一致。
     from anysole.data.smpl_io import load_smpl
-    from anysole.utils.geometry import fk_pose6d_np
+    from anysole.utils.geometry import fk_pose6d_np, rotmat_to_6d_np
     gt_motion = load_smpl(resolve_uri(row["smpl_path"]))
     rotmats = pose.detach().cpu().numpy()  # (T,24,3,3)，已转世界基
-    pose_6d = rotmats[..., :, :2].reshape(len(rotmats), -1)
+    pose_6d = rotmat_to_6d_np(rotmats).reshape(len(rotmats), -1)
     native = fk_pose6d_np(pose_6d, trans.detach().cpu().numpy(),
                           gt_motion["offsets_m"], gt_motion["parents"])
     from scipy.spatial.transform import Rotation

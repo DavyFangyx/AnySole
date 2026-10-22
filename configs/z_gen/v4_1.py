@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Generate the V4_1 first-group queue tasks (2026-10-19, V4_1A方案).
+"""Generate the V4_Av1 first-group queue tasks (2026-10-19, V4_Av1方案).
 
 Two configs, self-trained and self-tested per config:
-  V4_1               cam3 base (v1.yaml roots);
-  V4_1_cam3_occ010   cam3 + bottom 10% bbox occlusion (v1_cam3_occ010.yaml).
+  V4_Av1               cam3 base (v1.yaml roots);
+  V4_Av1_cam3_occ010   cam3 + bottom 10% bbox occlusion (v1_cam3_occ010.yaml).
 
-V6_1A occ_mix is an optional training-side augmentation carried by the conf
+V6_Av1 occ_mix is an optional training-side augmentation carried by the conf
 (OCC_MIX=true / P_OCC / P_NULLV / P_NULLT, honored by configs/tools/runner.py)
-— default off, never a standalone run (V6_1A方案 §3: 对照 = 同配方 p 全 0).
+— default off, never a standalone run (V6_A方案 §3: 对照 = 同配方 p 全 0).
 """
 
 from __future__ import annotations
@@ -18,16 +18,16 @@ from common import emit_experiment
 from model_registry import MODELS
 
 SUITES = {
-    "V4_1": [
-        ("v4_1_test", ["V4_1", "V4_1_cam3_occ010", "V4_1_occmix_cam3_occ010"]),
+    "V4_Av1": [
+        ("v4_1_test", ["V4_Av1", "V4_Av1_cam3_occ010", "V4_Av1_occmix_cam3_occ010"]),
     ],
 }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", default="V4_1",
-                        help="comma-separated suite IDs (default: V4_1)")
+    parser.add_argument("--suite", default="V4_Av1",
+                        help="comma-separated suite IDs (default: V4_Av1)")
     parser.add_argument("--models", default="",
                         help="comma-separated model IDs to subset the group")
     args = parser.parse_args()

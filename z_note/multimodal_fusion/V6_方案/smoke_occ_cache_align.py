@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""V6_1A occ_mix 的数据级闸门：cam3 vs occ010 特征缓存逐帧对齐审计（① 前置测试）。
+"""V6_Av1 occ_mix 的数据级闸门：cam3 vs occ010 特征缓存逐帧对齐审计（① 前置测试）。
 
 occ_mix（批量级缓存混合）的前置条件 = 双缓存同帧轴、同窗口网格、可同窗替换。
 本脚本核对：会话集合一致、逐会话帧数一致、occ 缓存确有特征差异（非 cam3 复制）。
@@ -8,7 +8,7 @@ occ_mix（批量级缓存混合）的前置条件 = 双缓存同帧轴、同窗�
 （diff 幅度 0.01~0.3，符合 bbox 底部 10% 遮挡预期）。
 
 用法（仓库根目录，touch_gait 环境）：
-  python z_note/multimodal_fusion/V6_1方案/smoke_occ_cache_align.py
+  python z_note/multimodal_fusion/V6_方案/smoke_occ_cache_align.py
 """
 
 from __future__ import annotations

@@ -2,7 +2,7 @@
 
 **对象**：与审计面 1（补）同条件——tactile = 交接包 v2 / v3（视频轴，
 不修正），GT（相位/CoP 目标）建在修正轴（--corrected-offset）。载体 =
-V3_3B_joint_and ckpt（任务指定路径），CPU。
+V3_Bv1_joint_and ckpt（任务指定路径），CPU。
 
 **产物**（本目录，全部为新增，未改任何既有文件）：
 - `probe_v5_phase_cop_readout_denoised108_v2_offset.json`、`probe_run_v2_offset.log`
@@ -12,17 +12,17 @@ V3_3B_joint_and ckpt（任务指定路径），CPU。
 
 ## 口径
 
-- 探针：`z_note/multimodal_fusion/V5_1方案/probe_v5_phase_cop_readout.py`，
+- 探针：`z_note/multimodal_fusion/V5_方案/probe_v5_phase_cop_readout.py`，
   未改动。参数：`--tactile-input denoised108_v2|v3 --corrected-offset
   --device cpu`（GT 修正轴贯穿 dataset 与 session_gt，与 raw108+offset
   审计同一脚本同一式）。λ 网格、80/20 选参、配对 bootstrap n_boot=10000
   seed=0、常数基线均未动。
 - **载体 ckpt（如实登记）**：任务指定
-  `results/AnySole/V3_3B_joint_and/tw20_st20_lr0.0001_lp3_lt1_lk1_la0.05_ls0.01_
+  `results/AnySole/V3_Bv1_joint_and/tw20_st20_lr0.0001_lp3_lt1_lk1_la0.05_ls0.01_
   sf0.1_wu0.05_gc5_ep740_bs256_sd1/checkpoints/ckpt_best.pt`（已确认存在；
   saved config：contact_method=joint_and、tactile_input=raw108，后者被
   --tactile-input 覆盖）。对比对象 raw108+offset JSON 的 provenance.ckpt =
-  `V3_3B_denoised_joint_and`（与 anchor report_cop.md 登记一致）——两者
+  `V3_Bv1_denoised_joint_and`（与 anchor report_cop.md 登记一致）——两者
   ckpt 不同。影响面：raw108 读出（特征 = T 拼接）与 T 可读判据
   （const−raw108）**不含编码器 → 三版直接可比**；v_tok/vt 读出含编码器
   → anchor↔v2/v3 跨 ckpt 不可比（v2↔v3 同 ckpt 可比，判读只用这一对）。
@@ -102,8 +102,8 @@ v2 与 v3 的 8 组判定**逐组同格局**（SIG/ns 全同，均值差 ≤ 2.5
    v2/v3 的 v_tok mse_test 与 λ **逐位相等**（4 通道全部 bitwise equal），
    vs_const verdict 亦逐位相等；vs_raw108 verdict 因配对项含 raw108 读出
    而微差（±1.5e-5）。anchor↔v2/v3 的 v_tok 差（−1.7e-4 / +1.4e-3 /
-   −9.9e-5 / +3.7e-5）= ckpt 效应（anchor = V3_3B_denoised 编码器，
-   本跑 = V3_3B_joint_and 编码器），不参与判读。
+   −9.9e-5 / +3.7e-5）= ckpt 效应（anchor = V3_Bv1_denoised 编码器，
+   本跑 = V3_Bv1_joint_and 编码器），不参与判读。
 2. **n_valid / const 三版全等**（表 1 n 列）：GT 掩码只依赖修正轴 GT，
    与触觉版本无关，实测逐位相同。
 3. 运行确定性：两跑同机同条件，无随机源（bootstrap seed=0 固定）。
@@ -126,8 +126,8 @@ v2 与 v3 的 8 组判定**逐组同格局**（SIG/ns 全同，均值差 ≤ 2.5
    CoP/相位读出上的效应与 F1 面同构（只动右脚、方向混合、量级小），
    v2/v3 判定格局零翻转。
 4. **V 更强与 vt>const（同 ckpt，v2↔v3）格局全同**：cop 两通道 V 更强
-   显著为负、phase_L vt>const 显著、cop_L vt>const 显著——V3_3B_joint_and
-   ckpt 下的状态，不与 anchor（V3_3B_denoised ckpt）跨 ckpt 比较。
+   显著为负、phase_L vt>const 显著、cop_L vt>const 显著——V3_Bv1_joint_and
+   ckpt 下的状态，不与 anchor（V3_Bv1_denoised ckpt）跨 ckpt 比较。
 
 全精度数字：三个 JSON 的 `results`/`verdict` + `compare_v2v3_summary.json`
 （差表与 verdict 三元组差机器可读）+ `compare_v2v3.log`（对比脚本输出全文）。

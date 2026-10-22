@@ -67,7 +67,7 @@ TRAIN_ARG_FLAG_MAP = {
     "tau_max": "--tau-max",
     "tau_fixed": "--tau-fixed",
     "beta": "--beta",
-    # V6_1A occ_mix (2026-10-19)：训练侧增强开关（默认关——MODELS
+    # V6_Av1 occ_mix (2026-10-19)：训练侧增强开关（默认关——MODELS
     # train_args 不带即关；conf 直写 OCC_MIX=true 时由 runner 注入）。
     "occ_mix": "--occ-mix",
     "p_occ": "--p-occ",
@@ -432,7 +432,7 @@ def config_path(registry: dict[str, Any], model_id: str | None = None) -> Path:
     if model_id is not None:
         value = resolved_model_spec(registry, model_id).get("config", value)
     # 四相机扩展 D2/D3 (2026-10-12/13): the data config is part of the model
-    # identity, not a config override -- V3_3B_cam{N} / V3_3B_cam3_occ{M} (and
+    # identity, not a config override -- V3_Bv1_cam{N} / V3_Bv1_cam3_occ{M} (and
     # their derived specialists) read the matching per-config yaml so
     # train/eval/rho_grid all land on that config's roots.
     suffix = _model_v_config_suffix(model_id) if model_id is not None else None
@@ -449,9 +449,9 @@ def effective_value(registry: dict[str, Any], model_id: str, key: str, default: 
 
 
 def _model_v_config_suffix(model_id: str | None) -> str | None:
-    """Data-config suffix of a per-config model id: "cam3" for V3_3B_cam{N},
-    "cam3_occ010" for V3_3B_cam3_occ{M} (incl. derived specialists like
-    V3_3B_cam{N}_vonly); None for ids without a per-config data root."""
+    """Data-config suffix of a per-config model id: "cam3" for V3_Bv1_cam{N},
+    "cam3_occ010" for V3_Bv1_cam3_occ{M} (incl. derived specialists like
+    V3_Bv1_cam{N}_vonly); None for ids without a per-config data root."""
     if not model_id:
         return None
     match = re.search(r"_cam([1-4])(?:_occ(\d{3}))?(?:$|_)", str(model_id))

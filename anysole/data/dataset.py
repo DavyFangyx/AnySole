@@ -257,12 +257,12 @@ class AnySoleDataset(Dataset):
         self.cache_root = Path(cache_root)
         self.allow_missing_video = allow_missing_video
         self.contact_method = str(contact_method)
-        # V5_1A z 通道 GT（2026-10-19）：相位运动学派生（__init__ 内，
+        # V5_Av1 z 通道 GT（2026-10-19）：相位运动学派生（__init__ 内，
         # kp_gt + floor_y 同口径）；CoP = smplx 正演数据件（独立构建脚本
         # anysole.data.v5_1_gt 落盘，缺失即报错——训练不按需构建）。
         self.load_v5_1_gt = bool(load_v5_1_gt)
         self.d8_heads = bool(d8_heads)
-        # V6_1A occ_mix（2026-10-19）：窗口级结构化丢弃采样器，默认关
+        # V6_Av1 occ_mix（2026-10-19）：窗口级结构化丢弃采样器，默认关
         # （None = 现行为逐位不变）。启用后逐会话装载 occ010 双缓存、
         # __getitem__ 采样窗源并挂标签（occ_src/occ_v_zeroed/occ_t_zeroed）。
         self.occ_sampler = OccMixSampler(**occ_mix) if occ_mix else None
@@ -540,7 +540,7 @@ class AnySoleDataset(Dataset):
                 session["strike_gt"] = strike
                 session["strike_mask"] = strike_mask
             if self.load_v5_1_gt:
-                # V5_1A z 通道 GT：相位（探针同口径运动学派生，直接算）+
+                # V5_Av1 z 通道 GT：相位（探针同口径运动学派生，直接算）+
                 # CoP（smplx 数据件装载，接触帧专用）。掩码全空（近静止
                 # 会话）属正常——损失按掩码跳过。
                 phase = derive_phase_gt(kp, float(floor_y))

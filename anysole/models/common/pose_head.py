@@ -217,7 +217,7 @@ class GatedDecoderLayer(nn.Module):
         # prior branch (g_∅) is the residual z with no modality injected.
         # sigma sees [z, e_V, e_T] so it can compare what each stream would
         # inject (fix for the V3-3B "static gate" audit, 2026-09-21).
-        # tau_p is clamped to [-4, 4]: the V3_3B audit showed the unclamped
+        # tau_p is clamped to [-4, 4]: the V3_Bv1 audit showed the unclamped
         # bias drifting to +9.8/-3.8, which saturates the softmax
         # (g -> [0,0,1] constant) and kills the sigma gradient (g(1-g) ~ 0) —
         # the gate then routes nothing.  With the clamp a saturated prior

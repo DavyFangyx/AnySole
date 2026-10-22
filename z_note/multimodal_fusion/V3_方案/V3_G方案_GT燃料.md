@@ -1,14 +1,16 @@
-# V3_3G 方案（2026-10-17 设计，v1.1 定稿 2026-10-18；**2026-10-19 归档**）
-
-**归档裁定（2026-10-19）：本文档的穿透/全局兑现实验结果并非触觉作用**——实测 = V(+FK 约束)，T 消失：接触门控失效（闸门失效登记）、T2M 健全性失败、全部兑现为 GT 锚燃料。模型与结果保留，退出主线；知识保留三条：闸门失效登记 / 两骨 IK 穿透帧诊断 / 穿透-ATE 前沿。
+# V3_Gv1 方案（2026-10-17 设计，v1.1 定稿 2026-10-18；**2026-10-19 归档**）
 
 独立回归式模型（`anysole/models/common/model_v3g.py`，观测层 `anysole/utils/constraints_g.py`）：**回归载体（继承 E v2.1 的 V 流权重，冻结）+ 从零训练的 T 接触流 + 推理侧零参数「分部观测层」（接触证据门控的平移修正；v1.1 起——腿链 IK 已由穿透帧诊断退场）**。三条件 = 同一前向的三种读出。无融合 Transformer、无门控、无 null token。
 
-全新模型：G-1/G-2 缝补式对照已撤回，编号让位；不 import V3_3E 管线代码，只继承两件已验证物——f6_soft 接触标签（数据）与 E 的 V 流权重（载体）。
+**GT 应用位置（2026-10-19 审计标记）**：训练 = 标准监督口径（pose/轨迹/接触 GT，无 GT floor 燃料）；GT 会话 floor（与 E v2.1 同口径）进入**推理侧分部观测层的穿透平移修正**——穿透/全局兑现 = GT 锚燃料，与 T 无关，对应行已标记。
+
+**归档裁定（2026-10-19）：本文档的穿透/全局兑现实验结果并非触觉作用**——实测 = V(+FK 约束)，T 消失：接触门控失效（闸门失效登记）、T2M 健全性失败、全部兑现为 GT 锚燃料。模型与结果保留，退出主线；知识保留三条：闸门失效登记 / 两骨 IK 穿透帧诊断 / 穿透-ATE 前沿。
+
+全新模型：G-1/G-2 缝补式对照已撤回，编号让位；不 import V3_Ev1 管线代码，只继承两件已验证物——f6_soft 接触标签（数据）与 E 的 V 流权重（载体）。
 
 ## 1. 设计主张与机制规则
 
-**理念：「完整流形，分部证据」（前馈因式化）。** 流形完整 = 载体冻结继承（E 底座）；分部 = 观测项按「部位 × 接触帧」组织，接触证据只门控修正幅度。与 V3_3H「完整流形，残差归零」（反馈纠偏）为同一数据基座上的两种技术理念，两线无依赖。
+**理念：「完整流形，分部证据」（前馈因式化）。** 流形完整 = 载体冻结继承（E 底座）；分部 = 观测项按「部位 × 接触帧」组织，接触证据只门控修正幅度。与 V3_Hv1「完整流形，残差归零」（反馈纠偏）为同一数据基座上的两种技术理念，两线无依赖。
 | 规则 | 证据 |
 |---|---|
 | 通道规则：T 永不进 V 表征、永不进共享融合层（B 形态的税机制已定位；范围声明：证伪对象为 B 形态融合，不作融合路线一般性否定） | 载体冻结继承 = 载体层对标的结构保证 |
@@ -39,7 +41,7 @@ floor (gt | t 派生) ────────────┘
 ### 2.2 组件
 
 - **状态与维度**：V 输入 (B, tw, 2051)；T 输入 raw108 = [96 原始 | 12 物理]；d_model=256、tw=20、pose=144 维 6D（SMPL-24 关节 × 6）、traj=3 维（anchor 相对、世界轴）；三条件同一次前向（config_id 被忽略）。
-- **载体（冻结，286 键装载自 E v2.1 ckpt_best）**：v_enc = LinearTemporalEncoder(2051→256) + v_temporal（4 层 TransformerEncoder，norm_first）+ V3EPoseHead（9 部位 query 解码 6 层，out_parts = 9×Linear → 6·|part|，sigma 头冻结保留不读出）+ V3ETrajHead（2 层 temporal → 逐帧速度 → cumsum 轨迹）。权重来源：cam3 → `V3_3E_f6_soft`、occ010 → `V3_3E_cam3_occ010_f6_soft`；入口按 carrier_from 拷贝 V 流键并冻结（embeddings/v_enc/v_temporal/pose_head/traj_head），T 流键不拷贝；provenance 记录进 ckpt config（源路径 + sha256）。头部类逐字复制自 model_v3e（provenance 注明，state-dict 键一致使载体装载零映射）。
+- **载体（冻结，286 键装载自 E v2.1 ckpt_best）**：v_enc = LinearTemporalEncoder(2051→256) + v_temporal（4 层 TransformerEncoder，norm_first）+ V3EPoseHead（9 部位 query 解码 6 层，out_parts = 9×Linear → 6·|part|，sigma 头冻结保留不读出）+ V3ETrajHead（2 层 temporal → 逐帧速度 → cumsum 轨迹）。权重来源：cam3 → `V3_Ev1_f6_soft`、occ010 → `V3_Ev1_cam3_occ010_f6_soft`；入口按 carrier_from 拷贝 V 流键并冻结（embeddings/v_enc/v_temporal/pose_head/traj_head），T 流键不拷贝；provenance 记录进 ckpt config（源路径 + sha256）。头部类逐字复制自 model_v3e（provenance 注明，state-dict 键一致使载体装载零映射）。
 - **T 接触流（从零）**：FootConvEncoder（per-foot 网格卷积 + 时间 token）→ t_tok (B, tw, 256)；接触头 = MLP(256→64→2)，每脚 logits，f6_soft pos-weighted + **air 加权 BCE（G 新增）**：摆动/air 帧再乘 (1 + lambda_air·(1−gt))，lambda_air=2.0——直接针对 F 接触头 air_recall 0.51 的前科（观测层的前置条件）。
 - **T 先验流（从零）**：t_temporal（4 层）+ 9 部位 prior head + prior traj head（与载体同构）；T2M 行 = 先验 + 观测层（观测层单独能力的健全性检查，~90mm 量级，不参与承诺）。
 - **分部观测层（推理侧零参数，v1.1）**，三条件中 VT/T 两行应用，V 行不应用：
@@ -99,7 +101,7 @@ floor (gt | t 派生) ────────────┘
 
 ### 4.2 跨模型定位
 
-零税 0.00 + 穿透极大化（−16.41 / −16.77），代价 = ATE +1.22 / +2.31；T2M 健全性失败（315.50）。全表见 `V3_3方案_性能对照.md`。
+零税 0.00 + 穿透极大化（−16.41 / −16.77），代价 = ATE +1.22 / +2.31；T2M 健全性失败（315.50）。全表见 `V方案_性能对照.md`。
 
 ### 4.3 预注册契约与实测
 

@@ -34,14 +34,14 @@ lambda_vrec = 0.1            lambda_con = 0.0
 ## 2. `singlemodal_eval`：主线和单模态专才
 
 ```bash
-python configs/z_gen/singlemodal_eval.py --models V3_3B
+python configs/z_gen/singlemodal_eval.py --models V3_Bv1
 ```
 
-### 2.1 主线 `V3_3B`
+### 2.1 主线 `V3_Bv1`
 
 | 配置项 | 有效值 | 含义 |
 |---|---|---|
-| model name | `V3_3B` | checkpoint 和结果目录名称 |
+| model name | `V3_Bv1` | checkpoint 和结果目录名称 |
 | tactile encoder | `foot_conv` | 触觉分支编码器 |
 | pose parts | `9` | 9 个身体分区 |
 | soft parts | `true` | 使用软分区 |
@@ -51,7 +51,7 @@ python configs/z_gen/singlemodal_eval.py --models V3_3B
 | grad clip | `5.0` | 梯度裁剪上限 |
 | f2 repr | `false` | 不启用 F2 表征 |
 | train | `true` | registry checkpoint 存在则跳过训练；缺失则从零训练 |
-| checkpoint | `results/AnySole/V3_3B_joint_and/checkpoints/ckpt_last.pt` | registry 自动推导 |
+| checkpoint | `results/AnySole/V3_Bv1_joint_and/checkpoints/ckpt_last.pt` | registry 自动推导 |
 
 主线训练采样概率的顺序固定为 `[VT, V-only, T-only]`：
 
@@ -62,9 +62,9 @@ config_probs = [0.50, 0.25, 0.25]
 这表示主线 checkpoint 同时见过完整输入和两种缺失模态条件；它不是只在
 完整 VT 条件上训练的模型。
 
-### 2.2 `V3_3B_vonly`
+### 2.2 `V3_Bv1_vonly`
 
-这不是删除 T encoder 的新网络，而是与 `V3_3B` 结构完全相同、只改变
+这不是删除 T encoder 的新网络，而是与 `V3_Bv1` 结构完全相同、只改变
 训练条件采样概率的派生模型：
 
 ```text
@@ -75,7 +75,7 @@ config_probs = [0.00, 1.00, 0.00]
 因此每个训练 batch 只采样 V-only 条件。它独立写入自己的 checkpoint 目录，
 并由 scheduler 按 registry 血缘自动确定 warm-start checkpoint。
 
-### 2.3 `V3_3B_tonly`
+### 2.3 `V3_Bv1_tonly`
 
 同样保持全部网络结构不变，只改训练条件采样：
 
@@ -84,14 +84,14 @@ config_probs = [0.00, 0.00, 1.00]
                  VT     V-only T-only
 ```
 
-每个 batch 只采样 T-only 条件，输出到独立的 `V3_3B_tonly` checkpoint 目录。
+每个 batch 只采样 T-only 条件，输出到独立的 `V3_Bv1_tonly` checkpoint 目录。
 
 三份配置的本质区别是：
 
 ```text
-V3_3B        : [VT, V-only, T-only] = [0.50, 0.25, 0.25]
-V3_3B_vonly  : [VT, V-only, T-only] = [0.00, 1.00, 0.00]
-V3_3B_tonly  : [VT, V-only, T-only] = [0.00, 0.00, 1.00]
+V3_Bv1        : [VT, V-only, T-only] = [0.50, 0.25, 0.25]
+V3_Bv1_vonly  : [VT, V-only, T-only] = [0.00, 1.00, 0.00]
+V3_Bv1_tonly  : [VT, V-only, T-only] = [0.00, 0.00, 1.00]
 ```
 
 每个模型 conf 会执行 checkpoint 准备、正式 val、正式 test，并将结果写入
@@ -100,7 +100,7 @@ V3_3B_tonly  : [VT, V-only, T-only] = [0.00, 0.00, 1.00]
 ## 3. `rho_grid_eval`：帧级连续缺失配置
 
 ```bash
-python configs/z_gen/rho_grid_eval.py --models V3_3B
+python configs/z_gen/rho_grid_eval.py --models V3_Bv1
 ```
 
 `rhoV` 和 `rhoT` 是模态 token 的帧级保留率，不是训练 dropout 比例：
@@ -123,7 +123,7 @@ python configs/z_gen/rho_grid_eval.py --models V3_3B
 
 | 项目 | 设置 | 含义 |
 |---|---|---|
-| 模型 | `V3_3B` | 使用 V3_3B checkpoint |
+| 模型 | `V3_Bv1` | 使用 V3_Bv1 checkpoint |
 | rhoV | `0,20,40,60,80,100` | V 分支帧级保留率 |
 | rhoT | `0,20,40,60,80,100` | T 分支帧级保留率 |
 | train | rhoV/rhoT=`0,100`，seed=`0` | 生成训练表征/运动产物 |
@@ -135,7 +135,7 @@ python configs/z_gen/rho_grid_eval.py --models V3_3B
 
 ```text
 TASK=rho_grid
-MODEL_ID=V3_3B
+MODEL_ID=V3_Bv1
 GRID_SPLIT=val
 GRID_SEED=1
 RHO_V=20
@@ -161,9 +161,9 @@ test:  6 × 6 × 1 =  36 个 conf
 结果合并写入：
 
 ```text
-results/experiments/rho_grid_eval/V3_3B/grid_metrics_train.json
-results/experiments/rho_grid_eval/V3_3B/grid_metrics_val.json
-results/experiments/rho_grid_eval/V3_3B/grid_metrics_test.json
+results/experiments/rho_grid_eval/V3_Bv1/grid_metrics_train.json
+results/experiments/rho_grid_eval/V3_Bv1/grid_metrics_val.json
+results/experiments/rho_grid_eval/V3_Bv1/grid_metrics_test.json
 ```
 
 ## 4. `all_models`：全部 12 基座训练 + 正式评估
@@ -183,7 +183,7 @@ results/experiments/all_models/<model>/{metrics,predictions,run.log,...}
 
 训练 checkpoint 仍落在 registry 地址 `results/AnySole/<model>_joint_and/<variant>/`。
 同一个模型若已被其它实验训出 checkpoint，runner 检测到后自动跳过训练、只做
-正式评估（这也是 `singlemodal_eval` 复用自己的 V3_3B 训练的机制）。
+正式评估（这也是 `singlemodal_eval` 复用自己的 V3_Bv1 训练的机制）。
 
 | 项目 | 设置 | 含义 |
 |---|---|---|
@@ -217,17 +217,17 @@ python configs/z_gen/all_models.py --models V4B
 
 ```bash
 python configs/z_gen/vdegrad.py               # 两套件全部任务（21 conf）
-python configs/z_gen/vdegrad.py --suite V3_3B --models V3_3B_cam1
+python configs/z_gen/vdegrad.py --suite V3_Bv1 --models V3_Bv1_cam1
 ```
 
 | 套件 | 实验表 | 模型 | 任务 |
 |---|---|---|---|
-| V3_3B 融合主线 | `singlemodal_eval_cams` | `V3_3B_cam1/2/4` + `_vonly` 专才 | 6 conf |
-| V3_3B 融合主线 | `singlemodal_eval_occl` | `V3_3B_cam3_occ010/020/030/050` + `_vonly` | 8 conf |
-| V3_3D 干净通道 | `position_test_vdegrad` | `V3_3D_cam1/2/4` + `V3_3D_cam3_occ010/020/030/050` | 7 conf |
+| V3_Bv1 融合主线 | `singlemodal_eval_cams` | `V3_Bv1_cam1/2/4` + `_vonly` 专才 | 6 conf |
+| V3_Bv1 融合主线 | `singlemodal_eval_occl` | `V3_Bv1_cam3_occ010/020/030/050` + `_vonly` | 8 conf |
+| V3_Dv1 干净通道 | `position_test_vdegrad` | `V3_Dv1_cam1/2/4` + `V3_Dv1_cam3_occ010/020/030/050` | 7 conf |
 
 每配置自训自测（训练与测试同配置数据）；分析入口
-`results_display/script/vdegrad.py`（产出 `Test6_VdegradTest/{V3_3B,V3_3D}/`）。
+`results_display/script/vdegrad.py`（产出 `Test6_VdegradTest/{V3_Bv1,V3_Dv1}/`）。
 
 ## 6. C1–M3 分析与数据对应关系
 
@@ -260,8 +260,8 @@ C1–M3 不生成 queue conf，只读取 `results/`：
 ```bash
 cd /data/fangyuxuan/projects/gait
 python configs/z_gen/all_models.py
-python configs/z_gen/singlemodal_eval.py --models V3_3B
-python configs/z_gen/rho_grid_eval.py --models V3_3B
+python configs/z_gen/singlemodal_eval.py --models V3_Bv1
+python configs/z_gen/rho_grid_eval.py --models V3_Bv1
 CUDA_VISIBLE_DEVICES=4 bash configs/bg.sh
 python configs/tools/status.py
 ```

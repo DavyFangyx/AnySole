@@ -1,10 +1,10 @@
-"""V3_3F (ruled 2026-10-17): the prior + observation-guidance sampling model.
+"""V3_Fv1 (ruled 2026-10-17): the prior + observation-guidance sampling model.
 
 A fresh, independent architecture — NOT the anysolev2 fusion/gating lineage,
-NOT the V3_3D frozen-base lineage, NOT the V3_3E constraint-fusion lineage
-(no code is shared with V3_3E; its numpy constraint layer stays its own).
+NOT the V3_Dv1 frozen-base lineage, NOT the V3_Ev1 constraint-fusion lineage
+(no code is shared with V3_Ev1; its numpy constraint layer stays its own).
 
-Design (z_note/multimodal_fusion/V3_3方案/V3_3F方案.md):
+Design (z_note/multimodal_fusion/V3_方案/V3_F方案_GT燃料.md):
 - x = [pose 144 | trans 3 | contact 2] per frame, per-component normalized,
   diffused with unit noise (linear T=1000 schedule, x0 prediction, DDIM).
 - Denoiser: DiT-style transformer over frame tokens with a timestep
@@ -212,7 +212,7 @@ def energy_ground(pose, trans_world, contact_p, floor_y, offsets, parents):
 
 def energy_support(kp: torch.Tensor, contact_p: torch.Tensor) -> torch.Tensor:
     """Contact feet must not slide: world velocity -> 0 (frame-t mask,
-    the V3_3E convention)."""
+    the V3_Ev1 convention)."""
     foot = kp[..., FOOT_JOINTS, :]                                  # (B, tw, 2, 3)
     v = (foot[:, 1:] - foot[:, :-1]) * float(FPS)                   # (B, tw-1, 2, 3)
     p = contact_p.detach()[:, :-1].clamp(0.0, 1.0)                  # (B, tw-1, 2)

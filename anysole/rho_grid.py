@@ -16,7 +16,7 @@ mask 按 (session, cell, seed) 确定性生成（crc32 混种子，同 eval 鲁�
 仅支持 anysolev2（回归式）checkpoint——mask 只接入了 v2 forward。
 
 Usage (touch_gait env, 仓库根执行):
-  python -m anysole.rho_grid --ckpt results/AnySole/V3_3B_joint_and/checkpoints/ckpt_last.pt \
+  python -m anysole.rho_grid --ckpt results/AnySole/V3_Bv1_joint_and/checkpoints/ckpt_last.pt \
       --split test --seeds 0
   python -m anysole.rho_grid --ckpt ... --split val --seeds 0,1,2
   # 冒烟：1 个 session × 粗网格

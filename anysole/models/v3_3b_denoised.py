@@ -1,8 +1,8 @@
-"""V3_3B_denoised entry: V3_3B structure on the handoff denoised pressure
-(tactile_input=denoised108; data variant of V3_3B, same network).
+"""V3_Bv1_denoised entry: V3_Bv1 structure on the handoff denoised pressure
+(tactile_input=denoised108; data variant of V3_Bv1, same network).
 
 Independent model (2026-09-24 restructure): the structure is fixed here;
-every training run of V3_3B — at any --tw/--stride/… — starts from random
+every training run of V3_Bv1 — at any --tw/--stride/… — starts from random
 init.  No warm-start lineage.
 """
 
@@ -27,7 +27,7 @@ CONFIG_EXTRA: dict = {}
 
 
 def build(config: dict, part_joints=None):
-    """Construct the V3_3B network from the effective train config."""
+    """Construct the V3_Bv1 network from the effective train config."""
     return AnySoleModelV2(
         d=int(config["d_model"]),
         tw=int(config["tw"]),

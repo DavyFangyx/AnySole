@@ -197,7 +197,7 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
     # （与 VP-MoCap 同一函数对象，漂移点 p）。向量 p_w = A p_n + b；旋转 R_w = A R_n。
     from AnysoleWorkspace.tool.adapters.mmvp_series.pressure_tookit.native_to_mocap import load_artifact
     from anysole.data.smpl_io import load_smpl
-    from anysole.utils.geometry import fk_pose6d_np
+    from anysole.utils.geometry import fk_pose6d_np, rotmat_to_6d_np
     transform = load_artifact(date)
     world_a = transform["A"]
     world_b = transform["b"]
@@ -245,10 +245,13 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
         R_w = world_a @ R_n
         transls_world[frame] = transl_world
         rotmats_world[frame, 0] = R_w
+        rotmats_world[frame, 1:] = SciRotation.from_rotvec(
+            body_pose.reshape(-1, 3)
+        ).as_matrix()
         pose_aa = np.concatenate([SciRotation.from_matrix(R_w).as_rotvec(), body_pose.reshape(-1)])
         poses[frame, :min(72, pose_aa.size)] = pose_aa[:72]
         available[frame] = True
-    pose_6d = rotmats_world[..., :, :2].reshape(n, -1)
+    pose_6d = rotmat_to_6d_np(rotmats_world).reshape(n, -1)
     joints_world = fk_pose6d_np(pose_6d, transls_world, gt_motion["offsets_m"], gt_motion["parents"])
     joints[:] = smpl_yup_to_display(joints_world)
     valid = valid_frames(row, n) & available
@@ -317,10 +320,10 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
     # 逐关节差 215–317mm）。协议 GT 的 pelvis = transl（根），其余关节 =
     # 父相对 offset 的 FK——这里用同一函数对象，关节定义与 protocol_gt 完全一致。
     from anysole.data.smpl_io import load_smpl
-    from anysole.utils.geometry import fk_pose6d_np
+    from anysole.utils.geometry import fk_pose6d_np, rotmat_to_6d_np
     gt_motion = load_smpl(resolve_uri(row["smpl_path"]))
     rotmats = pose.detach().cpu().numpy()  # (T,24,3,3)，已转世界基
-    pose_6d = rotmats[..., :, :2].reshape(len(rotmats), -1)
+    pose_6d = rotmat_to_6d_np(rotmats).reshape(len(rotmats), -1)
     native = fk_pose6d_np(pose_6d, trans.detach().cpu().numpy(),
                           gt_motion["offsets_m"], gt_motion["parents"])
     from scipy.spatial.transform import Rotation

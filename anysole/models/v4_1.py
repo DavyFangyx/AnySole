@@ -1,11 +1,11 @@
-"""V4_1A entry: frozen E v2.1 V-stream carrier + T contact stream +
+"""V4_Av1 entry: frozen E v2.1 V-stream carrier + T contact stream +
 part-token gated correction branch (2026-10-19).
 
 Fresh architecture (2026-09-24 independence restructure): the structure is
 fixed here; the T contact stream, the T prior tower and the correction
 branch train from zero.  The V carrier is E v2.1's — loaded from
-``carrier_from`` (per-config E production ckpt_best: cam3 = V3_3E_f6_soft,
-occ010 = V3_3E_cam3_occ010_f6_soft), copied key-by-key into the V-stream
+``carrier_from`` (per-config E production ckpt_best: cam3 = V3_Ev1_f6_soft,
+occ010 = V3_Ev1_cam3_occ010_f6_soft), copied key-by-key into the V-stream
 submodules and frozen at construction (model_v4_1 freezes them; this entry
 only loads).  Provenance (source path + sha256 + key count) is recorded
 into CONFIG_EXTRA and lands in every checkpoint's config.
@@ -19,7 +19,7 @@ Structure summary (model_v4_1.py):
      contact gate a_p (zero-init) -> per-part position heads (zero-init) ->
      six-joint pelvis-relative residual Δx (SG-7 smoothed).  Soft skeleton:
      build_corrected_skeleton (model_v4_1) replaces the six lower-limb
-     joints of FK(pose) with FK + Δx — V3_3D 同款, metrics only.
+     joints of FK(pose) with FK + Δx — V3_Dv1 同款, metrics only.
 """
 
 from __future__ import annotations
@@ -41,17 +41,17 @@ STRUCTURE = {
 # process = one config, so the module-level dict is safe here).
 CONFIG_EXTRA: dict = {}
 
-# Pre-registered beta sweep (V4_1A方案 §2.2): 0 = no-mask ablation (对照,
+# Pre-registered beta sweep (V4_A方案 §2.2): 0 = no-mask ablation (对照,
 # not committed), 1.0 = primary, 2.0.  The entry fails loudly outside it.
 BETA_SWEEP = (0.0, 1.0, 2.0)
 
 
 def build(config: dict, part_joints=None):
-    """Construct the V4_1 network; load and freeze the E V-stream carrier."""
+    """Construct the V4_Av1 network; load and freeze the E V-stream carrier."""
     beta = float(config.get("beta", 1.0))
     if beta not in BETA_SWEEP:
         raise ValueError(
-            "V4_1 beta must be one of the pre-registered sweep %s, got %r"
+            "V4_Av1 beta must be one of the pre-registered sweep %s, got %r"
             % (BETA_SWEEP, beta))
     model = AnySoleModelV41(
         d=int(config["d_model"]),
@@ -63,7 +63,7 @@ def build(config: dict, part_joints=None):
     carrier = str(config.get("carrier_from") or "")
     if not carrier:
         raise ValueError(
-            "V4_1 requires carrier_from (the E v2.1 ckpt_best whose V stream "
+            "V4_Av1 requires carrier_from (the E v2.1 ckpt_best whose V stream "
             "is the frozen carrier); the registry entries carry it per config")
     ckpt = torch.load(carrier, map_location="cpu")
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt

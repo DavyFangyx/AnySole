@@ -8,7 +8,7 @@ T信息量全面探针实验方案.md。
 
 ## 1. 口径
 
-- **特征条件**：v_tok / t_tok / vt（V3_3B 生产 ckpt_best 编码器输出，
+- **特征条件**：v_tok / t_tok / vt（V3_Bv1 生产 ckpt_best 编码器输出，
   单次 VT 前向，编码后 null 替换——编码器输出与输入条件无关）；
 - **两条读出路径**：
   A 姿态路径（ridge Y = [144 维 6D 姿态 ‖ 3 维根轨迹] → rotmat/FK → 指标）；
@@ -116,10 +116,10 @@ T信息量全面探针实验方案.md。
 recall 达标）、H 一阶足部残差头、探针在当前载体复测。T2M：H 88.68
 当前最佳（G 315.5 失败）。
 
-**E 载体复测（2026-10-19，`probe_info_panel.py --ckpt V3_3E_f6_soft --tag E`，JSON 同目录 `probe_info_panel_E.json`）**：
+**E 载体复测（2026-10-19，`probe_info_panel.py --ckpt V3_Ev1_f6_soft --tag E`，JSON 同目录 `probe_info_panel_E.json`）**：
 - 命题 1 复测通过且更强：GlobalMPJPE −76.66\* / −78.51\*、traj_ATE −73.37\*（B 载体为 −43/−45/−44）——T 的全局/世界系线性增量在 E 载体上不减反增，模型侧兑现（−2.32/−0.45）未兑现空间更大；
 - 命题 2 的 PA 口径在 E 载体上翻正：PA-MPJPE_anklefoot +6.44\*（B 为 −1.96\*）、r_foot +5.85\*——足部 PA 线性信号在 E 载体消失；非对齐位置口径保留：MPJPE_anklefoot 路径 B −4.54\*、MPJPE_r_foot 路径 B −4.54\*；
-- 设计影响：V4_1A 判据②（非对齐位置口径）与复测一致；V5_1A 判据②已由 PA 口径改为非对齐位置口径（2026-10-19 修正）。
+- 设计影响：V4_Av1 判据②（非对齐位置口径）与复测一致；V5_Av1 判据②已由 PA 口径改为非对齐位置口径（2026-10-19 修正）。
 
 **f6_soft 磁盘标签审计（2026-10-19，随相位/CoP 探针发现）**：磁盘标签为**二值 {0,1}**（contact_adapter 出口设计「exported binary (>0.5)」，方案文档「软值 {0.05,0.3,0.7,0.95}」口径过时）；63/140 会话全 1 = 近静止会话的运动学事实（足关节活动范围 ~8mm、无摆动期），标签正确反映运动——相位 GT 只在此类会话缺失，探针按掩码跳过。
 
@@ -132,9 +132,9 @@ recall 达标）、H 一阶足部残差头、探针在当前载体复测。T2M�
 - 脚本：`z_note/probes/probe_info_panel.py`；运行环境 touch_gait；
 - 全量 JSON：`results/AnySole/probes/probe_info_panel.json`（三条件 ×
   10 项 + PA 部位 × 两路径 + 逐会话值 + Δprobe CI + λ + provenance）；
-- 特征缓存：`V3_3B_joint_and/<variant>/metrics/.info_panel_cache/feats.pt`
+- 特征缓存：`V3_Bv1_joint_and/<variant>/metrics/.info_panel_cache/feats.pt`
   （38420 训练帧 / 12520 测试帧）；
-- 特征源：V3_3B 生产 ckpt_best（方案 §4 默认值）；更换 ckpt 需重跑
+- 特征源：V3_Bv1 生产 ckpt_best（方案 §4 默认值）；更换 ckpt 需重跑
   （读数整体作废）；
 - λ 选参结果（v_tok/t_tok/vt）：pose 316/316/316；traj 31.6/3.16e4/31.6；
   relkp 100/100/100；fwd 1e3/1e4/3.16e3。

@@ -1,5 +1,5 @@
-"""V5_1_v2 entry: V5_1A structure on the v2 无平滑交接包
-(tactile_input=denoised108_v2; data variant of V5_1, same network).
+"""V5_Av1_v2 entry: V5_Av1 structure on the v2 无平滑交接包
+(tactile_input=denoised108_v2; data variant of V5_Av1, same network).
 
 Data variant of v5_1 (2026-10-21): identical architecture, identical
 carrier contract (frozen E_offfix V stream) — the only difference is the

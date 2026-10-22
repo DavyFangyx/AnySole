@@ -8,7 +8,7 @@
 
 与 10-19 完全相同，唯一改动 = `--tactile-input denoised108_v3`，且按任务要求 `--device cpu`（10-19 为 cuda:3）：
 
-- 探针：`z_note/multimodal_fusion/V5_1方案/probe_v5_phase_cop_readout.py`，未改动。`denoised108_v3` = 交接包 v3（v2 前三项 + 故障格突发清洗，基线之前、raw 行上）`processed48`，`resample_handoff` 绝对最近行映射；T_phys 按 v3 值重算，接触标签保持 shared 原样（GT 固定）。
+- 探针：`z_note/multimodal_fusion/V5_方案/probe_v5_phase_cop_readout.py`，未改动。`denoised108_v3` = 交接包 v3（v2 前三项 + 故障格突发清洗，基线之前、raw 行上）`processed48`，`resample_handoff` 绝对最近行映射；T_phys 按 v3 值重算，接触标签保持 shared 原样（GT 固定）。
 - 载体 ckpt、GT 与有效帧、λ 网格、判据均与 10-19 相同；v2 与 v3 的逐通道 λ 完全相同（repr 逐位相等；raw108 与 v2/v3 在 phase_L|vt、phase_R|vt 的 λ 差异为 10-19 既有格局）。
 - 三版 n_valid 全等：phase_L 11159/3487、phase_R 11815/3800、cop_L 33185/10676、cop_R 32753/10850（train/test），const 全等。
 - 复现性（同条件 CPU 跑）：本跑结果与 10-19 GPU JSON 的差异中，v_tok 读出（不依赖 T 数据版本）逐格 Δ ≤ 1.6e-9（results）、≤ 4.1e-9（verdict）——即设备算术漂移上限；下文中所有 v3−v2 差异（1e-5 ~ 2.6e-3）均远大于该上限，属数据版本差异而非设备漂移。

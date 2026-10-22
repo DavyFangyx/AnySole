@@ -59,15 +59,15 @@ def pressure_queued(session):
     return False
 
 def _cam_id(model: str) -> int:
-    """Camera id of a four-camera model id (V3_3B_cam{N}); None otherwise."""
-    match = re.match(r"^V3_3B_cam([1-4])$", model)
+    """Camera id of a four-camera model id (V3_Bv1_cam{N}); None otherwise."""
+    match = re.match(r"^V3_Bv1_cam([1-4])$", model)
     return int(match.group(1)) if match else None
 
 
 def anysole_config_file(model: str) -> str:
-    """四相机扩展 D2/D3: V3_3B_cam{N} → v1_cam{N}.yaml, V3_3B_cam3_occ{M} →
+    """四相机扩展 D2/D3: V3_Bv1_cam{N} → v1_cam{N}.yaml, V3_Bv1_cam3_occ{M} →
     v1_cam3_occ{M}.yaml, others v1.yaml."""
-    match = re.match(r"^V3_3B_cam([1-4])(?:_occ(\d{3}))?$", model)
+    match = re.match(r"^V3_Bv1_cam([1-4])(?:_occ(\d{3}))?$", model)
     if not match:
         return "anysole/configs/v1.yaml"
     suffix = "cam" + match.group(1)

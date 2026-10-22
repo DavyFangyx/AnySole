@@ -1,6 +1,6 @@
-"""V3_3G 分部观测层 (v1.1, inference-only, zero parameters).
+"""V3_Gv1 分部观测层 (v1.1, inference-only, zero parameters).
 
-设计规则（V3_3G方案.md §1/§2.4）。
+设计规则（V3_G方案_GT燃料.md §1/§2.4）。
 
 v1.1 裁定（2026-10-18，生产模型穿透帧诊断）：两骨 IK 腿链修正退场——
 诊断数字：穿透帧上 GT 髋高于预测 12.1mm、GT 足高于预测 11.8mm（全身

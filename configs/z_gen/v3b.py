@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the V3_3B occ010 production-eval queue task (2026-10-18).
+"""Generate the V3_Bv1 occ010 production-eval queue task (2026-10-18).
 
 ckpt 已训（2026-10-13，ckpt_best/last 齐），metrics 缺失——只补评估。
 数据根按名称尾缀推导 v1_cam3_occ010.yaml（与削弱实验同基座）。
@@ -13,15 +13,15 @@ from common import emit_experiment
 from model_registry import MODELS
 
 SUITES = {
-    "V3_3B_cam3_occ010": [
-        ("v3b_test", ["V3_3B_cam3_occ010"]),
+    "V3_Bv1_cam3_occ010": [
+        ("v3b_test", ["V3_Bv1_cam3_occ010"]),
     ],
 }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", default="V3_3B_cam3_occ010",
+    parser.add_argument("--suite", default="V3_Bv1_cam3_occ010",
                         help="comma-separated suite IDs")
     parser.add_argument("--models", default="",
                         help="comma-separated model IDs to subset the group")

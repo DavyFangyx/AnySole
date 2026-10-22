@@ -1,8 +1,9 @@
-# V3_3H 方案（2026-10-17 裁定；首批结果 2026-10-18 落定，零税 + 兑现全面 ≥ E 且 ATE 安全）
+# V3_Hv1 方案（2026-10-17 裁定；首批结果 2026-10-18 落定，零税 + 兑现全面 ≥ E 且 ATE 安全）
+
 
 独立回归式模型（`anysole/models/common/model_v3h.py`，残差层 `anysole/utils/constraints_h.py`）：**纯 V 姿态主干 + T 接触头 + 推理侧零参数残差层（v1 两通道）**。三条件 = 同一回归塔的三个读数，无条件采样、无 null token、无门控、无 T 姿态塔、无 sigma 头。
 
-独立模型：不 import E/F/G 任何管线代码；只继承两件已验证物——f6_soft 接触标签（数据）与 vonly 编码器权重（V 特征）。与 V3_3G 的关系：同一数据基座（cam3 + occ010、f6_soft、三条件协议）上不同技术理念的独立实现——G 前馈因式化「完整流形，分部证据」，H 反馈纠偏「完整流形，残差归零」；两线无依赖。
+独立模型：不 import E/F/G 任何管线代码；只继承两件已验证物——f6_soft 接触标签（数据）与 vonly 编码器权重（V 特征）。与 V3_Gv1 的关系：同一数据基座（cam3 + occ010、f6_soft、三条件协议）上不同技术理念的独立实现——G 前馈因式化「完整流形，分部证据」，H 反馈纠偏「完整流形，残差归零」；两线无依赖。
 
 ## 1. 设计主张与机制规则
 
@@ -34,7 +35,7 @@ T2M = 残差层(null-V 前向的 pose_v, trans_hat, contact_logits)（V 输入�
 
 ### 2.2 组件
 
-- **v_enc（冻结）**：HRNet 特征 (B,tw,2051) → v_tok (B,tw,256)。权重复制自每配置的 vonly 专才 ckpt_best（V3_3H → V3_3B_vonly、V3_3H_cam3_occ010 → V3_3B_cam3_occ010_vonly），14 键冻结，入口装载 + sha256 provenance；embeddings 不冻结（time_pe 正弦、模态行随 T 流训练，F 线先例）。
+- **v_enc（冻结）**：HRNet 特征 (B,tw,2051) → v_tok (B,tw,256)。权重复制自每配置的 vonly 专才 ckpt_best（V3_Hv1 → V3_Bv1_vonly、V3_Hv1_cam3_occ010 → V3_Bv1_cam3_occ010_vonly），14 键冻结，入口装载 + sha256 provenance；embeddings 不冻结（time_pe 正弦、模态行随 T 流训练，F 线先例）。
 - **v_temporal**：4 层 pre-LN TransformerEncoder（nhead=8、ff=1024、gelu），从零训练。
 - **V3HPoseHead**：9 部位硬划分（PART_JOINTS）、6 层 TransformerDecoder 单流交叉注意力，无门控、无 soft A、无 sigma 分支（H 无 NLL/回退）；输出 pose_v (B,tw,144)（pose_mean/std 归一化同 E 机器）。**无 T 姿态塔、无先验头——H 与 E 的结构性区别：E 的 T 塔复刻生成（T2M 级），H 的 T 侧不出内容。**
 - **V3HTrajHead**：2 层时序 encoder → 每帧速度 → cumsum 轨迹 trans_hat (B,tw,3)。
@@ -74,7 +75,7 @@ T 流输入三条件恒定（接触头始终读真实压力），开关只作用
 
 ### 4.1 三条件读数（统一面板）
 
-口径：test，ckpt_best（`results/experiments/v3h_test/`，2026-10-18 重评——eval_protocol seq 装配修复后）；单位：位置类 mm、旋转类 度、Jitter m/s³；Δ = VT2M − V2M，负 = 更优。
+口径：test，ckpt_best（`results/experiments/v3_hv1_test/`，2026-10-18 重评——eval_protocol seq 装配修复后）；单位：位置类 mm、旋转类 度、Jitter m/s³；Δ = VT2M − V2M，负 = 更优。
 
 **关节位置误差（MPJPE 家族）**
 | 指标 | V2M | VT2M | Δ（VT−V） | T2M | V2M occ010 | VT2M occ010 | Δ（VT−V）occ010 | T2M occ010 |
@@ -105,7 +106,7 @@ T 流输入三条件恒定（接触头始终读真实压力），开关只作用
 
 ### 4.2 跨模型定位
 
-零税 −0.01 下穿透 −9.92、Global −3.02、ATE −1.60（全面 ≥ E 且 ATE 安全；**穿透/Global/ATE = GT 锚燃料，非 T 兑现——2026-10-19 审计**）、滑步 −0.56。全表见 `V3_3方案_性能对照.md`。
+零税 −0.01 下穿透 −9.92、Global −3.02、ATE −1.60（全面 ≥ E 且 ATE 安全；**穿透/Global/ATE = GT 锚燃料，非 T 兑现——2026-10-19 审计**）、滑步 −0.56。全表见 `V方案_性能对照.md`。
 
 ### 4.3 预注册判据与实测（E 对标数字：全局 72.0 / ATE 42.2 / 滑步 9.0 / 穿透 23.9）
 
@@ -122,7 +123,15 @@ T 流输入三条件恒定（接触头始终读真实压力），开关只作用
 
 ## 5. 落地文件与实现状态（2026-10-18）
 
-- 文件：`anysole/utils/constraints_h.py`（残差层：穿透 + 支撑 + floor_src 开关）；`anysole/models/common/model_v3h.py`（V 塔 + 接触头，无 T 塔、无 sigma）；`anysole/models/v3_3h.py`（入口，冻结 vonly v_enc 装载 + provenance）；`train.py` / `eval.py` / `eval_protocol.py`（v3h 分支 + 训练 V 零化 10%）；`registry.py` + `configs/z_gen/model_registry.py`（V3_3H 双配置）+ `configs/z_gen/v3h.py` + `common.py`（v3h_test）。
-- 队列：`configs/queue/00545__v3h_test__V3_3H.conf`、`00546__v3h_test__V3_3H_cam3_occ010.conf`（FORCE=false）。
+- 文件：`anysole/utils/constraints_h.py`（残差层：穿透 + 支撑 + floor_src 开关）；`anysole/models/common/model_v3h.py`（V 塔 + 接触头，无 T 塔、无 sigma）；`anysole/models/v3_3h.py`（入口，冻结 vonly v_enc 装载 + provenance）；`train.py` / `eval.py` / `eval_protocol.py`（v3h 分支 + 训练 V 零化 10%）；`registry.py` + `configs/z_gen/model_registry.py`（V3_Hv1 双配置）+ `configs/z_gen/v3h.py` + `common.py`（v3_hv1_test）。
+- 队列：`configs/queue/00545__v3_hv1_test__V3_Hv1.conf`、`00546__v3_hv1_test__V3_Hv1_cam3_occ010.conf`（FORCE=false）。
 - 冒烟（/tmp，不留产物）全过：imports/注册表、entry 构建（14 冻结 v_enc 键）、VT+null-V 前向、GT 上通道数学（踝关节唯一写入/只升不降/偏航纯水平 dh<6e-8/GT≈恒等）、t-floor 双口径（12.4mm gap + 自锚定退化复现）、足部通道证伪测量。
 - 未 commit；训练规模与 GPU 分配待用户跑（与 G 线错开）。
+
+## 6. 修改历史
+
+- **V1**：零参数残差层双通道（穿透 + 支撑）。穿透通道消费 GT 会话 floor——兑现 = 锚-几何非 T，已废弃。
+- **V2**：v1 + T 流 aux 压力重建（λ_trec=0.1）——命题 2 载体依赖修复：T 编码器监督恢复足部信息。
+- **V3**：v2 + 一阶足部残差头（接触软门控、饱和 0.05、只写足关节 6D）——落点 = 叶关节，位置效应恒 0（错误一）。
+- **V5**：v3 − 穿透通道（无锚版：不消费任何 floor 输入；v4 空号）。
+- **V6（现行）**：v5 + 残差头落点改踝 7/8（错误一修复）。

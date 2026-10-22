@@ -194,12 +194,12 @@ def _draw_deciles(rows: list[dict[str, Any]], path: Path) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--v2m-detail", type=Path, required=True,
-                        help="mainline V3_3B window_detail_<split>.json")
+                        help="mainline V3_Bv1 window_detail_<split>.json")
     parser.add_argument("--vt2m-detail", type=Path, required=True,
-                        help="mainline V3_3B window_detail_<split>.json")
+                        help="mainline V3_Bv1 window_detail_<split>.json")
     parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument("--out", type=Path,
-                        default=REPO / "results_display" / "Test5_OracleTest" / "V3_3B")
+                        default=REPO / "results_display" / "Test5_OracleTest" / "V3_Bv1")
     args = parser.parse_args(argv)
 
     v_cond = _load_condition(args.v2m_detail, "V2M")

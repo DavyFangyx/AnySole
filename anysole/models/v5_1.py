@@ -1,11 +1,11 @@
-"""V5_1 entry: frozen E v2.1 carrier + V/T dual z experts + PoE + FiLM
-lower-limb injection (2026-10-19, V5_1A方案.md).
+"""V5_Av1 entry: frozen E v2.1 carrier + V/T dual z experts + PoE + FiLM
+lower-limb injection (2026-10-19, V5_A方案.md).
 
 Fresh architecture (2026-09-24 independence restructure): the structure is
 fixed here; the z experts / FiLM / PoE weights / T prior tower train from
 zero.  The V carrier is E v2.1's — loaded from ``carrier_from`` (per-config
-E production ckpt_best: cam3 → V3_3E_f6_soft、occ010 →
-V3_3E_cam3_occ010_f6_soft), copied key-by-key into the V-stream submodules
+E production ckpt_best: cam3 → V3_Ev1_f6_soft、occ010 →
+V3_Ev1_cam3_occ010_f6_soft), copied key-by-key into the V-stream submodules
 and frozen at construction (model_v5_1 freezes them; this entry only
 loads).  Provenance (source path + sha256 + key count) is recorded into
 CONFIG_EXTRA and lands in every checkpoint's config.
@@ -29,7 +29,7 @@ import hashlib
 
 import torch
 
-from anysole.models.common.model_v5_1 import CARRIER_PREFIXES, AnySoleModelV5_1
+from anysole.models.common.model_v5_1 import CARRIER_PREFIXES, AnySoleModelV5_Av1
 
 STRUCTURE = {
     "t_encoder": "foot_conv",
@@ -44,8 +44,8 @@ CONFIG_EXTRA: dict = {}
 
 
 def build(config: dict, part_joints=None):
-    """Construct the V5_1 network; load and freeze the E V-stream carrier."""
-    model = AnySoleModelV5_1(
+    """Construct the V5_Av1 network; load and freeze the E V-stream carrier."""
+    model = AnySoleModelV5_Av1(
         d=int(config["d_model"]),
         tw=int(config["tw"]),
         dropout=float(config.get("dropout", 0.1)),
@@ -56,7 +56,7 @@ def build(config: dict, part_joints=None):
     carrier = str(config.get("carrier_from") or "")
     if not carrier:
         raise ValueError(
-            "V5_1 requires carrier_from (the E v2.1 ckpt_best whose V stream "
+            "V5_Av1 requires carrier_from (the E v2.1 ckpt_best whose V stream "
             "is the frozen carrier); the registry entries carry it per config")
     ckpt = torch.load(carrier, map_location="cpu")
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt

@@ -1,8 +1,8 @@
-"""V3_3G (2026-10-17): regression carrier + part-wise observation layer.
+"""V3_Gv1 (2026-10-17): regression carrier + part-wise observation layer.
 
-Fresh architecture.  V3_3G = E 的回归载体（冻结继承）+ 从零训练的 T 接触流
+Fresh architecture.  V3_Gv1 = E 的回归载体（冻结继承）+ 从零训练的 T 接触流
 + 推理侧分部观测层（constraints_g.py）。三条件 = 同一前向的三种读出
-（config_id 被忽略，同 V3_3E 协议）。
+（config_id 被忽略，同 V3_Ev1 协议）。
 
 - V 载体（冻结）: v_enc -> v_temporal -> 9-part pose head（144 维 6D）+
   traj head（速度 -> cumsum）。权重来自 E v2.1 生产 ckpt_best（入口按
@@ -70,7 +70,7 @@ class V3EPoseHead(nn.Module):
     Pure single-stream 9-part pose head: part queries decode ONE memory
     stream (no modality views, no gates), per-part unembeds emit the part's
     joints in 6D plus a per-joint log-sigma.  Hard PART_JOINTS partition.
-    Sigma heads are frozen at init in V3_3G (E carrier state, not read)."""
+    Sigma heads are frozen at init in V3_Gv1 (E carrier state, not read)."""
 
     def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8,
                  dim_feedforward=1024, dropout=0.1, n_layers=6,
@@ -143,7 +143,7 @@ class V3ETrajHead(nn.Module):
 
 class V3EContactHead(nn.Module):
     """[copied from model_v3e] Per-foot contact logits from the tactile
-    tokens (f6_soft supervision, air-weighted in V3_3G training)."""
+    tokens (f6_soft supervision, air-weighted in V3_Gv1 training)."""
 
     def __init__(self, dim=D_MODEL):
         super().__init__()
@@ -198,7 +198,7 @@ class AnySoleModelV3G(nn.Module):
                 T_s2m=None, V_hmr=None, mask_v=None, mask_t=None):
         """config_id is accepted for the train/eval call contract and
         deliberately IGNORED — both streams always live, and the three eval
-        conditions are three readouts of this one forward (V3_3E protocol)."""
+        conditions are three readouts of this one forward (V3_Ev1 protocol)."""
         T_tac = torch.cat([T_raw, T_phys], dim=-1)
         cid = torch.zeros(V_feat.shape[0], dtype=torch.long, device=V_feat.device)
         v_tok, t_tok = self.encoders(V_feat, T_tac, cid, V_hmr=V_hmr,

@@ -1,13 +1,13 @@
-"""V3_3C — 定向修复 (ruled 2026-10-09): frozen-V + zero-init T-residual.
+"""V3_Cv1 — 定向修复 (ruled 2026-10-09): frozen-V + zero-init T-residual.
 
 The name was reserved in model_fix_note §3.5 for the "directional repair" of
 the fusion deficit (VT worse than V across all 12 architectures).  The ruling
 replaced the originally-planned from-scratch gate fix (missing-stream zero
 injection + gating differential loss) with a structurally guaranteed
-alternative: freeze the V3_3B_vonly specialist wholesale and fine-tune only a
+alternative: freeze the V3_Bv1_vonly specialist wholesale and fine-tune only a
 small T-residual branch on VT windows.
 
-- STRUCTURE is identical to V3_3B plus ``residual_t=True``, so the checkpoint
+- STRUCTURE is identical to V3_Bv1 plus ``residual_t=True``, so the checkpoint
   config records the branch flag and eval/infer structure validation passes.
 - build() freezes every base parameter (requires_grad_(False)) and unfreezes
   only ``t_residual``; frozen params keep grad None forever, so although the
@@ -28,16 +28,16 @@ See z_note/multimodal_fusion/Appendix/T信息量判定实验.md §5.1 for the ex
 from __future__ import annotations
 
 from anysole.models.common.model_v2 import AnySoleModelV2
-from anysole.models.v3_3b import STRUCTURE as V3_3B_STRUCTURE
+from anysole.models.v3_3b import STRUCTURE as V3_Bv1_STRUCTURE
 
-STRUCTURE = {**V3_3B_STRUCTURE, "residual_t": True}
+STRUCTURE = {**V3_Bv1_STRUCTURE, "residual_t": True}
 
 # Provenance-only flags recorded into the ckpt config (not constructor args).
 CONFIG_EXTRA: dict = {}
 
 
 def build(config: dict, part_joints=None):
-    """Construct V3_3C from the effective train config, then freeze the base.
+    """Construct V3_Cv1 from the effective train config, then freeze the base.
 
     The optimizer (built later in train.py, after --init-from) therefore
     contains only the T-residual branch parameters.

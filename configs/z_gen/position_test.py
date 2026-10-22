@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate the train+eval task for the V3_3D frozen-V + position-head model.
+"""Generate the train+eval task for the V3_Dv1 frozen-V + position-head model.
 
-One conf (TASK=model_run): the runner trains V3_3D for 200 epochs from the
-V3_3C-derived base (--init-from in the registry), then runs the formal
+One conf (TASK=model_run): the runner trains V3_Dv1 for 200 epochs from the
+V3_Cv1-derived base (--init-from in the registry), then runs the formal
 val/test evaluation.
 """
 

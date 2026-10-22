@@ -1,7 +1,7 @@
-"""V3_3F entry: diffusion prior + T guidance (ruled 2026-10-17).
+"""V3_Fv1 entry: diffusion prior + T guidance (ruled 2026-10-17).
 
 Fresh architecture — deliberately independent of the anysolev2
-fusion/gating lineage, V3_3D, and V3_3E (no code shared with any of them).
+fusion/gating lineage, V3_Dv1, and V3_Ev1 (no code shared with any of them).
 Structure summary (model_v3f.py):
   x = [pose | trans | contact] diffused; V-conditioned DiT denoiser (x0
   prediction); T contact head (f6_soft) + contact/ground guidance at
@@ -9,8 +9,8 @@ Structure summary (model_v3f.py):
 
 The frozen vonly visual encoder (sanctioned reuse, 方案 §2.1): the entry
 loads the per-config V-only specialist's ``encoders.v_enc.*`` projection
-and freezes it (V3_3F -> V3_3B_vonly, V3_3F_cam3_occ010 ->
-V3_3B_cam3_occ010_vonly).  Embeddings stay fresh: time_pe is sinusoidal by
+and freezes it (V3_Fv1 -> V3_Bv1_vonly, V3_Fv1_cam3_occ010 ->
+V3_Bv1_cam3_occ010_vonly).  Embeddings stay fresh: time_pe is sinusoidal by
 construction and the modality row trains with the T stream.  Everything
 else — the denoiser, the T encoder, the contact head — trains from random
 init (2026-09-24 independence rule).
@@ -35,19 +35,19 @@ CONFIG_EXTRA: dict = {}
 
 
 def _vonly_model_name(model_name: str) -> str:
-    """Per-config frozen V specialist: V3_3F[_cam3_occNNN] ->
-    V3_3B[_cam3_occNNN]_vonly (the specialist suffix follows the config
-    suffix — V3_3B_cam3_occ010_vonly, not V3_3B_vonly_cam3_occ010)."""
+    """Per-config frozen V specialist: V3_Fv1[_cam3_occNNN] ->
+    V3_Bv1[_cam3_occNNN]_vonly (the specialist suffix follows the config
+    suffix — V3_Bv1_cam3_occ010_vonly, not V3_Bv1_vonly_cam3_occ010)."""
     name = str(model_name or "")
-    suffix = name[len("V3_3F"):] if name.startswith("V3_3F") else ""
+    suffix = name[len("V3_Fv1"):] if name.startswith("V3_Fv1") else ""
     # denoised 变体冻结的 V 编码器仍来自 raw108 的 vonly 专才（V 流与
     # T 数据源无关，2026-10-17 裁定）。
     suffix = suffix.replace("_denoised", "")
-    return "V3_3B" + suffix + "_vonly"
+    return "V3_Bv1" + suffix + "_vonly"
 
 
 def build(config: dict, part_joints=None):
-    """Construct V3_3F, then load + freeze the vonly visual encoder."""
+    """Construct V3_Fv1, then load + freeze the vonly visual encoder."""
     model = AnySoleModelV3F(
         d=int(config["d_model"]),
         tw=int(config["tw"]),
@@ -60,7 +60,7 @@ def build(config: dict, part_joints=None):
     ckpt = anysole_model_dir(vonly_name, "joint_and") / "checkpoints" / "ckpt_best.pt"
     if not ckpt.is_file():
         raise FileNotFoundError(
-            "V3_3F needs the frozen vonly visual encoder but it is missing: %s\n"
+            "V3_Fv1 needs the frozen vonly visual encoder but it is missing: %s\n"
             "Train the V-only specialist first (--model-name %s)."
             % (ckpt, vonly_name))
     state = torch.load(ckpt, map_location="cpu", weights_only=False)

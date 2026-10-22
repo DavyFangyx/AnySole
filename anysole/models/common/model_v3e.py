@@ -1,8 +1,8 @@
-"""V3_3E (ruled 2026-10-17): the constraint-fusion model.
+"""V3_Ev1 (ruled 2026-10-17): the constraint-fusion model.
 
 Fresh architecture, deliberately NOT built on anysolev2 (the cross-modal
 fusion transformer + learned sigma gating are the located interference
-mechanism, Δ_fusion +13.06) nor on V3_3D (frozen-base position head — ruled
+mechanism, Δ_fusion +13.06) nor on V3_Dv1 (frozen-base position head — ruled
 a bad model).  Three streams, zero cross-modal conditioning:
 
 - V 姿态主干（纯 V，T 不进入）: v_tok -> temporal encoder -> 9-part pose
@@ -192,7 +192,7 @@ class AnySoleModelV3E(nn.Module):
     def forward(self, V_feat, T_raw, T_phys, config_id=None, subject_ids=None,
                 T_s2m=None, V_hmr=None, mask_v=None, mask_t=None):
         """config_id is accepted for the train/eval call contract and
-        deliberately IGNORED — V3_3E has no condition sampling: both streams
+        deliberately IGNORED — V3_Ev1 has no condition sampling: both streams
         always live, and the three eval conditions are three readouts of this
         one forward."""
         T_tac = torch.cat([T_raw, T_phys], dim=-1)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate the train+eval task for the V3_3C frozen-V + T-residual fine-tune.
+"""Generate the train+eval task for the V3_Cv1 frozen-V + T-residual fine-tune.
 
-One conf (TASK=model_run): the runner trains V3_3C for 200 epochs starting
-from the V3_3B_vonly specialist ckpt_best (--init-from; a deliberate,
+One conf (TASK=model_run): the runner trains V3_Cv1 for 200 epochs starting
+from the V3_Bv1_vonly specialist ckpt_best (--init-from; a deliberate,
 sanctioned exception to the 2026-09-24 no-warm-start independence rule —
 z_note/multimodal_fusion/Appendix/T信息量判定实验.md §5.1), then runs the formal val/test
 evaluation.  The run manifest records the base checkpoint as provenance

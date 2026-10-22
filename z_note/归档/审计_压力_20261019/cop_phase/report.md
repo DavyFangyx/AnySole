@@ -4,13 +4,13 @@
 
 ## 口径
 
-- 探针：`z_note/multimodal_fusion/V5_1方案/probe_v5_phase_cop_readout.py`。本次唯一改动 = 新增 `--tactile-input` 参数（默认 None = 沿用载体 saved config），传给 `build()` 的 `AnySoleDataset(tactile_input=...)`；其余逻辑未动。dataset.py / handoff_pressure.py 只读未碰。
+- 探针：`z_note/multimodal_fusion/V5_方案/probe_v5_phase_cop_readout.py`。本次唯一改动 = 新增 `--tactile-input` 参数（默认 None = 沿用载体 saved config），传给 `build()` 的 `AnySoleDataset(tactile_input=...)`；其余逻辑未动。dataset.py / handoff_pressure.py 只读未碰。
 - 数据版本（dataset.py `tactile_input` 现行为）：
   - `raw108`：生产原值（shared pressure left48/right48）→ 探针 raw108 = [T_raw 96（normalize_raw 归一化）| T_phys 12]。
   - `denoised108`：交接包 v1（Tactile_pressure_handoff_20261017_v1）`baseline_step_corrected` 值（values48 = processed48），四项处理（孤立突变/悬空底值/持续阶跃/**自适应平滑**），`resample_handoff` 绝对最近行映射到生产帧网格；T_phys 按降噪值重算，接触标签保持 shared 原样（GT 固定）。
   - `denoised108_v2`：交接包 v2（_v2_no_smoothing），仅前三项处理、**无平滑**，其余同 v1。
   - 三版同帧网格、同窗口（tw=20, stride=20）。override 生效证据（冒烟侧验）：三版 T_raw 数值互异（v1/v2 与 raw108 差 ~1e-3 量级，v1-v2 最大 |Δ|≈0.002，归一化口径）。
-- 载体 ckpt：`results/AnySole/V3_3E_f6_soft/tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/checkpoints/ckpt_best.pt`（V3_3E v2.1，编码器冻结）。saved config 的 contact_method=f6_soft 仅影响探针不使用的接触标签。
+- 载体 ckpt：`results/AnySole/V3_Ev1_f6_soft/tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/checkpoints/ckpt_best.pt`（V3_Ev1 v2.1，编码器冻结）。saved config 的 contact_method=f6_soft 仅影响探针不使用的接触标签。
 - GT 与有效帧（不随 tactile_input 变）：相位 = 运动学触地事件（足关节世界高 < floor+2cm 上升沿，周期 ≥10 帧）→ (cos 2πφ, sin 2πφ)；CoP = smplx 正演 foot_heat 4×12 → cop_from_grid（接触帧且和值>0）。三版 n_valid 全等：phase_L 11159/3487、phase_R 11815/3800、cop_L 33185/10676、cop_R 32753/10850（train/test），test = val 36 会话。
 - 判据（脚本原样）：TRAIN 会话 80/20 连续切分选 λ（1e-3~1e5 对数 17 档）→ 全量 TRAIN 重拟 → TEST 打分；逐会话配对 bootstrap 95% CI（n_boot=10000，seed=0）。T 可读 = const−raw108 显著 >0；V 更强 = raw108−v_tok 显著 >0。
 - 运行：cuda:3，三版各全量一遍（23:14/23:20/23:25 完成，exit 0）。三版日志均无「GT 不可用」会话。冒烟（--max-sessions 2）时相位 no_data 系 TRAIN 前 2 会话（S10101/S10102）为站立式（0 次触地上升沿）所致，非缺陷；全量相位通道均有数据。

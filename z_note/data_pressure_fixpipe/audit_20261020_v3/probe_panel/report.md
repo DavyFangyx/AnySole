@@ -8,7 +8,7 @@
 
   | 版本 | 载体 ckpt | T 数据 | JSON |
   |---|---|---|---|
-  | v1 = denoised108 | V3_3B_denoised_joint_and ckpt_best（saved config tactile_input=denoised108） | 交接包 v1（四项，含自适应平滑） | `probe_info_panel_{config}_denoised.json`（10-17 既有） |
+  | v1 = denoised108 | V3_Bv1_denoised_joint_and ckpt_best（saved config tactile_input=denoised108） | 交接包 v1（四项，含自适应平滑） | `probe_info_panel_{config}_denoised.json`（10-17 既有） |
   | v2 = denoised108_v2 | 同 v1 载体，`--tactile-input denoised108_v2` 覆盖 | 交接包 v2（前三项，无平滑） | `probe_info_panel_{config}_denoised_v2.json`（10-20 既有） |
   | v3 = denoised108_v3 | 同 v1 载体，`--tactile-input denoised108_v3` 覆盖 | 交接包 v3（v2 三项 + 故障格突发清洗 fault_cell_burst_repair） | `probe_info_panel_{config}_denoised_v3.json`（本次产出） |
 
@@ -17,7 +17,7 @@
   cam3 不传 cache-root（默认 config cache_root）+ `--cam-id 3`；
   occ010/020/030/050 传 `…/hrnet/cam3_occ_lower0XX` + `--cam-id 3`。
 - **接触标签** = shared 原样固定 GT（隔离 T 输入变化对 A/B 的影响，与 10-19 同）。
-- **载体**：`results/AnySole/V3_3B_denoised_joint_and/tw20_st20_lr0.0001_lp3_lt1_lk1_la0.05_ls0.01_sf0.1_wu0.05_gc5_ep740_bs256_sd1/checkpoints/ckpt_best.pt`（与 10-19 v2 补跑同一 ckpt）。
+- **载体**：`results/AnySole/V3_Bv1_denoised_joint_and/tw20_st20_lr0.0001_lp3_lt1_lk1_la0.05_ls0.01_sf0.1_wu0.05_gc5_ep740_bs256_sd1/checkpoints/ckpt_best.pt`（与 10-19 v2 补跑同一 ckpt）。
 - **实现改动**：`z_note/probes/probe_info_panel.py` 仅新增 provenance 字段 `tactile_input`（单行，记录 --tactile-input 覆盖值；10-20 v2 补跑时该参数已存在）。
 - **GPU**：cuda:0 / cuda:6 / cuda:7 三卡并行（1/2/3 被占、4/5 禁用纪律遵守；开工前 nvidia-smi 确认）。
 - **v3 包规模**（RELEASE.json）：fault_burst_modified_values = 16,308，fault_affected_files = 299（另有 591 个空变更记录文件）；修理值为大突发（原始克值 4096→2910 一类，S10012_right 最大单值差 5.6e3）；涉及右足 cell 35 通道为主。

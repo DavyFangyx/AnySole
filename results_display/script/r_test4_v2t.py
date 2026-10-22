@@ -280,7 +280,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ckpt", type=str, default=str(DEFAULT_CKPT))
     parser.add_argument("--source", choices=("archives", "infer"), default="archives",
                         help="archives reads standardized V2T outputs; infer is the legacy on-the-fly diagnostic.")
-    parser.add_argument("--model-name", "--modal", dest="modal", default="V3_3B")
+    parser.add_argument("--model-name", "--modal", dest="modal", default="V3_Bv1")
     parser.add_argument("--contact-method", default="joint_and")
     parser.add_argument("--variant", default=None, help="AnySole run subdir (omit: single run -> use it, several -> newest by mtime; 'all' = every run).")
     parser.add_argument("--models", default="all", help="Select models: anysole and/or registry baseline names, comma-separated; default all.")

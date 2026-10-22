@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """T 判定后续 · 实验 1（Test3_ResidualTest）：冻结残差三列对比。
 
-三列目标 = V specialist（V3_3B_vonly V2M，冻结基底的既有数字）、main VT
-（主线 V3_3B VT2M，C2 的 interference 口径）、residual VT（V3_3C VT2M，
+三列目标 = V specialist（V3_Bv1_vonly V2M，冻结基底的既有数字）、main VT
+（主线 V3_Bv1 VT2M，C2 的 interference 口径）、residual VT（V3_Cv1 VT2M，
 冻结 V + 零初始化 T 残差微调 200ep 的产物）。
 
 行集 = C2 同款 19 行（REGION_GROUPS 上半身/下半身/全身/足-地）+ 2 行新指标
@@ -67,15 +67,15 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument("--fs-vspecialist", type=Path, required=True,
-                        help="V3_3B_vonly metrics/<split>.json")
+                        help="V3_Bv1_vonly metrics/<split>.json")
     parser.add_argument("--fs-mainvt", type=Path, required=True,
-                        help="mainline V3_3B metrics/<split>.json")
+                        help="mainline V3_Bv1 metrics/<split>.json")
     parser.add_argument("--fs-residual", type=Path, required=True,
-                        help="V3_3C metrics/<split>.json")
+                        help="V3_Cv1 metrics/<split>.json")
     parser.add_argument("--tol", type=float, default=0.0,
                         help="误差差值分类容差（同 C2）")
     parser.add_argument("--out", type=Path,
-                        default=REPO / "results_display" / "Test3_ResidualTest" / "V3_3C")
+                        default=REPO / "results_display" / "Test3_ResidualTest" / "V3_Cv1")
     args = parser.parse_args(argv)
 
     v = metric_block(load_fseries(args.fs_vspecialist), "V2M")

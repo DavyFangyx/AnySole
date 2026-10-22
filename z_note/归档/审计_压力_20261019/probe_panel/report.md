@@ -7,8 +7,8 @@
 - **三版数据**：
   | 版本 | 载体 ckpt | T 数据 | JSON |
   |---|---|---|---|
-  | raw108 | V3_3B_joint_and ckpt_best（saved config tactile_input=raw108） | raw108 | `probe_info_panel_{config}.json`（10-17 既有） |
-  | v1 = denoised108 | V3_3B_denoised_joint_and ckpt_best（saved config tactile_input=denoised108） | 交接包 v1（含自适应平滑） | `probe_info_panel_{config}_denoised.json`（10-17 既有） |
+  | raw108 | V3_Bv1_joint_and ckpt_best（saved config tactile_input=raw108） | raw108 | `probe_info_panel_{config}.json`（10-17 既有） |
+  | v1 = denoised108 | V3_Bv1_denoised_joint_and ckpt_best（saved config tactile_input=denoised108） | 交接包 v1（含自适应平滑） | `probe_info_panel_{config}_denoised.json`（10-17 既有） |
   | v2 = denoised108_v2 | 同 v1 载体，`--tactile-input denoised108_v2` 覆盖 | 交接包 v2（无平滑，仅前三项） | `probe_info_panel_{config}_denoised_v2.json`（本次产出） |
 - **8 配置参数**（v1 与 v2 完全一致，仅 tag 后缀 `_denoised` → `_denoised_v2`；载体 ckpt 绝对路径显式传入）：
   | 配置 | --cache-root | --cam-id | tag（v2） |
@@ -22,7 +22,7 @@
 - **实现改动**：`z_note/probes/probe_info_panel.py` 仅新增 `--tactile-input` 参数（缺省 None = 维持原行为，从 saved config 取），传给 `AnySoleDataset(tactile_input=…)`。dataset.py / handoff_pressure.py 只读未动。
 - **GPU**：cuda:3 被占（利用率 100%），本任务用 **cuda:0**（登记）。
 - **物理三行口径**：raw 官方 summary 用 SG-7 平滑读出；v1/v2 无平滑变体。三版对比表一律用逐帧读出（同口径）；raw 平滑值见 §2 注。
-- **载体差异警示**：raw108 与 v1/v2 载体不同（V3_3B_joint_and vs V3_3B_denoised_joint_and），v_tok 读数本身不同。raw→v1 的差异含「载体差 + T 数据差」两因素，不可单一归因于降噪。v1→v2 为干净对比：同载体、同 V 数据、v_tok 逐位全等，仅 T 数据版本不同。
+- **载体差异警示**：raw108 与 v1/v2 载体不同（V3_Bv1_joint_and vs V3_Bv1_denoised_joint_and），v_tok 读数本身不同。raw→v1 的差异含「载体差 + T 数据差」两因素，不可单一归因于降噪。v1→v2 为干净对比：同载体、同 V 数据、v_tok 逐位全等，仅 T 数据版本不同。
 
 ## 2. 数字（Δprobe，mean [配对 95% CI]，* = CI 排除 0）
 

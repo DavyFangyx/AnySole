@@ -3,19 +3,19 @@
 
 Two suites × 8 configs (cam3 baseline / cam1 / cam2 / cam4 / occ010–050):
 
-  V3_3B  融合主线 -- V = main model V2M condition, VT = main VT2M
+  V3_Bv1  融合主线 -- V = main model V2M condition, VT = main VT2M
                     (sources: singlemodal_eval[_cams|_occl])
-  V3_3D  干净通道 -- same two conditions of the position-head model
+  V3_Dv1  干净通道 -- same two conditions of the position-head model
                     (sources: position_test / position_test_vdegrad)
 
 每行只报 Δ = VT − V（负 = 加触觉更优）。指标面板 = PA / 踝足 PA / 全局
-MPJPE / 地面穿透 / 根轨迹 ATE + 协议指标行胜率；V3_3D 另出全配置 val
+MPJPE / 地面穿透 / 根轨迹 ATE + 协议指标行胜率；V3_Dv1 另出全配置 val
 decile 分层表（oracle 上限 / VT 胜率 / d10·d1 Δ，与 oracle_analysis.py
 同一计算）。
 
 输出（results_display/Test6_VdegradTest/<suite>/）：
   delta_table.csv / physical_delta.csv / win_rates.csv / delta_panels.png
-  decile_table.csv / decile_panels.png（仅 V3_3D）/ analysis_summary.json
+  decile_table.csv / decile_panels.png（仅 V3_Dv1）/ analysis_summary.json
 """
 
 from __future__ import annotations
@@ -64,25 +64,25 @@ CONFIG_ORDER = ("cam3", "cam1", "cam2", "cam4",
 # config id -> (experiment id, model id).  cam3 基准行 = 既有主线/position
 # 实验，其余 = 该套件自训自测模型。
 SUITE_CONFIGS: dict[str, dict[str, tuple[str, str]]] = {
-    "V3_3B": {
-        "cam3": ("singlemodal_eval", "V3_3B"),
-        "cam1": ("singlemodal_eval_cams", "V3_3B_cam1"),
-        "cam2": ("singlemodal_eval_cams", "V3_3B_cam2"),
-        "cam4": ("singlemodal_eval_cams", "V3_3B_cam4"),
-        "occ010": ("singlemodal_eval_occl", "V3_3B_cam3_occ010"),
-        "occ020": ("singlemodal_eval_occl", "V3_3B_cam3_occ020"),
-        "occ030": ("singlemodal_eval_occl", "V3_3B_cam3_occ030"),
-        "occ050": ("singlemodal_eval_occl", "V3_3B_cam3_occ050"),
+    "V3_Bv1": {
+        "cam3": ("singlemodal_eval", "V3_Bv1"),
+        "cam1": ("singlemodal_eval_cams", "V3_Bv1_cam1"),
+        "cam2": ("singlemodal_eval_cams", "V3_Bv1_cam2"),
+        "cam4": ("singlemodal_eval_cams", "V3_Bv1_cam4"),
+        "occ010": ("singlemodal_eval_occl", "V3_Bv1_cam3_occ010"),
+        "occ020": ("singlemodal_eval_occl", "V3_Bv1_cam3_occ020"),
+        "occ030": ("singlemodal_eval_occl", "V3_Bv1_cam3_occ030"),
+        "occ050": ("singlemodal_eval_occl", "V3_Bv1_cam3_occ050"),
     },
-    "V3_3D": {
-        "cam3": ("position_test", "V3_3D"),
-        "cam1": ("position_test_vdegrad", "V3_3D_cam1"),
-        "cam2": ("position_test_vdegrad", "V3_3D_cam2"),
-        "cam4": ("position_test_vdegrad", "V3_3D_cam4"),
-        "occ010": ("position_test_vdegrad", "V3_3D_cam3_occ010"),
-        "occ020": ("position_test_vdegrad", "V3_3D_cam3_occ020"),
-        "occ030": ("position_test_vdegrad", "V3_3D_cam3_occ030"),
-        "occ050": ("position_test_vdegrad", "V3_3D_cam3_occ050"),
+    "V3_Dv1": {
+        "cam3": ("position_test", "V3_Dv1"),
+        "cam1": ("position_test_vdegrad", "V3_Dv1_cam1"),
+        "cam2": ("position_test_vdegrad", "V3_Dv1_cam2"),
+        "cam4": ("position_test_vdegrad", "V3_Dv1_cam4"),
+        "occ010": ("position_test_vdegrad", "V3_Dv1_cam3_occ010"),
+        "occ020": ("position_test_vdegrad", "V3_Dv1_cam3_occ020"),
+        "occ030": ("position_test_vdegrad", "V3_Dv1_cam3_occ030"),
+        "occ050": ("position_test_vdegrad", "V3_Dv1_cam3_occ050"),
     },
 }
 
@@ -231,7 +231,7 @@ def _draw_delta_panels(rows: list[dict[str, Any]], suite: str, path: Path) -> No
 
 
 def _decile_head(suite: str, config: str) -> dict[str, Any] | None:
-    """V3_3D per-config val decile summary (oracle_analysis.py 同计算)."""
+    """V3_Dv1 per-config val decile summary (oracle_analysis.py 同计算)."""
     experiment_id, model_id = SUITE_CONFIGS[suite][config]
     detail = (REPO / "results" / "experiments" / experiment_id
               / model_id / "metrics" / "window_detail_val.json")
@@ -363,7 +363,7 @@ def run_suite(suite: str, split: str, out_root: Path) -> None:
     _draw_delta_panels(rows, suite, out / "delta_panels.png")
 
     decile_rows: list[dict[str, Any]] = []
-    if suite == "V3_3D":
+    if suite == "V3_Dv1":
         for config in CONFIG_ORDER:
             head = _decile_head(suite, config)
             if head is None:
@@ -387,7 +387,7 @@ def run_suite(suite: str, split: str, out_root: Path) -> None:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", default="V3_3B,V3_3D",
+    parser.add_argument("--suite", default="V3_Bv1,V3_Dv1",
                         help="comma-separated suite IDs (default: both)")
     parser.add_argument("--split", choices=("val", "test"), default="test",
                         help="split for the Δ/win-rate tables (decile is val)")

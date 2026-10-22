@@ -200,7 +200,7 @@ def main(argv=None) -> int:
                         help="NAME=GROUP:PATH (repeatable)")
     parser.add_argument("--split", choices=("val", "test"), default="test")
     parser.add_argument("--out", type=Path,
-                        default=REPO / "results_display" / "Test4_PhysicalTest" / "V3_3B")
+                        default=REPO / "results_display" / "Test4_PhysicalTest" / "V3_Bv1")
     args = parser.parse_args(argv)
     targets = parse_targets(args.target)
     series = [t.name for t in targets]

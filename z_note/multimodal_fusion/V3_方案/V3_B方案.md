@@ -1,4 +1,4 @@
-# V3_3B 方案（2026-10-08 定稿；生产主线，PA 税源已定位，兑现账本保留）
+# V3_Bv1 方案（2026-10-08 定稿；生产主线，PA 税源已定位，兑现账本保留）
 
 双流融合回归式模型（`anysole/models/v3_3b.py`，核心 `common/model_v2.py`）：**编码后直接拼接进融合 Transformer、再用双流交叉注意力 + σ 门控 + soft A 逐关节混合**。三条件 = null token 替换（训练采样 0.5 VT / 0.25 V-only / 0.25 T-only）。有融合 Transformer、有门控、有 null token。
 
@@ -10,7 +10,7 @@ B 的全部设计主张是一个赌注：**V 和 T 在融合层可以靠注意�
 | 事实 | 证据 |
 |---|---|
 | B 形态的共享表征融合是 PA 税的来源 | V 削弱实验：7/8 配置 ΔPA +0.55~+2.64；全流程探针：F\|VT 61.4 vs F\|V 48.3（T token 混入 V 半段后 V 读出恶化） |
-| T 不经过 V 通路即无税 | 对照实验 V3_3D（B 的残差上限实验，非完整模型：冻结 V 流 + T 只进位置头旁路）8 配置 Δ ∈ [−0.05, +0.34]；强提示——3D 同时换了输出头，非干净消融 |
+| T 不经过 V 通路即无税 | 对照实验 V3_Dv1（B 的残差上限实验，非完整模型：冻结 V 流 + T 只进位置头旁路）8 配置 Δ ∈ [−0.05, +0.34]；强提示——3D 同时换了输出头，非干净消融 |
 | T 有真实增量信息 | T 信息量探针：GlobalMPJPE Δprobe −43/−45、traj_ATE −44（配对显著、两路径一致）；部位正信号在足部（anklefoot −1.96\*、r_foot −2.89\*）、上身无——注意这是探针线性读出弱基线上的相对量（v_tok 全局 367 vs 模型 81.1），载体能力提升后该优势需复测 |
 | 学习式路由不可靠 | σ 门控不路由（全流程探针）；E v1 β-NLL σ 塌缩前科——E 起后续设计禁用门控的依据 |
 
@@ -104,15 +104,15 @@ query 对 F 做「V 半段 / T 半段」双流交叉注意力，用 σ 门控加
 
 ### 4.2 跨模型定位
 
-B 是账本中唯一「税 + 兑现并存」的训练通道（cam3：ΔPA +1.10 / Global −5.20 / ATE −7.39 / Pen −6.32；occ010 同向：ΔPA +1.57 / Pen −7.77）；税源 = B 形态融合（§1）。全表见 `V3_3方案_性能对照.md`。
+B 是账本中唯一「税 + 兑现并存」的训练通道（cam3：ΔPA +1.10 / Global −5.20 / ATE −7.39 / Pen −6.32；occ010 同向：ΔPA +1.57 / Pen −7.77）；税源 = B 形态融合（§1）。全表见 `V方案_性能对照.md`。
 
 ### 4.3 定位与状态
 
-- 生产主线（结构由入口脚本硬编码并记入 ckpt config）；专才 V3_3B_vonly/tonly = 同架构、只改训练条件采样、独立从零——vonly 被 V3_3H 用作 V 特征来源。
-- 谱系：V3_2（9 部位硬头，无门控）→ V3_3A（+soft A）→ V3_3B（+σ 门控）；F5 part_decoder 作废归档（encode_stream 缺 LayerNorm 根因）；V4A/V4B 分组学习实验结论：人为 9 部位是合格选择。
+- 生产主线（结构由入口脚本硬编码并记入 ckpt config）；专才 V3_Bv1_vonly/tonly = 同架构、只改训练条件采样、独立从零——vonly 被 V3_Hv1 用作 V 特征来源。
+- 谱系：V3_2（9 部位硬头，无门控）→ V3_3A（+soft A）→ V3_Bv1（+σ 门控）；F5 part_decoder 作废归档（encode_stream 缺 LayerNorm 根因）；V4A/V4B 分组学习实验结论：人为 9 部位是合格选择。
 - 兑现幅度（Global −5.2 / ATE −7.4）是训练通道的参照点，PA 税 +1.10 是所有零税设计的靶子。
 
 ## 5. 落地文件
 
 - 入口 `anysole/models/v3_3b.py`；核心 `anysole/models/common/model_v2.py`；融合层 `common/fusion.py`；部位头 `common/pose_head.py`；T 编码 `common/foot_encoder.py`。
-- ckpt：`results/AnySole/V3_3B_joint_and/<完整字段串>/checkpoints/`（字段串 = 超参记录）。
+- ckpt：`results/AnySole/V3_Bv1_joint_and/<完整字段串>/checkpoints/`（字段串 = 超参记录）。

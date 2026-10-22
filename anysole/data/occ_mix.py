@@ -1,6 +1,6 @@
-"""V6_1A occ_mix —— 窗口级结构化丢弃采样器（训练侧数据增强 + 窗源标签）。
+"""V6_Av1 occ_mix —— 窗口级结构化丢弃采样器（训练侧数据增强 + 窗源标签）。
 
-权威设计：``z_note/multimodal_fusion/V6_1方案/V6_1A方案.md`` §2.3 腿②。
+权威设计：``z_note/multimodal_fusion/V6_方案/V6_A方案.md`` §2.3 腿②。
 范围规则（§1）：本模块只做训练侧增强与标签——不新增模型组件、不写训练
 循环、不改评估。共享文件的注册集成（dataset.py / train.py / losses.py /
 configs）由主会话统一串行完成；本文件独立可导入，文件末尾
@@ -116,7 +116,7 @@ class WindowAug:
 # ---------------------------------------------------------------------------
 
 class OccMixSampler:
-    """V6_1A 三开关窗口级采样器（逐窗独立伯努利，允许叠加）。
+    """V6_Av1 三开关窗口级采样器（逐窗独立伯努利，允许叠加）。
 
     RNG 约定：
     - ``seed`` 给定 → 内部 ``torch.Generator``（确定性，单进程用途：
@@ -233,7 +233,7 @@ def load_occ_session(
     path = occ_cache_path(session_id, occ_root)
     if not path.is_file():
         raise FileNotFoundError(
-            "Missing occ010 cache %s (V6_1A occ_mix requires cam3_occ_lower010 "
+            "Missing occ010 cache %s (V6_Av1 occ_mix requires cam3_occ_lower010 "
             "built for every training session)" % path
         )
     occ = load_hrnet_cache(path)
@@ -382,7 +382,7 @@ def grouped_mean(
 #           t_raw  = torch.where(tz, torch.zeros_like(t_raw), t_raw)
 #           t_phys = torch.where(tz, torch.zeros_like(t_phys), t_phys)
 #           t_s2m  = torch.where(tz, torch.zeros_like(t_s2m), t_s2m)
-#       （V5_1 模式下先恢复 batch T 再套 tz——"T 流三条件恒定"恢复在零化之前。）
+#       （V5_Av1 模式下先恢复 batch T 再套 tz——"T 流三条件恒定"恢复在零化之前。）
 #       v3f 分支在其 clone 的 v_feat 上再做 v_cond_dropout——occ 零化已在
 #       v_feat 上，clone 自然继承，无需改 v3f 分支。
 #    A1/A2 日志：compute_losses 现只回 batch 均值；需 per-sample 损失

@@ -159,13 +159,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     mode.add_argument("--bar", action="store_true", help="deprecated alias for --c2")
     parser.add_argument("--split", choices=("val", "test"), default="val")
     parser.add_argument("--fs-main", type=Path,
-                        default=REPO / "results" / "experiments" / "singlemodal_eval" / "V3_3B" / "metrics" / "val.json")
+                        default=REPO / "results" / "experiments" / "singlemodal_eval" / "V3_Bv1" / "metrics" / "val.json")
     parser.add_argument("--fs-vspecialist", type=Path, default=None,
                         help="V 专才明细文件 (metrics/<split>.json)；C2/M1 必需")
     parser.add_argument("--fs-tspecialist", type=Path, default=None,
                         help="T 专才明细文件 (metrics/<split>.json)；C2/M2 必需")
     parser.add_argument("--prior-grid", type=Path,
-                        default=REPO / "results" / "experiments" / "rho_grid_eval" / "V3_3B" / "grid_metrics.json",
+                        default=REPO / "results" / "experiments" / "rho_grid_eval" / "V3_Bv1" / "grid_metrics.json",
                         help="主线 rhoV0_rhoT0 先验单元，M1/M2 必需")
     parser.add_argument("--prior-cell", default="rhoV0_rhoT0")
     parser.add_argument("--out", type=Path,

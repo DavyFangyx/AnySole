@@ -266,7 +266,7 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         else:
             pred_kp = fk_pose6d(out["x0_hat"], trans_world, batch["offsets"], batch["parents"])
         l_kp = F.mse_loss(pred_kp, batch["kp_gt"])
-        # V3_3D: L_pos — the position head's corrected lower-limb keypoints
+        # V3_Dv1: L_pos — the position head's corrected lower-limb keypoints
         # (soft skeleton).  World-frame MSE is equivalent to the pelvis-
         # relative probe target for the head's gradient (the pelvis term is
         # constant w.r.t. pos_corr) and needs no pelvis bookkeeping.  Zero
@@ -373,12 +373,12 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         nll = r2 / var.clamp(min=1e-4) + var.clamp(min=1e-4).log()
         l_sigma = beta * nll.mean()
 
-    # ---- V3_3E terms (2026-10-17) ----
+    # ---- V3_Ev1 terms (2026-10-17) ----
     # Contact head: per-foot logits vs f6_soft targets.  Pos-weighted BCE —
     # the contact rate is ~94%, and the constraint layer needs swing-phase
     # air recall (locking swing feet is probe A's failure mode), so the
     # per-batch pos_weight lifts the negatives.
-    # V3_3G air weighting (2026-10-17): swing/air frames additionally carry
+    # V3_Gv1 air weighting (2026-10-17): swing/air frames additionally carry
     # (1 + lambda_air * (1 - gt)) — F's contact head (air_recall 0.51) showed
     # the plain recipe undershoots air recall, and G's observation layer
     # gates on the head, so air recall is its registered precondition.
@@ -421,13 +421,13 @@ def compute_losses(out, batch, config_id, weights) -> dict:
                 {"v_hat": out["v_prior"], "trans_hat": out["trans_prior"]},
                 batch, weights)
 
-    # ---- V3_3H_v3 一阶足部残差（2026-10-19）----
+    # ---- V3_Hv3 一阶足部残差（2026-10-19）----
     # 残差头的唯一监督：修正后足关节 6D vs GT。基础部分（V 塔的足 6D）
     # detach——V 塔不被 T 残差损失触碰（零税的训练侧保证）；梯度只进
     # foot_res_head 与 T 编码器。
-    # 落点槽位：v1–v5 足关节（60:72）；V3_3H_v6 踝关节（42:54，7/8 相邻）
+    # 落点槽位：v1–v5 足关节（60:72）；V3_Hv6 踝关节（42:54，7/8 相邻）
     # ——损失只监督「修正后」落点关节 6D 且基础部分 detach（零税训练侧
-    # 保证；V3_3H设计错误裁定.md §1 错误一修复）。
+    # 保证；V3_H设计错误裁定.md §1 错误一修复）。
     l_foot_res = l_pose.new_zeros(())
     if (out.get("foot_res") is not None
             and _weight(weights, "lambda_foot_res", 0.0) > 0.0):
@@ -511,21 +511,21 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         "L_tcop": l_tcop,
         "L_strike": l_strike,
         "L_gtcop": l_gtcop,
-        "L_phase": l_pose.new_zeros(()),   # V5_1 only — uniform log panel
+        "L_phase": l_pose.new_zeros(()),   # V5_Av1 only — uniform log panel
         "L_cop": l_pose.new_zeros(()),
         "loss": total,
     }
 
 
 def compute_losses_v3f(out, x0_norm, batch, weights) -> dict:
-    """V3_3F training losses (2026-10-17).
+    """V3_Fv1 training losses (2026-10-17).
 
     L_pose = the denoiser's normalized full state MSE; L_kp = world-frame FK
     keypoint MSE on the native-space x0 (lambda_kp > 0, the pose-space
     bottleneck experiment 2026-10-17: the world/position-space supervision
     the v1 batch lacked — probe 支柱 1 says pose space cannot carry position
     increments, and every structure that delivered ground-quantity gains
-    (V3_3B L_kp/traj head, V3_3D position head) supervised in position
+    (V3_Bv1 L_kp/traj head, V3_Dv1 position head) supervised in position
     space); L_contact = the pos-weighted f6_soft BCE (swing-phase air recall
     matters for the guidance/refinement layers).  All other keys exist as
     zeros so the train.py logging loop sees one uniform loss dict.
@@ -570,7 +570,7 @@ def compute_losses_v3f(out, x0_norm, batch, weights) -> dict:
         "L_prior_nll": zero,
         "L_prior_traj": zero,
         "L_foot_res": zero,
-        "L_phase": zero,                   # V5_1 only — uniform log panel
+        "L_phase": zero,                   # V5_Av1 only — uniform log panel
         "L_cop": zero,
         "loss": total,
     }
@@ -585,7 +585,7 @@ def _masked_mean(loss_per_sample: torch.Tensor, mask: torch.Tensor):
 
 
 def _v5_1_traj_losses(v_hat, trans_hat, vel_gt, mask, weights):
-    """V5_1A L_traj（VT 行，live 样本掩码）：velocity + multi-scale
+    """V5_Av1 L_traj（VT 行，live 样本掩码）：velocity + multi-scale
     displacement 的逐样本版本（_trajectory_losses 的口径，逐样本聚合后
     按掩码取均值——零化 V 样本的 VT 行无意义，不进损失）。"""
     x_gt = torch.cumsum(vel_gt, dim=1) / float(FPS)
@@ -625,7 +625,7 @@ def _v5_1_contact_bce(logits, gt, live, air_w, pos_weight):
 
 
 def _v5_1_gauss_mu_mse(mu, gt, gt_mask, live):
-    """专家 μ 监督（V5_1A §3：相位/CoP 只监督各专家 μ，掩码跳过）。
+    """专家 μ 监督（V5_Av1 §3：相位/CoP 只监督各专家 μ，掩码跳过）。
     mu: (B, tw, 4) [L c/s, R c/s]；gt: (B, tw, 2, 2)（无效帧 NaN）；
     gt_mask: (B, tw, 2)；live: (B,) 样本掩码。掩码全空（静止会话）→ 0。"""
     mu = mu.reshape(*mu.shape[:2], 2, 2)
@@ -636,7 +636,7 @@ def _v5_1_gauss_mu_mse(mu, gt, gt_mask, live):
 
 
 def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
-    """V5_1A training losses (2026-10-19, V5_1A方案.md §3).
+    """V5_Av1 training losses (2026-10-19, V5_A方案.md §3).
 
     单点预注册权重（λ 不设网格，z_gen/model_registry.py train_args 携带）：
       L_pose 3.0（6D MSE，V2M 行 + VT2M 行，live 样本）
@@ -767,7 +767,7 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
 
 def per_sample_contact_bce(logits, gt, pos_weight, air_w):
     """Per-sample contact BCE (pos-weighted, air-weighted, G 配方口径) —
-    V6_1A A1 监控键的 per-sample 值（train.py 侧重算，reduction="none"
+    V6_Av1 A1 监控键的 per-sample 值（train.py 侧重算，reduction="none"
     同公式；不进入总损失）。"""
     elem = F.binary_cross_entropy_with_logits(
         logits, gt, pos_weight=pos_weight, reduction="none")
@@ -776,7 +776,7 @@ def per_sample_contact_bce(logits, gt, pos_weight, air_w):
 
 
 def compute_losses_v4_1(out, batch, config_id, weights) -> dict:
-    """V4_1A training losses (2026-10-19, V4_1A方案.md §3).
+    """V4_Av1 training losses (2026-10-19, V4_A方案.md §3).
 
     单点预注册权重（λ 不设网格，z_gen/model_registry.py train_args 携带）：
       L_pose 3.0（V 流 x0_hat，无梯度常数——载体冻结后该项恒 0，G 同款
@@ -785,7 +785,7 @@ def compute_losses_v4_1(out, batch, config_id, weights) -> dict:
       L_prior_pose 3.0 + L_prior_traj 1.0（T 先验流，T2M 行健全性）
       L_corr 3.0（lambda_pos 复用键）：out["pos_corr"] 六关节骨盆相对
         位置校正 MSE，目标 = GT 六关节骨盆相对位置 − FK(pose_v) 六关节
-        骨盆相对位置（残差监督 x_gt−x_V 在位置空间，V4_1A方案 §3）
+        骨盆相对位置（残差监督 x_gt−x_V 在位置空间，V4_A方案 §3）
       L_corr_prior（out["pos_corr_prior"] 同式，λ 同为 3.0 单点注册——
         T2M 行 = 先验 + 修正分支，同式监督）
     sigma NLL 恒 0（继承冻结）。其余键与 compute_losses 同构（统一日志
@@ -825,7 +825,7 @@ def compute_losses_v4_1(out, batch, config_id, weights) -> dict:
     l_corr = F.mse_loss(
         out["pos_corr"].reshape(*out["pos_corr"].shape[:2], len(six), 3),
         gt_rel - v_rel)
-    # T2M 行同式（修正分支读先验塔部位 token，V4_1A方案 §2.3）。
+    # T2M 行同式（修正分支读先验塔部位 token，V4_A方案 §2.3）。
     fk_prior = fk_pose6d(out["x0_prior"], out["trans_prior"] + anchor[:, None, :],
                          batch["offsets"], batch["parents"])
     prior_rel = fk_prior[..., six, :] - fk_prior[..., 0:1, :]
@@ -862,7 +862,7 @@ def compute_losses_v4_1(out, batch, config_id, weights) -> dict:
         "L_prior_nll": zero,
         "L_prior_traj": l_prior_traj,
         "L_foot_res": zero,
-        "L_phase": zero,                # V5_1 only — uniform log panel
+        "L_phase": zero,                # V5_Av1 only — uniform log panel
         "L_cop": zero,
         "loss": total,
     }

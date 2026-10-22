@@ -765,7 +765,7 @@ def main() -> int:
     ap.add_argument("--out-dir", type=Path, default=cli_common.DISPLAY_ROOT / "ResultTest/R2Test_compare")
     ap.add_argument("--force", action="store_true", help="Rebuild and overwrite existing outputs.")
     ap.add_argument("--fps", type=float, default=40.0)
-    ap.add_argument("--model-name", "--modal", dest="modal", metavar="MODEL_NAME", default="V3_3B", help="AnySole model name(s), comma-separated; legacy alias: --modal")
+    ap.add_argument("--model-name", "--modal", dest="modal", metavar="MODEL_NAME", default="V3_Bv1", help="AnySole model name(s), comma-separated; legacy alias: --modal")
     ap.add_argument("--contact-method", default="joint_and", help="Contact-label scheme(s), comma-separated; model dir is <model-name>_<contact-method>")
     ap.add_argument("--variant", default=None, help="AnySole stacked-hyperparameter run subdir (omit: single run -> use it, several -> newest by mtime; 'all' = every run).")
     ap.add_argument("--models", default="all", help="Select models: anysole and/or registry baseline names, comma-separated; default all.")

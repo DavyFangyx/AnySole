@@ -15,7 +15,7 @@
 | 0 两包自检闸门 | `contact_f1/00_package_selfcheck.md` | 两包 check_package 均 PASS（v1 改动值 1,599,431 / v2 34,579，基线修正均 33,800，空文件 64）；touch_gait 3.8 无法运行自检脚本（`is_relative_to` 需 3.9+），用 depthpro 执行已登记 |
 | 1 接触 f1 | `contact_f1/report.md` | 压力派生四方法 × 三版 vs f6_soft（val 36 会话，每脚 16/36 GT 全 1 退化排除）：8 组中 7 组 F1 略降（pooled Δ −0.006~−0.038），仅 tactile_abs 左脚 +0.017；量级 ≤0.05 不构成损坏也不构成改善；v1 vs v2 无差异（标签差 0~6 帧，平滑对接触标签中性） |
 | 2 COP/相位 | `cop_phase/report.md` | E 载体 ridge 读出（4 通道 × 3 读出）：v1/v2 相对 raw108 四通道方向全为正、幅度探针尺度小量；显著性格局不变（phase_L/cop_L 可读、phase_R/cop_R 不显著）；v1 vs v2 差异仅第 4~5 位小数（results mse ≤1.2e-4、verdict ≤9.7e-5），平滑无可见影响 |
-| 3 探针面板 | `probe_panel/report.md` | V3_3B_denoised 载体补跑 v2（8 配置，`*_denoised_v2.json`）+ 三版对比图 `ProbeVAxis/figures/probe_vaxis_denoised_v1v2_compare.png`：v2 vs v1 不可见（Δprobe 最大差 GlobalMPJPE 0.061 / traj_ATE 0.054 / PA 0.011，远小于 CI 宽度，560/560 方向一致、0 显著性翻转）；raw→v1 差异含载体差+T 数据差，不可单一归因于降噪；v1→v2 为干净对比（同载体、v_tok 逐位全等，仅 T 数据版本不同） |
+| 3 探针面板 | `probe_panel/report.md` | V3_Bv1_denoised 载体补跑 v2（8 配置，`*_denoised_v2.json`）+ 三版对比图 `ProbeVAxis/figures/probe_vaxis_denoised_v1v2_compare.png`：v2 vs v1 不可见（Δprobe 最大差 GlobalMPJPE 0.061 / traj_ATE 0.054 / PA 0.011，远小于 CI 宽度，560/560 方向一致、0 显著性翻转）；raw→v1 差异含载体差+T 数据差，不可单一归因于降噪；v1→v2 为干净对比（同载体、v_tok 逐位全等，仅 T 数据版本不同） |
 
 ## 总判读
 

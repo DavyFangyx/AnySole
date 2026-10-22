@@ -1,7 +1,7 @@
-# V3_3H 设计错误裁定（2026-10-20）
+# V3_Hv1 设计错误裁定（2026-10-20）
 
-两条设计错误的定量证据与规则化。证据源：探针 `z_note/probes/probe_v3h5_residual.py`
-（结果 `results/AnySole/probes/probe_v3h5_residual_v2.json` 与 `..._occ050.json`；
+两条设计错误的定量证据与规则化。证据源：探针 `z_note/probes/probe_v3_hv5_residual.py`
+（结果 `results/AnySole/probes/probe_v3_hv5_residual_v2.json` 与 `..._occ050.json`；
 口径 test 12520 帧 / TRAIN 38420 帧选 λ，零训练）与 FK 实证
 `z_note/probes/verify_fk_landing.py`（真实测试数据 64 窗 × 20 帧）。
 本文件只记事实、判读与规则；过程见探针输出。
@@ -57,11 +57,11 @@
 - v5 实际兑现 ≈0（六配置表）＝ 落点 0.0 × 信息不可读 × 容量 0.05 的乘积；
   支撑通道（接触门控踝阻尼）实测足部 1.22 mm 平均位移，其余 ≈0。
 
-### 强化（2026-10-20 分层扫描，`probe_v3h5_error_readability.py`）
+### 强化（2026-10-20 分层扫描，`probe_v3_hv5_error_readability.py`）
 
 「全局不可读」强化为「**逐条件不可读**」——626 测试窗 × 三类分层的全部
 fracT ≈ 1.00，三个逃逸口逐一排除（结果
-`results/AnySole/probes/probe_v3h5_error_readability.json`）：
+`results/AnySole/probes/probe_v3_hv5_error_readability.json`）：
 
 | 逃逸口 | 检验 | fracT |
 |---|---|---|
@@ -125,19 +125,19 @@ fracT ≈ 1.00，三个逃逸口逐一排除（结果
 
 ## 3. 对下一轮设计的证据行
 
-- V4_1A 位置修正头：兑现判据应设在干预实验（--null-t 对照），不设在 Δ 指标；
+- V4_Av1 位置修正头：兑现判据应设在干预实验（--null-t 对照），不设在 Δ 指标；
   预期受本文件错误二压制。
-- V5_1A z 专家：绕开错误二的已落盘方式——z 消费独立监督状态，不消费误差。
+- V5_Av1 z 专家：绕开错误二的已落盘方式——z 消费独立监督状态，不消费误差。
 - 待测：逐会话误差可读性扫描（T 的误差知识是否分时刻——转折性会话假设；
   失败窗选择器路线的零成本前置验证）。
 
 ## 4. 复现
 
 ```
-python z_note/probes/probe_v3h5_residual.py --device cuda:7 \
-  --out results/AnySole/probes/probe_v3h5_residual_v2.json
-python z_note/probes/probe_v3h5_residual.py --device cuda:7 \
+python z_note/probes/probe_v3_hv5_residual.py --device cuda:7 \
+  --out results/AnySole/probes/probe_v3_hv5_residual_v2.json
+python z_note/probes/probe_v3_hv5_residual.py --device cuda:7 \
   --config anysole/configs/v1_cam3_occ050.yaml \
-  --out results/AnySole/probes/probe_v3h5_residual_occ050.json
+  --out results/AnySole/probes/probe_v3_hv5_residual_occ050.json
 python z_note/probes/verify_fk_landing.py
 ```

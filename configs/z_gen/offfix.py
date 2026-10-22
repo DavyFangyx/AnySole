@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Generate the offset-resync experiment group queue tasks (2026-10-20).
 
-offsetfix (default): V3_3B cam3 基准 + cam3 occ010/020/030/050, all with
+offsetfix (default): V3_Bv1 cam3 基准 + cam3 occ010/020/030/050, all with
 corrected_offset=True (B 类 session GT 采样按 z_note/data_offset_fixpipe
 修正表平移；A/C/D 不动)。--experiment 可选其他组：
-  offsetfix_v45_v2 — V5_1A/V4_1A × cam3/cam3_occ010，触觉 = denoised108_v2。
+  offsetfix_v45_v2 — V5_Av1/V4_Av1 × cam3/cam3_occ010，触觉 = denoised108_v2。
 """
 
 from __future__ import annotations
