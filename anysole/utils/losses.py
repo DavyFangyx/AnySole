@@ -419,6 +419,10 @@ def loss_term_weights(config, tw, lambda_mv=0.0):
             _weight(config, "lambda_traj", 1.0) * _weight(config, "traj_delta_w", 1.0)
             / (len(deltas) * float(delta) ** power)
         )
+    if config.get("a2_version") is not None:
+        weights.update(pressure_contact=float(config.get("lambda_contact", 0.)),
+                       pressure_total=float(config.get("lambda_pressure_aux", 0.)),
+                       pressure_diff=float(config.get("lambda_pressure_aux", 0.)))
     return weights
 
 
@@ -500,6 +504,9 @@ def compute_visual_loss_counts(batch, view_index, config, *, include_assignment=
                                _weight(config, "lambda_assign", .05) > 0)
     for delta in _visual_deltas(config, frame.shape[1]):
         counts[f"traj_delta_{delta}"] = int(edges.unfold(1, delta, 1).all(dim=-1).sum().item()) * 3
+    if config.get("a2_version") is not None:
+        from anysole.utils.a2_pressure_losses import a2_pressure_counts
+        counts.update(a2_pressure_counts(batch, view_index, config))
     return counts
 
 
@@ -590,6 +597,9 @@ def compute_visual_loss_terms(out, batch, view_index, config, *, include_assignm
         if nll.numel() != counts["sigma"]:
             raise ValueError("visual sigma requires nine parts")
         terms["sigma"] = _term(nll.sum(), counts["sigma"], "dimensionless")
+    if config.get("a2_version") is not None:
+        from anysole.utils.a2_pressure_losses import modify_pressure_terms
+        modify_pressure_terms(terms, out, batch, view_index, config)
     return terms
 
 

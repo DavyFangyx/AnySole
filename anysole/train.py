@@ -1174,6 +1174,7 @@ def visual_accumulation_step(model, batches, config, optimizer, scaler, device,
                 terms.update(compute_pair_loss_terms(outputs, batch, index, config,
                                                        pair_group_index=permutation))
             objective = outputs["x0_hat"].reshape(-1)[:0].sum()
+            contributions = {}
             for key, term in terms.items():
                 numerator = term["raw_sum"]
                 if not torch.isfinite(numerator):
@@ -1186,7 +1187,13 @@ def visual_accumulation_step(model, batches, config, optimizer, scaler, device,
                 contribution = contribution * float(weights.get(key, 0.))
                 weighted[key] = weighted.get(key, 0.) + float(contribution.detach())
                 objective = objective + contribution
-        scaler.scale(objective).backward()
+                contributions[key] = contribution
+        if config.get("a2_version") is not None and (
+                config.get("pressure_pair_route") != "all" or config.get("supervised_pressure_route") != "all"):
+            from anysole.utils.a2_gradients import routed_backward
+            routed_backward(contributions, model, config, scaler)
+        else:
+            scaler.scale(objective).backward()
         shuffle_maps.append(permutation.cpu().tolist() if permutation is not None else None)
     scaler.unscale_(optimizer)
     parameters = [p for p in model.parameters() if p.grad is not None]
@@ -1552,6 +1559,12 @@ def load_visual_checkpoint(path, config, model, optimizer, scheduler, scaler, sa
     scaler.load_state_dict(checkpoint["scaler"])
     sampler.load_state_dict(checkpoint["sampler"])
     selector.load_state_dict(checkpoint["selector"])
+    if config.get("a2_version") is not None:
+        from anysole.utils.a2_training import validate_exposure
+        validate_exposure(checkpoint["training"], config, keys=sampler.keys, weights=sampler.weights)
+        if (sampler.epoch < 0 or not 0 <= sampler.cursor <= len(sampler.keys) or
+                any(type(i) is not int or not 0 <= i < len(sampler.keys) for i in sampler.pending)):
+            raise ValueError("invalid A2 checkpoint sampler cursor/pending state")
     restore_training_rng(checkpoint["rng"], device)
     return checkpoint
 
@@ -1562,7 +1575,10 @@ def _validate_visual_experiment(config):
                            "pose_pair", "press_pair", "pair_shuffle"):
         raise ValueError("explicit grouped experiment required")
     baseline = experiment.startswith("base_")
-    if config["pressure_head"] != ("legacy" if experiment == "base_legacy" else "time_pe"):
+    from anysole.utils.a2_config import is_a2, validate_a2_config
+    a2 = is_a2(config)
+    validate_a2_config(config, formal=config.get("stage") == "formal")
+    if not a2 and config["pressure_head"] != ("legacy" if experiment == "base_legacy" else "time_pe"):
         raise ValueError("experiment name and frozen pressure head disagree")
     if baseline and float(config.get("lambda_mv") or 0) != 0:
         raise ValueError("baseline cannot enable pair loss")
@@ -1653,7 +1669,7 @@ def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
     if not stats:
         raise ValueError("frozen train-only stats required")
     run_dir = Path(run_dir).resolve()
-    workspace = Path(__file__).resolve().parents[2]
+    workspace = Path("/private/Tactile").resolve() if config.get("a2_version") is not None else Path(__file__).resolve().parents[2]
     if not run_dir.is_relative_to(workspace):
         raise ValueError("run directory must stay inside /private/Tactile")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -1684,6 +1700,12 @@ def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
     weights = [len(window[3]) for window in dataset.windows]
     keys = [dataset.sample_key(i) for i in range(len(dataset))]
     sampler = GroupBudgetSampler(weights, keys, int(config["seed"]))
+    a2 = config.get("a2_version") is not None
+    if a2 and config["budget_mode"] == "cam3_exact":
+        if len(keys) != 1765 or any(w != 4 for w in weights) or any(set(w[3]) != {1, 2, 3, 4} for w in dataset.windows):
+            raise ValueError("exact cam3 matching requires all 1765 physical groups to contain all four cameras")
+        if config.get("cam3_sample_keys_hash") != canonical_hash(keys):
+            raise ValueError("B-CAM3 keys/order differ from the verified original cam3 sampler")
     previous = json.loads((run_dir / "run.json").read_text()) if (run_dir / "run.json").is_file() else {}
     if previous and previous.get("semantic_hash") != identity:
         raise ValueError("run directory already belongs to another semantic identity")
@@ -1734,6 +1756,22 @@ def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
             if hasattr(model, "pose_head"):
                 model.pose_head.set_stats(torch.tensor(stats["pose_mean"], device=device),
                                           torch.tensor(stats["pose_std"], device=device))
+            if a2:
+                from anysole.utils.a2_training import initialization_identity
+                if resume is None:
+                    initial_identity = initialization_identity(model)
+                    expected_common = config.get("common_initial_state_hash")
+                    if expected_common is not None and initial_identity["common_state_hash"] != expected_common:
+                        raise ValueError("controlled model common initial weights differ")
+                    atomic_json(run_dir / "initialization.json", initial_identity)
+                probe_indices = config.get("gradient_probe_indices", list(range(min(2, len(dataset)))))
+                if len(probe_indices) < 2 or any(type(i) is not int or not 0 <= i < len(dataset) for i in probe_indices):
+                    raise ValueError("A2 fixed train gradient probe requires two valid physical groups")
+                probe_batch = grouped_collate([dataset[i] for i in probe_indices])
+                atomic_json(run_dir / "gradient_probe_support.json", {
+                    "indices": probe_indices, "sample_keys": [keys[i] for i in probe_indices],
+                    "view_valid_hash": canonical_hash(probe_batch["visual"]["view_valid"].tolist()),
+                    "target_time_hash": canonical_hash(probe_batch["visual"]["target_time_s"].tolist()), "fit_split": "train"})
             optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))
             warmup = max(1, int(float(config.get("lr_warmup_frac", .05)) * target))
             def lr_factor(step):
@@ -1752,6 +1790,8 @@ def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
                 state = loaded["training"]
                 if loaded["stats"] != stats:
                     raise ValueError("checkpoint normalization statistics changed")
+            if a2 and resume is None:
+                state["exposure_ledger"] = {"schema": "anysole.a2.exposure.v1", "per_key": {}, "per_camera": {}, "per_camera_key": {}}
             rng = capture_training_rng(device)
             logger = VisualLogger(run_dir, config, loaded.get("observability") if loaded else None)
             restore_training_rng(rng, device)
@@ -1784,7 +1824,8 @@ def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
                         handle.write(json.dumps({**event, "time": time.time()}, sort_keys=True) + "\n")
                 result = visual_update_with_amp_retries(
                     model, batches, config, optimizer, scaler, device,
-                    state["successful_updates"], target, state, record_overflow)
+                    state["successful_updates"] + int(config.get("pilot_schedule_update_offset", 0)),
+                    target, state, record_overflow)
                 if not result["stepped"]:
                     state["zero_supervision_attempts"] += 1
                     state["consecutive_zero_supervision_attempts"] += 1
@@ -1796,6 +1837,9 @@ def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
                 state["successful_updates"] += 1
                 state["rgb_windows"] += sum(weights[i] for i in selected)
                 state["physical_group_windows"] += len(selected)
+                if a2:
+                    from anysole.utils.a2_training import record_exposure
+                    record_exposure(state, selected, dataset, keys)
                 unique.update(state["last_sample_keys"])
                 state["unique_sample_keys"] = sorted(unique)
                 state["lambda_mv"], state["sigma_frozen"] = result["lambda_mv"], result["sigma_frozen"]
@@ -1804,6 +1848,28 @@ def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
                 elapsed = max(time.monotonic() - started, 1e-9)
                 monitor.progress = {"update": step, "target_updates": target,
                                     "rgb_windows": state["rgb_windows"]}
+                if a2:
+                    ledger_row = {"schema": "anysole.a2.update.v1", "attempt_id": metadata["attempt_id"],
+                                  "successful_update": step, "attempt_steps": state["attempt_steps"],
+                                  "rgb_windows": state["rgb_windows"], "sample_keys": state["last_sample_keys"],
+                                  "cameras": [list(dataset.windows[i][3]) for i in selected],
+                                  "seconds": elapsed, "lambda_mv": result["lambda_mv"],
+                                  "sigma_frozen": result["sigma_frozen"], "counts": result["counts"],
+                                  "raw": result["raw"], "weighted": result["weighted"]}
+                    with (run_dir / "update_ledger.jsonl").open("a") as handle:
+                        handle.write(json.dumps(ledger_row, sort_keys=True, allow_nan=False) + "\n")
+                    timing_warmup = int(config.get("timing_warmup_updates", 0))
+                    if step > timing_warmup:
+                        timing = state.setdefault("timing", {"successful_updates": 0, "rgb_windows": 0, "seconds": 0.})
+                        timing["successful_updates"] += 1
+                        timing["rgb_windows"] += sum(weights[i] for i in selected)
+                        timing["seconds"] += elapsed
+                        metadata["timing_summary"] = {**timing, "rgb_windows_per_second": timing["rgb_windows"]/timing["seconds"]}
+                    metadata["exposure_per_camera"] = state["exposure_ledger"]["per_camera"]
+                    if step in config.get("gradient_probe_updates", [100, 500, 1300, 2600, 3900, 5180]):
+                        from anysole.utils.a2_training import fixed_gradient_probe
+                        probe = fixed_gradient_probe(model, probe_batch, config, device, update=step, horizon=target)
+                        atomic_json(run_dir / "gradient_probes" / ("step_%06d.json" % step), probe)
                 values = {"progress/update": step, "progress/target_updates": target,
                           "progress/completion": step / target, "progress/rgb_windows": state["rgb_windows"],
                           "progress/attempt_steps": state["attempt_steps"],
@@ -1849,10 +1915,16 @@ def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
                     if any(current[k] != config[k] for k in current):
                         raise ValueError("input/source hash drift during training")
                 stopping = stop_requested.is_set() or stop_after_updates is not None and step >= stop_after_updates
-                if selected_best or step % checkpoint_every == 0 or step == target or stopping:
+                snapshot = a2 and (step in config.get("snapshot_updates", []) or
+                                   step in config.get("gradient_probe_updates", [100, 500, 1300, 2600, 3900, 5180]))
+                if selected_best or step % checkpoint_every == 0 or step == target or stopping or snapshot:
                     saving_started = time.monotonic()
                     checkpoint = _visual_checkpoint(model, optimizer, scheduler, scaler, sampler, selector,
                                                     config, state, stats, logger, device)
+                    if snapshot:
+                        snap = run_dir / "snapshots" / ("step_%06d.pt" % step)
+                        snapshot_hash = atomic_checkpoint(snap, checkpoint)
+                        metadata.setdefault("snapshots", {})[str(step)] = {"path": str(snap), "sha256": snapshot_hash}
                     if selected_best:
                         metadata["best_checkpoint_hash"] = atomic_checkpoint(run_dir / "best.pt", checkpoint)
                     metadata["last_checkpoint_hash"] = atomic_checkpoint(run_dir / "last.pt", checkpoint)
@@ -1862,6 +1934,10 @@ def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
                     metadata.update(state="paused", exit_code=0)
                     atomic_json(run_dir / "run.json", metadata)
                     return metadata
+            if a2:
+                from anysole.utils.a2_training import validate_exposure
+                validate_exposure(state, config, terminal=True)
+                atomic_json(run_dir / "exposure_ledger.json", state["exposure_ledger"])
             if state["rgb_windows"] != int(config["target_rgb_windows"]) or last_val is None and not metadata.get("last_validation"):
                 raise ValueError("terminal successful budget or complete validation missing")
             if formal and (selector.best_step is None or not (run_dir / "best.pt").is_file()):

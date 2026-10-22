@@ -215,7 +215,7 @@ class AnySoleModelV2(nn.Module):
             raise ValueError("target timestamps must be finite and non-decreasing")
 
         time_pe = None
-        if self.pressure_head == "time_pe":
+        if self.pressure_time_pe_enabled:
             time_pe = relative_time_pe(timestamps, self.d, self.time_pe_scale, V_feat.dtype)
         v_tok, t_tok = self.encoders.forward_visual(V_feat, frame_valid, time_pe)
         memory_padding_mask = torch.cat([~frame_valid, ~frame_valid], dim=1)
@@ -227,7 +227,13 @@ class AnySoleModelV2(nn.Module):
         x0_hat = self.pose_head(F=fused, frame_valid=frame_valid,
                                  memory_padding_mask=padding)
         v_hat, trans_hat = self.traj_head(fused, frame_valid=frame_valid, timestamps=timestamps)
-        pressure_hat, vfeat_hat = self.aux_heads(fused)
+        pressure_extra = {}
+        if hasattr(self, "pressure_readout"):
+            pressure_extra = self.pressure_readout(fused, frame_valid, timestamps)
+            pressure_hat = pressure_extra["pressure_hat"]
+            vfeat_hat = self.aux_heads.v_rec(fused[:, :self.tw])
+        else:
+            pressure_hat, vfeat_hat = self.aux_heads(fused)
         out = {
             "x0_hat": x0_hat,
             "v_hat": v_hat,
@@ -252,4 +258,5 @@ class AnySoleModelV2(nn.Module):
                 "pose_std": self.pose_head.pose_std,
                 "sigma_frozen": bool(self.pose_head.decoder.layers[-1].sigma_frozen),
             })
+        out.update(pressure_extra)
         return out

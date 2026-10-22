@@ -423,8 +423,11 @@ def validate_view_config(config: dict, *, formal: bool = False) -> None:
         raise ValueError("view-consistency requires model_name=visual")
     if config.get("visual_structure_version") != VISUAL_STRUCTURE_VERSION:
         raise ValueError("unsupported visual structure version")
-    if config.get("pressure_head") not in ("legacy", "time_pe"):
-        raise ValueError("P1 supports only legacy or time_pe pressure heads")
+    from anysole.utils.a2_config import A2_HEADS, is_a2, validate_a2_config
+    a2 = is_a2(config)
+    validate_a2_config(config, formal=formal)
+    if config.get("pressure_head") not in (A2_HEADS if a2 else ("legacy", "time_pe")):
+        raise ValueError("unsupported pressure head for the declared schema")
     if config.get("pressure_time_pe") != "before_fusion" or config.get("time_pe_scale") != FPS:
         raise ValueError("pressure PE must use before_fusion and nominal frame phase")
     if config.get("d_model") != D_MODEL or config.get("window_length") != TW or config.get("tw") != TW:
@@ -501,7 +504,7 @@ def validate_view_config(config: dict, *, formal: bool = False) -> None:
     reference_n = config["n_cam3_train_windows"]
     steps = reference_n // reference_batch if config.get("drop_last") else (reference_n+reference_batch-1)//reference_batch
     if (config["reference_epochs"] != 740 or steps != config["reference_steps_per_epoch"] or
-            config["target_updates"] != 740*steps or
+            config["target_updates"] != 740*steps*(4 if a2 and config["budget_mode"] == "cam3_exact" else 1) or
             config["effective_batch_rgb_windows"] != reference_batch or
             config["target_rgb_windows"] != config["target_updates"]*reference_batch):
         raise ValueError("formal reference 740-epoch update/RGB budgets must match the shared frozen batch rule")
