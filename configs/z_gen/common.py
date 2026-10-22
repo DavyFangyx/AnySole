@@ -178,6 +178,12 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "MODEL_IDS": ["V3_3H_cam3_offfix", "V3_3H_cam3_occ010_offfix"],
         "REQUIRES": [],
     },
+    # 新数据验证（2026-10-22）：生产 v3+offset facts 的替换验证。
+    "v3off_validation": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_3B_cam3_v3off"],
+        "REQUIRES": [],
+    },
     # v2/v3 + offset 组（2026-10-20）：同 5 组合，触觉 = denoised108_v2 / _v3。
     "offsetfix_v2": {
         "KIND": "model_suite",
