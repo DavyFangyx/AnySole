@@ -70,3 +70,8 @@ python3 AnysoleWorkspace/tool/build_manifest.py split \
 数据硬约束：04（折返走路快）全库 2 条（S6、S12）、05（绕圈跑）4 条
 （S11×2、S7、S8）、08（折返跑）3 条（S5×2、S13）——稀有动作的 test 每条
 split 最多 1~2 条，且每 fold 训练集里 0~2 条（近似未见动作泛化读）。
+
+## splits_wo05.csv（2026-10-24）
+
+canonical 去掉动作 05（绕圈跑）全部 4 条会话（S11051/S11053/S7053/S8053，均原 train 列）的版本：
+train 92→88，val/test 不变（05 本无 held-out 会话）。用于「去绕圈跑」实验组。

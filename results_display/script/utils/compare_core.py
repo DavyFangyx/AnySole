@@ -44,6 +44,7 @@ from Baselines.utils.capabilities import (  # noqa: E402
 from Baselines.utils.gt_loading import (  # noqa: E402
     array_from_file,
     archive_meta,
+    bvh23_rotation_view,
     bvh_joints,
     find_prediction,
     load_split_ids,

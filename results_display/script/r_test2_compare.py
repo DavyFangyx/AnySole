@@ -48,6 +48,7 @@ from utils.compare_core import (
     aggregate,
     applicable_metrics,
     array_from_file,
+    bvh23_rotation_view,
     bvh_joints,
     find_prediction,
     load_mode_registry,
@@ -682,7 +683,12 @@ def evaluate_motion_row(model: dict[str, Any], row: dict[str, str],
         want_rotations = bool(applicable & {"root_orientation_deg", "root_orientation_drift_deg", "mpjae_deg"})
         pred_rotations = gt_rotations = None
         if want_rotations:
-            pred_rotation_data = load_rotations(pred_path)
+            # Generated BVH carries its own local clock (fewer frames than the
+            # canonical grid); resample onto the session grid like the joints.
+            pred_rotation_data = load_rotations(pred_path, query_t=times)
+            if protocol == "bvh23":
+                # Mirrors protocol_gt_rotations: EndSite nodes dropped, 23-joint order.
+                pred_rotation_data = bvh23_rotation_view(pred_rotation_data)
             cache_key = (row["session_id"], protocol)
             gt_rotation_data = gt_rotation_cache.setdefault(
                 cache_key, protocol_gt_rotations(row, protocol)
