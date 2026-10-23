@@ -1,6 +1,23 @@
 # Step2Motion 原始数据
 
-以下为文献中3张核心实验表格的Markdown格式整理，所有数值、指标定义及单位均与原文严格一致：
+'''
+Table 2. Evaluation of pose and shape registration on MMVP. M.:
+MFCE.Weemploy the 3D depth error E3d to quantify the alignment
+between human models and depth observations. To evalu-
+ate the interaction between the model and the scene, we cal-
+culate the model contact by setting a unified threshold and
+compare the Mean Foot-Contact Error (MFCE), F1 score,
+and IOU with the ground truth contact.
+
+
+Table 3. Quantitative comparison of contact estimation on
+MMVP-test.
+We apply precision, recall, F1 score, and IOU as evalu-
+ation metrics and conduct a quantitative comparison
+
+Table 4. Evaluation of pose and translation estimation on MMVP.
+M.: MPJPE, PM. : PMPJPE, PF. : PVE (Feet).
+'''
 
 ---
 

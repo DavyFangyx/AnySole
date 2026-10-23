@@ -66,7 +66,7 @@ def split_session_ids(split_csv: Path, split: str) -> list:
 
 
 def all_session_ids(split_csv: Path) -> list:
-    """Union of train/val/test, in splits.csv order (val == test today)."""
+    """Union of train/val/test, in splits.csv order (val != test since 2026-10-22)."""
     out = []
     for split in ("train", "val", "test"):
         for session_id in split_session_ids(split_csv, split):

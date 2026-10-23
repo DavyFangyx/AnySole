@@ -32,6 +32,54 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "SPECIALISTS": ["vonly", "tonly"],
         "REQUIRES": [],
     },
+    # 5-fold 动作覆盖实验（2026-10-22）：受试者轮换 leave-subjects-out，
+    # test 覆盖 11/11 动作；波 1/2/3 与 fold 条目见 model_registry 同名块。
+    # 生成 = configs/z_gen/per_action_folds.py（--stage 12 先入队，
+    # 波 3 待波 1 E1 ckpt 完成后生成）。
+    "per_action_folds": {
+        "KIND": "model_suite",
+        "MODEL_IDS": [
+            "V3_Ev1_fS13S14", "V3_Ev1_fS5S6S11", "V3_Ev1_fS5S11S12",
+            "V3_Ev1_fS6S7S13", "V3_Ev1_fS5S6S8",
+            "V3_Bv1_fS13S14", "V3_Bv1_fS5S6S11", "V3_Bv1_fS5S11S12",
+            "V3_Bv1_fS6S7S13", "V3_Bv1_fS5S6S8",
+            "V5_Av4_fS13S14", "V5_Av4_fS5S6S11",
+            "V5_Av4_fS5S11S12", "V5_Av4_fS6S7S13",
+            "V5_Av4_fS5S6S8",
+            "V5_Av1_fS13S14", "V5_Av1_fS5S6S11", "V5_Av1_fS5S11S12",
+            "V5_Av1_fS6S7S13", "V5_Av1_fS5S6S8",
+            "V4_Av1_fS13S14", "V4_Av1_fS5S6S11", "V4_Av1_fS5S11S12",
+            "V4_Av1_fS6S7S13", "V4_Av1_fS5S6S8",
+            # occ050 档（2026-10-23 裁定「加」）
+            "V5_Av1_occ050_fS13S14", "V5_Av1_occ050_fS5S6S11",
+            "V5_Av1_occ050_fS5S11S12", "V5_Av1_occ050_fS6S7S13",
+            "V5_Av1_occ050_fS5S6S8",
+            "V4_Av1_occ050_fS13S14", "V4_Av1_occ050_fS5S6S11",
+            "V4_Av1_occ050_fS5S11S12", "V4_Av1_occ050_fS6S7S13",
+            "V4_Av1_occ050_fS5S6S8",
+            # occ010 档（2026-10-23 裁定「加」）
+            "V5_Av1_occ010_fS13S14", "V5_Av1_occ010_fS5S6S11",
+            "V5_Av1_occ010_fS5S11S12", "V5_Av1_occ010_fS6S7S13",
+            "V5_Av1_occ010_fS5S6S8",
+            "V4_Av1_occ010_fS13S14", "V4_Av1_occ010_fS5S6S11",
+            "V4_Av1_occ010_fS5S11S12", "V4_Av1_occ010_fS6S7S13",
+            "V4_Av1_occ010_fS5S6S8",
+            # 全面添加（2026-10-23）：V3_Bv1/V5_Av4 × occ010/occ050
+            "V3_Bv1_occ050_fS13S14", "V3_Bv1_occ050_fS5S6S11",
+            "V3_Bv1_occ050_fS5S11S12", "V3_Bv1_occ050_fS6S7S13",
+            "V3_Bv1_occ050_fS5S6S8",
+            "V5_Av4_occ050_fS13S14", "V5_Av4_occ050_fS5S6S11",
+            "V5_Av4_occ050_fS5S11S12", "V5_Av4_occ050_fS6S7S13",
+            "V5_Av4_occ050_fS5S6S8",
+            "V3_Bv1_occ010_fS13S14", "V3_Bv1_occ010_fS5S6S11",
+            "V3_Bv1_occ010_fS5S11S12", "V3_Bv1_occ010_fS6S7S13",
+            "V3_Bv1_occ010_fS5S6S8",
+            "V5_Av4_occ010_fS13S14", "V5_Av4_occ010_fS5S6S11",
+            "V5_Av4_occ010_fS5S11S12", "V5_Av4_occ010_fS6S7S13",
+            "V5_Av4_occ010_fS5S6S8",
+        ],
+        "REQUIRES": [],
+    },
     # 交接包降噪压力重训（2026-10-17）：V3_Bv1 同结构，tactile_input=
     # denoised108（v3_3b_denoised 入口固定）。只训主线——探针实验读主线
     # 三条件，不需要专才；T 流换了数据源，旧 V3_Bv1_tonly 不再等价。
@@ -237,6 +285,44 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
                       "V4_Av1_cam3_v3off_vonly", "V4_Av1_cam3_v3off_tonly",
                       "V5_Av1_cam3_v3off", "V5_Av1_cam3_v3off_drop",
                       "V5_Av1_cam3_v3off_vonly", "V5_Av1_cam3_v3off_tonly"],
+        "REQUIRES": [],
+    },
+    # E1 修复迭代（2026-10-22）：V5_Av4 四变体（从零 V 流 + 先验塔 E 配方），
+    # v3off 生产轴，论文正文模型候选。
+    "e1_av4": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V5_Av4_cam3_v3off", "V5_Av4_cam3_v3off_drop",
+                      "V5_Av4_cam3_v3off_vonly", "V5_Av4_cam3_v3off_tonly"],
+        "REQUIRES": [],
+    },
+    # 时间窗扫描（2026-10-22，z_note/multimodal_fusion/时间窗扫描实验.md）：
+    # 五家族 x tw{5,10,15,20} x cam3/cam3_occ010（v3off 生产轴）。
+    # 波 1 = E + V3_Bv1 + V5_Av4；波 2 = V4_Av1 + V5_Av1
+    # （闸门 = 波 1 的 E 格完成——同 (tw, 视觉) 的 E 载体就绪后才可训）。
+    # MODEL_IDS 顺序即 conf 顺序：波 1 的 E 格排最前（worker 先取件）。
+    "tw_scan": {
+        "KIND": "model_suite",
+        "MODEL_IDS": [
+            "V3_Ev1_cam3_v3off_tw5", "V3_Ev1_cam3_v3off_tw10",
+            "V3_Ev1_cam3_v3off_tw15", "V3_Ev1_cam3_occ010_v3off",
+            "V3_Ev1_cam3_occ010_v3off_tw5", "V3_Ev1_cam3_occ010_v3off_tw10",
+            "V3_Ev1_cam3_occ010_v3off_tw15",
+            "V3_Bv1_cam3_v3off_tw5", "V3_Bv1_cam3_v3off_tw10",
+            "V3_Bv1_cam3_v3off_tw15", "V3_Bv1_cam3_occ010_v3off",
+            "V3_Bv1_cam3_occ010_v3off_tw5", "V3_Bv1_cam3_occ010_v3off_tw10",
+            "V3_Bv1_cam3_occ010_v3off_tw15",
+            "V5_Av4_cam3_v3off_tw5", "V5_Av4_cam3_v3off_tw10",
+            "V5_Av4_cam3_v3off_tw15", "V5_Av4_cam3_occ010_v3off",
+            "V5_Av4_cam3_occ010_v3off_tw5", "V5_Av4_cam3_occ010_v3off_tw10",
+            "V5_Av4_cam3_occ010_v3off_tw15",
+            "V4_Av1_cam3_v3off_tw5", "V4_Av1_cam3_v3off_tw10",
+            "V4_Av1_cam3_v3off_tw15", "V4_Av1_cam3_occ010_v3off",
+            "V4_Av1_cam3_occ010_v3off_tw5", "V4_Av1_cam3_occ010_v3off_tw10",
+            "V4_Av1_cam3_occ010_v3off_tw15",
+            "V5_Av1_cam3_v3off_tw5", "V5_Av1_cam3_v3off_tw10",
+            "V5_Av1_cam3_v3off_tw15", "V5_Av1_cam3_occ010_v3off",
+            "V5_Av1_cam3_occ010_v3off_tw5", "V5_Av1_cam3_occ010_v3off_tw10",
+            "V5_Av1_cam3_occ010_v3off_tw15"],
         "REQUIRES": [],
     },
     # T 增强三组（2026-10-21，T增强三组实验方案.md）：维度 2 显式物理特征

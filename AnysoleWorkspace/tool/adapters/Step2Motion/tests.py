@@ -126,10 +126,11 @@ def test_split_sessions() -> None:
         print(f"  info {variant}: canonical counts train/val/test = "
               f"{len(splits['train'])}/{len(splits['val'])}/{len(splits['test'])}")
         print(f"  info {variant}: empty_or_skipped = {payload['empty_or_skipped']}")
-    # the task book's 92/12/36 figure predates the 2026-09-27 19:58 split
-    # regeneration; the frozen file is authoritative (104/36/36).
-    if {len(splits[k]) for k in splits} == {92, 12, 36}:
-        raise AssertionError("unexpected: split matches the stale 92/12/36 book figure")
+    # 2026-10-22 用户裁定：val 与 test 分离，恢复任务书 92/12/36
+    # （val=S12、test=S13+S14）；旧 104/36/36 val==test 冻结已作废。
+    check("canonical split is 92/12/36",
+          {len(splits[k]) for k in splits} == {92, 12, 36},
+          "got %s" % {k: len(splits[k]) for k in splits})
 
 
 def test_normalizer_provenance() -> None:
@@ -208,12 +209,17 @@ def test_16ch_parity() -> None:
         session = bg.load_shared_session(sid)
         pooled_l = bg.pool_48_to_16(np.asarray(session["pressure"]["left48"], dtype=np.float32))
         pooled_r = bg.pool_48_to_16(np.asarray(session["pressure"]["right48"], dtype=np.float32))
+        # 2026-10-22 val/test 分离后：S13011 只在 test 里（旧 val==test 时在 val）。
         db = MotionDataset.load(str(ADAPTER_ROOT / "gait/gait_train.pt"), torch.device("cpu"))
         try:
             clip = db.session_ids.index(sid)
         except ValueError:
             db = MotionDataset.load(str(ADAPTER_ROOT / "gait/gait_val.pt"), torch.device("cpu"))
-            clip = db.session_ids.index(sid)
+            try:
+                clip = db.session_ids.index(sid)
+            except ValueError:
+                db = MotionDataset.load(str(ADAPTER_ROOT / "gait/gait_test.pt"), torch.device("cpu"))
+                clip = db.session_ids.index(sid)
         ins = torch.cat(db.insole, 0).numpy()
         kept_l = ins[db.clips[clip]:db.clips[clip + 1], 0:16]
         kept_r = ins[db.clips[clip]:db.clips[clip + 1], 25:41]
@@ -429,6 +435,16 @@ def test_export_and_evaluator_smoke() -> None:
     check("GT-export BVH written", pred_bvh.is_file())
     (SMOKE_ROOT / "predictions" / f"{sid}_gen.bvh").parent.mkdir(parents=True, exist_ok=True)
     (SMOKE_ROOT / "predictions" / f"{sid}_gen.bvh").write_bytes(pred_bvh.read_bytes())
+    # 2026-10-22 evaluator frame-map contract (Baselines/utils/prediction_grid):
+    # generated BVH must carry a canonical .frames.npz sidecar.  This smoke
+    # exports pred=GT on the full grid (frame 0 included, no fake frames),
+    # so the sidecar covers every frame.
+    np.savez_compressed(
+        SMOKE_ROOT / "predictions" / f"{sid}_gen.frames.npz",
+        frame_indices=np.arange(n, dtype=np.int64),
+        valid_mask=np.ones(n, dtype=bool),
+        session_id=np.asarray(sid),
+    )
 
     # Public evaluator CLI (smoke registry + canonical-resolved manifest row).
     _, payload = _run_evaluator(sid)
@@ -558,9 +574,15 @@ def test_full_test_py_smoke() -> None:
     check("test.py wrote metrics summary",
           (out_dir / "metrics_summary.json").is_file())
     # The public evaluator must be able to read the real test.py prediction.
+    # Copy the real frame-map sidecar as well: the GT-export sidecar written
+    # above covers all 161 frames, while the real prediction drops the first
+    # frame (160 frames); prediction_grid rejects a length mismatch.
     target = SMOKE_ROOT / "predictions" / f"{sid}_gen.bvh"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(gen.read_bytes())
+    real_sidecar = out_dir / f"{name}_gen.frames.npz"
+    if real_sidecar.is_file():
+        target.with_suffix(".frames.npz").write_bytes(real_sidecar.read_bytes())
     _, payload = _run_evaluator(sid)
     row_result = payload["sessions"][0]
     check("evaluator status ok for real prediction", row_result["status"] == "ok",

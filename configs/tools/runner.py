@@ -292,6 +292,10 @@ def _eval_command(registry: dict[str, Any], model_id: str, root: Path, ckpt: Pat
         command.append("--no-write-motion")
     else:
         command += ["--write-motion", str(root / "predictions" / "eval_motion")]
+    if spec.get("dump_detail"):
+        # 5-fold 动作覆盖实验：逐会话行（session_detail_<split>.json）是
+        # 按动作聚合的 canonical 数据源（与 test.json 同源同公式）。
+        command.append("--dump-detail")
     return command
 
 

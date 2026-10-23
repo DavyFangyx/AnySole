@@ -289,6 +289,15 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
     beta = beta.detach().cpu() if torch.is_tensor(beta) else torch.as_tensor(beta)
     if pose.ndim != 4 or tuple(pose.shape[1:]) != (24, 3, 3):
         raise ValueError(f"{native_path}: expected pose (T,24,3,3), got {tuple(pose.shape)}")
+    frame_ids_raw = np.asarray(data["frame_ids"])
+    if frame_ids_raw.ndim != 1 or not np.issubdtype(frame_ids_raw.dtype, np.integer):
+        raise ValueError(f"{native_path}: frame_ids must be a one-dimensional integer array")
+    frame_ids = frame_ids_raw.astype(np.int64, copy=False)
+    n = int(row["n_frames"])
+    if len(frame_ids) != len(pose) or len(trans) != len(pose):
+        raise ValueError(f"{native_path}: frame_ids/pose/trans row counts must match")
+    if np.any(frame_ids < 0) or np.any(frame_ids >= n) or np.any(np.diff(frame_ids) <= 0):
+        raise ValueError(f"{native_path}: frame_ids must be unique, increasing and within [0, {n})")
     if beta.ndim == 1:
         beta = beta.reshape(1, -1).repeat(len(pose), 1)
     # PoseTransOpt saves float64 tensors; smplx's lbs matmul requires float32.
@@ -332,13 +341,13 @@ def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
     full = np.zeros((n, 24, 3), dtype=np.float32)
     full_vertices = np.zeros((n, 6890, 3), dtype=np.float32)
     full_poses = np.zeros((n, 72), dtype=np.float32)
-    start = 2  # Dataset.load_pose/load_2d_keypoints discard the first/last 2 frames.
-    end = min(n, start + len(native))
-    full[start:end] = smpl_yup_to_display(native[: end - start])
-    full_vertices[start:end] = smpl_yup_to_display(native_vertices[: end - start])
-    full_poses[start:end] = poses_aa[: end - start]
+    # Native outputs already identify their canonical frames, including gaps.
+    # Apply the same mapping to joints, surfaces, poses and availability.
+    full[frame_ids] = smpl_yup_to_display(native)
+    full_vertices[frame_ids] = smpl_yup_to_display(native_vertices)
+    full_poses[frame_ids] = poses_aa
     available = np.zeros(n, dtype=bool)
-    available[start:end] = True
+    available[frame_ids] = True
     # 2026-10-01 U7 拍 A / E6：三基线 provenance 统一——VP-MoCap 的 pose/shape
     # 来自 PoseTransOpt 优化 pipeline 原生生成（与注册表 sources 一致），PVE 可评估。
     write_archive(output, full, valid_frames(row, n) & available, str(native_path), session,

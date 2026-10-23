@@ -32,6 +32,7 @@ traj head 的 forward 接受可选 film 钩子（None = 恒等，E 逐位行为�
 
 from __future__ import annotations
 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -294,10 +295,14 @@ def poe_synthesize(params_v, params_t, logit_w):
 
 class AnySoleModelV5_Av1(nn.Module):
     def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, pose_layers=6,
-                 t_phys_v2: bool = False, d8_heads: bool = False):
+                 t_phys_v2: bool = False, d8_heads: bool = False,
+                 carrier_scratch: bool = False):
         super().__init__()
         self.t_phys_v2 = bool(t_phys_v2)
         self.d8_heads = bool(d8_heads)
+        # V5_Av4（2026-10-22）：carrier_scratch = True 时 V 流从零训练
+        # （无 E 载体装载、不冻结——去 E 继承的论文载体）。
+        self.carrier_scratch = bool(carrier_scratch)
         self.d = d
         self.tw = tw
         self.modal = "anysolev2"  # regress machinery in train/eval
@@ -347,9 +352,11 @@ class AnySoleModelV5_Av1(nn.Module):
         # freezing here makes the carrier identity load-independent.
         # 冻结范围（V5_Av1 §3）：V 流 286 键全冻结；训练 = foot_conv +
         # g_V + g_T + FiLM + PoE 权重 + t_temporal/prior 塔/接触头。
-        for name, param in self.named_parameters():
-            if name.startswith(CARRIER_PREFIXES):
-                param.requires_grad_(False)
+        # carrier_scratch（V5_Av4）：不冻结——V 流从零训练。
+        if not self.carrier_scratch:
+            for name, param in self.named_parameters():
+                if name.startswith(CARRIER_PREFIXES):
+                    param.requires_grad_(False)
         for head in list(self.pose_head.sig_parts) + list(self.prior_head.sig_parts):
             for param in head.parameters():
                 param.requires_grad_(False)
@@ -407,6 +414,8 @@ class AnySoleModelV5_Av1(nn.Module):
         # T 先验塔（G 风格，从零）：T2M 行 = 无条件先验 + FiLM(z_T) 的
         # 健全性检查（~90mm 量级参照；G 前科 315.5 防回归——先验塔单独
         # 回归到 315.5，FiLM(z_T) 与 z 多通道监督是防回归结构）。
+        # 2026-10-22 诊断：FiLM 开/关 T2M 差异噪声级（±2~7mm）——先验塔
+        # 崩溃根因 = λ_prior_traj=0 零监督，非 FiLM 毒化；先验路径保留 FiLM。
         pose_t, sigma_t = self.prior_head(t_mem, film=lambda h: self._film_parts(h, zs["z_t"]))
         v_prior, trans_prior = self.prior_traj(t_mem, film=lambda h: self._film_vec(h, zs["z_t"]))
 

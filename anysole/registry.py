@@ -190,6 +190,41 @@ for _suf, _mod, _note in (("_vonly", "v3_3b", "E1: 3B V-only expert"),
             "v4_1": "V4_Av1_cam3_v3off", "v5_1": "V5_Av1_cam3_v3off"}[_mod]
     MODEL_REGISTRY[_pre + _suf] = ModelEntry(_pre + _suf, _mod, _note)
 
+# E1 同架构专家对比（2026-10-22，V5_Av4 修复迭代）：V5_Av1 结构 + V 流
+# 从零训练（carrier_scratch，去 E 继承）+ 先验塔 E 配方。四变体 × v3off。
+for _suf, _note in (("", "E1: V5_Av4 always-dual expert ([1,0,0])"),
+                    ("_drop", "E1: V5_Av4 unified (dropout)"),
+                    ("_vonly", "E1: V5_Av4 V-only expert"),
+                    ("_tonly", "E1: V5_Av4 T-only expert")):
+    MODEL_REGISTRY["V5_Av4_cam3_v3off" + _suf] = ModelEntry(
+        "V5_Av4_cam3_v3off" + _suf, "v5_1", _note)
+
+# 5-fold 动作覆盖实验（2026-10-22）：受试者轮换 leave-subjects-out。
+# fold 命名 = 统一编号 plain 名 + fold 尾缀（结构与基座逐项一致：
+# V3_Ev1→v3_3e / V3_Bv1→v3_3b / V5_Av4 与 V5_Av1→v5_1 / V4_Av1→v4_1）；
+# fold 尾缀与 split 文件见 AnysoleWorkspace/protocol/splits/default/。
+for _fold in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8"):
+    for _pre, _mod in (("V3_Ev1", "v3_3e"), ("V3_Bv1", "v3_3b"),
+                       ("V5_Av4", "v5_1"),
+                       ("V5_Av1", "v5_1"), ("V4_Av1", "v4_1")):
+        MODEL_REGISTRY[_pre + "_" + _fold] = ModelEntry(
+            _pre + "_" + _fold, _mod,
+            "5-fold per-action coverage, fold %s (2026-10-22)" % _fold)
+# 5-fold occ050 档（2026-10-23）：四评估模型 × 5 fold。
+for _fold in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8"):
+    for _pre, _mod in (("V5_Av1", "v5_1"), ("V4_Av1", "v4_1"),
+                       ("V3_Bv1", "v3_3b"), ("V5_Av4", "v5_1")):
+        MODEL_REGISTRY[_pre + "_occ050_" + _fold] = ModelEntry(
+            _pre + "_occ050_" + _fold, _mod,
+            "5-fold per-action coverage occ050, fold %s (2026-10-23)" % _fold)
+# 5-fold occ010 档（2026-10-23）：四评估模型 × 5 fold。
+for _fold in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8"):
+    for _pre, _mod in (("V5_Av1", "v5_1"), ("V4_Av1", "v4_1"),
+                       ("V3_Bv1", "v3_3b"), ("V5_Av4", "v5_1")):
+        MODEL_REGISTRY[_pre + "_occ010_" + _fold] = ModelEntry(
+            _pre + "_occ010_" + _fold, _mod,
+            "5-fold per-action coverage occ010, fold %s (2026-10-23)" % _fold)
+
 # V3_Ev1 削弱首组（2026-10-17）：cam3 + occ010 两配置自训自测。
 MODEL_REGISTRY.update({
     f"V3_Ev1_cam3_occ{occ}": ModelEntry(f"V3_Ev1_cam3_occ{occ}", "v3_3e",
@@ -373,3 +408,27 @@ def infer_anysole_paths(
         "predictions_dir": model_dir / "predictions" / "eval_motion",
         "metrics_dir": model_dir / "metrics",
     }
+
+# 时间窗扫描（2026-10-22，z_note/multimodal_fusion/时间窗扫描实验.md）：
+# 五家族 x tw{5,10,15,20} x cam3/cam3_occ010（v3off 生产轴）。tw 是训练期
+# 协变量（eval 从 ckpt 读 tw）；stride 随 tw 非重叠。E 格 = V4_Av1/V5_Av1
+# 的同 (tw, 视觉) 载体。波 1 = E + V3_Bv1 + V5_Av4；波 2 = V4_Av1 + V5_Av1。
+for _mod, _cam3, _occ010 in (
+        ("v3_3b", "V3_Bv1_cam3_v3off", "V3_Bv1_cam3_occ010_v3off"),
+        ("v3_3e", "V3_Ev1_cam3_v3off", "V3_Ev1_cam3_occ010_v3off"),
+        ("v4_1", "V4_Av1_cam3_v3off", "V4_Av1_cam3_occ010_v3off"),
+        ("v5_1", "V5_Av1_cam3_v3off", "V5_Av1_cam3_occ010_v3off"),
+        ("v5_1", "V5_Av4_cam3_v3off", "V5_Av4_cam3_occ010_v3off")):
+    MODEL_REGISTRY.update({
+        f"{_cam3}_tw{tw}": ModelEntry(f"{_cam3}_tw{tw}", _mod,
+                                      "tw scan cam3 cell (2026-10-22)")
+        for tw in (5, 10, 15)
+    })
+    MODEL_REGISTRY.update({
+        _occ010: ModelEntry(_occ010, _mod, "tw scan occ010 cell (2026-10-22)"),
+        **{
+            f"{_occ010}_tw{tw}": ModelEntry(f"{_occ010}_tw{tw}", _mod,
+                                            "tw scan occ010 cell (2026-10-22)")
+            for tw in (5, 10, 15)
+        },
+    })

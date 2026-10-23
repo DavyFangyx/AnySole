@@ -201,7 +201,11 @@ def join_pressure_quality(rows: list[dict]) -> None:
 
 def write_splits(rows: list[dict], output: Path, *, exclude: set[str] | None = None,
                  test: set[str] | None = None, val: set[str] | None = None) -> None:
-    """Generate a subject split; validation equals test unless ``val`` is given."""
+    """Generate a subject split; validation defaults to the subject preceding test.
+
+    2026-10-22 用户裁定：val 必须与 test 分离（92/12/36）。缺省 ``--val`` 时取
+    排序后紧邻 test 块的前一个 subject；无前驱 subject 时 val 为空。
+    """
     excluded = exclude or set()
     eligible = [row for row in rows if row.get("eligible_anysole") == "1" and row["subject_id"] not in excluded]
     by_subject = sorted({row["subject_id"] for row in eligible},
@@ -210,7 +214,11 @@ def write_splits(rows: list[dict], output: Path, *, exclude: set[str] | None = N
     unknown = (test_subjects | (val or set())) - set(by_subject)
     if unknown:
         print(f"warning: requested subjects not present in eligible manifest: {sorted(unknown)}")
-    val_subjects = set(test_subjects if val is None else val)
+    if val is not None:
+        val_subjects = set(val)
+    else:
+        first_test = min((by_subject.index(s) for s in test_subjects if s in by_subject), default=None)
+        val_subjects = {by_subject[first_test - 1]} if first_test and first_test > 0 else set()
     groups = {
         "train": sorted(row["session_id"] for row in eligible if row["subject_id"] not in test_subjects | val_subjects),
         "val": sorted(row["session_id"] for row in eligible if row["subject_id"] in val_subjects),
@@ -299,7 +307,7 @@ def main() -> int:
         p.add_argument("--output", type=Path, default=WORKSPACE / "protocol/splits/default/splits.csv")
         p.add_argument("--exclude", default="", help="subjects to remove, e.g. S4,S5")
         p.add_argument("--test", default="", help="test subjects, e.g. S13,S14; default: last two")
-        p.add_argument("--val", default=None, help="validation subjects; default: same subjects as --test")
+        p.add_argument("--val", default=None, help="validation subjects; default: the subject immediately preceding --test")
         a = p.parse_args(argv[1:])
         rows = [json.loads(line) for line in a.manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
         write_splits(rows, a.output, exclude=_subject_list(a.exclude),

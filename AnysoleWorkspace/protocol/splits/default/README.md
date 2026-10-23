@@ -1,7 +1,7 @@
 # splits/default —— 划分、触觉质量标注与排除依据
 
 `splits.csv` 是本工作区唯一的训练/验证/测试划分文件（模型直接读取），列格式 `index,train,val,test`，
-由 `tool/build_manifest.py split` 生成。**当前文件为冻结状态：train/val/test = 104/36/36，val 与 test 同批（设计如此）。**
+由 `tool/build_manifest.py split` 生成。**train/val/test = 92/12/36，val 与 test 分离（2026-10-22 裁定：val=S12、test=S13+S14、train 为其余 6 人）。**
 
 ## 触觉质量标注（排除依据）
 
@@ -43,10 +43,30 @@
 4. A/B 级内部仍有个别 session 未入 manifest（如 S8 的 21 条 A/B 只入 9 条），系 mocap 解算失败
    （`Mocap/0808/0808smpl/fail.txt` 等）与 final_fake_marked 可用性等进一步门槛，详见 `tool/build_manifest.py`。
 
-## 生成命令（记录用；重跑会改变本文件内容，冻结期内勿执行）
+## 生成命令（记录用；重跑会改变本文件内容）
 
 ```bash
 python3 AnysoleWorkspace/tool/build_manifest.py split \
   --manifest AnysoleWorkspace/protocol/manifests/session_manifest.jsonl \
-  --test S13,S14
+  --test S13,S14 --val S12
 ```
+
+## 5-fold 动作覆盖实验（2026-10-22）
+
+受试者轮换 leave-subjects-out 的 4 份轮换 split（`splits_test_<testSubjects>_val_<valSubject>.csv`），
+与 `splits.csv`（canonical，val=S12 / test=S13,S14）一起构成 5 fold；轮换 fold 的 test
+覆盖全部 11 动作（canonical 缺 04/05 系有意保留）。生成 = `configs/z_gen/per_action_folds.py`
+（模型 fold 条目见 `configs/z_gen/model_registry.py` 同名块；每 fold 专属 yaml =
+`anysole/configs/v1_fold_<testSubjects>.yaml`，仅 `split_csv` 键不同）。
+
+| 文件 | val | test | test 动作 |
+|---|---|---|---|
+| `splits.csv` | S12 | S13,S14 | 9/11（缺 04/05） |
+| `splits_test_S5S6S11_val_S12.csv` | S12 | S5,S6,S11 | 11/11 |
+| `splits_test_S5S11S12_val_S13.csv` | S13 | S5,S11,S12 | 11/11 |
+| `splits_test_S6S7S13_val_S14.csv` | S14 | S6,S7,S13 | 11/11 |
+| `splits_test_S5S6S8_val_S7.csv` | S7 | S5,S6,S8 | 11/11 |
+
+数据硬约束：04（折返走路快）全库 2 条（S6、S12）、05（绕圈跑）4 条
+（S11×2、S7、S8）、08（折返跑）3 条（S5×2、S13）——稀有动作的 test 每条
+split 最多 1~2 条，且每 fold 训练集里 0~2 条（近似未见动作泛化读）。

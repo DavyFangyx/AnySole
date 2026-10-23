@@ -45,6 +45,10 @@ CONFIG_EXTRA: dict = {}
 
 def build(config: dict, part_joints=None):
     """Construct the V5_Av1 network; load and freeze the E V-stream carrier."""
+    # V5_Av4（2026-10-22）：carrier_from="scratch" → V 流从零训练（无 E
+    # 载体、不冻结）；CONFIG_EXTRA 记录 scratch provenance。
+    carrier = str(config.get("carrier_from") or "")
+    carrier_scratch = carrier.strip().lower() in ("scratch", "none", "")
     model = AnySoleModelV5_Av1(
         d=int(config["d_model"]),
         tw=int(config["tw"]),
@@ -52,8 +56,11 @@ def build(config: dict, part_joints=None):
         pose_layers=int(config.get("pose_layers", 6)),
         t_phys_v2=bool(config.get("t_phys_v2", False)),
         d8_heads=bool(config.get("d8_heads", False)),
+        carrier_scratch=carrier_scratch,
     )
-    carrier = str(config.get("carrier_from") or "")
+    if carrier_scratch:
+        CONFIG_EXTRA["carrier"] = {"source": "scratch", "n_keys": 0}
+        return model
     if not carrier:
         raise ValueError(
             "V5_Av1 requires carrier_from (the E v2.1 ckpt_best whose V stream "

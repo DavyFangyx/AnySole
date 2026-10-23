@@ -694,6 +694,13 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
     # G 前科 315.5 防回归）。
     l_prior_pose = F.mse_loss(out["x0_prior"], pose_gt)
 
+    # T2M 行 L_prior_traj（V5_Av4 修复，2026-10-22）：先验塔轨迹头此前零
+    # 监督（L_prior_traj 恒 0）→ T2M ATE 崩溃（291 vs E 配方 84）。E 配方
+    # λ_prior_traj=1.0 全样本（先验塔不依赖 V，live 掩码不适用）。
+    l_prior_traj, l_prior_traj_vel, l_prior_traj_delta = _v5_1_traj_losses(
+        out["v_prior"], out["trans_prior"], batch["vel_gt"],
+        torch.ones_like(live), weights)
+
     # 维度 3 足-地监督三损失（2026-10-21，T增强三组实验方案.md；只读
     # t_tok 侧读出，与 z/PoE 结构无关）。
     l_tcop = l_pose.new_zeros(())
@@ -731,6 +738,7 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
         + _weight(weights, "lambda_phase", 0.0) * l_phase
         + _weight(weights, "lambda_cop", 0.0) * l_cop
         + _weight(weights, "lambda_prior_pose", 0.0) * l_prior_pose
+        + _weight(weights, "lambda_prior_traj", 0.0) * l_prior_traj
         + _weight(weights, "lambda_tcop", 0.0) * l_tcop
         + _weight(weights, "lambda_strike", 0.0) * l_strike
         + _weight(weights, "lambda_gtcop", 0.0) * l_gtcop
@@ -754,7 +762,7 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
         "L_nll": zero,
         "L_prior_pose": l_prior_pose,
         "L_prior_nll": zero,
-        "L_prior_traj": zero,
+        "L_prior_traj": l_prior_traj,
         "L_foot_res": zero,
         "L_phase": l_phase,
         "L_cop": l_cop,

@@ -1,6 +1,25 @@
 # MotionPRO 原始数据
 
-以下为文献中Table 3、Table 4、Table 5的Markdown格式还原，所有指标、数值与原文完全一致：
+'''
+Evaluation Metrics. To evaluate our methods, we use the following metrics: MPJPE (Mean Per Joint Position Error), PMPJPE (Procrustes-aligned Mean Per Joint Position Error), PVE (Per Vertex Error), and Accel (Acceleration). For evaluating global trajectory, we utilize the GTraj (Global Trajectory error of root) and GMPJPE (Global Mean Per Joint Position Error) in pose and trajectory estimation only from pressure. For comparison with RGB-based methods, we follow [44] and split sequences into segments of 100 frames and align each segment with ground truth by using the first two frames (WMPJPE) or all frames (WAMPJPE). Root Translation Error (RTE) over the entire trajectory, Jitter of moition, and Whole Body Contact Error (WBCE) are introduced for evaluation. WBCE represents the average absolute height distance between the ground plane and the joints which are in contact with ground. FS represents Foot Sliding during the contact. The unit of Jitter is 10m/s2. The unit of Accel is m/s2. All other metrics are in mm.
+
+
+Table 2. Evaluation of global pose and trajectory estimation only
+from pressure on MotionPRO. M.: MPJPE, PM. : PMPJPE, LM.,
+LPM.: Lower body MPJPE, PMPJPE, GM.: GMPJPE.
+
+Table 3. Evaluation of global pose estimation on MotionPRO.
+MPJPE ↓ PMPJPE ↓ PVE ↓ Accel ↓
+
+Table 4. Evaluation of global trajectory on MotionPRO.
+WMPJPE ↓ WAMPJPE ↓ RTE ↓ Jitter ↓ WBCE ↓
+
+Table 5. Ablation study of FRAPPE.
+GTraj ↓ GMPJPE ↓ Jitter ↓ MPJPE ↓ FS ↓
+
+Table 6. Quantitative results of humanoid actuation.
+MPJPE-H ↓ MPJPE-R ↓ Fr´echet ↓ Complete ↑ Ecom ↓ Ecop ↓
+'''
 
 ---
 

@@ -13,7 +13,7 @@ VP-MoCap (FPP-Net + PoseTransOpt)）在同一套数据、同一份 split、同�
 ## 统一前提（所有模型共用）
 
 - 相机固定 **cam3**、采样 **40 Hz**、同一份 session split
-  （当前默认 train/val/test = 104/36/36，val=test，`AnysoleWorkspace/protocol/splits/default/splits.csv`）。
+  （train/val/test = 92/12/36，val=S12、test=S13+S14，`AnysoleWorkspace/protocol/splits/default/splits.csv`）。
 - 中间数据、GT 与适配数据一律在 `AnysoleWorkspace/`；任何模型不得自行划分数据。
 - 主模型 AnySole 只读写 SMPL；BVH 仅供 Step2Motion 基线。
 

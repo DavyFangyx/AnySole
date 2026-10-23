@@ -29,8 +29,8 @@ def check_manifest() -> dict[str, int]:
         for key in split_counts:
             if (row.get(key) or "").strip():
                 split_counts[key] += 1
-    # 08 全局审阅：split 以用户生成的 canonical CSV 为准（当前 104/36/36），
-    # 不再按固定 92/12/36 断言。
+    # 08 全局审阅：split 以用户生成的 canonical CSV 为准（2026-10-22 起 92/12/36，
+    # val=S12、test=S13+S14），不按固定数字断言。
     for row in split_rows:
         for key in split_counts:
             value = (row.get(key) or "").strip()
@@ -103,22 +103,29 @@ def check_fpp_metadata() -> dict:
 
 
 def check_motionpro_cache(session: str) -> dict:
+    # 2026-10-22: 用安装到 adapter 目录的 carpet_v2 任务配置（与 test_frappe.py
+    # 同口径：OmegaConf 加载 -> URI 解析 -> apply_cam_seq_root），读 canonical
+    # splits.csv 的 test 列。旧 ad-hoc cfg（seq_root=shared facts）已过时。
     motion_root = ROOT / "Baselines/MotionPRO"
     if str(motion_root) not in sys.path:
         sys.path.insert(0, str(motion_root))
-    from lib.dataset.image_pressure import ImagePressureDataset  # noqa: E402
+    from omegaconf import OmegaConf  # noqa: E402
+    from lib.dataset.image_pressure import ImagePressureDataset, apply_cam_seq_root  # noqa: E402
+    from lib.util.workspace import resolve_path  # noqa: E402
 
-    seq_root = WORKSPACE / "shared/facts/sessions/cam3"
-    cfg = {"task": {
-        "window_length": 20, "cam_id": 3,
-        "split_csv": str(SPLITS), "seq_root": str(seq_root),
-        "contact_method": "tactile_abs",
-    }}
+    yaml_path = WORKSPACE / "model_inputs/MotionPRO/adapter_v2_carpet/imagepressure2smpl_carpet_v2_cam3.yaml"
+    cfg = OmegaConf.load(yaml_path)
+    apply_cam_seq_root(cfg)
+    for key in ("split_csv", "seq_root", "train_data_dir", "eval_data_dir",
+                "smpl_model", "smpl_mean_params"):
+        if cfg.get(key):
+            cfg[key] = str(resolve_path(cfg[key], motion_root))
+    cfg = {"task": dict(cfg)}
     dataset = ImagePressureDataset(cfg, "test")
     assert len(dataset) > 0
     item = dataset[0]
-    assert tuple(item["pressure"].shape[-2:]) == (96, 96)
-    assert item["pressure"].shape[0] == 20
+    assert tuple(item["pressure"].shape[-2:]) == tuple(cfg["task"]["pressure_hw"])
+    assert item["pressure"].shape[0] == int(cfg["task"]["window_length"])
     return {"windows": len(dataset), "pressure_shape": list(item["pressure"].shape)}
 
 
