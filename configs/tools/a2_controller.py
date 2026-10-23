@@ -151,8 +151,8 @@ def validate_job(job):
 
 
 def validate_bundle(plan, resource, grant=None, *, fixture=False):
-    if plan.get("schema") != SCHEMA or plan.get("a2_version") != "anysole.a2.v1":
-        raise ValueError("explicit A2 plan schema required")
+    if plan.get("schema") != SCHEMA or plan.get("a2_version") not in ("anysole.a2.v1", "anysole.a3.v1"):
+        raise ValueError("explicit A2/A3 plan schema required")
     if not plan.get("frozen") or resource.get("schema") != RESOURCE_SCHEMA:
         raise ValueError("frozen plan and A2 resources required")
     if plan.get("purpose") not in ("formal", "measurement", "diagnostic", "fixture"):
@@ -226,8 +226,9 @@ def validate_bundle(plan, resource, grant=None, *, fixture=False):
         if plan["purpose"] != "fixture" or any(j["kind"] != "cpu" for j in jobs):
             raise ValueError("fixtures may run CPU jobs only")
     else:
-        if not grant or grant.get("schema") != "anysole.a2.controller-grant.v1" or grant.get("authorized_by") != "root-a2":
-            raise ValueError("specific root-a2 controller grant required")
+        owner = "root-a3" if plan["a2_version"] == "anysole.a3.v1" else "root-a2"
+        if not grant or grant.get("schema") != "anysole.a2.controller-grant.v1" or grant.get("authorized_by") != owner:
+            raise ValueError(f"specific {owner} controller grant required")
         if grant.get("plan_sha256") != digest(plan) or grant.get("resource_sha256") != digest(resource):
             raise ValueError("grant does not bind this exact plan/resource")
         if grant.get("purpose") != plan["purpose"] or grant.get("revoked"):
@@ -383,6 +384,7 @@ def require_worker_lease(*, kind, checkpoint=None):
 
 def initial_state(plan, resource):
     return {"schema": QUEUE_SCHEMA, "plan_sha256": digest(plan), "resource_sha256": digest(resource),
+            "a2_version": plan["a2_version"], "capacity_max_n": plan.get("capacity_max_n", 4),
             "created_unix": time.time(), "jobs": {j["id"]: {"state": "pending", "attempts": []} for j in plan["jobs"]},
             "cap_overrides": {}, "events": [], "dynamic_jobs": [], "publications": {}}
 
@@ -806,12 +808,24 @@ def main(argv=None):
     positive(args.tick, "tick")
     with exclusive(args.state_dir / "controller.lock"):
         controller = Controller(plan, resource, args.state_dir, grant=grant, fixture=args.fixture)
-        while True:
-            controller.tick()
-            status = read_json(args.state_dir / "status.json")
-            if args.once or status["terminal"]:
-                return 0 if args.once or status["success"] else 1
-            time.sleep(args.tick)
+        identity = {"pid": os.getpid(), "starttime": starttime(os.getpid()), "pgid": os.getpgrp(),
+                    "plan_sha256": digest(plan), "resource_sha256": digest(resource), "started_unix": time.time()}
+        atomic_json(args.state_dir / "controller_identity.json", identity)
+        code, error = 1, None
+        try:
+            while True:
+                controller.tick()
+                status = read_json(args.state_dir / "status.json")
+                if args.once or status["terminal"]:
+                    code = 0 if args.once or status["success"] else 1
+                    return code
+                time.sleep(args.tick)
+        except BaseException as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            atomic_json(args.state_dir / "controller_exit.json", {**identity, "finished_unix": time.time(),
+                        "exit_code": code, "error": error, "once": args.once})
 
 
 if __name__ == "__main__":

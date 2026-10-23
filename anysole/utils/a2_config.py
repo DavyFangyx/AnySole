@@ -1,9 +1,10 @@
-"""Explicit A2 scientific contracts; absent A2 fields never alter legacy runs."""
+"""Explicit A2/A3 contracts; absent version fields never alter legacy runs."""
 from __future__ import annotations
 
 import math
 
 A2_VERSION = "anysole.a2.v1"
+A3_VERSION = "anysole.a3.v1"
 A2_HEADS = ("time_pe", "capacity_time_pe", "query_direct", "query_nonnegative", "query_factorized")
 # run: (base experiment, head, effective pose peak, pressure peak, pair route, supervised route)
 A2_RUNS = {
@@ -25,6 +26,14 @@ A2_RUNS = {
        for run in ("L-TOTAL", "L-ACTIVE", "L-HUBER", "L-DIFF")},
 }
 A2_CONDITIONAL = ("L-TOTAL", "L-ACTIVE", "L-HUBER", "L-DIFF", "ROI", "ROI-CTRL", "C-FINAL")
+A3_RUNS = {
+    f"{family}-{route}-{memory}": (experiment, "query_factorized", pose, pressure, "HF", supervised)
+    for family, experiment, pose, pressure in (("B", "base_pool", 0., 0.),
+                                               ("P", "pose_pair", .2, 0.),
+                                               ("R", "press_pair", 0., .2))
+    for route, supervised in (("ALL", "all"), ("HF", "HF"))
+    for memory in ("T20", "VT40")
+}
 
 
 def is_a2(config):
@@ -32,7 +41,7 @@ def is_a2(config):
         if any(k in config for k in ("a2_run_id", "pressure_pair_route", "supervised_pressure_route", "budget_mode")):
             raise ValueError("A2 route/budget fields require explicit a2_version")
         return False
-    if config["a2_version"] != A2_VERSION:
+    if config["a2_version"] not in (A2_VERSION, A3_VERSION):
         raise ValueError("unsupported a2_version")
     return True
 
@@ -67,19 +76,21 @@ def _finite_array(config, key, length, *, positive=False, probability=False):
 def validate_a2_config(config, *, formal=False):
     if not is_a2(config):
         return
+    a3 = config["a2_version"] == A3_VERSION
+    runs = A3_RUNS if a3 else A2_RUNS
     run = config.get("a2_run_id")
-    if run not in A2_RUNS and run != "C-FINAL":
+    if run not in runs and (a3 or run != "C-FINAL"):
         raise ValueError("unknown or not implemented A2 run; ROI requires a separately frozen deployable feature contract")
-    if config.get("seed") != 1 or isinstance(config.get("seed"), bool):
-        raise ValueError("all A2 scientific runs require seed1")
+    if type(config.get("seed")) is not int or config["seed"] not in ((1, 2, 3) if a3 else (1,)):
+        raise ValueError("A3 requires seed1/2/3; A2 requires seed1")
     for key in ("pressure_pair_route", "supervised_pressure_route"):
         if config.get(key) not in ("all", "H", "HF"):
             raise ValueError(f"explicit A2 {key} must be all/H/HF")
-    if config.get("budget_mode") != ("cam3_exact" if run == "B-CAM3" else "standard"):
+    if config.get("budget_mode") != ("a3_extended" if a3 else "cam3_exact" if run == "B-CAM3" else "standard"):
         raise ValueError("A2 run and budget_mode disagree")
     pose, pressure = effective_pair_peaks(config)
-    if run in A2_RUNS:
-        exp, head, ep, et, pair_route, sup_route = A2_RUNS[run]
+    if run in runs:
+        exp, head, ep, et, pair_route, sup_route = runs[run]
         for key, expected in (("experiment", exp), ("pressure_head", head),
                               ("pressure_pair_route", pair_route), ("supervised_pressure_route", sup_route)):
             if config.get(key) != expected:
@@ -106,8 +117,8 @@ def validate_a2_config(config, *, formal=False):
     if head not in A2_HEADS:
         raise ValueError("unsupported A2 pressure head")
     if head != "time_pe":
-        if config.get("a2_head_seed") != 1:
-            raise ValueError("A2 new heads require isolated a2_head_seed=1")
+        if config.get("a2_head_seed") != (config["seed"] if a3 else 1):
+            raise ValueError("new heads require isolated a2_head_seed matching the run seed")
         if config.get("query_layers", 1) != 1 or config.get("query_heads", 8) != 8 or config.get("query_hidden", 128) != 128:
             raise ValueError("A2 query dimensions are frozen at one layer/eight heads/128 hidden")
     if head == "capacity_time_pe" and config.get("capacity_width") != 544:
@@ -148,6 +159,36 @@ def validate_a2_config(config, *, formal=False):
     if formal:
         if config.get("save_initial_checkpoint") is not True:
             raise ValueError("formal A2 saves initialization/model/optimizer/sampler/RNG")
+    if a3:
+        memory = "fusion_tactile_slice" if run.endswith("-T20") else "fusion_all"
+        if config.get("query_memory") != memory:
+            raise ValueError("A3 run and query_memory disagree")
+        if config.get("stage") not in ("pilot", "formal") or (formal and config["stage"] != "formal"):
+            raise ValueError("A3 stage and formal validation disagree")
+        if config.get("train_cameras") != [1, 2, 4] or config.get("validation_cameras") != [1, 2, 4]:
+            raise ValueError("A3 train and validation use only cameras1,2,4")
+        if config.get("selection_motion_weight") != .8 or config.get("selection_pressure_weight") != .2:
+            raise ValueError("A3 motion/pressure selection weights must be .8/.2")
+        for key in ("target_updates", "effective_batch_rgb_windows", "microbatch_rgb_windows"):
+            if type(config.get(key)) is not int or config[key] <= 0:
+                raise ValueError(f"A3 requires a positive integer {key}")
+        batch, micro = config["effective_batch_rgb_windows"], config["microbatch_rgb_windows"]
+        if batch % 3 or micro % 3 or micro < 6 or micro > batch:
+            raise ValueError("A3 batches must preserve at least two complete three-view groups")
+        if config.get("target_rgb_windows") != config["target_updates"] * batch:
+            raise ValueError("A3 target RGB windows must equal successful updates times batch")
+        if formal:
+            if config["target_updates"] < 10360:
+                raise ValueError("A3 formal budget must at least double the previous5180 updates")
+            for key in ("selection_m_ref", "selection_p_ref"):
+                if not isinstance(config.get(key), (int, float)) or not 0 < config[key] < math.inf:
+                    raise ValueError("A3 requires finite positive new-val selection references")
+            snapshots = config.get("snapshot_updates", [])
+            if (not snapshots or any(type(s) is not int or not 0 < s <= config["target_updates"] for s in snapshots)
+                    or snapshots != sorted(set(snapshots)) or snapshots[-1] != config["target_updates"]):
+                raise ValueError("A3 snapshots must be ordered unique successful updates through the final budget")
+        return
+    if formal:
         expected = a2_budget(config["budget_mode"])
         for key, value in expected.items():
             if key == "gradient_probe_updates":

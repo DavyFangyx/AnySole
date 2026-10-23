@@ -929,8 +929,12 @@ def shuffle_pair_groups(batch, seed: int, update: int, micro: int):
 
 class JointSelector:
     """Finite/common-coverage Pareto candidates and deterministic fixed score."""
-    def __init__(self, m_ref=None, p_ref=None, coverage_hash=None):
+    def __init__(self, m_ref=None, p_ref=None, coverage_hash=None, motion_weight=.5, pressure_weight=.5):
         self.m_ref, self.p_ref, self.coverage_hash = m_ref, p_ref, coverage_hash
+        if not (0 < motion_weight < 1 and 0 < pressure_weight < 1 and
+                math.isclose(motion_weight + pressure_weight, 1., rel_tol=0, abs_tol=1e-12)):
+            raise ValueError("selection weights must be positive and sum to one")
+        self.motion_weight, self.pressure_weight = motion_weight, pressure_weight
         self.candidates = []
         self.best_step = None
 
@@ -948,7 +952,7 @@ class JointSelector:
         if not (0 < float(self.m_ref) < math.inf and 0 < float(self.p_ref) < math.inf):
             raise ValueError("selection references must be finite and positive")
         candidate = {"step": int(step), "motion": m, "pressure": p,
-                     "score": .5 * m / self.m_ref + .5 * p / self.p_ref}
+                     "score": self.motion_weight * m / self.m_ref + self.pressure_weight * p / self.p_ref}
         pool = self.candidates + [candidate]
         self.candidates = [a for a in pool if not any(
             b["motion"] <= a["motion"] and b["pressure"] <= a["pressure"] and
@@ -965,6 +969,8 @@ class JointSelector:
     def load_state_dict(self, state):
         if state["m_ref"] != self.m_ref or state["p_ref"] != self.p_ref:
             raise ValueError("selection reference changed on resume")
+        if (state.get("motion_weight", .5), state.get("pressure_weight", .5)) != (self.motion_weight, self.pressure_weight):
+            raise ValueError("selection weights changed on resume")
         self.__dict__.update(copy.deepcopy(state))
 
 
@@ -1385,10 +1391,12 @@ class VisualLogger:
                 (shared / name).mkdir(parents=True, exist_ok=True)
                 os.environ[f"WANDB_{name.upper()}_DIR"] = str(shared / name)
             os.environ["WANDB_DIR"] = str(self.run_dir)
-            try:
-                auth = bool(wandb.Api(timeout=5).api_key)
-            except Exception:
-                auth = False
+            auth = False
+            if requested == "online":
+                try:
+                    auth = bool(wandb.Api(timeout=5).api_key)
+                except Exception:
+                    pass
             self.mode = "online" if requested == "online" and auth else "offline"
             self.run_id = self.run_id or uuid.uuid4().hex[:8]
             # Offline attempts get their own segment. They share the explicit
@@ -1396,7 +1404,7 @@ class VisualLogger:
             sdk_id = self.run_id if self.mode == "online" else None
             options = dict(
                 id=sdk_id, resume="must" if sdk_id and self.online_id else None,
-                project="anysole", entity=config.get("wandb_entity"),
+                project=config.get("wandb_project", "anysole"), entity=config.get("wandb_entity"),
                 group=config.get("wandb_group", "view-consistency-20261016"),
                 job_type=config.get("wandb_job_type", "train"), name=self.run_dir.name,
                 dir=str(self.run_dir), mode=self.mode,
@@ -1681,13 +1689,18 @@ def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
     if formal and not config.get("resource_frozen"):
         raise ValueError("formal run requires measured and frozen GPU resource envelope")
     if dataset is None:
-        cameras = (3,) if config["experiment"] in ("base_legacy", "base_time") else (1, 2, 3, 4)
+        cameras = tuple(config.get("train_cameras", (3,) if config["experiment"] in ("base_legacy", "base_time") else (1, 2, 3, 4)))
         common = dict(manifest=Path(config["manifest_path"]), dataset_root=Path(config["dataset_root"]),
                       feature_cache_root=Path(config["feature_cache_root"]), smpl_model_path=Path(config["smpl_model_path"]),
                       window_length=int(config["window_length"]), stride=int(config["train_stride"]), cameras=cameras)
         dataset = GroupedViewDataset(**common, split="train", cover_tail=False)
         validation_dataset = GroupedViewDataset(**{**common, "cameras": tuple(config["validation_cameras"])}, split="val", cover_tail=True)
-        if formal:
+        if formal and config.get("a2_version") == "anysole.a3.v1":
+            if (len(dataset) != config["n_train_group_windows"] or
+                    sum(len(w[3]) for w in dataset.windows) != config["n_train_rgb_windows"] or
+                    canonical_hash([dataset.sample_key(i) for i in range(len(dataset))]) != config["train_sample_keys_hash"]):
+                raise ValueError("A3 actual train windows differ from the frozen train-only budget")
+        elif formal:
             reference = dataset if cameras == (3,) else GroupedViewDataset(
                 **{**common, "cameras": (3,)}, split="train", cover_tail=False)
             if len(reference) != config["n_cam3_train_windows"]:
@@ -1782,7 +1795,9 @@ def train_visual_run(config, run_dir, *, resume=None, stop_after_updates=None,
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor)
             scaler = torch.amp.GradScaler("cuda", enabled=bool(config.get("amp")) and device.type == "cuda")
             selector = JointSelector(config.get("selection_m_ref"), config.get("selection_p_ref"),
-                                     config.get("selection_coverage_hash"))
+                                     config.get("selection_coverage_hash"),
+                                     motion_weight=config.get("selection_motion_weight", .5),
+                                     pressure_weight=config.get("selection_pressure_weight", .5))
             loaded = None
             if resume is not None:
                 loaded = load_visual_checkpoint(resume, config, model, optimizer, scheduler,

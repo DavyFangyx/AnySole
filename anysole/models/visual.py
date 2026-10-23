@@ -9,7 +9,7 @@ import hashlib
 import json
 
 from anysole.models.common.model_v2 import AnySoleModelV2
-from anysole.utils.a2_config import A2_HEADS, is_a2
+from anysole.utils.a2_config import A2_HEADS, A3_VERSION, is_a2
 from anysole.models.v3_3b import STRUCTURE as V3_3B_STRUCTURE
 
 
@@ -28,6 +28,8 @@ def effective_config(config: dict) -> dict:
     state. Operational fields do not affect this architecture-only hash.
     """
     a2 = is_a2(config)
+    if config.get("a2_version") == A3_VERSION and config.get("pressure_head") != "query_factorized":
+        raise ValueError("A3 requires Q-FACT")
     if config.get("pressure_head") not in (("legacy", "time_pe") if not a2 else A2_HEADS):
         raise ValueError("visual checkpoints require explicit pressure_head='legacy' or 'time_pe'")
     enabled = config["pressure_head"] != "legacy"
@@ -42,9 +44,15 @@ def effective_config(config: dict) -> dict:
                     "pressure_time_pe_enabled": enabled,
                     "dropout": float(config.get("dropout", 0.1)), "model_name": "visual"}
     if a2 and config["pressure_head"] not in ("legacy", "time_pe"):
+        memory = config.get("query_memory") if config.get("a2_version") == A3_VERSION else "fusion_visual_slice"
+        if config.get("a2_version") == A3_VERSION and (config["pressure_head"] != "query_factorized"
+                or memory not in ("fusion_tactile_slice", "fusion_all")):
+            raise ValueError("A3 requires Q-FACT with tactile-only or full fusion memory")
+        if config.get("query_memory", memory) != memory:
+            raise ValueError("query_memory disagrees with versioned architecture")
         architecture.update(a2_head_version="anysole.pressure-readout.v1", a2_head_seed=config.get("a2_head_seed"),
                             query_layers=1, query_heads=8, query_hidden=128,
-                            query_memory="fusion_visual_slice", query_time="relative_actual_seconds_x40",
+                            query_memory=memory, query_time="relative_actual_seconds_x40",
                             query_mask="rgb_valid_true", foot_layout="left48_right48",
                             capacity_width=config.get("capacity_width") if config["pressure_head"] == "capacity_time_pe" else None,
                             output_foot_bias=config["pressure_head"] in ("query_nonnegative", "query_factorized"))

@@ -27,7 +27,7 @@ def reload_smoke(root):
     if not keys_required <= checkpoint.keys():
         raise ValueError("incomplete checkpoint recovery state")
     device = torch.device("cuda:0")
-    cameras = (3,) if config["experiment"] in ("base_legacy", "base_time") else (1, 2, 3, 4)
+    cameras = tuple(config.get("train_cameras", (3,) if config["experiment"] in ("base_legacy", "base_time") else (1, 2, 3, 4)))
     dataset = GroupedViewDataset(manifest=Path(config["manifest_path"]), dataset_root=Path(config["dataset_root"]),
         feature_cache_root=Path(config["feature_cache_root"]), smpl_model_path=Path(config["smpl_model_path"]),
         window_length=int(config["window_length"]), stride=int(config["train_stride"]), cameras=cameras,
@@ -46,7 +46,8 @@ def reload_smoke(root):
         return value
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
     scaler = torch.amp.GradScaler("cuda", enabled=bool(config.get("amp")))
-    selector = train.JointSelector(config.get("selection_m_ref"), config.get("selection_p_ref"), config.get("selection_coverage_hash"))
+    selector = train.JointSelector(config.get("selection_m_ref"), config.get("selection_p_ref"), config.get("selection_coverage_hash"),
+        motion_weight=config.get("selection_motion_weight", .5), pressure_weight=config.get("selection_pressure_weight", .5))
     loaded = train.load_visual_checkpoint(root / "last.pt", config, model, optimizer, scheduler, scaler,
                                          sampler, selector, device)
     def equal(actual, expected):
@@ -82,7 +83,7 @@ def verify(root, *, smoke=False, identity=None):
         evidence = read_json(root / "a2_smoke.json")
         if not evidence.get("checkpoint_reloaded") or evidence["checkpoint_sha256"] != file_hash(root / "last.pt"):
             raise ValueError("missing real smoke reload evidence")
-        if record.get("successful_updates") != 25 or record.get("rgb_windows") != 6400:
+        if record.get("successful_updates") != 25 or record.get("rgb_windows") != 25 * evidence.get("effective_batch_rgb_windows", 256):
             raise ValueError("smoke successful budget mismatch")
         if not all(evidence.get(k) for k in ("state_complete", "full_validation", "maximum_effective_batch")):
             raise ValueError("incomplete real smoke")
@@ -110,14 +111,17 @@ def main(argv=None):
     import yaml
     from anysole import train
     config = yaml.safe_load(args.config.read_text())
-    if config.get("a2_version") != "anysole.a2.v1":
-        raise ValueError("A2 trainer adapter requires explicit A2 schema")
+    if config.get("a2_version") not in ("anysole.a2.v1", "anysole.a3.v1"):
+        raise ValueError("trainer adapter requires explicit A2/A3 schema")
     recovery_note = os.environ.get("A2_RECOVERY_NOTE")
     if recovery_note:
         config["recovery_note"] = recovery_note
     smoke = args.action == "smoke"
-    if smoke and (config.get("stage") != "pilot" or config.get("validation_every_updates") != 25 or config.get("timing_warmup_updates") != 5 or config.get("effective_batch_rgb_windows") != 256):
-        raise ValueError("resource smoke requires pilot, validation25, warmup5, effective RGB256")
+    batch_rgb = config.get("effective_batch_rgb_windows")
+    if smoke and (config.get("stage") != "pilot" or config.get("validation_every_updates") != 25 or config.get("timing_warmup_updates") != 5
+                  or type(batch_rgb) is not int or batch_rgb <= 0
+                  or (config["a2_version"] == "anysole.a2.v1" and batch_rgb != 256)):
+        raise ValueError("resource smoke requires pilot, validation25, warmup5 and a positive frozen RGB batch (A2=256)")
     began = time.time()
     record = train.train_visual_run(config, root, resume=args.resume, stop_after_updates=25 if smoke else None)
     if smoke:
@@ -129,8 +133,8 @@ def main(argv=None):
         if [row["successful_update"] for row in ledger] != list(range(1, 26)):
             raise ValueError("actual successful update ledger coverage mismatch")
         actual_batches = [sum(len(cameras) for cameras in row["cameras"]) for row in ledger]
-        if any(value != 256 for value in actual_batches):
-            raise ValueError("actual measured effective batch is not256 RGB windows")
+        if any(value != batch_rgb for value in actual_batches):
+            raise ValueError("actual measured effective batch differs from frozen RGB budget")
         rows = [json.loads(line) for line in (root / "metrics.jsonl").read_text().splitlines()]
         by_step = {int(row["progress/update"]): row for row in rows}
         if not set(range(1, 26)) <= by_step.keys():
@@ -138,11 +142,12 @@ def main(argv=None):
         timed = by_step[25]["unix_time"] - by_step[5]["unix_time"]
         last = record.get("last_validation") or {}
         evidence.update(schema="anysole.a2.smoke.v1", warmup_updates=5, timed_updates=20,
-            timed_seconds=timed, timed_rgb_windows=5120, timed_rgb_windows_per_second=5120 / timed,
+            a2_version=config["a2_version"], effective_batch_rgb_windows=batch_rgb,
+            timed_seconds=timed, timed_rgb_windows=20 * batch_rgb, timed_rgb_windows_per_second=20 * batch_rgb / timed,
             timed_started_unix=by_step[5]["unix_time"], timed_finished_unix=by_step[25]["unix_time"],
             wall_seconds=time.time() - began,
             full_validation=last.get("val/motion_frames", 0) > 0 and last.get("val/pressure_cells", 0) > 0,
-            maximum_effective_batch=min(actual_batches) == max(actual_batches) == 256,
+            maximum_effective_batch=min(actual_batches) == max(actual_batches) == batch_rgb,
             minimum_actual_batch_rgb=min(actual_batches), maximum_actual_batch_rgb=max(actual_batches),
             validated_motion_frames=last.get("val/motion_frames", 0),
             validated_pressure_cells=last.get("val/pressure_cells", 0),

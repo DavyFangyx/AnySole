@@ -425,6 +425,7 @@ def validate_view_config(config: dict, *, formal: bool = False) -> None:
         raise ValueError("unsupported visual structure version")
     from anysole.utils.a2_config import A2_HEADS, is_a2, validate_a2_config
     a2 = is_a2(config)
+    a3 = config.get("a2_version") == "anysole.a3.v1"
     validate_a2_config(config, formal=formal)
     if config.get("pressure_head") not in (A2_HEADS if a2 else ("legacy", "time_pe")):
         raise ValueError("unsupported pressure head for the declared schema")
@@ -436,8 +437,8 @@ def validate_view_config(config: dict, *, formal: bool = False) -> None:
         raise ValueError("view-consistency must use strict V-only input")
     if config.get("generate_contact_cache") is not False:
         raise ValueError("grouped loading must not generate contact cache")
-    if config.get("validation_cameras") != [1, 2, 3, 4]:
-        raise ValueError("all grouped experiments require the same four-camera old-val domain")
+    if config.get("validation_cameras") != ([1, 2, 4] if a3 else [1, 2, 3, 4]):
+        raise ValueError("validation cameras disagree with the versioned training domain")
     if (config.get("crop_height"), config.get("crop_width")) != (256, 192):
         raise ValueError("frozen CLIFF frontend requires a 256x192 RGB crop")
     for key, expected in (("manifest_schema", VIEW_MANIFEST_SCHEMA),
@@ -447,7 +448,7 @@ def validate_view_config(config: dict, *, formal: bool = False) -> None:
     if any(config.get(key) is not False for key in ("horizontal_flip", "time_stretch", "mix_occlusion_cache")):
         raise ValueError("unaudited grouped augmentation/cache mixing must remain disabled")
     if (config.get("selection_rule") != "pareto_weighted" or
-            config.get("selection_motion_weight") != .5 or config.get("selection_pressure_weight") != .5 or
+            config.get("selection_motion_weight") != (.8 if a3 else .5) or config.get("selection_pressure_weight") != (.2 if a3 else .5) or
             config.get("selection_tie_break") != ["motion", "pressure", "earlier_successful_update"]):
         raise ValueError("unsupported shared joint checkpoint selection rule")
     if not formal:
@@ -468,6 +469,13 @@ def validate_view_config(config: dict, *, formal: bool = False) -> None:
         "frontend_runtime_hash",
         "resource_version",
     )
+    if a3:
+        required = tuple(k for k in required if k not in (
+            "n_cam3_train_windows", "reference_batch_rgb_windows", "reference_epochs", "reference_steps_per_epoch"))
+        required += ("n_train_group_windows", "n_train_rgb_windows", "train_sample_keys_hash")
+        key_hash = config.get("train_sample_keys_hash")
+        if not isinstance(key_hash, str) or len(key_hash) != 64 or any(c not in "0123456789abcdef" for c in key_hash):
+            raise ValueError("A3 train_sample_keys_hash must be a SHA-256 hex digest")
     missing = [key for key in required if config.get(key) is None or config.get(key) == ""]
     if missing:
         raise ValueError("formal config has unresolved fields: " + ", ".join(missing))
@@ -487,23 +495,28 @@ def validate_view_config(config: dict, *, formal: bool = False) -> None:
         "checkpoint_every_updates", "disk_min_free_bytes",
         "n_cam3_train_windows", "reference_batch_rgb_windows", "reference_epochs",
     )
+    if a3:
+        positive = tuple(k for k in positive if k not in (
+            "n_cam3_train_windows", "reference_batch_rgb_windows", "reference_epochs", "reference_steps_per_epoch"))
+        positive += ("n_train_group_windows", "n_train_rgb_windows")
     for key in positive:
         value = config[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0 < value < float("inf")):
             raise ValueError(f"formal config {key} must be finite and positive")
     for key in ("target_updates", "target_rgb_windows", "effective_batch_rgb_windows",
-                "reference_steps_per_epoch", "runs_per_gpu", "microbatch_rgb_windows",
+                "runs_per_gpu", "microbatch_rgb_windows",
                 "validation_every_updates", "checkpoint_every_updates", "num_workers",
                 "disk_min_free_bytes"):
         if isinstance(config[key], bool) or not isinstance(config[key], int):
             raise ValueError(f"formal config {key} must be an integer")
-    for key in ("n_cam3_train_windows", "reference_batch_rgb_windows", "reference_epochs"):
+    for key in (("n_train_group_windows", "n_train_rgb_windows") if a3 else
+                ("n_cam3_train_windows", "reference_batch_rgb_windows", "reference_epochs", "reference_steps_per_epoch")):
         if isinstance(config[key], bool) or not isinstance(config[key], int):
             raise ValueError(f"formal config {key} must be an integer")
-    reference_batch = config["reference_batch_rgb_windows"]
-    reference_n = config["n_cam3_train_windows"]
+    reference_batch = config["effective_batch_rgb_windows"] if a3 else config["reference_batch_rgb_windows"]
+    reference_n = config["n_train_rgb_windows"] if a3 else config["n_cam3_train_windows"]
     steps = reference_n // reference_batch if config.get("drop_last") else (reference_n+reference_batch-1)//reference_batch
-    if (config["reference_epochs"] != 740 or steps != config["reference_steps_per_epoch"] or
+    if not a3 and (config["reference_epochs"] != 740 or steps != config["reference_steps_per_epoch"] or
             config["target_updates"] != 740*steps*(4 if a2 and config["budget_mode"] == "cam3_exact" else 1) or
             config["effective_batch_rgb_windows"] != reference_batch or
             config["target_rgb_windows"] != config["target_updates"]*reference_batch):
@@ -524,7 +537,7 @@ def validate_view_config(config: dict, *, formal: bool = False) -> None:
         raise ValueError("unsupported formal complete-group packing rule")
     if isinstance(config.get("seed"), bool) or config.get("seed") not in (1, 2, 3):
         raise ValueError("formal seed must be 1, 2, or 3")
-    if config["experiment"] in ("pose_pair", "press_pair", "pair_shuffle") and config["seed"] != 1:
+    if not a3 and config["experiment"] in ("pose_pair", "press_pair", "pair_shuffle") and config["seed"] != 1:
         raise ValueError("formal mechanism checks use only seed 1")
     for key in ("max_steps", "limit_sessions", "max_batches", "smoke_steps", "stop_after_updates", "pilot_train_sample_keys"):
         if config.get(key) is not None:

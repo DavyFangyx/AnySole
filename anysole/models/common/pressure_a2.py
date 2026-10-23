@@ -41,13 +41,17 @@ class CapacityPressureHead(nn.Module):
 
 
 class QueryPressureHead(nn.Module):
-    """Two foot/time queries read exactly the valid visual fusion slice."""
+    """Foot/time queries read one explicitly selected single-view memory."""
     def __init__(self, kind="query_direct", dim=256, nhead=8, hidden=128,
-                 dropout=.1, cell_mean=None, contact_rate=None):
+                 dropout=.1, cell_mean=None, contact_rate=None,
+                 memory="fusion_visual_slice"):
         super().__init__()
         if kind not in ("query_direct", "query_nonnegative", "query_factorized"):
             raise ValueError("unsupported query output representation")
         self.kind = kind
+        if memory not in ("fusion_visual_slice", "fusion_tactile_slice", "fusion_all"):
+            raise ValueError("unsupported query memory")
+        self.memory = memory
         self.foot_embedding = nn.Parameter(torch.empty(2, dim))
         nn.init.normal_(self.foot_embedding, std=.02)
         self.attention = nn.MultiheadAttention(dim, nhead, dropout=dropout, batch_first=True)
@@ -81,10 +85,15 @@ class QueryPressureHead(nn.Module):
             time = relative_time_pe(timestamps[rows], h.shape[-1], 40., fused.dtype)
             query = time[:, :, None, :] + self.foot_embedding[None, None]
             query = query.reshape(-1, 2*t, h.shape[-1])
-            memory = fused[rows, :t]
-            memory = torch.where(frame_valid[rows, :, None], memory, torch.zeros_like(memory))
+            mask = frame_valid[rows]
+            memory = fused[rows]
+            if self.memory == "fusion_all":
+                mask = torch.cat([mask, mask], dim=1)
+            else:
+                memory = memory[:, :t] if self.memory == "fusion_visual_slice" else memory[:, t:]
+            memory = torch.where(mask[..., None], memory, torch.zeros_like(memory))
             attended, _ = self.attention(query, memory, memory,
-                                          key_padding_mask=~frame_valid[rows], need_weights=False)
+                                          key_padding_mask=~mask, need_weights=False)
             values = self.norm(query + attended).reshape(-1, t, 2, h.shape[-1])
             h[rows] = values
         z = self.hidden(h)
@@ -119,4 +128,5 @@ def build_pressure_head(config):
             return CapacityPressureHead(width=int(config["capacity_width"]))
         return QueryPressureHead(config["pressure_head"], dropout=float(config.get("dropout", .1)),
                                  cell_mean=config.get("pressure_cell_mean"),
-                                 contact_rate=config.get("pressure_contact_rate"))
+                                 contact_rate=config.get("pressure_contact_rate"),
+                                 memory=config.get("query_memory", "fusion_visual_slice"))

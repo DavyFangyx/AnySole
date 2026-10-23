@@ -78,6 +78,7 @@ def summarize(state_dir, stage, n):
         peaks.append(sum(smoke.get("peak_gpu_reserved_bytes", 0) for worker, smoke in
             zip([w for w in workers if w["kind"] == "train"], smokes) if worker["gpu"] == gpu))
     report = {"schema": COHORT_SCHEMA, "purpose": "measurement", "stage": stage, "n": n,
+              "a2_version": queue.get("a2_version", "anysole.a2.v1"), "capacity_max_n": queue.get("capacity_max_n", 4),
               "plan_sha256": queue["plan_sha256"], "resource_sha256": queue["resource_sha256"],
               "source_files": sources, "contracts": contracts, "workers": workers,
               "expected_worker_count": len(workers), "controller_state": reference(root / "a2_queue.json"),
@@ -120,8 +121,10 @@ def validate_cohort(report):
     if report.get("stage") not in ("single", "seven", "mixed", "eval"):
         raise ValueError("unknown cohort stage")
     positive(report.get("n"), "cohort n")
-    if report["n"] > 4:
-        raise ValueError("finite protocol maximum n=4")
+    a3 = report.get("a2_version") == "anysole.a3.v1"
+    maximum = report.get("capacity_max_n", 4) if a3 else 4
+    if type(maximum) is not int or maximum < 1 or report["n"] > maximum:
+        raise ValueError("cohort exceeds frozen finite protocol maximum n")
     for key in ("wall_seconds", "peak_gpu_bytes", "gpu_total_bytes", "host_total_bytes", "minimum_host_available_bytes", "disk_min_free_bytes"):
         positive(report.get(key), key)
     if report["peak_gpu_bytes"] > report["gpu_total_bytes"] - max(2 * 1024**3, .1 * report["gpu_total_bytes"]):
@@ -157,15 +160,22 @@ def validate_cohort(report):
         if result.get("schema") != "anysole.a2.attempt.v1" or not result.get("success") or result.get("exit_code") != 0 or result.get("verify_exit_code") != 0:
             raise ValueError("cohort worker failed")
         if worker["kind"] == "train":
+            import yaml
+            config = yaml.safe_load(Path(worker["config"]["path"]).read_text())
+            if a3 and config.get("a2_version") != "anysole.a3.v1":
+                raise ValueError("A3 capacity cannot use an A2 training configuration")
+            batch_rgb = config.get("effective_batch_rgb_windows", 256) if a3 else 256
+            if type(batch_rgb) is not int or batch_rgb <= 0:
+                raise ValueError("invalid frozen training RGB batch")
             run = verify_reference(worker["run"])
             smoke = verify_reference(worker["smoke"])
-            if run.get("successful_updates") != 25 or run.get("rgb_windows") != 25 * 256:
+            if run.get("successful_updates") != 25 or run.get("rgb_windows") != 25 * batch_rgb:
                 raise ValueError("cohort successful training budget incomplete")
             if run.get("last_validation", {}).get("val/pressure_cells", 0) <= 0 or run.get("last_validation", {}).get("val/motion_frames", 0) <= 0:
                 raise ValueError("complete validation missing")
             if not all(smoke.get(k) is True for k in ("checkpoint_reloaded", "state_complete", "full_validation", "maximum_effective_batch")):
                 raise ValueError("save/reload/validation/maximum batch evidence missing")
-            if smoke.get("validated_motion_frames", 0) <= 0 or smoke.get("validated_pressure_cells", 0) <= 0 or smoke.get("minimum_actual_batch_rgb") != 256 or smoke.get("maximum_actual_batch_rgb") != 256:
+            if smoke.get("validated_motion_frames", 0) <= 0 or smoke.get("validated_pressure_cells", 0) <= 0 or smoke.get("minimum_actual_batch_rgb") != batch_rgb or smoke.get("maximum_actual_batch_rgb") != batch_rgb:
                 raise ValueError("numerical coverage/batch evidence missing")
             if file_hash(inside(worker["checkpoint"]["path"])) != worker["checkpoint"].get("sha256") or smoke.get("checkpoint_sha256") != worker["checkpoint"]["sha256"]:
                 raise ValueError("reload checkpoint identity mismatch")
@@ -215,7 +225,15 @@ def suggest_next(reports):
     rate = "evaluation_frames_per_second" if is_eval else "successful_rgb_windows_per_second"
     confirm = "confirm_mixed" if is_eval else "confirm_seven"
     selected = last
-    if len(singles) > 1:
+    a3 = last.get("a2_version") == "anysole.a3.v1"
+    if a3:
+        if any(r.get("a2_version") != "anysole.a3.v1" or r.get("capacity_max_n") != last.get("capacity_max_n") for r in singles):
+            raise ValueError("capacity protocol changed between cohorts")
+        # A flat n2 result cannot establish that n3..n6 are slower. Inspect all
+        # safely fitting task-bounded occupancies; favor higher n within 1% noise.
+        best_rate = max(r[rate] for r in singles)
+        selected = max((r for r in singles if r[rate] >= .99 * best_rate), key=lambda r: r["n"])
+    elif len(singles) > 1:
         gain = last[rate] / singles[-2][rate] - 1
         if gain < .05:
             selected = singles[-2]
@@ -225,6 +243,12 @@ def suggest_next(reports):
     reserve = max(2 * 1024**3, .1 * last["gpu_total_bytes"])
     host_per_worker = last.get("worker_peak_rss_bytes", last["host_total_bytes"] - last["minimum_host_available_bytes"]) / last["n"]
     memory_ok = per_worker * n <= last["gpu_total_bytes"] - reserve and host_per_worker * n < .8 * last["host_total_bytes"]
+    if a3:
+        available_without_cohort = last["minimum_host_available_bytes"] + last.get("worker_peak_rss_bytes", 0)
+        memory_ok = memory_ok and host_per_worker * n * 7 < available_without_cohort - .2 * last["host_total_bytes"]
+        if n <= last["capacity_max_n"] and memory_ok:
+            return {"action": "measure", "n": n, "reason": "A3 task-bounded measured memory permits next occupancy"}
+        return {"action": confirm, "selected_n": selected["n"], "reason": "A3 measured throughput maximum within 1 percent; finite task/memory boundary"}
     # n4 only if n3 actually remained underutilized, rather than merely fitting RAM.
     underutilized = n < 4 or last.get("mean_gpu_utilization", 100) < 85
     if n <= 4 and memory_ok and underutilized:
@@ -277,6 +301,8 @@ def verify_frozen_resource(resource):
             if profile["cap"] not in {r["n"] for r in singles}:
                 raise ValueError("selected cap was never measured")
             selection = suggest_next(singles)
+            if singles[0].get("a2_version") == "anysole.a3.v1" and (selection.get("action") != "confirm_seven" or profile["cap"] != selection.get("selected_n")):
+                raise ValueError("A3 cap must equal the completed measured throughput selection")
             if "selected_n" in selection and profile["cap"] > selection["selected_n"]:
                 raise ValueError("selected cap exceeds finite throughput/memory decision")
         elif not any(r["stage"] == "eval" and r["n"] == profile["cap"] for r in reports):
