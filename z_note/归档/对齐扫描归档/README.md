@@ -18,7 +18,7 @@
   - `s31_verify.py`：复跑一致性（140/140、53/53 位精确）；`s32_classify.py`/`s33_table.py`/`s34_reclass.py`/`s35_joint.py`：A/B/C/D 分类与回归
   - `s40–s42`：YOLOX IoU 车队复核；`s50–s53`：RTMPose×YOLOX 对比与裁定 → `adjudication.json`
   - `s60/s61`：分段漂移；`s70/s71`：抽样；`s80_final.py`：终表 → `lag_fleet.csv` / `lag_fleet_final.json`
-- 关键结果表（已随带）：`s1_scratch/lag_fleet.csv`（逐 session lag_eff 表，A/B/C/D 分类）、`s1_scratch/adjudication.json`、`s1_scratch/clock_probe.json`、`r2_scratch/multi_lag.json`、`r2_scratch/wide_lag.json`
+- 关键结果表（已随带）：`s1_scratch/adjudication.json`、`s1_scratch/clock_probe.json`、`r2_scratch/multi_lag.json`、`r2_scratch/wide_lag.json`。`lag_fleet.csv` 与 `lag_fleet_final.json` 已随修正表提升至 `AnysoleWorkspace/protocol/calibration/`（2026-10-24，见 offset_README.md）。
 
 ## 使用
 

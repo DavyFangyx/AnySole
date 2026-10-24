@@ -1,0 +1,141 @@
+session_id,date,subject,conf_class,lag_eff_frames,offset_s_old,offset_s_new,remark,source
+S10101,20260808,S10,D,-11.5,0.000000,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行114
+S10102,20260808,S10,D,2.5,0.351506,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行135
+S10103,20260808,S10,D,-4.5,0.175681,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行133
+S10111,20260808,S10,D,-1.5,0.000000,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行139
+S10112,20260808,S10,B,-11.5,-0.218221,-0.505721,B 可平移修复：mocap_time_s 平移 +0.287500s（offset_s_new = offset_s_old -0.287500s）,lag_fleet.csv 行64
+S10113,20260808,S10,D,0.0,0.327482,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行141
+S11011,20260808,S11,D,-15.0,-0.101018,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行102
+S11012,20260808,S11,D,-10.5,0.050187,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行119
+S11013,20260808,S11,D,-13.5,0.050220,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行108
+S11021,20260808,S11,D,-2.5,0.427347,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行136
+S11022,20260808,S11,D,5.0,0.478146,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行132
+S11023,20260808,S11,D,-15.0,-0.301428,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行103
+S11031,20260808,S11,C,-16.5,0.000000,,C 修不动（align*≥12px，2D 串人非时钟），不修,lag_fleet.csv 行90
+S11032,20260808,S11,B,-5.0,0.250294,0.125294,B 可平移修复：mocap_time_s 平移 +0.125000s（offset_s_new = offset_s_old -0.125000s）,lag_fleet.csv 行83
+S11051,20260808,S11,C,-8.5,0.150455,,C 修不动（align*≥12px，2D 串人非时钟），不修,lag_fleet.csv 行93
+S11053,20260808,S11,C,-16.0,-0.050266,,C 修不动（align*≥12px，2D 串人非时钟），不修,lag_fleet.csv 行91
+S11061,20260808,S11,B,-14.5,-0.025074,-0.387574,B 可平移修复：mocap_time_s 平移 +0.362500s（offset_s_new = offset_s_old -0.362500s）,lag_fleet.csv 行51
+S11062,20260808,S11,D,-11.5,-0.150173,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行115
+S11063,20260808,S11,B,-8.5,0.100302,-0.112198,B 可平移修复：mocap_time_s 平移 +0.212500s（offset_s_new = offset_s_old -0.212500s）,lag_fleet.csv 行74
+S11071,20260808,S11,D,-8.5,0.100607,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行124
+S11072,20260808,S11,D,-11.5,0.075456,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行116
+S11073,20260808,S11,D,-8.5,0.175471,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行125
+S11091,20260808,S11,D,-17.5,-0.152415,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行98
+S11093,20260808,S11,D,-9.5,0.125721,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行123
+S11101,20260808,S11,B,-16.5,-0.100962,-0.513462,B 可平移修复：mocap_time_s 平移 +0.412500s（offset_s_new = offset_s_old -0.412500s）,lag_fleet.csv 行44
+S11102,20260808,S11,B,16.0,0.678071,1.078071,B 可平移修复：mocap_time_s 平移 -0.400000s（offset_s_new = offset_s_old +0.400000s）,lag_fleet.csv 行45
+S11103,20260808,S11,A,0.0,0.252223,0.252223,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行19
+S11111,20260808,S11,B,-15.5,-0.579040,-0.966540,B 可平移修复：mocap_time_s 平移 +0.387500s（offset_s_new = offset_s_old -0.387500s）,lag_fleet.csv 行47
+S11112,20260808,S11,B,-12.0,0.126232,-0.173768,B 可平移修复：mocap_time_s 平移 +0.300000s（offset_s_new = offset_s_old -0.300000s）,lag_fleet.csv 行60
+S11113,20260808,S11,C,-11.0,0.075298,,C 修不动（align*≥12px，2D 串人非时钟），不修,lag_fleet.csv 行92
+S12011,20260808,S12,D,-16.5,0.000000,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行100
+S12012,20260808,S12,A,0.0,0.251024,0.251024,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行20
+S12013,20260808,S12,D,-14.0,-0.025090,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行106
+S12021,20260808,S12,D,-12.5,-0.475139,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行110
+S12042,20260808,S12,B,-3.0,0.326787,0.251787,B 可平移修复：mocap_time_s 平移 +0.075000s（offset_s_new = offset_s_old -0.075000s）,lag_fleet.csv 行89
+S12061,20260808,S12,D,2.0,0.225169,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行138
+S12062,20260808,S12,D,-6.0,0.074939,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行131
+S12073,20260808,S12,D,-1.0,0.225402,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行140
+S12101,20260808,S12,D,-8.0,0.201279,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行128
+S12102,20260808,S12,D,-10.0,0.151054,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行121
+S12103,20260808,S12,D,-13.0,-0.200927,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行109
+S12113,20260808,S12,B,-14.5,-0.326200,-0.688700,B 可平移修复：mocap_time_s 平移 +0.362500s（offset_s_new = offset_s_old -0.362500s）,lag_fleet.csv 行52
+S13011,20260810,S13,A,0.0,-0.226015,-0.226015,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行21
+S13013,20260810,S13,A,0.0,-0.476807,-0.476807,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行22
+S13021,20260810,S13,A,0.0,0.126205,0.126205,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行23
+S13023,20260810,S13,D,-8.0,0.126157,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行129
+S13061,20260810,S13,B,-14.0,-0.275643,-0.625643,B 可平移修复：mocap_time_s 平移 +0.350000s（offset_s_new = offset_s_old -0.350000s）,lag_fleet.csv 行54
+S13062,20260810,S13,A,0.0,0.099865,0.099865,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行24
+S13063,20260810,S13,B,12.0,0.632066,0.932066,B 可平移修复：mocap_time_s 平移 -0.300000s（offset_s_new = offset_s_old +0.300000s）,lag_fleet.csv 行61
+S13071,20260810,S13,D,-11.5,-0.075057,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行117
+S13072,20260810,S13,B,-14.0,-0.352808,-0.702808,B 可平移修复：mocap_time_s 平移 +0.350000s（offset_s_new = offset_s_old -0.350000s）,lag_fleet.csv 行55
+S13073,20260810,S13,B,-15.0,-0.702233,-1.077233,B 可平移修复：mocap_time_s 平移 +0.375000s（offset_s_new = offset_s_old -0.375000s）,lag_fleet.csv 行48
+S13082,20260810,S13,B,-12.0,0.000000,-0.300000,B 可平移修复：mocap_time_s 平移 +0.300000s（offset_s_new = offset_s_old -0.300000s）,lag_fleet.csv 行62
+S13092,20260810,S13,B,-6.5,0.175966,0.013466,B 可平移修复：mocap_time_s 平移 +0.162500s（offset_s_new = offset_s_old -0.162500s）,lag_fleet.csv 行77
+S13093,20260810,S13,B,-14.0,-0.201856,-0.551856,B 可平移修复：mocap_time_s 平移 +0.350000s（offset_s_new = offset_s_old -0.350000s）,lag_fleet.csv 行56
+S13101,20260810,S13,A,0.0,0.025136,0.025136,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行25
+S13102,20260810,S13,A,0.0,0.125664,0.125664,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行26
+S13103,20260810,S13,A,0.0,0.150628,0.150628,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行27
+S13112,20260810,S13,B,-9.0,0.126726,-0.098274,B 可平移修复：mocap_time_s 平移 +0.225000s（offset_s_new = offset_s_old -0.225000s）,lag_fleet.csv 行72
+S13113,20260810,S13,B,-13.5,-0.100609,-0.438109,B 可平移修复：mocap_time_s 平移 +0.337500s（offset_s_new = offset_s_old -0.337500s）,lag_fleet.csv 行58
+S14011,20260810,S14,A,0.0,-0.837982,-0.837982,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行28
+S14012,20260810,S14,A,0.0,0.303206,0.303206,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行29
+S14013,20260810,S14,A,0.0,0.275876,0.275876,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行30
+S14022,20260810,S14,A,0.0,-0.025160,-0.025160,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行31
+S14033,20260810,S14,B,-4.5,0.226219,0.113719,B 可平移修复：mocap_time_s 平移 +0.112500s（offset_s_new = offset_s_old -0.112500s）,lag_fleet.csv 行85
+S14061,20260810,S14,A,0.0,-0.100888,-0.100888,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行32
+S14062,20260810,S14,A,0.0,0.327968,0.327968,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行33
+S14063,20260810,S14,A,0.0,0.075893,0.075893,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行34
+S14071,20260810,S14,B,-5.0,0.200787,0.075787,B 可平移修复：mocap_time_s 平移 +0.125000s（offset_s_new = offset_s_old -0.125000s）,lag_fleet.csv 行84
+S14072,20260810,S14,A,0.0,0.274256,0.274256,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行35
+S14073,20260810,S14,B,-8.0,0.050151,-0.149849,B 可平移修复：mocap_time_s 平移 +0.200000s（offset_s_new = offset_s_old -0.200000s）,lag_fleet.csv 行75
+S14091,20260810,S14,B,-10.5,0.101568,-0.160932,B 可平移修复：mocap_time_s 平移 +0.262500s（offset_s_new = offset_s_old -0.262500s）,lag_fleet.csv 行66
+S14092,20260810,S14,B,-4.5,0.227416,0.114916,B 可平移修复：mocap_time_s 平移 +0.112500s（offset_s_new = offset_s_old -0.112500s）,lag_fleet.csv 行86
+S14093,20260810,S14,A,0.0,0.327448,0.327448,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行36
+S14102,20260810,S14,A,0.0,0.176871,0.176871,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行37
+S14103,20260810,S14,A,0.0,0.200766,0.200766,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行38
+S14111,20260810,S14,A,0.0,0.301558,0.301558,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行39
+S14112,20260810,S14,B,-6.0,0.100952,-0.049048,B 可平移修复：mocap_time_s 平移 +0.150000s（offset_s_new = offset_s_old -0.150000s）,lag_fleet.csv 行78
+S5011,20260804,S5,A,0.0,0.443549,0.443549,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行2
+S5012,20260804,S5,A,0.0,0.308422,0.308422,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行3
+S5013,20260804,S5,D,27.5,1.019412,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行94
+S5031,20260804,S5,B,26.5,0.950458,1.612958,B 可平移修复：mocap_time_s 平移 -0.662500s（offset_s_new = offset_s_old +0.662500s）,lag_fleet.csv 行40
+S5033,20260804,S5,B,-10.5,-0.142091,-0.404591,B 可平移修复：mocap_time_s 平移 +0.262500s（offset_s_new = offset_s_old -0.262500s）,lag_fleet.csv 行65
+S5061,20260804,S5,A,0.0,0.125165,0.125165,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行4
+S5062,20260804,S5,A,0.0,-0.175936,-0.175936,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行5
+S5063,20260804,S5,D,-13.5,-0.332701,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行107
+S5071,20260804,S5,A,0.0,0.174554,0.174554,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行6
+S5072,20260804,S5,B,21.0,0.871774,1.396774,B 可平移修复：mocap_time_s 平移 -0.525000s（offset_s_new = offset_s_old +0.525000s）,lag_fleet.csv 行41
+S5073,20260804,S5,A,0.0,0.523424,0.523424,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行7
+S5081,20260804,S5,B,-8.5,0.125673,-0.086827,B 可平移修复：mocap_time_s 平移 +0.212500s（offset_s_new = offset_s_old -0.212500s）,lag_fleet.csv 行73
+S5083,20260804,S5,B,-10.0,0.024999,-0.225001,B 可平移修复：mocap_time_s 平移 +0.250000s（offset_s_new = offset_s_old -0.250000s）,lag_fleet.csv 行67
+S5091,20260804,S5,B,9.5,0.631612,0.869112,B 可平移修复：mocap_time_s 平移 -0.237500s（offset_s_new = offset_s_old +0.237500s）,lag_fleet.csv 行68
+S5092,20260804,S5,B,5.0,0.453224,0.578224,B 可平移修复：mocap_time_s 平移 -0.125000s（offset_s_new = offset_s_old +0.125000s）,lag_fleet.csv 行81
+S5093,20260804,S5,B,-4.0,0.000000,-0.100000,B 可平移修复：mocap_time_s 平移 +0.100000s（offset_s_new = offset_s_old -0.100000s）,lag_fleet.csv 行87
+S5101,20260804,S5,D,-14.0,-0.150033,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行104
+S5102,20260804,S5,A,0.0,-0.351083,-0.351083,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行8
+S5103,20260804,S5,A,0.0,-0.075849,-0.075849,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行9
+S5111,20260804,S5,B,-5.5,0.150627,0.013127,B 可平移修复：mocap_time_s 平移 +0.137500s（offset_s_new = offset_s_old -0.137500s）,lag_fleet.csv 行79
+S5112,20260804,S5,B,14.5,0.675801,1.038301,B 可平移修复：mocap_time_s 平移 -0.362500s（offset_s_new = offset_s_old +0.362500s）,lag_fleet.csv 行49
+S5113,20260804,S5,B,-14.0,-0.025113,-0.375113,B 可平移修复：mocap_time_s 平移 +0.350000s（offset_s_new = offset_s_old -0.350000s）,lag_fleet.csv 行53
+S6011,20260804,S6,A,0.0,-0.553598,-0.553598,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行10
+S6012,20260804,S6,D,-11.5,0.025118,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行112
+S6013,20260804,S6,A,0.0,0.276862,0.276862,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行11
+S6021,20260804,S6,A,0.0,0.276723,0.276723,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行12
+S6022,20260804,S6,D,-8.0,0.075626,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行126
+S6023,20260804,S6,B,9.5,0.553195,0.790695,B 可平移修复：mocap_time_s 平移 -0.237500s（offset_s_new = offset_s_old +0.237500s）,lag_fleet.csv 行69
+S6031,20260804,S6,B,-15.5,-0.008333,-0.395833,B 可平移修复：mocap_time_s 平移 +0.387500s（offset_s_new = offset_s_old -0.387500s）,lag_fleet.csv 行46
+S6041,20260804,S6,B,-5.5,0.250851,0.113351,B 可平移修复：mocap_time_s 平移 +0.137500s（offset_s_new = offset_s_old -0.137500s）,lag_fleet.csv 行80
+S6061,20260804,S6,D,-7.0,0.125592,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行130
+S6062,20260804,S6,D,-11.0,0.050296,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行118
+S6063,20260804,S6,D,-14.0,-0.025223,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行105
+S6071,20260804,S6,D,3.5,0.508993,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行134
+S6073,20260804,S6,D,-17.5,-0.050122,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行96
+S6091,20260804,S6,D,-10.0,0.281261,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行120
+S6092,20260804,S6,D,8.0,0.630621,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行127
+S6093,20260804,S6,D,-11.5,0.100495,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行113
+S6102,20260804,S6,D,-2.0,-0.050184,,D 证据不足（fleet flag: n_gate<100），不修,lag_fleet.csv 行137
+S6103,20260804,S6,B,-14.5,0.025178,-0.337322,B 可平移修复：mocap_time_s 平移 +0.362500s（offset_s_new = offset_s_old -0.362500s）,lag_fleet.csv 行50
+S6112,20260804,S6,B,-17.0,-0.176011,-0.601011,B 可平移修复：mocap_time_s 平移 +0.425000s（offset_s_new = offset_s_old -0.425000s）,lag_fleet.csv 行42
+S6113,20260804,S6,B,-16.5,-0.125498,-0.537998,B 可平移修复：mocap_time_s 平移 +0.412500s（offset_s_new = offset_s_old -0.412500s）,lag_fleet.csv 行43
+S7011,20260804,S7,D,-15.0,-0.075592,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行101
+S7012,20260804,S7,A,0.0,-0.125922,-0.125922,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行13
+S7013,20260804,S7,D,-16.5,-0.251609,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行99
+S7023,20260804,S7,D,-17.5,-0.251881,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行97
+S7031,20260804,S7,B,9.0,0.527301,0.752301,B 可平移修复：mocap_time_s 平移 -0.225000s（offset_s_new = offset_s_old +0.225000s）,lag_fleet.csv 行71
+S7032,20260804,S7,B,-12.5,0.025182,-0.287318,B 可平移修复：mocap_time_s 平移 +0.312500s（offset_s_new = offset_s_old -0.312500s）,lag_fleet.csv 行59
+S7033,20260804,S7,B,-11.5,0.000000,-0.287500,B 可平移修复：mocap_time_s 平移 +0.287500s（offset_s_new = offset_s_old -0.287500s）,lag_fleet.csv 行63
+S7053,20260804,S7,B,-5.0,0.176083,0.051083,B 可平移修复：mocap_time_s 平移 +0.125000s（offset_s_new = offset_s_old -0.125000s）,lag_fleet.csv 行82
+S7061,20260804,S7,B,-9.5,-0.251701,-0.489201,B 可平移修复：mocap_time_s 平移 +0.237500s（offset_s_new = offset_s_old -0.237500s）,lag_fleet.csv 行70
+S7062,20260804,S7,D,-19.0,-0.151135,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行95
+S7063,20260804,S7,A,0.0,0.302926,0.302926,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行14
+S8011,20260807,S8,A,0.0,-0.128029,-0.128029,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行15
+S8012,20260807,S8,A,0.0,0.000000,0.000000,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行16
+S8013,20260807,S8,A,0.0,0.000000,0.000000,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行17
+S8021,20260807,S8,D,-9.5,0.075558,,D 证据不足（fleet flag: gain<3px），不修,lag_fleet.csv 行122
+S8023,20260807,S8,D,-12.0,0.075313,,D 证据不足（fleet flag: lag_CI>+-4f），不修,lag_fleet.csv 行111
+S8032,20260807,S8,B,-3.0,0.227189,0.152189,B 可平移修复：mocap_time_s 平移 +0.075000s（offset_s_new = offset_s_old -0.075000s）,lag_fleet.csv 行88
+S8053,20260807,S8,B,-13.5,-0.251508,-0.589008,B 可平移修复：mocap_time_s 平移 +0.337500s（offset_s_new = offset_s_old -0.337500s）,lag_fleet.csv 行57
+S8062,20260807,S8,A,0.0,0.225587,0.225587,A 已对齐，不修（lag_eff 恒 0）,lag_fleet.csv 行18
+S8063,20260807,S8,B,7.0,0.502419,0.677419,B 可平移修复：mocap_time_s 平移 -0.175000s（offset_s_new = offset_s_old +0.175000s）,lag_fleet.csv 行76

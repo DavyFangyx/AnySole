@@ -33,13 +33,13 @@ FACTS_ROOT = WORKSPACE / "shared/facts/sessions"
 MMVP_ROOT = WORKSPACE / "shared/representations/tactile/mmvp_31x11/v1"
 MANIFEST = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
 ESSENTIALS = ROOT / "Baselines/VP-MoCap/FPP-Net/essentials/insole2cont"
-LAYOUT = WORKSPACE / "assets/foot_sensor_layout"
-# 触觉值正典（2026-10-22 生产替换）：tactile_pipeline（AnysoleWorkspace/tool）
-# 的清洗产物 dataset npz（processed48 + wall_time_day_s，与 jpeg 文件名同一
-# 日秒墙钟）。帧级 valid/fake 掩码由 pipeline 的 quality_rows 行级标记映射
-# （吸收自旧 mark-fake 链，见 data/quality_rows/provenance.json）。
-TACTILE_DATA_ROOT = WORKSPACE / "work" / "data_pipeline" / "tactile_v3"
-OFFSET_TABLE_CSV = ROOT / "z_note" / "data_offset_fixpipe" / "offset_correction.csv"
+LAYOUT = ROOT / "hf-raw" / "config" / "foot_sensor_layout"
+# 触觉值正典（2026-10-22 生产替换）：tactile_pipeline 的清洗产物 dataset
+# npz（processed48 + wall_time_day_s，与 jpeg 文件名同一日秒墙钟）。
+# 2026-10-24 定妆照：行级质量包（{side}_{t_us,raw_t_us,valid,fake}）已由生产
+# 端烤进 npz 本身，消费端不再依赖 quality_rows 生产中间件。
+TACTILE_DATA_ROOT = ROOT / "hf-raw" / "pressure"
+OFFSET_TABLE_CSV = WORKSPACE / "protocol" / "calibration" / "offset_correction.csv"
 
 _OFFSET_TABLE: dict[str, float] | None = None
 
@@ -49,7 +49,7 @@ def corrected_lag(sid: str) -> float:
     0.0 for A/C/D (no effective correction; D 的 lag_eff 仅供排序参考)。
 
     Facts 的 mocap 轴 = manifest 原始对齐 − lag·dt（10-22 固化，见
-    z_note/data_offset_fixpipe/README.md）；重建时在此应用同一修正。
+    AnysoleWorkspace/protocol/calibration/offset_README.md）；重建时在此应用同一修正。
     """
     global _OFFSET_TABLE
     if _OFFSET_TABLE is None:
@@ -83,25 +83,27 @@ def read_manifest(cam: int = 3) -> dict[str, dict]:
     }
 
 
-def quality_pack(date: str, subject: str, recording: str) -> dict[str, tuple]:
-    """Row-level valid/fake packs from the tactile pipeline's quality_rows."""
-    from tactile_pipeline.quality_rows import load_quality_rows
-    return load_quality_rows(date, subject, recording)
-
-
-def v3_value_pack(date: str, subject: str, sid: str, side: str) -> tuple[np.ndarray, np.ndarray]:
-    """Canonical pressure values + absolute wall clock from the tactile
-    pipeline's dataset npz (fault-cell burst repair + isolated impulse +
-    airborne baseline + supported step, no smoothing).
+def v3_value_pack(date: str, subject: str, sid: str, side: str) -> dict[str, np.ndarray]:
+    """Canonical pressure values + absolute wall clock + row quality pack from
+    the tactile pipeline's dataset npz (fault-cell burst repair + isolated
+    impulse + airborne baseline + supported step, no smoothing).
 
     ``wall_time_day_s`` lives on the same day-second wall clock as the JPEG
     filenames (started_at_iso + native receive clock), so it maps onto video
-    frames directly without an epoch anchor.
+    frames directly without an epoch anchor.  The ``{side}_*`` quality arrays
+    are baked into the npz by the producer (2026-10-24); sessions without a
+    producer-side quality record lack these keys.
     """
     from tactile_pipeline import pressure_io
     p = pressure_io.load_pressure(TACTILE_DATA_ROOT / "data", sid, side)
-    return (np.asarray(p["processed48"], dtype=np.float32),
-            np.asarray(p["wall_time_day_s"], dtype=np.float64))
+    out = {"values": np.asarray(p["processed48"], dtype=np.float32),
+           "wall": np.asarray(p["wall_time_day_s"], dtype=np.float64)}
+    if f"{side}_t_us" in p:
+        out["quality"] = (np.asarray(p[f"{side}_t_us"]), np.asarray(p[f"{side}_raw_t_us"]),
+                          np.asarray(p[f"{side}_valid"]), np.asarray(p[f"{side}_fake"]))
+    else:
+        out["quality"] = None
+    return out
 
 
 def day_seconds_from_iso(value: str) -> float:
@@ -174,14 +176,17 @@ def mmvp_map(foot: str) -> tuple[np.ndarray, np.ndarray]:
 def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
     recording = resolve_uri(row["video_path"], must_exist=True)
     date, subject = recording.parts[-3], recording.parts[-2]
-    left_values, left_wall = v3_value_pack(date, subject, sid, "left")
-    right_values, right_wall = v3_value_pack(date, subject, sid, "right")
-    left_uri = (f"AnysoleWorkspace/work/data_pipeline/tactile_v3/"
-                f"data/processed_csv/{date}/{subject}/{sid}/left.csv")
-    right_uri = (f"AnysoleWorkspace/work/data_pipeline/tactile_v3/"
-                 f"data/processed_csv/{date}/{subject}/{sid}/right.csv")
-    quality_rows = quality_pack(date, subject, recording.name)
-    left_quality, right_quality = quality_rows["left"], quality_rows["right"]
+    left_pack = v3_value_pack(date, subject, sid, "left")
+    right_pack = v3_value_pack(date, subject, sid, "right")
+    left_values, left_wall = left_pack["values"], left_pack["wall"]
+    right_values, right_wall = right_pack["values"], right_pack["wall"]
+    left_uri = (f"hf-raw/pressure/"
+                f"data/dataset/{date}/{subject}/{sid}/left.npz")
+    right_uri = (f"hf-raw/pressure/"
+                 f"data/dataset/{date}/{subject}/{sid}/right.npz")
+    if left_pack["quality"] is None or right_pack["quality"] is None:
+        raise ValueError(f"{sid}: npz lacks producer-side quality rows (valid/fake pack)")
+    left_quality, right_quality = left_pack["quality"], right_pack["quality"]
     n = int(row["n_frames"])
     rgb_source = recording / str(cam)
     images = sorted(rgb_source.glob("*.jpg"))
@@ -233,14 +238,14 @@ def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
         unit=np.asarray("source_sensor_units"), value_min=np.asarray(min(left48.min(), right48.min()), dtype=np.float32),
         value_max=np.asarray(max(left48.max(), right48.max()), dtype=np.float32),
         source_file_left=np.asarray(left_uri), source_file_right=np.asarray(right_uri),
-        source_time_column=np.asarray("t_us"), alignment_method=np.asarray(resample_meta["alignment_method"]),
+        source_time_column=np.asarray("wall_time_day_s"), alignment_method=np.asarray(resample_meta["alignment_method"]),
     )
     bvh = resolve_uri(row["bvh_path"], must_exist=True)
     smpl = resolve_uri(row["smpl_path"], must_exist=True) if row.get("smpl_path") else None
     meta_path = recording / "meta.json"
-    value_csv_left = TACTILE_DATA_ROOT / "data" / "processed_csv" / date / subject / sid / "left.csv"
-    value_csv_right = TACTILE_DATA_ROOT / "data" / "processed_csv" / date / subject / sid / "right.csv"
-    quality_uri = (f"work://data_pipeline/tactile_v3/data/quality_rows/"
+    value_csv_left = TACTILE_DATA_ROOT / "data" / "dataset" / date / subject / sid / "left.npz"
+    value_csv_right = TACTILE_DATA_ROOT / "data" / "dataset" / date / subject / sid / "right.npz"
+    quality_uri = (f"hfraw://pressure/data/quality_rows/"
                    f"{date}/{subject}/{recording.name}.npz")
     source_files = {
         "rgb": row["video_path"], "bvh": row["bvh_path"], "smpl": row.get("smpl_path", ""),
