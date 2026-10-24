@@ -21,6 +21,14 @@ STATES = ("queue", "running", "done", "failed")
 # These are the only experiments that produce model/evaluation data.  Analysis
 # and visualization live under results_display and are intentionally absent.
 EXPERIMENTS: dict[str, dict[str, Any]] = {
+    # B 查询压力头线（2026-10-24）：V3_Bv2（Q-NN 先验表示）→ V3_Bv3
+    # （Q-FACT 因式化）依次训练；B 的既有配方（740ep/seed1/三条件采样），
+    # 唯一变化 = 压力头结构（版本节登记见 V3_B方案.md §6）。
+    "bv_query": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V3_Bv2", "V3_Bv3"],
+        "REQUIRES": [],
+    },
     "all_models": {
         "KIND": "model_suite",
         "MODEL_IDS": list(MODELS),
@@ -78,22 +86,6 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
             "V5_Av4_occ010_fS5S11S12", "V5_Av4_occ010_fS6S7S13",
             "V5_Av4_occ010_fS5S6S8",
         ],
-        "REQUIRES": [],
-    },
-    # 交接包降噪压力重训（2026-10-17）：V3_Bv1 同结构，tactile_input=
-    # denoised108（v3_3b_denoised 入口固定）。只训主线——探针实验读主线
-    # 三条件，不需要专才；T 流换了数据源，旧 V3_Bv1_tonly 不再等价。
-    "singlemodal_eval_denoised": {
-        "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_Bv1_denoised"],
-        "SPECIALISTS": [],
-        "REQUIRES": [],
-    },
-    # 降噪压力 E/F（2026-10-17）：同协议，主线 only。
-    "singlemodal_eval_denoised_ef": {
-        "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_Ev1_denoised", "V3_Fv1_denoised"],
-        "SPECIALISTS": [],
         "REQUIRES": [],
     },
     # 四相机扩展 D2 (2026-10-12): same protocol on the three new cameras.
@@ -179,72 +171,10 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "MODEL_IDS": ["V3_Hv3", "V3_Hv3_cam3_occ010"],
         "REQUIRES": [],
     },
-    # offset 重同步组（2026-10-20）：cam3 基准 + occ010/020/030/050，
-    # 自训自测（corrected_offset=True）。
-    "offsetfix": {
-        "KIND": "model_suite",
-        "MODEL_IDS": ["V3_Bv1_cam3_offfix",
-                      "V3_Bv1_cam3_occ010_offfix", "V3_Bv1_cam3_occ020_offfix",
-                      "V3_Bv1_cam3_occ030_offfix", "V3_Bv1_cam3_occ050_offfix"],
-        "REQUIRES": [],
-    },
-    # offset 设计组（2026-10-21）：载体先行——E_offfix（V5_Av1/V4_Av1 载体）
-    # 与 vonly 专才（V3_Hv1 载体）；设计主体在载体完成后另批入队。
-    "offsetfix_e": {
-        "KIND": "model_suite",
-        "MODEL_IDS": ["V3_Ev1_cam3_offfix", "V3_Ev1_cam3_occ010_offfix"],
-        "REQUIRES": [],
-    },
-    "offsetfix_vonly": {
-        "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_Bv1_cam3_offfix", "V3_Bv1_cam3_occ010_offfix"],
-        "SPECIALISTS": ["vonly"],
-        "REQUIRES": [],
-    },
-    "offsetfix_v5_1": {
-        "KIND": "model_suite",
-        "MODEL_IDS": ["V5_Av1_cam3_offfix", "V5_Av1_cam3_occ010_offfix",
-                      "V5_Av1_cam3_occ020_offfix", "V5_Av1_cam3_occ030_offfix",
-                      "V5_Av1_cam3_occ050_offfix"],
-        "REQUIRES": [],
-    },
-    "offsetfix_v4_1": {
-        "KIND": "model_suite",
-        "MODEL_IDS": ["V4_Av1_cam3_offfix", "V4_Av1_cam3_occ010_offfix"],
-        "REQUIRES": [],
-    },
-    # v2 + offset 设计组（2026-10-21）：V5_Av1 / V4_Av1 × cam3/cam3_occ010，
-    # 触觉 = denoised108_v2（corrected_offset=True、载体 = E_offfix 系）。
-    "offsetfix_v45_v2": {
-        "KIND": "model_suite",
-        "MODEL_IDS": ["V5_Av1_cam3_offfix_v2", "V5_Av1_cam3_occ010_offfix_v2",
-                      "V4_Av1_cam3_offfix_v2", "V4_Av1_cam3_occ010_offfix_v2"],
-        "REQUIRES": [],
-    },
-    "offsetfix_v3_3h": {
-        "KIND": "model_suite",
-        "MODEL_IDS": ["V3_Hv1_cam3_offfix", "V3_Hv1_cam3_occ010_offfix"],
-        "REQUIRES": [],
-    },
     # 新数据验证（2026-10-22）：生产 v3+offset facts 的替换验证。
     "v3off_validation": {
         "KIND": "model_suite",
         "MODEL_IDS": ["V3_Bv1_cam3_v3off"],
-        "REQUIRES": [],
-    },
-    # v2/v3 + offset 组（2026-10-20）：同 5 组合，触觉 = denoised108_v2 / _v3。
-    "offsetfix_v2": {
-        "KIND": "model_suite",
-        "MODEL_IDS": ["V3_Bv1_cam3_offfix_v2",
-                      "V3_Bv1_cam3_occ010_offfix_v2", "V3_Bv1_cam3_occ020_offfix_v2",
-                      "V3_Bv1_cam3_occ030_offfix_v2", "V3_Bv1_cam3_occ050_offfix_v2"],
-        "REQUIRES": [],
-    },
-    "offsetfix_v3": {
-        "KIND": "model_suite",
-        "MODEL_IDS": ["V3_Bv1_cam3_offfix_v3",
-                      "V3_Bv1_cam3_occ010_offfix_v3", "V3_Bv1_cam3_occ020_offfix_v3",
-                      "V3_Bv1_cam3_occ030_offfix_v3", "V3_Bv1_cam3_occ050_offfix_v3"],
         "REQUIRES": [],
     },
     # V3_Hv5 无锚版全网格（2026-10-20）：4 相机 × 3 遮挡 = 12 格
@@ -293,6 +223,22 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "KIND": "model_suite",
         "MODEL_IDS": ["V5_Av4_cam3_v3off", "V5_Av4_cam3_v3off_drop",
                       "V5_Av4_cam3_v3off_vonly", "V5_Av4_cam3_v3off_tonly"],
+        "REQUIRES": [],
+    },
+    # wo05 实验轴（2026-10-24）：canonical split 去掉动作 05（绕圈跑）的
+    # 12 模型（3 家族 x E1 四变体，splits_wo05.csv；train 92->88，val/test
+    # 不变）。波 1 = V3_Ev1_wo05 + V5_Av4_wo05（V5_Av4 carrier=scratch 无
+    # E 依赖）；波 2 = V4_Av1_wo05（carrier 依赖波 1 的 V3_Ev1_wo05
+    # ckpt_best）。MODEL_IDS 顺序即 conf 顺序：波 1 排最前（worker 先取件）。
+    "wo05": {
+        "KIND": "model_suite",
+        "MODEL_IDS": [
+            "V3_Ev1_wo05", "V3_Ev1_wo05_drop",
+            "V3_Ev1_wo05_vonly", "V3_Ev1_wo05_tonly",
+            "V5_Av4_wo05", "V5_Av4_wo05_drop",
+            "V5_Av4_wo05_vonly", "V5_Av4_wo05_tonly",
+            "V4_Av1_wo05", "V4_Av1_wo05_drop",
+            "V4_Av1_wo05_vonly", "V4_Av1_wo05_tonly"],
         "REQUIRES": [],
     },
     # 时间窗扫描（2026-10-22，z_note/multimodal_fusion/时间窗扫描实验.md）：
@@ -515,3 +461,24 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
         sequence += 1
         count += 1
     return count
+
+
+# wo05 E5 遮挡交叉评估（2026-10-24）：eval-only 12 条目（3 家族 × occ010–050），
+# 复用 _drop 统一模型 ckpt_best；入队闸门由 wo05.py 波 3 按家族把控。
+EXPERIMENTS["wo05_eval"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V3_Ev1_wo05_drop_evalocc010", "V3_Ev1_wo05_drop_evalocc020", "V3_Ev1_wo05_drop_evalocc030", "V3_Ev1_wo05_drop_evalocc050", "V4_Av1_wo05_drop_evalocc010", "V4_Av1_wo05_drop_evalocc020", "V4_Av1_wo05_drop_evalocc030", "V4_Av1_wo05_drop_evalocc050", "V5_Av4_wo05_drop_evalocc010", "V5_Av4_wo05_drop_evalocc020", "V5_Av4_wo05_drop_evalocc030", "V5_Av4_wo05_drop_evalocc050"],
+    "REQUIRES": [],
+}
+
+# λ 扫描（2026-10-24，用户裁定「先扫描一下这几个参数点」）：V5_Av1 / V5_Av4 /
+# V4_Av1 × λ_prior_pose {1,2,3,4} × λ_prior_traj {0,1} 共 24 格；cam3 训练 +
+# 评估、splits_wo05.csv；纯扫描、无调参目标——每格产出三条件面板，终表由各格
+# test.json 汇总（条目定义见 model_registry 同名块）。
+EXPERIMENTS["prior_lambda_scan"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_wo05_lp%s_lt%s" % (m, lp, lt)
+                  for m in ("V5_Av1", "V5_Av4", "V4_Av1")
+                  for lp in ("1", "2", "3", "4") for lt in ("0", "1")],
+    "REQUIRES": [],
+}

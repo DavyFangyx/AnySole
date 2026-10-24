@@ -1,0 +1,20 @@
+{
+  "status": "locked_before_new_processing_evaluation",
+  "created_at": "2026-10-17T03:56:48.083437+00:00",
+  "baseline": "90% of channel q10 in calibration airborne rows; top6 contribution, >=80% positive, robust stability guard",
+  "single_human_center": "center values calibrate; adjacent raw values check stability only, not new air labels",
+  "step": "only selected baseline channel; >=12 existing airborne interval rows; pre/post median shift>max(20,4*within-state MAD); exact edge from middle interval; adjacent3/3 median shift same sign and >=max(20,0.5*whole shift)",
+  "reference": "reference row matches q10 baseline calibration level; constant state carried within this recording; cap [0,2*reference baseline]; ineligible rows unchanged",
+  "numerical_processing": "max(impulse_only_input - unchanged estimated_baseline,0)",
+  "baseline_is_model_estimate": true,
+  "hardware_sync_validated": false,
+  "physical_force_zero_calibrated": false,
+  "human_evaluation_is_not_blind": true,
+  "calibration_air_samples_not_independent_test": true,
+  "no_more_manual_annotations": true,
+  "source_manifest_sha256": "3147c35b448ec4a4869bce89a69563825b95de6ca4e72e495267502578a9fdb8",
+  "human_sha256": "f12dacb404938e854aabf26fdf53856e5f8ed12a43feee326b66388b5cdb6122",
+  "AI_corrected_source_sha256": "cc9287053a927b551f06c741bb635f76a7ccc0e156ef815bc5261ececd3107da",
+  "code_sha256": "d356d6adfb7a7f1120d180072b9e70e25c05d2c9cdbcecb3fbe9b27ece4998ee",
+  "revision": "v2_no_smoothing: original baseline settings and anchors unchanged; input branch is impulse_only"
+}

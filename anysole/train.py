@@ -236,6 +236,28 @@ def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt
     return mean.float(), var.sqrt().float()
 
 
+def fit_pressure_cell_means(loader: DataLoader, device: torch.device) -> Tuple[float, ...]:
+    """One pass over the training loader: per-cell train mean of raw pressure
+    (96 cells, grams).  V3_Bv2/Bv3 Q-NN/Q-FACT initialize their output bias
+    from these values, so the zero-initialized readout starts at the training
+    prior; fitted once at run start, then frozen in the checkpoint config.
+    """
+    sums = torch.zeros(96, dtype=torch.float64, device=device)
+    count = 0
+    with torch.no_grad():
+        for raw_batch in loader:
+            t_raw = raw_batch["T_raw"].to(device=device, dtype=torch.float64, non_blocking=True)
+            flat = t_raw.reshape(-1, t_raw.shape[-1])
+            if flat.shape[-1] != 96:
+                raise ValueError("pressure cell statistics require 96 raw cells")
+            sums += flat.sum(dim=0)
+            count += flat.shape[0]
+    if count == 0:
+        raise RuntimeError("cannot fit pressure cell means: training loader is empty")
+    mean = sums / count
+    return tuple(float(x) for x in mean.cpu())
+
+
 def fit_state_stats(loader: DataLoader, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
     """V3_Fv1: per-component mean/std of the diffused state [pose|trans|contact].
 
@@ -1425,6 +1447,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise ValueError("anysolev2 does not support insole drift compensation")
         part_joints = tuple(tuple(int(j) for j in g) for g in config["part_joints"]) \
             if config.get("part_joints") else None
+        if str(config.get("pressure_head", "")) in ("query_nonnegative", "query_factorized") \
+                and config.get("pressure_cell_mean") is None:
+            cell_mean = fit_pressure_cell_means(loader, device)
+            config["pressure_cell_mean"] = cell_mean
+            print("pressure cell means: min %.2f max %.2f g (frozen in ckpt config)"
+                  % (min(cell_mean), max(cell_mean)))
         model = entry.build(config, part_joints=part_joints).to(device)
         # Entries that compute build-time provenance (V3_Gv1 carrier sha256)
         # stash it in CONFIG_EXTRA during build — fold it into the config so

@@ -10,7 +10,7 @@
 
 `work/data_pipeline/pressure_washer/stats/pressure_stats_20260814_231054/overall/missing_pressure_objects.csv`
 
-### 等级定义（按 `tool/pressure_washer/analyze_pressure_csv_stats.py`）
+### 等级定义（2026-08-14 压力清洗统计口径，统计表见上）
 
 | 等级 | 判据 |
 |---|---|

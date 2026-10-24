@@ -114,33 +114,27 @@ def raw_index(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def pressure_files(recording_name: str, pressure_uri: str | None = None) -> tuple[Path, Path] | None:
+def pressure_files(recording_name: str, pressure_uri: str | None = None) -> Path | None:
     root = resolve_uri(pressure_uri or "raw://pressure", must_exist=True)
-    if root.is_dir() and (root / "pressure_left.csv").is_file():
-        left = [root / "pressure_left.csv"]
-        right = [root / "pressure_right.csv"]
-    else:
-        left = sorted(root.glob(f"**/{recording_name}/pressure_left.csv"))
-        right = sorted(root.glob(f"**/{recording_name}/pressure_right.csv"))
-    if not left or not right:
+    if not root.is_dir():
         return None
-    return left[-1], right[-1]
+    matches = sorted(root.glob(f"**/{recording_name}.npz"))
+    return matches[-1] if matches else None
 
 
 def pressure_flags(recording_name: str, n_frames: int, pressure_uri: str | None = None) -> tuple[list[int], list[int], str]:
-    files = pressure_files(recording_name, pressure_uri)
-    if files is None:
+    path = pressure_files(recording_name, pressure_uri)
+    if path is None:
         return [], [], "missing_pressure_final"
     import numpy as np
 
+    data = np.load(path)
     columns = []
-    for path in files:
-        with path.open(encoding="utf-8-sig", newline="") as handle:
-            values = list(csv.DictReader(handle))
-        if not values:
+    for side in ("left", "right"):
+        if data[f"{side}_valid"].size == 0:
             return [], [], "empty_pressure_final"
-        fake = np.asarray([int(float(row.get("fake", 0))) for row in values], dtype=np.uint8)
-        valid = np.asarray([int(float(row.get("valid_mask", 1))) for row in values], dtype=np.uint8)
+        fake = np.asarray(data[f"{side}_fake"], dtype=np.uint8)
+        valid = np.asarray(data[f"{side}_valid"], dtype=np.uint8)
         columns.append((fake, valid))
     target = np.linspace(0.0, 1.0, n_frames)
     flags = []
@@ -178,13 +172,11 @@ def join_pressure_quality(rows: list[dict]) -> None:
     definitions in protocol/splits/default/README.md).  A manifest rebuilt
     without this join silently drops the columns, so the join lives here.
     """
-    stats_root = WORKSPACE / "work/data_pipeline/pressure_washer/stats"
-    candidates = sorted(stats_root.glob("pressure_stats_*/overall/missing_pressure_objects.csv"))
-    if not candidates:
-        print("join_pressure_quality: no pressure stats table under %s; columns left empty" % stats_root,
+    stats_path = WORKSPACE / "work/data_pipeline/tactile_v3/data/pressure_quality.csv"
+    if not stats_path.is_file():
+        print("join_pressure_quality: no pressure stats table under %s; columns left empty" % stats_path,
               file=sys.stderr)
         return
-    stats_path = candidates[-1]
     lookup: dict[str, tuple[str, str]] = {}
     with stats_path.open(encoding="utf-8") as handle:
         for record in csv.DictReader(handle):
@@ -274,7 +266,10 @@ def build(fps: float, camera: str, output: Path,
         eligibility_reason = "ok" if eligible else ";".join(
             issue for issue in quality if issue.startswith("missing_") or issue.startswith("invalid_")
         )
-        pressure_uri = meta.get("pressure_uri", f"raw://pressure/{meta['date']}/{subject}/{recording.name}")
+        # 触觉值正典 = v3 交接包 processed_csv 目录（2026-10-22 生产替换；
+        # 帧级 valid/fake 由 meta["pressure_uri"] 的 quality_rows 行级标记计算）
+        pressure_uri = (f"AnysoleWorkspace/work/data_pipeline/tactile_v3/"
+                        f"data/processed_csv/{meta['date']}/{subject}/{sid}")
         rows.append({"session_id": sid, "subject_id": subject, "action": meta.get("action", ""),
                      "trial": meta.get("trial", ""), "camera": camera,
                      "video_path": meta["recording_uri"], "pressure_path": pressure_uri,

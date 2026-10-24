@@ -122,3 +122,7 @@ V6_Av1 的增强开关全部训练侧；评估三条件 = 同一前向的三种�
 
 - 单开关消融（occ_mix / null-V / null-T 各 1 run）；
 - exp-list 登记（V6_Av1 行）。
+
+## 6. 版本
+
+- **V6_Av1（现行）**：结构化丢弃三开关（occ_mix / null-V / null-T）训练机制。

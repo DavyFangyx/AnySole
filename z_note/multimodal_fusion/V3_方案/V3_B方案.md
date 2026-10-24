@@ -116,3 +116,12 @@ B 是账本中唯一「税 + 兑现并存」的训练通道（cam3：ΔPA +1.10 
 
 - 入口 `anysole/models/v3_3b.py`；核心 `anysole/models/common/model_v2.py`；融合层 `common/fusion.py`；部位头 `common/pose_head.py`；T 编码 `common/foot_encoder.py`。
 - ckpt：`results/AnySole/V3_Bv1_joint_and/<完整字段串>/checkpoints/`（字段串 = 超参记录）。
+
+## 6. 版本
+
+- **V3_2**：9 部位硬头、无门控。
+- **V3_3A**：+ soft A 逐关节混合（A 矩阵冻结在人为划分、未学习）。
+- **V3_Bv1（现行）**：+ σ 门控（β-NLL）。
+- **V3_Bv2**：压力头换查询式读出——足/时间查询 cross-attention 到 F，直出 Q-DIRECT、非负 Q-NN（训练集 cell 均值/接触率先验初始化）。
+- **V3_Bv3**：+ 因式化读出——Q-FACT total×allocation 分解，零初始化起点=训练集先验。
+- **V3_3B_TTA（2026-10-24）**：Bv1 + 多视角 TTA 适配（v_tok_override 注入点 + L_2D 口径/trans_anchor 修复；改动说明见 z_note/HMR2.0/hmr2_gait/notes/实验报告_V3_3B_TTA.md）。

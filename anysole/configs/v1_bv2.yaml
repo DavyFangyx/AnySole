@@ -1,0 +1,68 @@
+# AnySole V1 配置（E3 基础，2026-09-16 起）
+#
+# 基础 = E3_nocontact 训练口径：
+#   cosine-1000 schedule、噪声不缩放（noise_scaled=false）、恒定 lr、
+#   λ_pose=3.0 / λ_kp=1.0 / λ_con=0.0、sample 50 步。
+#   注意：E4 的"噪声×pose_std"与 E5 的 linear-200 被证实在输出上引入了
+#   "向天空踢腿"（E4 BVH 实测脚踝平均悬空 +0.013m，E3 为 -0.606m 贴地），
+#   因此本配置保持 E3 口径，不启用这两个改动。
+#
+# E6.x 系列开关（默认全部关闭 = 纯 E3 行为；各实验单点开启，互不依赖，
+# 详见 anysole/model_fix_note/archived/E6x_series_plan.md）：
+#   E6.1: pose_repr: pos + modal: anysolev1_pos（表示切换）
+#   E6.2: lambda_pose_vel / lambda_bone > 0（帧间平滑 + 骨长刚性，pos 模式）
+#   E6.3: tw / stride（窗口长度与训练步长）
+#   E6.4: continuation: true（eval/infer 续写式推理）
+#   E6.5: warm_start: true（采样起点对齐训练边缘分布）
+d_model: 256
+dropout: 0.1
+tw: 20
+batch_size: 256
+# Native SMPL-24 F4 preflight: 1e-3 (including 20-step warmup) worsened full
+# MPJPE; 1e-4 reduced both loss and full MPJPE on the same real fixed batch.
+lr: 1.0e-4
+epochs: 800
+num_workers: 4
+diffusion_train_steps: 1000
+diffusion_sample_steps: 50
+pose_layers: 6
+# ---- E6.x 系列开关 ----
+pose_repr: 6d
+stride: 20
+lambda_pose_vel: 0.0
+lambda_bone: 0.0
+continuation: false
+warm_start: false
+noise_scaled: false
+lr_schedule: constant
+# ----
+lambda_pose: 3.0
+lambda_traj: 1.0
+lambda_trec: 0.1
+lambda_vrec: 0.1
+lambda_kp: 1.0
+lambda_con: 0.0
+traj_velocity_w: 1.0
+traj_delta_w: 1.0
+traj_delta_weight_power: 1.0
+traj_deltas: [2, 4, 8, 19]
+# Config order is [VT, V-only, T-only]. Values are normalized when sampled.
+config_probs: [0.50, 0.25, 0.25]
+cam_id: 3
+seq_root: shared://facts/sessions/cam3
+split_csv: protocol://splits/default/splits.csv
+cache_root: model-input://AnySole/adapter_v1/visual/hrnet/cam3
+use_insole_drift: false
+modal: anysolev1
+contact_method: f6_soft
+# AnySole always reads SMPL NPZ. BVH is a Step2Motion-only baseline format.
+smpl_roots:
+  - /data/lizhe/projects/Tactile/Mocap/0804
+  - /data/lizhe/projects/Tactile/Mocap/0807
+  - /data/lizhe/projects/Tactile/Mocap/0808
+  - /data/lizhe/projects/Tactile/Mocap/0810
+template_path: /data/fangyuxuan/projects/gait/AnysoleWorkspace/assets/insole_templates.json
+
+# ---- V3_Bv2/Bv3 查询压力读出头（2026-10-24）----
+# Q-DIRECT/Q-NN/Q-FACT 一个机制三表示；cell 均值先验由 train 启动时一遍拟合冻结进 ckpt config。
+pressure_head: query_nonnegative

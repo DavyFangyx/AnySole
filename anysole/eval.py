@@ -443,6 +443,13 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         # strict load died on unexpected keys).
         if saved_config.get("model_name"):
             build_cfg["model_name"] = str(saved_config["model_name"])
+        # V3_Bv2/Bv3: the query pressure representation and its frozen
+        # train-cell-mean prior are structural init values recorded in the
+        # ckpt config at training time (same class as carrier_from above).
+        if saved_config.get("pressure_head"):
+            build_cfg["pressure_head"] = str(saved_config["pressure_head"])
+        if saved_config.get("pressure_cell_mean"):
+            build_cfg["pressure_cell_mean"] = saved_config["pressure_cell_mean"]
         # 维度 2/3 结构旗标（2026-10-21）：T_phys 12→20 与 d8 三头是
         # 训练时结构 provenance，必须从 ckpt config 回放（yaml 缺省 False）。
         build_cfg["t_phys_v2"] = bool(saved_config.get("t_phys_v2", False))

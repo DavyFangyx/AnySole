@@ -125,3 +125,8 @@ floor (gt | t 派生) ────────────┘
 ## 5. 落地文件
 
 `anysole/utils/constraints_g.py`（观测层，审计头注释）→ `anysole/models/common/model_v3g.py`（载体头部类复制自 model_v3e，注明 provenance）+ `anysole/models/v3_3g.py`（入口，carrier 装载冻结）→ losses.py（lambda_air）+ train.py / eval.py / eval_protocol.py（v3g 分支）→ registry + configs/z_gen/v3g.py + v3g_test 套件。
+
+## 6. 版本
+
+- **v1**：回归载体 + 接触证据门控平移修正（含两骨 IK 腿链）。
+- **v1.1（现行，已归档）**：腿链 IK 退场（穿透 = 整体平移误差诊断）。

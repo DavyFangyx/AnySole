@@ -42,6 +42,21 @@ MODELS = {
                   train_args={"lambda_assign": 0.05, "lambda_sigma": 0.01,
                               "sigma_freeze_frac": 0.1,
                               "lr_warmup_frac": 0.05, "grad_clip": 5.0}),
+    # V3_Bv2/V3_Bv3（2026-10-24）：Bv1 + 查询压力读出头（Q-DIRECT/Q-NN、
+    # Q-FACT 一个机制三表示，pressure_head 为唯一切换参数）；cell 均值
+    # 先验由 train 启动时一遍拟合冻结进 ckpt config，yaml 只冻结表示选择。
+    "V3_Bv2": dict(label="V3-3B-v2", name="V3_Bv2", which="last", train=True, epochs=740,
+                  config="anysole/configs/v1_bv2.yaml",
+                  provides=("base", "foot_conv", "pose_parts9", "soft_parts", "gate_sigma"),
+                  train_args={"lambda_assign": 0.05, "lambda_sigma": 0.01,
+                              "sigma_freeze_frac": 0.1,
+                              "lr_warmup_frac": 0.05, "grad_clip": 5.0}),
+    "V3_Bv3": dict(label="V3-3B-v3", name="V3_Bv3", which="last", train=True, epochs=740,
+                  config="anysole/configs/v1_bv3.yaml",
+                  provides=("base", "foot_conv", "pose_parts9", "soft_parts", "gate_sigma"),
+                  train_args={"lambda_assign": 0.05, "lambda_sigma": 0.01,
+                              "sigma_freeze_frac": 0.1,
+                              "lr_warmup_frac": 0.05, "grad_clip": 5.0}),
     # V3_Cv1: frozen-V + zero-init T-residual fine-tune (VT-only windows,
     # 200ep).  Deliberate, sanctioned exception to the 2026-09-24 no-warm-start
     # independence rule — the base ckpt is the run's provenance (runner writes
@@ -279,23 +294,6 @@ for _cam in (1, 2, 3, 4):
         "name": f"V3_Bv1_cam{_cam}",
     }
 
-# 交接包降噪压力（2026-10-17）：V3_Bv1 同结构同规格，tactile_input 由
-# v3_3b_denoised 入口固定为 denoised108（z_note/data_pressure_fixpipe/Tactile_pressure_handoff
-# _20261017_v1 的 baseline_step_corrected 值，帧网格映射与 build_shared
-# 同语义）。
-MODELS["V3_Bv1_denoised"] = {
-    **_V3_Bv1,
-    "label": "V3-3B-denoised",
-    "name": "V3_Bv1_denoised",
-}
-
-# E/F 降噪压力变体（2026-10-17）：规格与 E/F 完全一致，仅入口
-# tactile_input=denoised108。
-MODELS["V3_Ev1_denoised"] = {**MODELS["V3_Ev1"], "label": "V3-3E-denoised",
-                            "name": "V3_Ev1_denoised"}
-MODELS["V3_Fv1_denoised"] = {**MODELS["V3_Fv1"], "label": "V3-3F-denoised",
-                            "name": "V3_Fv1_denoised"}
-
 # V-degradation 遮挡组（2026-10-13：cam3 + bbox 底部遮挡 4 档）。训练规格与
 # V3_Bv1 完全一致；数据根差异由 create_queue/runner 按名称尾缀推导
 # v1_cam3_occ{N}.yaml（occ010 = 底部 10%，f=0.10）。
@@ -305,42 +303,6 @@ for _occ in ("010", "020", "030", "050"):
         "label": f"V3-3B-cam3-occ{_occ}",
         "name": f"V3_Bv1_cam3_occ{_occ}",
     }
-
-# offset 重同步组（2026-10-20）：训练规格与 V3_Bv1 完全一致，唯一差异 =
-# corrected_offset=True（B 类 session GT 采样按 z_note/data_offset_fixpipe
-# 修正表平移，A/C/D 不动）。yaml 尾缀推导兼容 `_offfix` 结尾
-# （_model_v_config_suffix 的 `(?:$|_)`），cam3_offfix → v1_cam3.yaml、
-# cam3_occ{N}_offfix → v1_cam3_occ{N}.yaml。
-MODELS["V3_Bv1_cam3_offfix"] = {
-    **_V3_Bv1,
-    "label": "V3-3B-cam3-offfix",
-    "name": "V3_Bv1_cam3_offfix",
-    "train_args": {**_V3_Bv1["train_args"]},
-}
-for _occ in ("010", "020", "030", "050"):
-    MODELS[f"V3_Bv1_cam3_occ{_occ}_offfix"] = {
-        **_V3_Bv1,
-        "label": f"V3-3B-cam3-occ{_occ}-offfix",
-        "name": f"V3_Bv1_cam3_occ{_occ}_offfix",
-        "train_args": {**_V3_Bv1["train_args"]},
-    }
-
-# v2/v3 + offset 组（2026-10-20）：结构 = v3_3b_v2 / v3_3b_v3（tactile_input
-# 由结构固定 denoised108_v2 / denoised108_v3），其余同 offset 组。
-for _ver in ("v2", "v3"):
-    MODELS[f"V3_Bv1_cam3_offfix_{_ver}"] = {
-        **_V3_Bv1,
-        "label": f"V3-3B-cam3-offfix-{_ver}",
-        "name": f"V3_Bv1_cam3_offfix_{_ver}",
-        "train_args": {**_V3_Bv1["train_args"]},
-    }
-    for _occ in ("010", "020", "030", "050"):
-        MODELS[f"V3_Bv1_cam3_occ{_occ}_offfix_{_ver}"] = {
-            **_V3_Bv1,
-            "label": f"V3-3B-cam3-occ{_occ}-offfix-{_ver}",
-            "name": f"V3_Bv1_cam3_occ{_occ}_offfix_{_ver}",
-            "train_args": {**_V3_Bv1["train_args"]},
-        }
 
 # 新数据验证（2026-10-22）：默认口径 = 生产 v3+offset facts。
 MODELS["V3_Bv1_cam3_v3off"] = {**_V3_Bv1, "label": "V3-3B-cam3-v3off",
@@ -730,59 +692,20 @@ def _load_defaults() -> dict[str, str]:
 
 COMMON = _load_defaults()
 
-# offset 设计组（2026-10-21）：E v2.1 / V5_Av1 / V4_Av1 / V3_Hv1 的
-# corrected_offset 版。载体换接：V5_Av1/V4_Av1 的 carrier_from → E_offfix
-# （occ020/030/050 沿用 cam3 载体口径）；V3_Hv1 的 vonly 载体按名推导。
-_E_OFF = ("results/AnySole/V3_Ev1_cam3_offfix_f6_soft/"
-          "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
-          "checkpoints/ckpt_best.pt")
-_E_OFF_OCC010 = ("results/AnySole/V3_Ev1_cam3_occ010_offfix_f6_soft/"
-                 "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
-                 "checkpoints/ckpt_best.pt")
-for _name, _base in (("V3_Ev1_cam3_offfix", "V3_Ev1"), ("V3_Ev1_cam3_occ010_offfix", "V3_Ev1_cam3_occ010")):
-    MODELS[_name] = {**MODELS[_base], "label": _name.replace("_", "-"), "name": _name,
-                     "train_args": {**MODELS[_base]["train_args"]}}
-for _occ, _base_occ, _carrier in (("", "", _E_OFF), ("_occ010", "_cam3_occ010", _E_OFF_OCC010),
-                                  ("_occ020", "_cam3_occ020", _E_OFF), ("_occ030", "_cam3_occ030", _E_OFF),
-                                  ("_occ050", "_cam3_occ050", _E_OFF)):
-    for _prefix, _base_prefix in (("V5_Av1", "V5_Av1"), ("V4_Av1", "V4_Av1")):
-        _n = f"{_prefix}_cam3{_occ}_offfix"
-        _b = f"{_base_prefix}_cam3{_occ}" if _occ else _prefix
-        if _b not in MODELS:
-            continue
-        MODELS[_n] = {**MODELS[_b], "label": _n.replace("_", "-"), "name": _n,
-                      "train_args": {**MODELS[_b]["train_args"],
-                                     "carrier_from": _carrier}}
-# T 增强三组（2026-10-21，T增强三组实验方案.md）：
+# T 增强三组（2026-10-21，T增强三组实验方案.md；2026-10-24 基座换接 v3off 生产轴，
+# 原名保留以维持 results/ 目录寻址）：
 # V5_Av1_cam3_offfix_tphys = 维度 2 显式物理特征（T_phys 12→20）；
-# V5_Av1_cam3_offfix_d8   = 维度 3 足-地监督（占位，监督头落地后启用）。
+# V5_Av1_cam3_offfix_d8   = 维度 3 足-地监督。
 MODELS["V5_Av1_cam3_offfix_tphys"] = {
-    **MODELS["V5_Av1_cam3_offfix"], "label": "V5-1-cam3-offfix-tphys",
+    **MODELS["V5_Av1_cam3_v3off"], "label": "V5-1-cam3-offfix-tphys",
     "name": "V5_Av1_cam3_offfix_tphys",
-    "train_args": {**MODELS["V5_Av1_cam3_offfix"]["train_args"], "t_phys_v2": True}}
+    "train_args": {**MODELS["V5_Av1_cam3_v3off"]["train_args"], "t_phys_v2": True}}
 MODELS["V5_Av1_cam3_offfix_d8"] = {
-    **MODELS["V5_Av1_cam3_offfix"], "label": "V5-1-cam3-offfix-d8",
+    **MODELS["V5_Av1_cam3_v3off"], "label": "V5-1-cam3-offfix-d8",
     "name": "V5_Av1_cam3_offfix_d8",
-    "train_args": {**MODELS["V5_Av1_cam3_offfix"]["train_args"],
+    "train_args": {**MODELS["V5_Av1_cam3_v3off"]["train_args"],
                    "d8_heads": True, "lambda_tcop": 0.1,
                    "lambda_strike": 0.1, "lambda_gtcop": 0.1}}
-# v2 + offset 设计组（2026-10-21）：V5_Av1 / V4_Av1 × cam3/cam3_occ010 的
-# denoised108_v2 版。与 offset 设计组逐项相同（corrected_offset=True、
-# carrier_from = E_offfix 系），唯一差异 = 结构固定
-# tactile_input=denoised108_v2（v5_1_v2 / v4_1_v2）。
-for _occ in ("", "_occ010"):
-    for _prefix in ("V5_Av1", "V4_Av1"):
-        _b = f"{_prefix}_cam3{_occ}_offfix"
-        MODELS[f"{_b}_v2"] = {
-            **MODELS[_b],
-            "label": f"{_b}_v2".replace("_", "-"),
-            "name": f"{_b}_v2",
-        }
-for _occ in ("", "_occ010"):
-    _n = f"V3_Hv1_cam3{_occ}_offfix"
-    _b = f"V3_Hv1_cam3{_occ}" if _occ else "V3_Hv1"
-    MODELS[_n] = {**MODELS[_b], "label": _n.replace("_", "-"), "name": _n,
-                  "train_args": {**MODELS[_b]["train_args"]}}
 
 # 时间窗扫描（2026-10-22，z_note/multimodal_fusion/时间窗扫描实验.md）：
 # 五家族 x tw{5,10,15,20} x cam3/cam3_occ010（v3off 生产轴）。tw 是训练期
@@ -880,3 +803,75 @@ for _prefix, _occ_base in (("V4_Av1", "V4_Av1_cam3_occ010"),
                       "train_args": _tw_args(
                           _b_occ["train_args"], _tw,
                           _e_carrier_cell(f"V3_Ev1_cam3_occ010_v3off_tw{_tw}", _tw))}
+
+# wo05 实验轴（2026-10-24，AnysoleWorkspace/protocol/splits/default/
+# splits_wo05.csv）：canonical split 去掉动作 05（绕圈跑）全部 4 条 train
+# 会话（S11051/S11053/S7053/S8053）→ train 92→88，val/test 不变。3 家族 ×
+# E1 四变体 = 12 模型（E1 约定：基名 = always-dual [1,0,0]；_drop = dropout
+# 统一 [0.5,0.25,0.25]；_vonly/_tonly = 单模态专家）。训练规格与 v3off E1
+# 条目逐项一致，唯一差异 = 名称尾缀 _wo05、config 指向 v1_wo05.yaml（仅
+# split_csv 差异）、V4_Av1 的 carrier_from 指向 V3_Ev1_wo05 的 ckpt_best。
+# V5_Av4 保持 carrier_from="scratch"（v5_1 entry 的 scratch 分支在
+# torch.load 之前返回——不装载任何 E ckpt，无 E 依赖，随波 1 并行）。
+# 波次：波 1 = V3_Ev1_wo05 + V5_Av4_wo05 ×8；波 2 = V4_Av1_wo05 ×4
+# （闸门 = 波 1 的 V3_Ev1_wo05 完成）。conf 生成 = configs/z_gen/wo05.py。
+_WO05_CONFIG = "anysole/configs/v1_wo05.yaml"
+_WO05_E1_CKPT = ("results/AnySole/V3_Ev1_wo05_f6_soft/"
+                 "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
+                 "checkpoints/ckpt_best.pt")
+for _suf in ("", "_drop", "_vonly", "_tonly"):
+    _b = MODELS["V3_Ev1_cam3_v3off" + _suf]
+    MODELS["V3_Ev1_wo05" + _suf] = {
+        **_b, "label": "V3-3E-wo05" + _suf.replace("_", "-"),
+        "name": "V3_Ev1_wo05" + _suf, "config": _WO05_CONFIG}
+for _suf in ("", "_drop", "_vonly", "_tonly"):
+    _b = MODELS["V5_Av4_cam3_v3off" + _suf]
+    MODELS["V5_Av4_wo05" + _suf] = {
+        **_b, "label": "V5-Av4-wo05" + _suf.replace("_", "-"),
+        "name": "V5_Av4_wo05" + _suf, "config": _WO05_CONFIG}
+for _suf in ("", "_drop", "_vonly", "_tonly"):
+    _b = MODELS["V4_Av1_cam3_v3off" + _suf]
+    MODELS["V4_Av1_wo05" + _suf] = {
+        **_b, "label": "V4-1-wo05" + _suf.replace("_", "-"),
+        "name": "V4_Av1_wo05" + _suf, "config": _WO05_CONFIG,
+        "train_args": {**_b["train_args"], "carrier_from": _WO05_E1_CKPT}}
+
+
+# wo05 E5 遮挡交叉评估（2026-10-24）：eval-only 条目——复用各家族 _drop 统一
+# 模型的 ckpt（name 保持 _drop 基名；which=best → ckpt_best，对齐 E5 口径与
+# canonical occ json 的 checkpoint 字段），数据根 = v1_cam3_occ{N}_wo05.yaml
+# （显式 config 键）。零重训；入队闸门 = 对应家族 _drop conf 进 done/
+# （configs/z_gen/wo05.py 波 3 按家族把控）。
+for _f in ("V3_Ev1", "V4_Av1", "V5_Av4"):
+    for _occ in ("010", "020", "030", "050"):
+        _eval_id = f"{_f}_wo05_drop_evalocc{_occ}"
+        _src = MODELS[f"{_f}_wo05_drop"]
+        MODELS[_eval_id] = {
+            **_src,
+            "label": f"{_src['label']}-evalocc{_occ}",
+            "train": False,
+            "which": "best",
+            "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml",
+        }
+
+
+# λ 扫描（2026-10-24，用户裁定「先扫描一下这几个参数点」）：V5_Av1 / V5_Av4 /
+# V4_Av1 × λ_prior_pose {1,2,3,4} × λ_prior_traj {0,1} 共 24 格。cam3 训练 +
+# 评估、splits_wo05.csv（v1_wo05.yaml）；纯扫描、无调参目标——每格产出三条件
+# 面板（V2M/VT2M/T2M），终表由各格 test.json 汇总。
+# 基座 = v3off 生产轴条目（与 wo05 批次同数据 facts）：V5_Av1_cam3_v3off /
+# V5_Av4_cam3_v3off / V4_Av1_cam3_v3off，config_probs 全 [1,0,0]。载体 =
+# 各基座现役 carrier（v3off E / scratch）——wo05 批次的 wo05-E 载体因 GPU
+# OOM 未产出，扫描不依赖（occ 档先例：冻结载体与 split 无关）。
+# conf 生成 = configs/z_gen/prior_lambda_scan.py。
+for _m in ("V5_Av1", "V5_Av4", "V4_Av1"):
+    for _lp in (1.0, 2.0, 3.0, 4.0):
+        for _lt in (0.0, 1.0):
+            _n = "%s_wo05_lp%s_lt%s" % (_m, "%g" % _lp, "%g" % _lt)
+            _b = MODELS["%s_cam3_v3off" % _m]
+            MODELS[_n] = {
+                **_b, "label": _n.replace("_", "-"), "name": _n,
+                "config": _WO05_CONFIG,
+                "train_args": {**_b["train_args"],
+                               "lambda_prior_pose": _lp,
+                               "lambda_prior_traj": _lt}}

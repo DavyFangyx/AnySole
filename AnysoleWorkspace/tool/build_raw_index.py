@@ -55,8 +55,8 @@ def build(input_manifest: Path, output: Path) -> int:
         if not bvh_matches:
             raise RuntimeError(f"missing raw BVH for {sid}")
         smpl_matches = sorted(resolve_uri("raw://smpl").glob(f"**/{sid}/motion_neutral_smpl.npz"))
-        final_root = WORKSPACE / "work/data_pipeline/pressure_washer/final_fake_marked"
-        pressure_dir = final_root / date / subject / recording.name
+        quality_root = WORKSPACE / "work/data_pipeline/tactile_v3/data/quality_rows"
+        pressure_dir = quality_root / date / subject
         item = {
             "schema_version": "raw.session-index.v1",
             "session_id": sid,
@@ -68,7 +68,7 @@ def build(input_manifest: Path, output: Path) -> int:
             "recording_uri": uri_for(recording, resolve_uri("raw://rgb"), "raw://rgb"),
             "bvh_uri": uri_for(bvh_matches[0], resolve_uri("raw://bvh"), "raw://bvh"),
             "smpl_uri": uri_for(smpl_matches[0], resolve_uri("raw://smpl"), "raw://smpl") if smpl_matches else "",
-            "pressure_uri": uri_for(pressure_dir, final_root, "work://data_pipeline/pressure_washer/final_fake_marked"),
+            "pressure_uri": uri_for(pressure_dir, quality_root, "work://data_pipeline/tactile_v3/data/quality_rows"),
             "n_frames": int(row["n_frames"]),
             "target_fps": float(row.get("target_fps", 40.0)),
             "visual_start_s": float(row.get("visual_start_s") or 0.0),

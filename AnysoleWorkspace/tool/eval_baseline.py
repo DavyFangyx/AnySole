@@ -57,7 +57,7 @@ def split_sessions(split: str) -> list[str]:
 
 def eval_motionpro(args: argparse.Namespace) -> None:
     run([TOUCH_GAIT, "-m", "app.test_frappe"], cwd=BASELINES / "MotionPRO")
-    root = ROOT / "results" / "baselines" / "MotionPRO" / "predictions" / "eval_motion"
+    root = ROOT / "results" / "baselines" / "MotionPRO" / "predictions" / "carpet_v2" / "eval_motion"
     missing = [s for s in split_sessions(args.split) if not (root / f"{s}.npz").is_file()]
     if missing:
         raise SystemExit(f"motionpro eval_motion missing {len(missing)}: {missing[:10]}")

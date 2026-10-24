@@ -155,3 +155,9 @@ occmix 第三配置（2026-10-20 test 落盘）：PA Δ −0.000、MPJPE Δ −0
 - 前置探针脚本 + JSON 已落定（§4.4）；D_Test8 GT CoP 管线抽为训练侧数据件（现为只读展示件 `results_display/script/d_test8_smpl_gt_cop.py`）待做。
 - 冒烟（/tmp 不留产物）全过；未 commit。
 - 待办：occ050/occ020/occ030 出数 → 判据②正式裁决；判据③两项正式验收（--z-src V 干预 + 专家分歧审计）同批跑。
+
+## 6. 版本
+
+- **V5_Av1（现行）**：PoE z 专家（接触/相位/CoP）+ FiLM 注入下肢与根轨迹；载体 = 冻结 E v2.1。
+- **V5_Av4**：V5_Av1 结构 + V 流从零训练（carrier_from=scratch）、λ_prior 3/1——T2M 修复、兑现缩水（天花板效应）。（Av2 / Av3 空号。）
+- **V5_Av4_TTA（2026-10-24）**：V5_Av4 + 多视角 TTA 适配（第一版 = 模型+TTA；足-地接触约束为第二版待启动。v_tok_override 注入点 + Δt 平移残差叶子；改动说明见 z_note/HMR2.0/hmr2_gait/notes/实验报告_V5_Av4_TTA.md）。

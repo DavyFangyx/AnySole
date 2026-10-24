@@ -20,9 +20,13 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+TOOL = Path(__file__).resolve().parent
+if str(TOOL) not in sys.path:
+    sys.path.insert(0, str(TOOL))
 
 from AnysoleWorkspace.tool.artifacts import sha256_file, write_artifact  # noqa: E402
 from AnysoleWorkspace.tool.workspace import canonical_uri, resolve_uri  # noqa: E402
+from tactile_pipeline.align import nearest_indices, resample_quality  # noqa: E402
 
 WORKSPACE = ROOT / "AnysoleWorkspace"
 FACTS_ROOT = WORKSPACE / "shared/facts/sessions"
@@ -30,6 +34,32 @@ MMVP_ROOT = WORKSPACE / "shared/representations/tactile/mmvp_31x11/v1"
 MANIFEST = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
 ESSENTIALS = ROOT / "Baselines/VP-MoCap/FPP-Net/essentials/insole2cont"
 LAYOUT = WORKSPACE / "assets/foot_sensor_layout"
+# 触觉值正典（2026-10-22 生产替换）：tactile_pipeline（AnysoleWorkspace/tool）
+# 的清洗产物 dataset npz（processed48 + wall_time_day_s，与 jpeg 文件名同一
+# 日秒墙钟）。帧级 valid/fake 掩码由 pipeline 的 quality_rows 行级标记映射
+# （吸收自旧 mark-fake 链，见 data/quality_rows/provenance.json）。
+TACTILE_DATA_ROOT = WORKSPACE / "work" / "data_pipeline" / "tactile_v3"
+OFFSET_TABLE_CSV = ROOT / "z_note" / "data_offset_fixpipe" / "offset_correction.csv"
+
+_OFFSET_TABLE: dict[str, float] | None = None
+
+
+def corrected_lag(sid: str) -> float:
+    """B-class ``lag_eff_frames`` from the offset correction table (frames);
+    0.0 for A/C/D (no effective correction; D 的 lag_eff 仅供排序参考)。
+
+    Facts 的 mocap 轴 = manifest 原始对齐 − lag·dt（10-22 固化，见
+    z_note/data_offset_fixpipe/README.md）；重建时在此应用同一修正。
+    """
+    global _OFFSET_TABLE
+    if _OFFSET_TABLE is None:
+        import csv
+        _OFFSET_TABLE = {}
+        with OFFSET_TABLE_CSV.open(encoding="utf-8-sig", newline="") as handle:
+            for r in csv.DictReader(handle):
+                _OFFSET_TABLE[r["session_id"]] = (
+                    float(r["lag_eff_frames"]) if r["conf_class"] == "B" else 0.0)
+    return _OFFSET_TABLE.get(sid, 0.0)
 
 
 def manifest_for(cam: int) -> Path:
@@ -53,44 +83,25 @@ def read_manifest(cam: int = 3) -> dict[str, dict]:
     }
 
 
-def source_csvs(pressure_dir: Path) -> tuple[Path, Path]:
-    left = pressure_dir / "pressure_left.csv"
-    right = pressure_dir / "pressure_right.csv"
-    if not left.is_file() or not right.is_file():
-        raise FileNotFoundError(f"missing final PressureWasher CSVs under {pressure_dir}")
-    return left, right
+def quality_pack(date: str, subject: str, recording: str) -> dict[str, tuple]:
+    """Row-level valid/fake packs from the tactile pipeline's quality_rows."""
+    from tactile_pipeline.quality_rows import load_quality_rows
+    return load_quality_rows(date, subject, recording)
 
 
-def read_pressure(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return (time_us, raw_time_us, values, valid, fake).
+def v3_value_pack(date: str, subject: str, sid: str, side: str) -> tuple[np.ndarray, np.ndarray]:
+    """Canonical pressure values + absolute wall clock from the tactile
+    pipeline's dataset npz (fault-cell burst repair + isolated impulse +
+    airborne baseline + supported step, no smoothing).
 
-    ``time_us`` is the shipped (synthetic uniform-40 Hz) timeline;
-    ``raw_time_us`` carries the reconstructed physical wall-clock time of each
-    row (``raw_t_us``, computed by mark-fake from the per-segment manifest
-    anchors) with NaN where the row must never be selected (bridge/fake rows).
-    Raw times live on the same wall clock as the recording's JPEG wall clock
-    (S2 ruling, Baselines/决策/05_R1-R3_风险裁定.md §三 证据 C; the four
-    cameras' JPEG filenames share that clock -- 四相机决策记录 D1) and are
-    used for absolute-time resampling.
+    ``wall_time_day_s`` lives on the same day-second wall clock as the JPEG
+    filenames (started_at_iso + native receive clock), so it maps onto video
+    frames directly without an epoch anchor.
     """
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    if not rows:
-        raise ValueError(f"empty pressure CSV: {path}")
-    channels = [str(i) for i in range(1, 49)]
-    missing = [name for name in channels if name not in rows[0]]
-    if missing:
-        raise ValueError(f"{path}: missing pressure columns {missing}")
-    time = np.asarray([float(row["t_us"]) for row in rows], dtype=np.float64)
-    values = np.asarray([[float(row[name]) for name in channels] for row in rows], dtype=np.float32)
-    valid = np.asarray([int(float(row.get("valid_mask", 1))) for row in rows], dtype=np.uint8)
-    fake = np.asarray([int(float(row.get("fake", 0))) for row in rows], dtype=np.uint8)
-    raw_time = np.full(len(rows), np.nan, dtype=np.float64)
-    if "raw_t_us" in rows[0]:
-        raw_time[:] = [float(row["raw_t_us"]) if row.get("raw_t_us", "").strip() else np.nan for row in rows]
-    if not np.isfinite(values).all() or not np.isfinite(time).all():
-        raise ValueError(f"non-finite pressure source: {path}")
-    return time, raw_time, values, valid, fake
+    from tactile_pipeline import pressure_io
+    p = pressure_io.load_pressure(TACTILE_DATA_ROOT / "data", sid, side)
+    return (np.asarray(p["processed48"], dtype=np.float32),
+            np.asarray(p["wall_time_day_s"], dtype=np.float64))
 
 
 def day_seconds_from_iso(value: str) -> float:
@@ -109,103 +120,6 @@ def day_seconds_from_jpeg_name(name: str) -> float:
     """
     core = name.split("_")[-1][:-4]  # strip ".jpg"
     return int(core[0:2]) * 3600 + int(core[2:4]) * 60 + float(core[4:])
-
-
-def nearest_indices(times_s: np.ndarray, targets_s: np.ndarray) -> np.ndarray:
-    """Index of the nearest element of ``times_s`` (ascending) for each target."""
-    idx = np.clip(np.searchsorted(times_s, targets_s), 1, len(times_s) - 1)
-    left = idx - 1
-    return np.where(np.abs(times_s[left] - targets_s) <= np.abs(times_s[idx] - targets_s), left, idx)
-
-
-def fake_gap_frame_marks(raw_rows: np.ndarray, row_fake: np.ndarray,
-                         t_sub: np.ndarray, targets: np.ndarray) -> np.ndarray:
-    """Frames whose nearest pressure row is a fake row, nearest-value semantics.
-
-    The absolute nearest-row selection only sees rows with a wall-clock
-    timestamp, so fake rows inside a dropout span never land on any frame.
-    Each run of such rows sits between two real rows (or before the first /
-    after the last real row); every frame whose wall time falls inside that
-    run's span is marked fake.  No timeline reconstruction, no interpolation:
-    the span is bounded by the two neighbouring real rows, and boundary frames
-    stay with their real row (conservative at ±1 frame).
-    """
-    marks = np.zeros(len(targets), dtype=bool)
-    if raw_rows.size == 0:
-        return marks
-    for k in range(len(raw_rows) - 1):
-        lo, hi = raw_rows[k], raw_rows[k + 1]
-        if hi - lo > 1 and row_fake[lo + 1:hi].any():
-            marks |= (targets > t_sub[k]) & (targets < t_sub[k + 1])
-    if raw_rows[0] > 0 and row_fake[:raw_rows[0]].any():
-        marks |= targets < t_sub[0]
-    if raw_rows[-1] < len(row_fake) - 1 and row_fake[raw_rows[-1] + 1:].any():
-        marks |= targets > t_sub[-1]
-    return marks
-
-
-def resample_pressure(left: tuple, right: tuple, n_frames: int, *,
-                      video_start_day_s: float | None = None,
-                      pressure_epoch_day_s: float | None = None,
-                      fps: float = 40.0) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
-    """Map each video frame to the nearest pressure sample.
-
-    Absolute mode (default when the wall-clock anchors are available and the
-    CSVs carry raw ``source_t_us``): video frame ``i`` has wall time
-    ``video_start_day_s + i/fps`` (the source camera's jpeg clock); pressure
-    row ``j`` has
-    wall time ``pressure_epoch_day_s + raw_t_us[j]/1e6`` (``started_at_iso`` +
-    raw ``time.monotonic`` bridge -- the same clock, S2 §三 证据 C).  Values and
-    quality flags are taken from the nearest row; no interpolation.  Video
-    frames outside the source span clamp to the edge row and are counted.
-    Fake rows that carry no raw timestamp (dropout spans) are invisible to
-    that selection; their flags are propagated onto the frame span between the
-    neighbouring real rows (see ``fake_gap_frame_marks``).
-
-    Legacy mode (no anchors or no raw timestamps): the previous normalized
-    grid, with nearest-row values instead of linear interpolation.
-    """
-    target = np.linspace(0.0, 1.0, n_frames, dtype=np.float64)
-    absolute = (video_start_day_s is not None and pressure_epoch_day_s is not None
-                and np.isfinite(left[1]).any() and np.isfinite(right[1]).any())
-    out = {}
-
-    def map_foot(pack: tuple) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
-        time, raw_time, values, valid, fake = pack
-        if absolute:
-            # Map onto real raw samples only: rows without a raw timestamp
-            # (bridge/interpolated rows) are never selected as a source row.
-            has_raw = np.isfinite(raw_time)
-            raw_rows = np.flatnonzero(has_raw)
-            t_sub = raw_time[raw_rows] / 1e6 + pressure_epoch_day_s
-            targets = video_start_day_s + np.arange(n_frames, dtype=np.float64) / fps
-            idx = raw_rows[nearest_indices(t_sub, targets)]
-            n_clamp_start = int((targets < t_sub[0]).sum())
-            n_clamp_end = int((targets > t_sub[-1]).sum())
-            frame_fake = fake[idx].astype(np.uint8)
-            frame_fake |= fake_gap_frame_marks(raw_rows, fake, t_sub, targets).astype(np.uint8)
-        else:
-            idx = np.rint(target * max(len(time) - 1, 0)).astype(int)
-            n_clamp_start = n_clamp_end = 0
-            frame_fake = fake[idx].astype(np.uint8)
-        return values[idx], valid[idx], frame_fake, n_clamp_start, n_clamp_end
-
-    left48, left_valid, left_fake, lc0, lc1 = map_foot(left)
-    right48, right_valid, right_fake, rc0, rc1 = map_foot(right)
-    fake = np.maximum(left_fake, right_fake).astype(np.uint8)
-    valid = np.minimum(left_valid, right_valid).astype(np.uint8)
-    valid = np.minimum(valid, 1 - fake).astype(np.uint8)
-    out.update(
-        alignment_method="nearest_values_absolute_t_us" if absolute else "nearest_values_normalized_t_us",
-        absolute=absolute,
-        video_frame0_wall_s=video_start_day_s, pressure_epoch_wall_s=pressure_epoch_day_s,
-        out_of_span_frames_left=(lc0, lc1), out_of_span_frames_right=(rc0, rc1),
-    )
-    if absolute:
-        frame_times = video_start_day_s + np.arange(n_frames, dtype=np.float64) / fps
-    else:
-        frame_times = target
-    return left48, right48, valid, fake, frame_times, out
 
 
 def sole_positions(foot: str) -> np.ndarray:
@@ -259,11 +173,15 @@ def mmvp_map(foot: str) -> tuple[np.ndarray, np.ndarray]:
 
 def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
     recording = resolve_uri(row["video_path"], must_exist=True)
-    pressure_dir = resolve_uri(row["pressure_path"], must_exist=True)
-    left_csv, right_csv = source_csvs(pressure_dir)
-    left_uri = row["pressure_path"].rstrip("/") + "/pressure_left.csv"
-    right_uri = row["pressure_path"].rstrip("/") + "/pressure_right.csv"
-    left_raw, right_raw = read_pressure(left_csv), read_pressure(right_csv)
+    date, subject = recording.parts[-3], recording.parts[-2]
+    left_values, left_wall = v3_value_pack(date, subject, sid, "left")
+    right_values, right_wall = v3_value_pack(date, subject, sid, "right")
+    left_uri = (f"AnysoleWorkspace/work/data_pipeline/tactile_v3/"
+                f"data/processed_csv/{date}/{subject}/{sid}/left.csv")
+    right_uri = (f"AnysoleWorkspace/work/data_pipeline/tactile_v3/"
+                 f"data/processed_csv/{date}/{subject}/{sid}/right.csv")
+    quality_rows = quality_pack(date, subject, recording.name)
+    left_quality, right_quality = quality_rows["left"], quality_rows["right"]
     n = int(row["n_frames"])
     rgb_source = recording / str(cam)
     images = sorted(rgb_source.glob("*.jpg"))
@@ -273,12 +191,15 @@ def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else {}
     video_start_day_s = day_seconds_from_jpeg_name(images[0].name)
     pressure_epoch_day_s = day_seconds_from_iso(meta["started_at_iso"]) if meta.get("started_at_iso") else None
-    left48, right48, valid, fake, frame_times, resample_meta = resample_pressure(
-        left_raw, right_raw, n,
+    fps = float(row["target_fps"])
+    targets = video_start_day_s + np.arange(n, dtype=np.float64) / fps
+    left48 = left_values[nearest_indices(left_wall, targets)]
+    right48 = right_values[nearest_indices(right_wall, targets)]
+    valid, fake, _frame_times, resample_meta = resample_quality(
+        left_quality, right_quality, n,
         video_start_day_s=video_start_day_s,
         pressure_epoch_day_s=pressure_epoch_day_s,
-        fps=float(row["target_fps"]))
-    date, subject = recording.parts[-3], recording.parts[-2]
+        fps=fps)
     session_root = FACTS_ROOT / row["camera"] / date / subject / sid
     if session_root.exists() and not force and all((session_root / name).is_file() for name in ("session.json", "frames.npz", "pressure_48.npz")):
         return session_root
@@ -298,7 +219,10 @@ def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
 
     frame_id = np.arange(n, dtype=np.int64)
     visual = float(row.get("visual_start_s", 0.0)) + frame_id.astype(np.float64) / float(row["target_fps"])
-    mocap = float(row.get("mocap_start_s", 0.0)) + frame_id.astype(np.float64) / float(row["target_fps"])
+    # 与 10-22 固化同一运算顺序：先算原始帧数组、再整体减 lag·dt（位精确复现生产）
+    lag_eff = corrected_lag(sid)
+    mocap = (float(row.get("mocap_start_s", 0.0))
+             + frame_id.astype(np.float64) / float(row["target_fps"])) - lag_eff * 0.025
     np.savez_compressed(session_root / "frames.npz", frame_id=frame_id,
                         visual_time_s=visual.astype(np.float64), mocap_time_s=mocap.astype(np.float64),
                         valid=valid.astype(np.uint8), fake=fake.astype(np.uint8))
@@ -314,12 +238,17 @@ def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
     bvh = resolve_uri(row["bvh_path"], must_exist=True)
     smpl = resolve_uri(row["smpl_path"], must_exist=True) if row.get("smpl_path") else None
     meta_path = recording / "meta.json"
+    value_csv_left = TACTILE_DATA_ROOT / "data" / "processed_csv" / date / subject / sid / "left.csv"
+    value_csv_right = TACTILE_DATA_ROOT / "data" / "processed_csv" / date / subject / sid / "right.csv"
+    quality_uri = (f"work://data_pipeline/tactile_v3/data/quality_rows/"
+                   f"{date}/{subject}/{recording.name}.npz")
     source_files = {
         "rgb": row["video_path"], "bvh": row["bvh_path"], "smpl": row.get("smpl_path", ""),
         "left_source": left_uri, "right_source": right_uri,
+        "quality_source": quality_uri,
     }
     source_hashes = {
-        "left_source": sha256_file(left_csv), "right_source": sha256_file(right_csv),
+        "left_source": sha256_file(value_csv_left), "right_source": sha256_file(value_csv_right),
         "bvh": sha256_file(bvh), "rgb_meta": sha256_file(meta_path) if meta_path.is_file() else "",
         "rgb_frame_listing": __import__("hashlib").sha256("\n".join(p.name for p in selected_images).encode()).hexdigest(),
     }
@@ -327,18 +256,27 @@ def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
         source_hashes["smpl"] = sha256_file(smpl)
     session = {
         "schema_version": "shared.session.v1", "session_id": sid, "date": date, "subject": subject,
-        "camera": row["camera"], "fps": float(row["target_fps"]), "offset_s": float(row.get("offset_s", 0.0)),
+        "camera": row["camera"], "fps": float(row["target_fps"]),
+        "offset_s": float(row.get("offset_s", 0.0)) + lag_eff * 0.025,
         "frame_count": n, "quality": row.get("quality", ""), "valid_count": int(valid.sum()), "fake_count": int(fake.sum()),
         "source_files": source_files, "source_hashes": source_hashes,
         "pressure_provenance": {
             "layout": "4x12 per foot; 96 cells per frame across both feet", "value_columns": [str(i) for i in range(1, 49)],
             "time_column": "t_us", "quality_columns": ["valid_mask", "fake"],
             "left_source": left_uri, "right_source": right_uri,
+            "quality_source": quality_uri,
+            "value_processing": (
+                "tactile_pressure_handoff_v3: fault-cell burst repair + isolated impulse "
+                "+ airborne baseline + supported step (no smoothing)"
+            ),
             "shared_alignment": (
-                "values and quality flags nearest-neighbour mapped by absolute wall-clock time "
-                f"(video frames: first cam{cam} jpeg name + i/fps; pressure rows: started_at_iso + raw_t_us column; "
-                "same clock per S2 ruling Baselines/决策/05_R1-R3_风险裁定.md §三 证据 C); "
-                "rows without a raw timestamp are never selected; out-of-span video frames clamp to the edge sample"
+                "pressure values nearest-neighbour mapped from v3 handoff processed rows by "
+                "absolute wall-clock time (row wall = v3 wall_time_day_s = started_at_iso + "
+                f"native receive clock; frame wall = first cam{cam} jpeg name + i/fps; same "
+                "clock per S2 ruling Baselines/决策/05_R1-R3_风险裁定.md §三 证据 C); quality "
+                "flags (valid/fake) nearest-neighbour mapped from the pipeline quality_rows "
+                "marks (started_at_iso + raw_t_us); rows without a raw timestamp are never "
+                "selected; out-of-span video frames clamp to the edge sample"
                 if resample_meta["absolute"] else
                 "legacy normalized grid, nearest-row values (no selectable raw_t_us rows available)"
             ),
@@ -352,7 +290,8 @@ def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
     (session_root / "session.json").write_text(json.dumps(session, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     write_artifact(session_root, schema_version="shared.session.v1", producer="build_shared.py", repository_root=ROOT,
                    parameters={"camera": row["camera"], "fps": row["target_fps"], "pressure_alignment": resample_meta["alignment_method"]},
-                   source_artifacts=[row["video_path"], row["bvh_path"], row.get("smpl_path", ""), left_uri, right_uri],
+                   source_artifacts=[row["video_path"], row["bvh_path"], row.get("smpl_path", ""),
+                                     left_uri, right_uri, quality_uri],
                    source_hashes=source_hashes, frame_id_min=0, frame_id_max=n - 1, frame_count=n,
                    consumers=["model_inputs/<model>"])
     return session_root

@@ -24,13 +24,6 @@ WORKSPACE_ROOT = GAIT_ROOT / "AnysoleWorkspace"
 # AnySole's default input contract is the public shared-facts tree.
 SEQ_ROOT = WORKSPACE_ROOT / "shared" / "facts" / "sessions" / "cam3"
 SPLIT_CSV = WORKSPACE_ROOT / "protocol" / "splits" / "default" / "splits.csv"
-FAKE_MARKED_ROOT = (
-    WORKSPACE_ROOT
-    / "work"
-    / "data_pipeline"
-    / "pressure_washer"
-    / "final_fake_marked"
-)
 HRNET_CACHE_ROOT = WORKSPACE_ROOT / "model_inputs" / "AnySole" / "adapter_v1" / "visual" / "hrnet" / "cam3"
 # F1: GVHMR per-session caches (<model>/cam3/<session>.pt), written by
 # anysole/data/extract_hmr.py.

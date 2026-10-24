@@ -43,16 +43,12 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V3_2": ModelEntry("V3_2", "v3_2", "9-part pose head"),
     "V3_3A": ModelEntry("V3_3A", "v3_3a", "9-part + soft A"),
     "V3_Bv1": ModelEntry("V3_Bv1", "v3_3b", "9-part + soft A + sigma gate"),
-    "V3_Bv1_denoised": ModelEntry("V3_Bv1_denoised", "v3_3b_denoised",
-                                 "V3_Bv1 on handoff denoised pressure (2026-10-17)"),
+    "V3_Bv2": ModelEntry("V3_Bv2", "v3_3b_query", "Bv1 + query pressure readout (Q-DIRECT / Q-NN)"),
+    "V3_Bv3": ModelEntry("V3_Bv3", "v3_3b_query", "Bv2 + Q-FACT factored readout"),
     "V3_Cv1": ModelEntry("V3_Cv1", "v3_3c", "frozen-V (V3_Bv1_vonly base) + zero-init T-residual"),
     "V3_Dv1": ModelEntry("V3_Dv1", "v3_3d", "frozen-V + joint position head (position-space T channel)"),
     "V3_Ev1": ModelEntry("V3_Ev1", "v3_3e", "constraint fusion: pure-V pose + T contact head + T pose prior"),
-    "V3_Ev1_denoised": ModelEntry("V3_Ev1_denoised", "v3_3e_denoised",
-                                 "V3_Ev1 on handoff denoised pressure (2026-10-17)"),
     "V3_Fv1": ModelEntry("V3_Fv1", "v3_3f", "diffusion prior (V cond) + T contact/ground guidance + leg-chain refinement"),
-    "V3_Fv1_denoised": ModelEntry("V3_Fv1_denoised", "v3_3f_denoised",
-                                 "V3_Fv1 on handoff denoised pressure (2026-10-17)"),
     "V3_Gv1": ModelEntry("V3_Gv1", "v3_3g", "frozen E carrier + T contact stream + part-wise observation layer"),
     "V3_Hv1": ModelEntry("V3_Hv1", "v3_3h", "single-generator regression + T physical state + residual channels"),
     "V3_Hv2": ModelEntry("V3_Hv2", "v3_3h",
@@ -103,66 +99,6 @@ MODEL_REGISTRY.update({
                                        f"the person bbox occluded (V-degradation experiment)")
     for occ in ("010", "020", "030", "050")
 })
-
-# offset 重同步组（2026-10-20）：V3_Bv1 同结构同规格，唯一差异 =
-# corrected_offset=True（B 类 session GT 采样按 z_note/data_offset_fixpipe
-# 修正表平移，A/C/D 不动）。数据根推导同 V3_Bv1_cam3 / _cam3_occ{N}。
-MODEL_REGISTRY.update({
-    "V3_Bv1_cam3_offfix": ModelEntry("V3_Bv1_cam3_offfix", "v3_3b",
-                                    "V3_Bv1 on cam3 with corrected mocap offsets "
-                                    "(offset-resync experiment)"),
-    **{
-        f"V3_Bv1_cam3_occ{occ}_offfix": ModelEntry(
-            f"V3_Bv1_cam3_occ{occ}_offfix", "v3_3b",
-            f"V3_Bv1 on cam3 occ{occ} with corrected mocap offsets "
-            f"(offset-resync experiment)")
-        for occ in ("010", "020", "030", "050")
-    },
-})
-# v2/v3 + offset 组（2026-10-20）：结构 = v3_3b_v2 / v3_3b_v3（tactile_input
-# 分别固定 denoised108_v2 / denoised108_v3），其余同 offset 组。
-for _entry_name, _struct in (("v2", "v3_3b_v2"), ("v3", "v3_3b_v3")):
-    MODEL_REGISTRY.update({
-        f"V3_Bv1_cam3_offfix_{_entry_name}": ModelEntry(
-            f"V3_Bv1_cam3_offfix_{_entry_name}", _struct,
-            f"V3_Bv1 on cam3, corrected offsets, tactile {_entry_name}"),
-        **{
-            f"V3_Bv1_cam3_occ{occ}_offfix_{_entry_name}": ModelEntry(
-                f"V3_Bv1_cam3_occ{occ}_offfix_{_entry_name}", _struct,
-                f"V3_Bv1 on cam3 occ{occ}, corrected offsets, tactile {_entry_name}")
-            for occ in ("010", "020", "030", "050")
-        },
-    })
-
-
-
-# offset 设计组（2026-10-21）：V3_Ev1（E v2.1 载体）/ V5_Av1 / V4_Av1 / V3_Hv1
-# 的 corrected_offset 版。E_offfix 为 V5_Av1/V4_Av1 的新载体（v1 载体的
-# offset 重训版）；V3_Hv1_offfix 的 vonly 载体按名称尾缀推导
-# （V3_Bv1_cam3_offfix_vonly / V3_Bv1_cam3_occ010_offfix_vonly，专才由
-# offsetfix_vonly 实验组训练）。
-for _base, _struct, _note in (("V3_Ev1_cam3_offfix", "v3_3e", "E v2.1 offset 重训（V5_Av1/V4_Av1 新载体）"),
-                              ("V3_Ev1_cam3_occ010_offfix", "v3_3e", "E v2.1 occ010 offset 重训"),
-                              ("V5_Av1_cam3_offfix", "v5_1", "V5_Av1 offset"),
-                              ("V5_Av1_cam3_occ010_offfix", "v5_1", "V5_Av1 occ010 offset"),
-                              ("V5_Av1_cam3_occ020_offfix", "v5_1", "V5_Av1 occ020 offset"),
-                              ("V5_Av1_cam3_occ030_offfix", "v5_1", "V5_Av1 occ030 offset"),
-                              ("V5_Av1_cam3_occ050_offfix", "v5_1", "V5_Av1 occ050 offset"),
-                              ("V4_Av1_cam3_offfix", "v4_1", "V4_Av1 offset"),
-                              ("V4_Av1_cam3_occ010_offfix", "v4_1", "V4_Av1 occ010 offset"),
-                              ("V3_Hv1_cam3_offfix", "v3_3h", "V3_Hv1 offset"),
-                              ("V3_Hv1_cam3_occ010_offfix", "v3_3h", "V3_Hv1 occ010 offset")):
-    MODEL_REGISTRY[_base] = ModelEntry(_base, _struct, _note + " (2026-10-21)")
-
-# v2 + offset 设计组（2026-10-21）：V5_Av1 / V4_Av1 × cam3/cam3_occ010 的
-# denoised108_v2 版。与 offset 设计组逐项相同（corrected_offset=True、
-# 载体 = E_offfix 系），唯一差异 = 结构固定 tactile_input=denoised108_v2
-#（v5_1_v2 / v4_1_v2）。
-for _base, _struct, _note in (("V5_Av1_cam3_offfix_v2", "v5_1_v2", "V5_Av1 offset + v2 压力包"),
-                              ("V5_Av1_cam3_occ010_offfix_v2", "v5_1_v2", "V5_Av1 occ010 offset + v2 压力包"),
-                              ("V4_Av1_cam3_offfix_v2", "v4_1_v2", "V4_Av1 offset + v2 压力包"),
-                              ("V4_Av1_cam3_occ010_offfix_v2", "v4_1_v2", "V4_Av1 occ010 offset + v2 压力包")):
-    MODEL_REGISTRY[_base] = ModelEntry(_base, _struct, _note + " (2026-10-21)")
 
 # 新数据验证（2026-10-22）：facts 已固化为 v3+offset，默认口径训练即新数据。
 MODEL_REGISTRY["V3_Bv1_cam3_v3off"] = ModelEntry(
@@ -432,3 +368,36 @@ for _mod, _cam3, _occ010 in (
             for tw in (5, 10, 15)
         },
     })
+
+# wo05 实验轴（2026-10-24，AnysoleWorkspace/protocol/splits/default/
+# splits_wo05.csv）：canonical 去动作 05（绕圈跑）的 12 模型（3 家族 ×
+# E1 四变体）；结构与 v3off 条目逐项一致（v3_3e / v4_1 / v5_1 入口）。
+for _suf, _mod, _note in (
+        ("", "v3_3e", "wo05: E always-dual expert ([1,0,0]; V4_Av1 wo05 carrier)"),
+        ("_drop", "v3_3e", "wo05: E unified (dropout)"),
+        ("_vonly", "v3_3e", "wo05: E V-only expert"),
+        ("_tonly", "v3_3e", "wo05: E T-only expert"),
+        ("", "v4_1", "wo05: V4_Av1 always-dual expert ([1,0,0])"),
+        ("_drop", "v4_1", "wo05: V4_Av1 unified (dropout)"),
+        ("_vonly", "v4_1", "wo05: V4_Av1 V-only expert"),
+        ("_tonly", "v4_1", "wo05: V4_Av1 T-only expert"),
+        ("", "v5_1", "wo05: V5_Av4 always-dual expert ([1,0,0])"),
+        ("_drop", "v5_1", "wo05: V5_Av4 unified (dropout)"),
+        ("_vonly", "v5_1", "wo05: V5_Av4 V-only expert"),
+        ("_tonly", "v5_1", "wo05: V5_Av4 T-only expert")):
+    _pre = {"v3_3e": "V3_Ev1_wo05", "v4_1": "V4_Av1_wo05",
+            "v5_1": "V5_Av4_wo05"}[_mod]
+    MODEL_REGISTRY[_pre + _suf] = ModelEntry(_pre + _suf, _mod, _note)
+
+# λ 扫描（2026-10-24，用户裁定「先扫描一下这几个参数点」）：V5_Av1 / V5_Av4 /
+# V4_Av1 × λ_prior_pose {1,2,3,4} × λ_prior_traj {0,1} 共 24 模型；cam3 +
+# v1_wo05.yaml 纯扫描。结构与 v3off 条目逐项一致（v4_1 / v5_1 入口）。
+for _m, _mod, _fam in (("V5_Av1", "v5_1", "V5_Av1_wo05"),
+                       ("V5_Av4", "v5_1", "V5_Av4_wo05"),
+                       ("V4_Av1", "v4_1", "V4_Av1_wo05")):
+    for _lp in (1, 2, 3, 4):
+        for _lt in (0, 1):
+            _n = "%s_lp%d_lt%d" % (_fam, _lp, _lt)
+            MODEL_REGISTRY[_n] = ModelEntry(
+                _n, _mod, "prior-lambda scan %s lp%s lt%s (2026-10-24)"
+                % (_m, _lp, _lt))

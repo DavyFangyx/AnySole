@@ -161,8 +161,8 @@ def extract_session(model, session_id: str, cam: int, device: str,
         meta = json.loads((seq_dir / "session.json").read_text())
         n = int(meta["frame_count"])
     else:
-        meta = json.loads((seq_dir / "align_meta.json").read_text())
-        n = int(meta["n_frames"])
+        raise FileNotFoundError(
+            f"{session_id}: missing shared facts session.json (legacy align_meta format removed)")
     frames = load_frames(seq_dir, n)
     img_h, img_w = frames.shape[1], frames.shape[2]
     bbx_xys = get_bbx_xys_from_xyxy(load_bbox_xyxy(seq_dir, n, bbox_root), base_enlarge=1.2)  # (L,3)

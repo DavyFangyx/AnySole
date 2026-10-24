@@ -530,6 +530,33 @@ def _run_task(
             "display tasks are not queue tasks anymore; run the matching "
             "script under results_display/script directly"
         )
+    elif task == "optuna_tune":
+        # Optuna 调参研究（2026-10-24，configs/tools/tune_v5.py）：一个 conf
+        # = 一个 study，在 worker 持有的 GPU 上顺序跑 trial——train/eval
+        # 子进程继承 CUDA_VISIBLE_DEVICES，不自行选卡。STUDY_NAME 与
+        # TUNE_ARGS 直传给驱动；产物落 results/AnySole/optuna_tune/<study>/。
+        import shlex as _shlex
+        study_name = str(values.get("STUDY_NAME", "")).strip()
+        if not study_name:
+            raise ValueError("TASK=optuna_tune without STUDY_NAME")
+        cmd = [sys.executable, "configs/tools/tune_v5.py",
+               "--study-name", study_name]
+        cmd += _shlex.split(str(values.get("TUNE_ARGS", "")))
+        if dry_run:
+            print("# task optuna_tune study=%s" % study_name)
+            print("$ " + subprocess.list2cmdline(cmd))
+            return
+        root = Path(values.get("RUN_DIR", "")) if values.get("RUN_DIR") \
+            else _REPO_FOR_IMPORT / "results" / "logs" / \
+            ("optuna_tune_%s" % study_name)
+        root.mkdir(parents=True, exist_ok=True)
+        log = root / "run.log"
+        with log.open("w") as out:
+            print("$ " + subprocess.list2cmdline(cmd), file=out, flush=True)
+            rc = subprocess.run(cmd, cwd=REPO, stdout=out, stderr=subprocess.STDOUT)
+        if rc.returncode != 0:
+            raise RuntimeError("optuna_tune failed rc=%d; log: %s"
+                               % (rc.returncode, log))
     else:
         raise ValueError("Unknown TASK=%r in task conf" % task)
 

@@ -17,7 +17,7 @@ import torch
 from torch.utils.data import Dataset
 
 from anysole.data.smpl_io import estimate_floor_y, load_smpl, resolve_smpl_path
-from anysole.data.pressure import load_session_pressure, normalize_raw
+from anysole.data.pressure import normalize_raw
 
 STRIKE_TH = 100.0   # 落地事件判定：足力和 >100g（CONTACT_SUM_THRESH 同值）
 STRIKE_CELL_TH = 20.0  # 激活格阈值（g）
@@ -228,10 +228,8 @@ class AnySoleDataset(Dataset):
         # 四相机扩展 D2: camera id selects the per-camera GVHMR cache dir
         # (hrnet cache is addressed via cache_root, already camera-scoped).
         self.cam_id = int(cam_id)
-        if self.tactile_input not in ("raw108", "s2m50", "denoised108", "denoised108_v2", "denoised108_v3"):
-            raise ValueError(
-                "tactile_input must be 'raw108', 's2m50', 'denoised108', "
-                "'denoised108_v2' or 'denoised108_v3'")
+        if self.tactile_input not in ("raw108", "s2m50"):
+            raise ValueError("tactile_input must be 'raw108' or 's2m50'")
         if no_imu and self.tactile_input != "s2m50":
             raise ValueError("no_imu requires tactile_input='s2m50'")
         # --no-imu: T_s2m is built without the synthesized IMU channels
@@ -302,19 +300,8 @@ class AnySoleDataset(Dataset):
                         "BVH is supported only by Step2Motion."
                     ) from exc
             else:
-                # Explicit legacy seq_root is retained for migration parity
-                # tests only.  It is never selected by the default config.
-                meta = json.loads((seq_dir / "align_meta.json").read_text())
-                n_frames = int(meta["n_frames"])
-                t_grid = session_time_grid(meta)
-                t_mocap = t_grid - float(meta["offset_s"])
-                try:
-                    smpl_path = resolve_smpl_path(meta, self.smpl_roots, cache=smpl_cache)
-                except FileNotFoundError as exc:
-                    raise FileNotFoundError(
-                        f"AnySole requires SMPL motion for {session_id}; {exc}. "
-                        "BVH is supported only by Step2Motion."
-                    ) from exc
+                raise FileNotFoundError(
+                    f"{session_id}: missing shared facts session.json under {seq_dir}")
             motion = load_smpl(smpl_path, query_t=t_mocap)
             if motion["pose_6d"].shape[0] != n_frames:
                 raise ValueError(
@@ -325,29 +312,6 @@ class AnySoleDataset(Dataset):
                 shared_pressure = shared["pressure"]
                 left48 = np.asarray(shared_pressure["left48"], dtype=np.float32)
                 right48 = np.asarray(shared_pressure["right48"], dtype=np.float32)
-                if self.tactile_input in ("denoised108", "denoised108_v2",
-                                          "denoised108_v3"):
-                    # 交接包降噪压力（2026-10-17 起）：同帧网格、同最近行语义，
-                    # 值换成 baseline_step_corrected（values48 = processed48）。
-                    # denoised108 = v1 包（含自适应平滑）；denoised108_v2 =
-                    # v2 包（无平滑，仅前三项）；denoised108_v3 = v3 包
-                    # （v2 三项 + 故障格突发清洗，2026-10-20）。T_phys 随后按
-                    # normalize_raw 约定重算，接触标签保持 shared 原样
-                    # （固定 GT，隔离触觉输入变化的 A/B）。root 必须显式传：
-                    # resample_handoff 的默认值在函数定义时绑定，改模块常量
-                    # 不会生效。
-                    from anysole.data.handoff_pressure import (
-                        resample_handoff,
-                        video_start_for,
-                        handoff_root,
-                    )
-                    package = {"denoised108": "v1",
-                               "denoised108_v2": "v2",
-                               "denoised108_v3": "v3"}[self.tactile_input]
-                    left48, right48 = resample_handoff(
-                        session_id, str(meta["date"]), str(meta["subject"]),
-                        video_start_for(shared["dir"]), n_frames,
-                        package=package, root=handoff_root(package))
                 t_raw_source = np.concatenate([left48, right48], axis=1)
                 pressure = {
                     "T_raw": t_raw_source,
@@ -376,22 +340,6 @@ class AnySoleDataset(Dataset):
                     np.asarray(shared["frames"]["fake"], dtype=np.uint8),
                     1 - np.asarray(shared["frames"]["valid"], dtype=np.uint8),
                 )
-            else:
-                pressure = load_session_pressure(meta, t_grid,
-                                                  t_phys_v2=self.t_phys_v2)
-                contact_path = contact_label_path(seq_dir, self.contact_method)
-                if not contact_path.is_file():
-                    raise FileNotFoundError(
-                        "Missing contact labels %s for %s (contact_method=%s). Run the "
-                        "AnySole private contact adapter, not the legacy shared tool."
-                        % (contact_path, session_id, self.contact_method)
-                    )
-                raw_contact = np.load(contact_path).astype(np.float32)
-                if raw_contact.shape[0] != n_frames or raw_contact.shape[1] < 8:
-                    raise ValueError("Bad %s for %s: %s" % (contact_path.name, session_id, raw_contact.shape))
-                contact = raw_contact[:, 6:8]
-                fake_path = seq_dir / "fake_mask.npy"
-                fake_mask = np.load(fake_path).astype(np.uint8).reshape(-1) if fake_path.is_file() else np.zeros((n_frames,), dtype=np.uint8)
 
             cache_path = hrnet_cache_path(session_id, self.cache_root)
             if cache_path.is_file():

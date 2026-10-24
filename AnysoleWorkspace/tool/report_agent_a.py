@@ -54,7 +54,7 @@ def main() -> int:
 | 旧路径 | 新路径/处理 |
 |---|---|
 | 旧 `AnysoleWorkspace/sources/raw` | `raw://rgb`、`raw://pressure`、`raw://bvh`（直接外部只读链接） |
-| `AnysoleWorkspace/work/data_pipeline/pressure_washer/*` | `work://data_pipeline/pressure_washer/final_fake_marked`（只读最终记录）；过程文件留在 work 分层 |
+| `AnysoleWorkspace/work/data_pipeline/tactile_v3/*` | 触觉管线数据（清洗产物 + quality_rows 行级质量标记） |
 | 旧 `AnysoleWorkspace/manifests/session_manifest.*` | `protocol://manifests/session_manifest.*` |
 | 旧 `AnysoleWorkspace/splits/default/splits.csv` | `protocol://splits/default/splits.csv` |
 | `derived/MotionPRO/sequences/**/color` | `shared://facts/sessions/.../rgb` |

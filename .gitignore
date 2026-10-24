@@ -81,6 +81,8 @@ __pycache__/
 !/configs/failed/.gitkeep
 /configs/logs/
 /configs/generated/
+# 失败实验的废弃 conf（机器本地归档，不进 git）
+/configs/failed_trash/
 
 # Wandb Analyser Thirdparty
 /Wandb_Analyzer/
@@ -102,7 +104,11 @@ z_note/probes/
 /z_note/data_pressure_fixpipe/Tactile_pressure_handoff_20261017_v1/
 /z_note/data_pressure_fixpipe/Tactile_pressure_handoff_20261017_v2_no_smoothing/
 z_note/data_pressure_fixpipe/Tactile_pressure_handoff_20261020_v3/
+# 备份目录与审计/探针中间产物（机器本地，不进 git）
 z_note/data_offset_fixpipe/backup/
+z_note/data_pressure_fixpipe/backup/
+z_note/data_offset_fixpipe/审计_F1_CoP/
+z_note/data_offset_fixpipe/探针面板/
 
 # HMR2.0 实验线的第三方参考仓库（论文仓库 clone，不进 git；实验文档保留）
 /z_note/HMR2.0/4D-Humans/

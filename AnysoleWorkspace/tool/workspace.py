@@ -103,7 +103,7 @@ CANONICAL_DIRS = (
     WORKSPACE / "shared/representations/tactile/mmvp_31x11",
     WORKSPACE / "shared/frontends",
     WORKSPACE / "model_inputs",
-    WORKSPACE / "work/data_pipeline/pressure_washer",
+    WORKSPACE / "work/data_pipeline/tactile_v3",
     WORKSPACE / "assets",
     WORKSPACE / "reports",
 )

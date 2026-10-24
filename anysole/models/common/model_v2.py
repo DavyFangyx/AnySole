@@ -59,12 +59,12 @@ class AnySoleModelV2(nn.Module):
             raise ValueError("position_head requires f2_repr=False (V3_Dv1)")
         if self.v_input not in ("hrnet", "hmr_gvhmr"):
             raise ValueError("v_input must be 'hrnet' or 'hmr_gvhmr', got %r" % self.v_input)
-        if self.tactile_input not in ("raw108", "s2m50", "denoised108", "denoised108_v2", "denoised108_v3"):
-            raise ValueError("tactile_input must be 'raw108', 's2m50', 'denoised108', 'denoised108_v2' or 'denoised108_v3', got %r" % self.tactile_input)
+        if self.tactile_input not in ("raw108", "s2m50"):
+            raise ValueError("tactile_input must be 'raw108' or 's2m50', got %r" % self.tactile_input)
         if self.t_encoder not in ("linear", "foot_conv"):
             raise ValueError("t_encoder must be 'linear' or 'foot_conv', got %r" % self.t_encoder)
-        if self.t_encoder == "foot_conv" and self.tactile_input not in ("raw108", "denoised108", "denoised108_v2", "denoised108_v3"):
-            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108'/denoised108[_v2/_v3] (F4a)")
+        if self.t_encoder == "foot_conv" and self.tactile_input != "raw108":
+            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108' (F4a)")
         if self.tactile_direct and self.tactile_input != "s2m50":
             raise ValueError("tactile_direct requires tactile_input='s2m50'")
         if self.no_imu and self.tactile_input != "s2m50":
@@ -160,7 +160,15 @@ class AnySoleModelV2(nn.Module):
             pos_corr, v_corr = self.position_head(v_tok, t_tok)
             v_hat = v_hat + v_corr
             trans_hat = torch.cumsum(v_hat[..., :3], dim=1) / float(FPS)
-        pressure_hat, vfeat_hat = self.aux_heads(fused)
+        if hasattr(self, "pressure_readout"):
+            # V3_Bv2/Bv3: query pressure readout replaces the linear aux
+            # t_rec (same λ_trec supervision position).  B windows are fully
+            # valid at fixed 40 Hz, so the head derives both frame_valid and
+            # timestamps; callers with per-frame validity pass them through.
+            pressure_hat = self.pressure_readout(fused)["pressure_hat"]
+            vfeat_hat = self.aux_heads.v_rec(fused[:, :self.tw])
+        else:
+            pressure_hat, vfeat_hat = self.aux_heads(fused)
         out = {
             "x0_hat": x0_hat,
             "v_hat": v_hat,

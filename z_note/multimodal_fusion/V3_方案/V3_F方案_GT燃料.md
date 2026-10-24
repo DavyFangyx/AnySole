@@ -108,3 +108,7 @@ T 流输入三条件恒定（接触头始终读真实压力），开关只作用
 ## 5. 落地文件
 
 `anysole/models/common/model_v3f.py`（去噪器 + T 编码器 + 接触头 + 能量 + 精修 + 采样循环）→ `anysole/models/v3_3f.py`（入口，冻结 vonly 装载）→ losses.py（compute_losses_v3f）→ train.py / eval.py / eval_protocol.py 接入 → registry + configs/z_gen/v3f.py。GPU：V3_Fv1=cuda:2、V3_Fv1_cam3_occ010=cuda:4。
+
+## 6. 版本
+
+- **v1（现行，已归档）**：扩散先验 + T 采样引导 + 接触精修。

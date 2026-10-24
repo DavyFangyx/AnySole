@@ -19,7 +19,7 @@ from anysole.data.dataset import (
     hrnet_cache_path,
     session_time_grid,
 )
-from anysole.data.pressure import load_session_pressure, normalize_raw
+from anysole.data.pressure import normalize_raw
 from anysole.data.workspace_adapter import load_shared_session, shared_smpl_path
 from anysole.data.tactile_s2m import build_t_s2m, resolve_legacy_bvh_path
 from anysole.utils.diffusion import GaussianDiffusion
@@ -41,7 +41,6 @@ from anysole.types import (
     CONFIG_V,
     CONFIG_VT,
     DEFAULT_CONFIG_PATH,
-    FAKE_MARKED_ROOT,
     FPS,
     JOINT_PROTOCOL_CHECKSUM,
     MOTION_PROTOCOL,
@@ -138,11 +137,10 @@ def _stride_windows(values: np.ndarray, tw: int, half: int):
 
 
 def _pressure_paths(meta: dict) -> tuple:
-    if "pressure_48_path" in meta:
-        path = Path(meta["pressure_48_path"])
-        return path, path
-    root = FAKE_MARKED_ROOT / meta["date"] / meta["subject"] / meta["rec_name"]
-    return root / "pressure_left.csv", root / "pressure_right.csv"
+    if "pressure_48_path" not in meta:
+        raise FileNotFoundError("meta has no pressure_48_path (legacy align_meta format removed)")
+    path = Path(meta["pressure_48_path"])
+    return path, path
 
 
 _MODE_TO_CONFIG = dict(zip(CONFIG_MODE_NAMES, (CONFIG_VT, CONFIG_V, CONFIG_T)))
@@ -181,7 +179,8 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
         pressure_path = shared["dir"] / "pressure_48.npz"
         meta["pressure_48_path"] = str(pressure_path)
     else:
-        meta = json.loads((seq_dir / "align_meta.json").read_text())
+        raise FileNotFoundError(
+            "%s: missing shared facts session.json under %s" % (args.session, seq_dir))
     n_frames = int(meta["n_frames"])
     if n_frames <= 0:
         raise ValueError("Session %s has no frames" % args.session)
@@ -206,16 +205,11 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     else:
         v_feat = np.zeros((n_frames, V_FEAT_DIM), dtype=np.float32)
     if config_value in (CONFIG_VT, CONFIG_T):
-        if shared is not None:
-            left48 = np.asarray(shared["pressure"]["left48"], dtype=np.float32)
-            right48 = np.asarray(shared["pressure"]["right48"], dtype=np.float32)
-            t_raw = normalize_raw(np.concatenate([left48, right48], axis=1))
-            from anysole.data.pressure import physical_tokens
-            t_phys = physical_tokens(normalize_raw(left48), normalize_raw(right48))
-        else:
-            pressure = load_session_pressure(meta, session_time_grid(meta))
-            t_raw = normalize_raw(pressure["T_raw"])
-            t_phys = np.asarray(pressure["T_phys"], dtype=np.float32)
+        left48 = np.asarray(shared["pressure"]["left48"], dtype=np.float32)
+        right48 = np.asarray(shared["pressure"]["right48"], dtype=np.float32)
+        t_raw = normalize_raw(np.concatenate([left48, right48], axis=1))
+        from anysole.data.pressure import physical_tokens
+        t_phys = physical_tokens(normalize_raw(left48), normalize_raw(right48))
     else:
         t_raw = np.zeros((n_frames, T_RAW_DIM), dtype=np.float32)
         t_phys = np.zeros((n_frames, T_PHYS_DIM), dtype=np.float32)
@@ -553,7 +547,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             shared = load_shared_session(args.session, Path(config["seq_root"]))
             meta = {"pressure_48_path": str(shared["dir"] / "pressure_48.npz")}
         else:
-            meta = json.loads((seq_dir / "align_meta.json").read_text())
+            raise FileNotFoundError(
+                "%s: missing shared facts session.json under %s" % (args.session, seq_dir))
         cache_path = hrnet_cache_path(args.session, Path(config["cache_root"]))
         left_path, right_path = _pressure_paths(meta)
         if cache_path.is_file() and left_path.is_file() and right_path.is_file():

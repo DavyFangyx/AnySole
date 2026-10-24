@@ -186,8 +186,8 @@ def extract_session(
         meta = json.loads((seq_dir / "session.json").read_text())
         n_frames = int(meta["frame_count"])
     else:
-        meta = json.loads((seq_dir / "align_meta.json").read_text())
-        n_frames = int(meta["n_frames"])
+        raise FileNotFoundError(
+            f"{seq_dir.name}: missing shared facts session.json (legacy align_meta format removed)")
     image_paths = session_frame_paths(seq_dir, n_frames)
     bbox_path = (bbox_root / f"{seq_dir.name}.npy") if bbox_root else seq_dir / "bbox.npy"
     if not bbox_path.is_file():

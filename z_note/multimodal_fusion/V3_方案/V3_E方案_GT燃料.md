@@ -105,3 +105,8 @@ config_probs [1,0,0]（无条件采样）；从零训练（独立性规则）。
 
 - `anysole/models/common/model_v3e.py`（主干 + 双头）；`anysole/models/v3_3e.py`（入口）；`anysole/utils/constraints.py`（v2.1 约束层，审计头注释）。
 - 生产 ckpt：cam3 → `V3_Ev1_f6_soft`；occ010 → `V3_Ev1_cam3_occ010_f6_soft`（V3_Gv1 载体来源）。
+
+## 6. 版本
+
+- **v1**：原始约束层——反方差回退、支撑静态、地面贴地三缺陷。
+- **v2.1（现行）**：回退休眠、支撑移除、贴地改只抬不压 ×0.5。

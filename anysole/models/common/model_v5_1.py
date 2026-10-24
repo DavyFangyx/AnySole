@@ -388,7 +388,8 @@ class AnySoleModelV5_Av1(nn.Module):
         return h + (gamma - 1.0) * h + beta
 
     def forward(self, V_feat, T_raw, T_phys, config_id=None, subject_ids=None,
-                T_s2m=None, V_hmr=None, mask_v=None, mask_t=None, z_src="all"):
+                T_s2m=None, V_hmr=None, mask_v=None, mask_t=None, z_src="all",
+                v_tok_override=None):
         """config_id is accepted for the train/eval call contract and
         deliberately IGNORED — the three eval conditions are three readouts
         of one forward selected by ``z_src`` (V5_Av1 §2.3；T 流输入三条件
@@ -402,6 +403,8 @@ class AnySoleModelV5_Av1(nn.Module):
         cid = torch.zeros(V_feat.shape[0], dtype=torch.long, device=V_feat.device)
         v_tok, t_tok = self.encoders(V_feat, T_tac, cid, V_hmr=V_hmr,
                                      mask_v=mask_v, mask_t=mask_t)
+        if v_tok_override is not None:
+            v_tok = v_tok_override  # TTA 注入点（V5_Av4_TTA）
         v_mem = self.v_temporal(v_tok)
         t_mem = self.t_temporal(t_tok)
         params_v = self.g_V(v_tok)

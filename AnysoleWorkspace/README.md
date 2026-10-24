@@ -53,19 +53,7 @@ python3 AnysoleWorkspace/tool/relink_raw.py verify
 python3 AnysoleWorkspace/tool/build_raw_index.py \
   --from-manifest AnysoleWorkspace/protocol/manifests/session_manifest.jsonl
 
-# 生成带 valid/fake 标记的公共触觉源
-python3 AnysoleWorkspace/tool/pressure_washer/run.py inspect --skip-existing
-python3 AnysoleWorkspace/tool/pressure_washer/run.py reconstruct --skip-existing
-python3 AnysoleWorkspace/tool/pressure_washer/run.py mark-fake --skip-existing
-# 右脚故障格（1-based cell 35）清洗：D7 判据全树扫描，命中的 recording 整条右足通道置零
-# （103/313，含 3 个 CV 刀刃 override：S13072/S14033/S6101）；就地改写 final_fake_marked 的
-# pressure_*.csv 并落 fault_cell_manifest.csv 审计清单；幂等（重跑零命中），无需 --force；
-# 必须在 encode 之前。清洗前原树存档于 work/data_pipeline/pressure_washer/archive/（确认后可删）
-python3 AnysoleWorkspace/tool/pressure_washer/run.py clean-fault-cell
-# encode 读 final_fake_marked 平铺树根（--force = 覆盖 encoded/ 同名输出）
-python3 AnysoleWorkspace/tool/pressure_washer/run.py encode --force
-
-# 从 raw、session 索引和 PressureWasher 最终记录构建公共 manifest
+# 从 raw、session 索引和触觉最终记录构建公共 manifest
 python3 AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3 --cam 1,2,3,4
 # --cam 1,2,3,4（或 all）：另写 per-camera jsonl（session_manifest_cam{N}.jsonl）
 # 生成 split（当前 train/val/test = 92/12/36；--val 缺省取 test 前一个 subject）
