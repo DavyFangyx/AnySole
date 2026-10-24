@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Build the raw/ modality link farm (plan: reports/raw_relink_plan_20261001.md §4).
+"""Build the hf-raw modality link farm.
 
 ``AnysoleWorkspace/hf-raw/{rgb,bvh,smpl}`` become per-modality filtered views over the
 upstream tree, shape-preserving with respect to the frozen manifest URIs
 (relative paths inside each entry match ``raw://`` URIs segment by segment).
 pressure 不再由本脚本建农场：触觉正典 = AnysoleWorkspace/hf-raw/pressure 数据树
-（tactile_v3 清洗产物，见 build_shared.py）。
-``raw/{calibration,human_masks}`` stay plain symlinks and are managed by
-``tool/workspace.py`` (RAW_SYMLINKS), not by this script.
+（tactile_v3 清洗产物，见 build_shared.py）。标定正典 = protocol/calibration/，
+human_masks 入口 = assets/upstream/，均不在本脚本范围。
 
 Glob-safety: every level that is hit by a recursive ``**`` glob (AnysoleWorkspace/hf-raw/smpl
 by ``build_raw_index.py``) is a real directory here; symlinks are only leaves

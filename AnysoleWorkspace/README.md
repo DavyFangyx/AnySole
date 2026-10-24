@@ -4,9 +4,10 @@
 
 ```text
 AnysoleWorkspace/
-├── raw/
-│   ├── rgb/ pressure/ bvh/ smpl/                 # 模态链接农场（relink_raw.py 生成）
-│   └── calibration/ human_masks/                 # 外部只读源软链接
+├── hf-raw/                                        # 原始数据包（部署布局，不进 git）
+│   ├── rgb/ bvh/ smpl/                           # 模态链接农场（relink_raw.py 生成）
+│   ├── pressure/data/dataset/                    # 触觉正典（890 自包含 npz，烤入质量包）
+│   └── config/                                   # foot_sensor_layout + 标定/offset 软链→正典
 ├── protocol/
 │   ├── manifests/session_manifest.{csv,jsonl}
 │   ├── splits/default/splits.csv                # 由参数生成（92/12/36，val≠test）
@@ -17,7 +18,7 @@ AnysoleWorkspace/
 │   ├── representations/tactile/mmvp_31x11/v1/<date>/<subject>/<session>/
 │   └── frontends/<name>/<version>/
 ├── model_inputs/<model>/                        # 模型私有产物
-├── work/data_pipeline/pressure_washer/
+├── work/
 ├── assets/                                      # 依赖、布局和固定资产
 ├── reports/
 └── tool/
@@ -27,7 +28,7 @@ AnysoleWorkspace/
 
 公共解析入口是 `tool/workspace.py`，只支持：
 
-`raw://`、`protocol://`、`shared://`、`model-input://<model>/`、`work://`、`asset://`、`results://`。
+`raw://`、`hfraw://`、`protocol://`、`shared://`、`model-input://<model>/`、`work://`、`asset://`、`results://`。
 
 旧 `workspace://` 已移除，路径逃逸和 `raw://` 写入都会直接报错。
 
@@ -36,26 +37,23 @@ AnysoleWorkspace/
 ```bash
 # 初始化 canonical Workspace 目录、raw 外部只读软链接，并构建 raw 模态链接农场
 python3 AnysoleWorkspace/tool/workspace.py init
-# init 创建的外部只读软链接：
-# raw/calibration  -> /data/lizhe/projects/Tactile/0_Calibration
-# raw/human_masks  -> /data/lizhe/projects/Tactile/3_Result/processed/rgb_human_masks
-# init 构建的模态链接农场（raw/rgb raw/pressure raw/bvh raw/smpl，路径形状与 manifest URI 逐段一致）：
-#   raw/rgb/<date>/<S#>/<rec>/{meta.json, <cam>/}          相机目录软链（--cam 默认 3；四相机用 1,2,3,4 或 all）
-#   raw/pressure/<date>/<S#>/<rec>/pressure_{left,right}.csv
-#   raw/bvh/<date>/mocap_ori_bvh/<sid>/*.bvh (+ 0804 *.avi, calibration_Skeleton0.bvh)
-#   raw/smpl/<MMDD>/<MMDD>smpl/mocap_ori_c3d/<sid>/motion_neutral_smpl.npz
+# init 构建的模态链接农场（AnysoleWorkspace/hf-raw/rgb|bvh|smpl，路径形状与 manifest URI 逐段一致）：
+#   hf-raw/rgb/<date>/<S#>/<rec>/{meta.json, <cam>/}       相机目录软链（--cam 默认 3；四相机用 1,2,3,4 或 all）
+#   hf-raw/bvh/<date>/mocap_ori_bvh/<sid>/*.bvh（含 calibration_Skeleton0.bvh）
+#   hf-raw/smpl/<MMDD>/<MMDD>smpl/mocap_ori_c3d/<sid>/motion_neutral_smpl.npz
+# 触觉正典 = hf-raw/pressure/data/dataset/（v3 清洗产物，质量包烤入 npz，由生产端 rebuild.py 产出）；
+# 标定正典 = protocol/calibration/（日期 json 软链 lizhe 4_Dataset + 我方派生 native_to_mocap + offset 修正表）。
 # 上游新增日期/改名 rec 目录后，重建并校验农场（幂等，原子替换）：
 python3 AnysoleWorkspace/tool/relink_raw.py build --dates 20260804,20260807,20260808,20260810 --cam 1,2,3,4
 python3 AnysoleWorkspace/tool/relink_raw.py verify
-# 方案与回滚快照：reports/raw_relink_plan_20261001.md、reports/raw_relink_rollback_20261002.txt
 
 # 从现有 protocol manifest 建立 raw session 索引
 python3 AnysoleWorkspace/tool/build_raw_index.py \
   --from-manifest AnysoleWorkspace/protocol/manifests/session_manifest.jsonl
 
 # 从 raw、session 索引和触觉最终记录构建公共 manifest
-python3 AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3 --cam 1,2,3,4
-# --cam 1,2,3,4（或 all）：另写 per-camera jsonl（session_manifest_cam{N}.jsonl）
+python3 AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3 --cam 1,2,4
+# --cam 1,2,4（或 all）：另写 per-camera jsonl（cam3 = 主 manifest，不再另写）
 # 生成 split（当前 train/val/test = 92/12/36；--val 缺省取 test 前一个 subject）
 python3 AnysoleWorkspace/tool/build_manifest.py split \
   --manifest AnysoleWorkspace/protocol/manifests/session_manifest.jsonl \

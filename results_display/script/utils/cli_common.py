@@ -45,17 +45,6 @@ GEN_CHOICES = ("gif", "mp4")
 GEN_DEFAULT = "gif"
 
 
-def _resolve_raw_bvh(path: Path) -> Path:
-    """Resolve BVHs recorded before the workspace was reorganized."""
-    marker = "/mocap_ori_bvh/"
-    normalized = path.as_posix()
-    if marker not in normalized:
-        return path
-    suffix = normalized.split(marker, 1)[1]
-    matches = sorted((WORKSPACE_ROOT / "raw/bvh").glob("*/mocap_ori_bvh/" + suffix))
-    return matches[0] if matches else path
-
-
 def resolve_path(value, base_dir=None) -> Path:
     """Resolve a path that may use a ``results://``-style scheme.
 
@@ -76,13 +65,13 @@ def resolve_path(value, base_dir=None) -> Path:
     normalized = text.replace("\\", "/").rstrip("/")
     path = Path(os.path.expandvars(text)).expanduser()
     if path.is_absolute():
-        return _resolve_raw_bvh(path)
+        return path
     if base_dir is None:
         candidate = WORKSPACE_ROOT / path
-        if candidate.exists() or "/mocap_ori_bvh/" in candidate.as_posix():
-            return _resolve_raw_bvh(candidate)
+        if candidate.exists():
+            return candidate
         return path
-    return _resolve_raw_bvh(Path(base_dir) / path)
+    return Path(base_dir) / path
 
 
 def split_csv_arg(value) -> list:

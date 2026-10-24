@@ -46,3 +46,6 @@ md5 全等（2026-10-24 实测）。
    的 dataset；`--verify-reference` 需先以新产物替换 `data/dataset` 后生效
    （旧 data/ 为未烤入的 v3 参考）。
 3. 消费端只消费已烤入会话（warning 列出的无 quality_rows 录制不烤入）。
+4. `quality_rows.py` 的默认根 = 包内 `data/quality_rows`（代码落位包根时生效）；
+   本交付包的 data/ 在上一级，重建请显式 `--package-root`（rebuild 已默认）。
+

@@ -11,7 +11,7 @@
 | `项目概述.md` | 论文视角的项目概述（数据集/机制主张/部署场景） |
 | `评估/` | 评估配置说明书（唯一现行评估说明书）、三基线模型性能与文献对照 |
 | `multimodal_fusion/` | 现行融合方案与判读（V3_3–V6_Av1、失败窗/时间窗、T 信息量探针） |
-| `data_pressure_fixpipe/` | 触觉压力数据管道：交接包 v1/v2/v3、审计、压力传感器协议 |
+| `data_pressure_fixpipe/` | 触觉压力数据管道：GT足底×触觉冲突审计（d_test8 口径）、压力传感器协议 |
 | （offset 修正表已提升） | → `AnysoleWorkspace/protocol/calibration/`（表+血缘+验证器，见 offset_README.md） |
 | `data_smpl_fixpipe/` | SMPL 足部地面审计、rgb_smpl 评估 |
 | `probes/` | 诊断探针/冒烟脚本（不入 git，机器本地；运行方式见其 README） |
@@ -24,7 +24,6 @@
 | 路径 | 读取方 |
 |---|---|
 | `AnysoleWorkspace/protocol/calibration/offset_correction.csv` | `AnysoleWorkspace/tool/build_shared.py` `corrected_lag()`（facts 构建时固化） |
-| `data_pressure_fixpipe/Tactile_pressure_handoff_20261017_v1/`、`…_v2_no_smoothing/`、`…_20261020_v3/` | `anysole/data/handoff_pressure.py`（denoised108 / _v2 / _v3 三入口全在用） |
 
 ## 归档规则
 

@@ -29,16 +29,13 @@ URI_ROOTS = {key: CANONICAL_ROOTS[key] for key in ("raw", "protocol", "shared", 
 URI_ROOTS.update({"asset": CANONICAL_ROOTS["assets"], "hfraw": WORKSPACE / "hf-raw"})
 
 # hf-raw/{rgb,bvh,smpl} are modality link farms built by tool/relink_raw.py
-# (shape-preserving views over the upstream tree; see reports/raw_relink_plan_20261001.md).
+# (shape-preserving views over the upstream tree).
 # 2026-10-24: raw 数据包化为 AnysoleWorkspace/hf-raw/；pressure 不再进农场（正典 =
 # AnysoleWorkspace/hf-raw/pressure 数据树）。标定消费形态 = protocol/calibration/{date}.json
 # （正典唯一，hf-raw 内不再镜像标定），human_masks 导入入口迁至
 # assets/upstream/human_masks。无遗留外部整目录软链。
 RAW_FARM_ENTRIES = ("rgb", "bvh", "smpl")
-# 兼容桥：AnysoleWorkspace/raw -> hf-raw（存量 facts/model_inputs 相对软链
-# 仍按旧深度解析；最后阶段重建 facts/适配器后删除）。桥内不含 human_masks
-# 等非 raw 内容，HF 数据包不受影响。
-RAW_SYMLINKS = {}
+RAW_SYMLINKS = {}  # 兼容桥已随 facts 软链重链移除（2026-10-24），无存量消费者
 
 
 class WorkspacePathError(ValueError):

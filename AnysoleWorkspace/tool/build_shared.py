@@ -245,12 +245,9 @@ def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
     meta_path = recording / "meta.json"
     value_csv_left = TACTILE_DATA_ROOT / "data" / "dataset" / date / subject / sid / "left.npz"
     value_csv_right = TACTILE_DATA_ROOT / "data" / "dataset" / date / subject / sid / "right.npz"
-    quality_uri = (f"hfraw://pressure/data/quality_rows/"
-                   f"{date}/{subject}/{recording.name}.npz")
     source_files = {
         "rgb": row["video_path"], "bvh": row["bvh_path"], "smpl": row.get("smpl_path", ""),
         "left_source": left_uri, "right_source": right_uri,
-        "quality_source": quality_uri,
     }
     source_hashes = {
         "left_source": sha256_file(value_csv_left), "right_source": sha256_file(value_csv_right),
@@ -269,7 +266,6 @@ def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
             "layout": "4x12 per foot; 96 cells per frame across both feet", "value_columns": [str(i) for i in range(1, 49)],
             "time_column": "t_us", "quality_columns": ["valid_mask", "fake"],
             "left_source": left_uri, "right_source": right_uri,
-            "quality_source": quality_uri,
             "value_processing": (
                 "tactile_pressure_handoff_v3: fault-cell burst repair + isolated impulse "
                 "+ airborne baseline + supported step (no smoothing)"
@@ -279,8 +275,9 @@ def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
                 "absolute wall-clock time (row wall = v3 wall_time_day_s = started_at_iso + "
                 f"native receive clock; frame wall = first cam{cam} jpeg name + i/fps; same "
                 "clock per S2 ruling Baselines/决策/05_R1-R3_风险裁定.md §三 证据 C); quality "
-                "flags (valid/fake) nearest-neighbour mapped from the pipeline quality_rows "
-                "marks (started_at_iso + raw_t_us); rows without a raw timestamp are never "
+                "flags (valid/fake) nearest-neighbour mapped from the producer-baked "
+                "quality packs inside the dataset npz ({side}_t_us/raw_t_us/valid/fake, "
+                "started_at_iso + raw_t_us); rows without a raw timestamp are never "
                 "selected; out-of-span video frames clamp to the edge sample"
                 if resample_meta["absolute"] else
                 "legacy normalized grid, nearest-row values (no selectable raw_t_us rows available)"
@@ -296,7 +293,7 @@ def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
     write_artifact(session_root, schema_version="shared.session.v1", producer="build_shared.py", repository_root=ROOT,
                    parameters={"camera": row["camera"], "fps": row["target_fps"], "pressure_alignment": resample_meta["alignment_method"]},
                    source_artifacts=[row["video_path"], row["bvh_path"], row.get("smpl_path", ""),
-                                     left_uri, right_uri, quality_uri],
+                                     left_uri, right_uri],
                    source_hashes=source_hashes, frame_id_min=0, frame_id_max=n - 1, frame_count=n,
                    consumers=["model_inputs/<model>"])
     return session_root

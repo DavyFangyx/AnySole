@@ -40,8 +40,8 @@ __pycache__/
 
 # AnysoleWorkspace v2: raw links and generated facts/representations are
 # machine-local outputs. Keep protocol contracts and hand-off reports tracked.
-# raw 已数据包化为 AnysoleWorkspace/hf-raw/（2026-10-24）；
-# AnysoleWorkspace/raw 现为存量相对软链的兼容桥（symlink -> hf-raw），同样不进 git。
+# raw 已数据包化为 AnysoleWorkspace/hf-raw/（2026-10-24）；兼容桥已随 facts
+# 软链重链移除，/AnysoleWorkspace/raw 若再出现亦不进 git。
 /AnysoleWorkspace/raw
 /AnysoleWorkspace/assets/upstream/
 /AnysoleWorkspace/shared/
