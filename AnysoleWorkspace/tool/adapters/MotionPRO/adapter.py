@@ -115,7 +115,7 @@ CARPET_Y_UP_TO_Z_UP = "new = (x_old, -z_old, y_old) from y-up raw BVH; " \
 
 # V2 footprint: the insole is 12cm wide (4 rows, 3cm each) x 24cm long
 # (12 columns, 2cm each).  Cell order is the frozen shared contract
-# (assets/foot_sensor_layout/README.md, verified numerically): channel index is
+# (hf-raw/config/foot_sensor_layout/README.md, verified numerically): channel index is
 # row-major over 4 width rows x 12 length columns and **column 0 is the toe**,
 # column 11 the heel.  The user's formula "(c-5.5)*2cm along the toe-minus-foot
 # direction" assumes column 0 == heel, so the length offset is written here as

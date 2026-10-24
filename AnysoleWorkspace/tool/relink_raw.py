@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Build the raw/ modality link farm (plan: reports/raw_relink_plan_20261001.md §4).
 
-``raw/{rgb,pressure,bvh,smpl}`` become per-modality filtered views over the
+``hf-raw/{rgb,bvh,smpl}`` become per-modality filtered views over the
 upstream tree, shape-preserving with respect to the frozen manifest URIs
 (relative paths inside each entry match ``raw://`` URIs segment by segment).
+pressure 不再由本脚本建农场：触觉正典 = hf-raw/pressure 数据树
+（tactile_v3 清洗产物，见 build_shared.py）。
 ``raw/{calibration,human_masks}`` stay plain symlinks and are managed by
 ``tool/workspace.py`` (RAW_SYMLINKS), not by this script.
 
-Glob-safety: every level that is hit by a recursive ``**`` glob (raw/smpl by
-``build_raw_index.py``, raw/pressure by ``build_manifest.py``) is a real
-directory here; symlinks are only leaves (files) or camera directories under
-raw/rgb (never ``**``-traversed).
+Glob-safety: every level that is hit by a recursive ``**`` glob (hf-raw/smpl
+by ``build_raw_index.py``) is a real directory here; symlinks are only leaves
+(files) or camera directories under hf-raw/rgb (never ``**``-traversed).
 
 Usage:
     python3 AnysoleWorkspace/tool/relink_raw.py build [--dates ...] [--cam 3] [--dry-run]
@@ -29,13 +30,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "AnysoleWorkspace"
-RAW = WORKSPACE / "raw"
+RAW = ROOT / "hf-raw"
 UP = Path("/data/lizhe/projects/Tactile")
 UP_DATA = UP / "1_Data"
 UP_MOCAP = UP / "Mocap"
 
 DEFAULT_DATES = ("20260804", "20260807", "20260808", "20260810")
-FARM_ENTRIES = ("rgb", "pressure", "bvh", "smpl")
+FARM_ENTRIES = ("rgb", "bvh", "smpl")
 
 
 def _rel(target: Path, link: Path) -> str:
@@ -70,10 +71,6 @@ def collect(dates: tuple[str, ...], cams: tuple[str, ...]) -> dict[str, list[tup
                         add("rgb", rel_rec / cam, cam_dir)
                     else:
                         print(f"skip missing camera {cam}: {rec}", file=sys.stderr)
-                for side in ("left", "right"):
-                    csv_path = rec / f"pressure_{side}.csv"
-                    if csv_path.is_file():
-                        add("pressure", rel_rec / f"pressure_{side}.csv", csv_path)
         bvh_root = date_dir / "mocap_ori_bvh"
         if bvh_root.is_dir():
             rel_root = Path(date) / "mocap_ori_bvh"
@@ -82,7 +79,7 @@ def collect(dates: tuple[str, ...], cams: tuple[str, ...]) -> dict[str, list[tup
             for sid_dir in sorted(bvh_root.iterdir()):
                 if not sid_dir.is_dir():
                     continue
-                for pattern in ("*.bvh", "*.avi"):
+                for pattern in ("*.bvh",):
                     for motion_file in sorted(sid_dir.glob(pattern)):
                         add("bvh", rel_root / sid_dir.name / motion_file.name, motion_file)
         mmdd = date[4:]

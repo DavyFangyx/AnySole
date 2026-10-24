@@ -267,7 +267,7 @@ def cop_layout_check(ctx: dict, truth: np.ndarray, head: int = 5) -> dict:
     For every stance run (f6 state 1) the centre of pressure along the insole
     length axis is averaged over the first and last few frames: a heel strike
     loads high column indices and toe-off loads low ones only if column 0 is the
-    toe (assets/foot_sensor_layout/README.md, verified numerically).
+    toe (hf-raw/config/foot_sensor_layout/README.md, verified numerically).
     """
     out = {}
     for index, side in enumerate(("left", "right")):

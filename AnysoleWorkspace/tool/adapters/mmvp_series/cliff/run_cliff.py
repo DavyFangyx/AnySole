@@ -61,7 +61,7 @@ from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 CLIFF_ROOT = WORKSPACE / "assets/third_party/CLIFF"  # upstream CLIFF code/checkpoints
 CKPT_DEFAULT = CLIFF_ROOT / "data/ckpt/hr48-PA43.0_MJE69.0_MVE81.2_3dpw.pt"
 FACTS_ROOT = WORKSPACE / "shared/facts/sessions/cam3"
-MASK_ROOT = resolve_uri("raw://human_masks")  # external source registered in workspace.py RAW_SYMLINKS
+MASK_ROOT = resolve_uri("asset://upstream/human_masks")  # 2026-10-24: import entry moved to assets/upstream
 SMPL_NEUTRAL = WORKSPACE / "assets/third_party/smpl/SMPL_NEUTRAL.pkl"
 OUTPUT_ROOT = common.CLIFF_ROOT  # shared/frontends/cliff_hr48/v1
 TOLERANCE_S = 0.020

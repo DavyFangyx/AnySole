@@ -47,7 +47,7 @@ from AnysoleWorkspace.tool.adapters.mmvp_series.pressure_tookit import floor as 
 from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
 OUT_DIR = REPO_ROOT / "results_display" / "DataTest" / "D6Test_floor"
-MASK_SOURCE_ROOT = resolve_uri("raw://human_masks")  # external source registered in workspace.py RAW_SYMLINKS
+MASK_SOURCE_ROOT = resolve_uri("asset://upstream/human_masks")  # 2026-10-24: import entry moved to assets/upstream
 
 # 每日期代表 session（date -> session id）
 REPRESENTATIVE = {

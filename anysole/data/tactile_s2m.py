@@ -83,7 +83,7 @@ def resolve_legacy_bvh_path(meta: dict) -> Path:
         return recorded
     session_id = str(meta["session_id"])
     date = str(meta["date"])
-    root = WORKSPACE_ROOT / "raw" / "bvh" / date / "mocap_ori_bvh" / session_id
+    root = WORKSPACE_ROOT.parent / "hf-raw" / "bvh" / date / "mocap_ori_bvh" / session_id
     candidates = sorted(root.glob("*.bvh"))
     if not candidates:
         raise FileNotFoundError(

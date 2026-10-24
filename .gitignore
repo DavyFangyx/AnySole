@@ -40,7 +40,10 @@ __pycache__/
 
 # AnysoleWorkspace v2: raw links and generated facts/representations are
 # machine-local outputs. Keep protocol contracts and hand-off reports tracked.
-/AnysoleWorkspace/raw/
+# raw 已数据包化为根目录 hf-raw/（2026-10-24）；AnysoleWorkspace/raw 现为
+# 存量相对软链的兼容桥（symlink -> ../hf-raw），同样不进 git。
+/AnysoleWorkspace/raw
+/AnysoleWorkspace/assets/upstream/
 /AnysoleWorkspace/shared/
 /AnysoleWorkspace/model_inputs/
 /AnysoleWorkspace/work/
@@ -105,10 +108,7 @@ z_note/probes/
 /z_note/data_pressure_fixpipe/Tactile_pressure_handoff_20261017_v2_no_smoothing/
 z_note/data_pressure_fixpipe/Tactile_pressure_handoff_20261020_v3/
 # 备份目录与审计/探针中间产物（机器本地，不进 git）
-z_note/data_offset_fixpipe/backup/
 z_note/data_pressure_fixpipe/backup/
-z_note/data_offset_fixpipe/审计_F1_CoP/
-z_note/data_offset_fixpipe/探针面板/
 
 # HMR2.0 实验线的第三方参考仓库（论文仓库 clone，不进 git；实验文档保留）
 /z_note/HMR2.0/4D-Humans/
@@ -116,3 +116,7 @@ z_note/data_offset_fixpipe/探针面板/
 
 # 机器本地临时目录（跨用户压力导出等临时数据）
 /tmp/
+
+# HF 原始数据包（部署者下载；含四相机 jpg/触觉 tactile_v3 树/BVH/SMPL npz/
+# 空间时间配置，机器本地数据，不进 git）
+/hf-raw/

@@ -22,7 +22,7 @@
                       source_hashes.pressure_48 一致；frame_id.npy 与 facts frame_id 相等
 
 显示口径（与已删除的 generate_baseline_tactile.py 落盘契约兼容，纯只读复现）：
-    - 4×12 / 脚 = row-major（col0 = 脚尖；assets/foot_sensor_layout/README.md 已数值
+    - 4×12 / 脚 = row-major（col0 = 脚尖；hf-raw/config/foot_sensor_layout/README.md 已数值
       验证），AnySole/Step2Motion 面板 rot90 竖直显示；
     - AnySole / MMVP / Step2Motion 三块共用同一值域裁剪 clip(v, 0, 1023) / 1023，等价于
       旧的冻结双足光栅 clip(raw, 0, 1023) / 1023 * 255 再 pressure_to_heatmap(vmax=255)

@@ -1,36 +1,7 @@
-# foot_sensor_layout —— 我方 4×12 鞋垫传感器物理布局
+# foot_sensor_layout
 
-来源：`/data/lizhe/projects/Tactile/Gait-Data-Collector_0811/foot_sensor_layout/`
-（采集器仓库自带，2026-09-21 复制入 workspace）。
+足底传感点阵与轮廓曲线坐标（dot_index/curve 归一化坐标）。
 
-## 文件
-
-| 文件 | 内容 |
-| --- | --- |
-| `leftfoot_dots.csv` / `rightfoot_dots.csv` | 48 个压力传感器点的归一化坐标（`norm_x, norm_y` ∈ [0,1]，`dot_index` 1-48） |
-| `leftfoot_curve.csv` / `rightfoot_curve.csv` | 足型轮廓曲线 200 点（同归一化坐标系） |
-
-## 与 48 通道的对应（已数值验证）
-
-- **dot_index = 通道号 + 1**：`dot_index k` ↔ 重建 CSV 第 k 列 ↔ T_raw 通道 k-1
-  （验证：dots 1-12 沿脚长方向 12 个位置（y 0.904→0.091，脚尖→脚跟）、x 近似不变；
-  每 12 点跳一个宽度位置（x +0.39）→ 即通道序 = 4 宽行 × 12 长列 row-major，
-  与 `anysole/data/pressure.py` 冻结的 reshape(-1,4,12)、col0=脚尖 完全一致）。
-- 坐标系：y = 脚长方向（y≈0.9 脚尖 → y≈0.1 脚跟）；x = 脚宽方向。
-- **内外侧方向（2026-10-16 裁定）**：row0（dots 1-12，每脚 x 小端的行，通道 0-11）
-  = **外侧**；内侧 = row3。依据：① 足型轮廓趾区凸起（大脚趾=内侧）左脚在 x 大端
-  （x→0.95）、右脚在 x 小端（x→0.05），两脚图纸互为精确 x 镜像（x_L+x_R=1.000，
-  实测零误差）；② 全量 139 session 左右脚行占比时间序列互相关：直接对齐 +0.116 vs
-  翻转对齐 −0.086——两脚数据行口径一致（无左右镜像）。数据链保证：采集器
-  reorder_pressure_rows 为全局限定翻转（两脚同规则），washer 透传，通道 k ↔
-  dot_index k+1。GT 足底网格栅格化（results_display d_test8/d_test9 foot_heat）
-  按本口径对齐：col0=趾、row0=外侧（右脚 lat 取反）。采集器 UI 显示时做
-  1-x/1-y 翻转仅为显示，不影响数据。
-- 单位：归一化 0-1，无绝对 mm 尺度；转入 SMPL 模板足底系时按足底包围盒范围对齐
-  （见 results_display D_Test5 的 `our_cell_positions`）。
-
-## 消费者
-
-- `results_display/script/d_test5_baseline_tactile.py`（四基线触觉适配 GIF）
-- 后续 pressure_tookit / VP-MoCap 适配层（Agent_06 D2 宽度方向"以标定为准"
-  可改用本文件 + 左右脚各自对齐，替代整带宽占位）
+2026-10-24 起目录已迁至 **`hf-raw/config/foot_sensor_layout/`**（随 HF
+原始数据包分发；build_shared.py 的 `LAYOUT` 指向该处）。本目录仅保留此
+指路说明。
