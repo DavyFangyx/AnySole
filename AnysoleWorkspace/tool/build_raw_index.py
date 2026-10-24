@@ -74,6 +74,9 @@ def build(input_manifest: Path, output: Path) -> int:
             "visual_start_s": float(row.get("visual_start_s") or 0.0),
             "mocap_start_s": float(row.get("mocap_start_s") or 0.0),
             "offset_s": float(row.get("offset_s") or 0.0),
+            # 质量评级流经索引（源 = 冻结 manifest 两列，重建链不另设登记表）
+            "pressure_quality_class": row.get("pressure_quality_class", ""),
+            "pressure_quality_reason": row.get("pressure_quality_reason", ""),
             "source_manifest": str(input_manifest),
         }
         result.append(item)

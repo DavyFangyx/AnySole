@@ -171,33 +171,6 @@ def _subject_list(value: str | None) -> set[str]:
     return {item.strip() for item in (value or "").split(",") if item.strip()}
 
 
-def join_pressure_quality(rows: list[dict]) -> None:
-    """Fill pressure_quality_class/reason from the pressure washer stats table.
-
-    0605d1f registered the A/B/C/D tactile-quality annotation (join key =
-    dataset_id == session_id; source = stats/.../missing_pressure_objects.csv,
-    definitions in protocol/splits/default/README.md).  A manifest rebuilt
-    without this join silently drops the columns, so the join lives here.
-    """
-    stats_path = WORKSPACE / "hf-raw/pressure/data/pressure_quality.csv"
-    if not stats_path.is_file():
-        print("join_pressure_quality: no pressure stats table under %s; columns left empty" % stats_path,
-              file=sys.stderr)
-        return
-    lookup: dict[str, tuple[str, str]] = {}
-    with stats_path.open(encoding="utf-8") as handle:
-        for record in csv.DictReader(handle):
-            lookup[record["dataset_id"]] = (record["quality_class"], record["reason"])
-    joined = 0
-    for row in rows:
-        quality = lookup.get(row["session_id"])
-        row["pressure_quality_class"] = quality[0] if quality else ""
-        row["pressure_quality_reason"] = quality[1] if quality else ""
-        joined += quality is not None
-    print("join_pressure_quality: %d/%d sessions annotated from %s" % (joined, len(rows), stats_path),
-          file=sys.stderr)
-
-
 def write_splits(rows: list[dict], output: Path, *, exclude: set[str] | None = None,
                  test: set[str] | None = None, val: set[str] | None = None) -> None:
     """Generate a subject split; validation defaults to the subject preceding test.
@@ -241,7 +214,7 @@ def build(fps: float, camera: str, output: Path,
           index_path: Path | None = None, split_path: Path | None = None,
           jsonl_only: bool = False) -> tuple[list[dict], list[str]]:
     index_path = index_path or WORKSPACE / "protocol/manifests/raw_session_index.jsonl"
-    cam_dir = str(camera).removeprefix("cam")  # QC per camera (四相机决策记录 §4-1)
+    cam_dir = str(camera)[3:] if str(camera).startswith("cam") else str(camera)  # QC per camera (四相机决策记录 §4-1; py3.8 无 removeprefix)
     rows, issues = [], []
     for meta in raw_index(index_path):
         sid = str(meta["session_id"])
@@ -284,10 +257,12 @@ def build(fps: float, camera: str, output: Path,
                      "visual_start_s": meta.get("visual_start_s", 0.0),
                      "mocap_start_s": meta.get("mocap_start_s", 0.0), "offset_s": meta.get("offset_s", 0.0),
                      "fake_frame_indices": json.dumps(fake), "valid_frame_indices": json.dumps(valid),
+                     # 质量评级随索引流入（源 = 冻结 manifest，经 build_raw_index 携带；不设登记表）
+                     "pressure_quality_class": str(meta.get("pressure_quality_class", "")),
+                     "pressure_quality_reason": str(meta.get("pressure_quality_reason", "")),
                      "quality": "ok" if not quality else ";".join(quality),
                      "eligible_anysole": "1" if eligible else "0", "eligibility_reason": eligibility_reason,
                      "joint_checksum": SMPL24_CHECKSUM if smpl.is_file() else ""})
-    join_pressure_quality(rows)
     rows.sort(key=lambda row: row["session_id"])
     output.parent.mkdir(parents=True, exist_ok=True)
     if not jsonl_only:

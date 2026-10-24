@@ -181,7 +181,7 @@ def doctor() -> int:
     for path in required:
         if not path.exists():
             errors.append(f"missing required canonical path: {path}")
-    for root in (WORKSPACE / "raw", WORKSPACE / "protocol", WORKSPACE / "shared",
+    for root in (WORKSPACE / "hf-raw", WORKSPACE / "protocol", WORKSPACE / "shared",
                  WORKSPACE / "model_inputs", WORKSPACE / "work", WORKSPACE / "assets",
                  WORKSPACE / "reports"):
         for path in root.rglob("*"):

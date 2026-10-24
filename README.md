@@ -32,7 +32,7 @@ gait/
 │   └── command_manual.md            # 基线训练/评估/方法运行手册
 ├── AnysoleWorkspace/                # 数据与过程产物工作区（唯一数据工作区）
 │   ├── README.md                    # 中间数据准备手册（全部数据构建命令）
-│   ├── raw/  protocol/  shared/  model_inputs/  work/  assets/  reports/
+│   ├── hf-raw/  protocol/  shared/  model_inputs/  work/  assets/  reports/
 │   └── tool/                        # 数据构建代码（唯一入口）
 ├── results/                         # 最终结果区（checkpoint/预测/评测结果）
 │   ├── README.md                    # 主模型与基线的文件树说明
