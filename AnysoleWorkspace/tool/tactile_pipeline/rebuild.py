@@ -7,6 +7,11 @@ to the unchanged v2 treatments (isolated impulse / airborne baseline /
 supported step). Every value change appears in exactly one change log:
 fault_cell_changes (raw -> fault_repaired), impulse_changes
 (fault_repaired -> impulse_only), changes (impulse_only -> processed).
+
+v3.1 (2026-10-24 定妆照): 写 npz 时把行级质量包
+（{side}_{t_us,raw_t_us,valid,fake}，源 = 包内 data/quality_rows/）烤进
+dataset npz 本身，消费端不再依赖任何生产侧中间件。无 quality_rows 的
+录制跳过烤入并告警（消费端仅消费已烤入会话）。
 """
 from pathlib import Path
 import argparse,collections,csv,datetime,hashlib,json,shutil
@@ -16,6 +21,7 @@ from noise_model import process
 from baseline_core import make_baseline
 from fault_cell import repair as repair_fault_bursts
 from detector import scan_steps
+from quality_rows import load_quality_rows
 
 def sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 def read(p):
@@ -35,7 +41,7 @@ def same(a,b):
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--package-root',type=Path,
-                    default=Path(__file__).resolve().parents[2]/'work'/'data_pipeline'/'tactile_v3')
+                    default=Path(__file__).resolve().parent)
     ap.add_argument('--output',type=Path,required=True,help='new directory outside this package')
     ap.add_argument('--verify-reference',action='store_true',help='compare every rebuilt array and CSV with shipped data')
     ap.add_argument('--scan',action='store_true',help='also rerun full-population statistical step screening')
@@ -63,11 +69,14 @@ def main():
         faultmax=float(fb.max()) if len(fr) else float('nan')
         native=np.array([float(a['t_us'])/1e6 for a in rows],float) if 't_us' in fields else np.full(n,np.nan)
         epoch=np.nan
+        meta_rec=None
         if r['relative_metadata']:
             metap=inside(root,r['relative_metadata']);assert sha(metap)==r['metadata_sha256']
-            iso=json.loads(metap.read_text()).get('started_at_iso','')
+            meta=json.loads(metap.read_text());iso=meta.get('started_at_iso','')
             if iso:
                 date=datetime.datetime.fromisoformat(iso);epoch=date.hour*3600+date.minute*60+date.second+date.microsecond/1e6
+                hhmmss=f'{date.hour:02d}{date.minute:02d}{date.second:02d}'
+                meta_rec=f"rec{r['date']}_{hhmmss}_{meta.get('subject','')}_{r['subject']}{r['action'].zfill(2)}_{r['trial']}"
         wall=native+epoch if np.isfinite(epoch) else np.full(n,np.nan)
         legacy=np.zeros(48,bool);legacyids=json.loads(r['legacy_advisory_channels0'])
         assert all(0<=c<48 for c in legacyids);legacy[legacyids]=True
@@ -88,6 +97,19 @@ def main():
             temporal_segment_id=q['temporal_segment_id'],cell_valid=q['cell_valid'],
             cell_review_flags=q['cell_review_flags'],row_quality_flags=q['row_quality_flags'],
             schema_version=np.asarray('native_faultrepair_impulse_airborne_baseline_step.v3'))
+        # v3.1 定妆照：行级质量包烤进 npz 本身（消费端自包含）。
+        # 质量包行数与值行数不同空间（quality_rows 独立行空间，消费端按时间
+        # 最近邻对齐），烤入 = 原样复制，不做行数校验。
+        if meta_rec is not None:
+            try:
+                pack = load_quality_rows(r['date'], r['subject'], meta_rec, root=root)[side]
+            except FileNotFoundError:
+                print(f'warning: {sid}/{side} 无 quality_rows（{meta_rec}），不烤入', flush=True)
+            else:
+                payload[f'{side}_t_us'] = pack[0]
+                payload[f'{side}_raw_t_us'] = pack[1]
+                payload[f'{side}_valid'] = pack[2]
+                payload[f'{side}_fake'] = pack[3]
         np.savez_compressed(p,**payload)
         fl=Path('fault_cell_changes')/(sid+'_'+side+'.npz');(out/fl).parent.mkdir(exist_ok=True)
         np.savez_compressed(out/fl,row0=fr,channel=fc,before=fb,after=fa)
