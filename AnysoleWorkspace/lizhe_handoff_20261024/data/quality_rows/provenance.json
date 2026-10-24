@@ -1,5 +1,0 @@
-{
-  "origin": "row-level valid/fake marks built by the retired PressureWasher mark-fake chain (2026-08; code deleted 2026-10-24)",
-  "absorbed": "2026-10-24",
-  "semantics": "per-row t_us (uniform 40 Hz reconstruction), raw_t_us (physical wall clock, NaN = never selectable), valid_mask, fake; values intentionally absent (values are the tactile pipeline's job)"
-}
