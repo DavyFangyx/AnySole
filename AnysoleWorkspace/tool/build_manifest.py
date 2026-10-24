@@ -114,23 +114,30 @@ def raw_index(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def pressure_files(recording_name: str, pressure_uri: str | None = None) -> Path | None:
+def pressure_files(sid: str, pressure_uri: str | None = None) -> tuple[Path, Path] | None:
+    """Return (left.npz, right.npz) from the baked dataset tree.
+
+    ``pressure_uri`` = subject 级目录 URI（如 hfraw://pressure/data/dataset/
+    {date}/{subject}），其下 {sid}/left.npz、{sid}/right.npz 自含质量包
+    （{side}_valid/_fake，2026-10-24 定妆照）。
+    """
     root = resolve_uri(pressure_uri or "raw://pressure", must_exist=True)
-    if not root.is_dir():
+    left = root / sid / "left.npz"
+    right = root / sid / "right.npz"
+    if not (left.is_file() and right.is_file()):
         return None
-    matches = sorted(root.glob(f"**/{recording_name}.npz"))
-    return matches[-1] if matches else None
+    return left, right
 
 
-def pressure_flags(recording_name: str, n_frames: int, pressure_uri: str | None = None) -> tuple[list[int], list[int], str]:
-    path = pressure_files(recording_name, pressure_uri)
-    if path is None:
+def pressure_flags(sid: str, n_frames: int, pressure_uri: str | None = None) -> tuple[list[int], list[int], str]:
+    paths = pressure_files(sid, pressure_uri)
+    if paths is None:
         return [], [], "missing_pressure_final"
     import numpy as np
 
-    data = np.load(path)
     columns = []
-    for side in ("left", "right"):
+    for side, path in zip(("left", "right"), paths):
+        data = np.load(path)
         if data[f"{side}_valid"].size == 0:
             return [], [], "empty_pressure_final"
         fake = np.asarray(data[f"{side}_fake"], dtype=np.uint8)
@@ -243,7 +250,7 @@ def build(fps: float, camera: str, output: Path,
         bvh = resolve_uri(meta["bvh_uri"])
         smpl = resolve_uri(meta["smpl_uri"]) if meta.get("smpl_uri") else Path("__missing_smpl__")
         recording = resolve_uri(meta["recording_uri"], must_exist=True)
-        fake, valid, pressure_issue = pressure_flags(recording.name, n, meta.get("pressure_uri"))
+        fake, valid, pressure_issue = pressure_flags(sid, n, meta.get("pressure_uri"))
         names, parents = parse_bvh_header(bvh)
         quality = []
         for label, path in (("bvh", bvh), ("smpl", smpl)):
@@ -266,10 +273,9 @@ def build(fps: float, camera: str, output: Path,
         eligibility_reason = "ok" if eligible else ";".join(
             issue for issue in quality if issue.startswith("missing_") or issue.startswith("invalid_")
         )
-        # 触觉值正典 = v3 数据包 dataset npz 目录（2026-10-22 生产替换；
-        # 2026-10-24 定妆照：processed_csv 导出件已剔除）
-        pressure_uri = (f"AnysoleWorkspace/hf-raw/pressure/"
-                        f"data/dataset/{meta['date']}/{subject}/{sid}")
+        # 触觉值正典 = v3 数据包 dataset npz（2026-10-24 定妆照：自含质量包；
+        # pressure_path = session 级目录 URI，消费端解析后读 left/right.npz）
+        pressure_uri = (f"hfraw://pressure/data/dataset/{meta['date']}/{subject}/{sid}")
         rows.append({"session_id": sid, "subject_id": subject, "action": meta.get("action", ""),
                      "trial": meta.get("trial", ""), "camera": camera,
                      "video_path": meta["recording_uri"], "pressure_path": pressure_uri,

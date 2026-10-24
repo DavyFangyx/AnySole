@@ -19,9 +19,9 @@
   ③ 随足轴在 ‖d_xz‖<0.05m（足俯仰>50°，提踵/上楼梯）时沿用上一有效轴，
   防踝→foot 水平投影退化/翻转导致的热图列序错乱（类型 C）；
 - 触觉数据热图 —— 默认 shared facts pressure_48.npz 原始 48 格/脚（0-1023），
-  rot90 竖直显示（col0=脚尖，heel 在上），与 D_Test4 同口径；--tactile-input
-  可切交接包降噪源（denoised108=v1 / denoised108_v2 / denoised108_v3，与
-  anysole/data/dataset.py 同语义；fake/valid 标志仍取 shared facts）；
+  rot90 竖直显示（col0=脚尖，heel 在上），与 D_Test4 同口径；触觉源固定 =
+  shared facts 原始 48 格/脚（旧 handoff 交接包链已删，2026-10-24；facts
+  即 v3 清洗值 + 烤入质量包，fake/valid 标志同取 shared facts）；
 - SMPL GT 的 CoP —— **同一个** anysole.data.pressure.cop_from_grid 作用于
   GT 足底热图网格（着地顶点计数质心），与触觉 CoP 同公式同单位（网格坐标
   0-1），可直接对比；
@@ -41,7 +41,6 @@
     python results_display/script/d_test8_smpl_gt_cop.py --session S5091
     python results_display/script/d_test8_smpl_gt_cop.py --split test
     python results_display/script/d_test8_smpl_gt_cop.py --session S5091 --stride 2 --max-frames 20
-    python results_display/script/d_test8_smpl_gt_cop.py --session S5091 --tactile-input denoised108_v2
 """
 from __future__ import annotations
 
@@ -68,12 +67,6 @@ from loguru import logger as log  # noqa: E402
 from PIL import Image, ImageDraw  # noqa: E402
 
 from utils import cli_common, render_common as rc  # noqa: E402
-from anysole.data.handoff_pressure import (  # noqa: E402
-    HANDOFF_PACKAGES,
-    handoff_root,
-    resample_handoff,
-    video_start_for,
-)
 from anysole.data.pressure import cop_from_grid  # noqa: E402
 from anysole.data.smpl_io import (  # noqa: E402
     load_smpl,
@@ -107,15 +100,6 @@ GT_ANKLE_DZ = 0.005                # 只取踝关节以下的足部顶点
 # 提踵/上楼梯时踝→foot 水平投影退化甚至翻转——GT足底×触觉冲突审计 2026-10-20
 # 类型 C）。
 AXIS_MIN_NORM = 0.05
-
-# --tactile-input → 交接包编号（与 anysole/data/dataset.py 的切换同语义：
-# denoised108=v1 含平滑 / denoised108_v2=v2 无平滑 / denoised108_v3=v3
-# 另线落地）。包是否可用按 handoff_pressure.HANDOFF_PACKAGES 注册表判断。
-TACTILE_INPUT_PACKAGE = {
-    "denoised108": "v1",
-    "denoised108_v2": "v2",
-    "denoised108_v3": "v3",
-}
 
 SENSOR_CLIP = 1023.0               # 触觉面板 raw 值域（D_Test4 口径）
 TRAIL_FRAMES = 40                  # CoP 轨迹窗（渲染帧数）
@@ -402,24 +386,9 @@ def render_one(sid: str, args: argparse.Namespace) -> Path | None:
     valid_flags = (~np.asarray(shared["pressure"]["fake"], dtype=bool))[:n_frames]
     fps = float(shared["meta"].get("fps", FPS))
 
-    # 触觉数据源：raw108 = shared facts 原始（默认）；其余 = 交接包降噪，与
-    # anysole/data/dataset.py 的切换同语义（同帧网格最近行，值换处理值；
-    # fake/valid 标志仍取 shared facts）。root 必须显式传（handoff_pressure
-    # 的默认值在模块定义时绑定，改注册表不会生效）。
+    # 触觉数据源：shared facts 原始 48 格/脚（旧 handoff 交接包链已删，
+    # 2026-10-24；facts 即 v3 清洗值 + 烤入质量包）
     tactile_source = "shared facts raw108"
-    if args.tactile_input != "raw108":
-        package = TACTILE_INPUT_PACKAGE[args.tactile_input]
-        if package not in HANDOFF_PACKAGES:
-            raise ValueError(
-                f"{sid}: --tactile-input {args.tactile_input} → 交接包 {package}"
-                f" 尚未注册（HANDOFF_PACKAGES 无该项，v3 落地后自动可用）")
-        left48, right48 = resample_handoff(
-            sid, str(shared["meta"]["date"]), str(shared["meta"]["subject"]),
-            video_start_for(shared["dir"]), n_frames,
-            package=package, root=handoff_root(package))
-        tactile_source = f"handoff {args.tactile_input}"
-        log.info("{}: 触觉源 = handoff 包 {}（n_frames={}）", sid, package,
-                 n_frames)
 
     if args.frame:
         frame_ids = [int(x) for x in cli_common.split_csv_arg(args.frame)]
@@ -528,7 +497,7 @@ def render_one(sid: str, args: argparse.Namespace) -> Path | None:
             trail_t_l[-TRAIL_FRAMES:],
             trail_t_r[-TRAIL_FRAMES:], force_l, force_r,
             "触觉的 CoP",
-            f"cop_from_grid({args.tactile_input}) · 轨迹窗 {TRAIL_FRAMES} 渲染帧 · 准星=最近有效帧",
+            f"cop_from_grid(raw108) · 轨迹窗 {TRAIL_FRAMES} 渲染帧 · 准星=最近有效帧",
             C_COP)
         frames.append(compose_2x2(gt_panel, tactile, gt_cop_panel, t_cop_panel,
                                   sid, fi, n_frames, bool(valid_flags[fi]),
@@ -582,14 +551,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--frame", type=str, default="",
                    help="指定帧号（逗号分隔）静态渲染 PNG（<sid>_smpl_gt_cop_f<N>.png），"
                         "优先于 --stride/--max-frames")
-    p.add_argument("--tactile-input", type=str, default="raw108",
-                   choices=("raw108", "denoised108", "denoised108_v2",
-                            "denoised108_v3"),
-                   help="触觉数据源（默认 raw108 = shared facts 原始 48 格/脚；"
-                        "denoised108 = v1 交接包（含自适应平滑）、denoised108_v2 = "
-                        "v2（无平滑）、denoised108_v3 = v3（另线落地后可用），"
-                        "与 anysole/data/dataset.py 同语义，fake/valid 仍取 "
-                        "shared facts）")
     p.add_argument("--block-secs", type=float, default=0.0,
                    help="连续全速时间块秒数（>0 时覆盖 --stride/--max-frames，"
                         "块间插分隔帧；如 0.5）")

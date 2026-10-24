@@ -380,9 +380,9 @@ archive y=0（g0，SMPL 足部地面审计 2026-10-19 裁定；旧 estimate_floo
 p5 比物理地面高致恒接触）；接触阈值 3cm（鞋底厚度 1.4–2.0cm 稳定裕度）；
 随足轴在 ‖d_xz‖<0.05m（足俯仰>50°，提踵/上楼梯）时沿用上一有效轴。标题行
 附 action 编号（session_manifest.csv，无记录不显示；action 11 = 上楼梯）。
-`--tactile-input` 切触觉源：raw108（默认，shared facts）| denoised108（v1
-交接包）| denoised108_v2（v2 无平滑）| denoised108_v3（v3 落地后可用），
-与训练侧 `anysole/data/dataset.py` 同语义；fake/valid 标志仍取 shared facts。
+触觉源固定 = shared facts 原始 48 格/脚（旧 handoff 交接包链与
+`--tactile-input` 选项已随模块删除，2026-10-24；facts 即 v3 清洗值 +
+烤入质量包）。
 
 已知局限（不建模）：上楼梯（action 11）session 台阶面高于 y=0，单平面 GT 对
 台阶支撑期必然显示"悬空"——台阶支撑期 GT 热图可为空而触觉面板有载荷，正常。
