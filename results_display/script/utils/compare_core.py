@@ -154,8 +154,16 @@ def load_contact_gt(row: dict[str, str], n: int, method: str = "joint_and") -> n
     derived contact can never feed a formal ``contact_f1``.  This loader and
     :func:`contact_from_joints` remain for visualization/diagnosis only.
     """
-    pressure_path = resolve_repo_path(row["pressure_path"], ROOT)
-    path = pressure_path.parent / ("contact.npy" if method == "tactile_abs" else f"contact_{method}.npy")
+    # 2026-10-24 适配：pressure_path 为 hfraw://…/dataset/{date}/{subject}/{sid}
+    # 目录 URI；contact 标签正典 = facts session 目录（contact_{method}.npy）
+    try:
+        pressure_dir = resolve_repo_path(row["pressure_path"], ROOT)
+    except Exception:
+        return None
+    facts_dir = (ROOT / "AnysoleWorkspace" / "shared" / "facts" / "sessions" / "cam3"
+                 / pressure_dir.parent.parent.name / pressure_dir.parent.name
+                 / pressure_dir.name)
+    path = facts_dir / f"contact_{method}.npy"
     if not path.is_file():
         return None
     values = np.asarray(np.load(path), dtype=np.float32)

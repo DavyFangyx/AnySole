@@ -38,16 +38,23 @@ def main():
     args = parser.parse_args()
     import csv
     rows = list(csv.DictReader(args.manifest.open(encoding="utf-8-sig")))
+    from AnysoleWorkspace.tool.workspace import resolve_uri
     grouped = {}
     for row in rows:
-        path = Path(row["pressure_path"])
-        if not path.is_absolute(): path = args.manifest.parents[2] / path
-        if path.is_file(): grouped.setdefault(row["subject_id"], []).append((row["session_id"], path))
+        try:
+            path = resolve_uri(row["pressure_path"])  # hfraw://…/dataset/{date}/{subject}/{sid}
+        except Exception:
+            continue
+        if (path / "left.npz").is_file() and (path / "right.npz").is_file():
+            grouped.setdefault(row["subject_id"], []).append((row["session_id"], path))
     templates, records = [], []
     for subject, sessions in sorted(grouped.items()):
         candidates = []
         for sid, path in sessions:
-            p = np.load(path)["pressure"].astype(np.float32)
+            left = np.load(path / "left.npz")["processed48"].astype(np.float32)
+            right = np.load(path / "right.npz")["processed48"].astype(np.float32)
+            n_rows = min(len(left), len(right))  # 左右脚行数可不等，取交集对齐
+            p = np.concatenate([left[:n_rows], right[:n_rows]], axis=1)
             try:
                 left, right = pressure_to_feet(p)
             except ValueError:
