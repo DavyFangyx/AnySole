@@ -172,7 +172,7 @@ def join_pressure_quality(rows: list[dict]) -> None:
     definitions in protocol/splits/default/README.md).  A manifest rebuilt
     without this join silently drops the columns, so the join lives here.
     """
-    stats_path = WORKSPACE / "work/data_pipeline/tactile_v3/data/pressure_quality.csv"
+    stats_path = ROOT / "hf-raw/pressure/data/pressure_quality.csv"
     if not stats_path.is_file():
         print("join_pressure_quality: no pressure stats table under %s; columns left empty" % stats_path,
               file=sys.stderr)
@@ -266,10 +266,10 @@ def build(fps: float, camera: str, output: Path,
         eligibility_reason = "ok" if eligible else ";".join(
             issue for issue in quality if issue.startswith("missing_") or issue.startswith("invalid_")
         )
-        # 触觉值正典 = v3 交接包 processed_csv 目录（2026-10-22 生产替换；
-        # 帧级 valid/fake 由 meta["pressure_uri"] 的 quality_rows 行级标记计算）
-        pressure_uri = (f"AnysoleWorkspace/work/data_pipeline/tactile_v3/"
-                        f"data/processed_csv/{meta['date']}/{subject}/{sid}")
+        # 触觉值正典 = v3 数据包 dataset npz 目录（2026-10-22 生产替换；
+        # 2026-10-24 定妆照：processed_csv 导出件已剔除）
+        pressure_uri = (f"hf-raw/pressure/"
+                        f"data/dataset/{meta['date']}/{subject}/{sid}")
         rows.append({"session_id": sid, "subject_id": subject, "action": meta.get("action", ""),
                      "trial": meta.get("trial", ""), "camera": camera,
                      "video_path": meta["recording_uri"], "pressure_path": pressure_uri,
@@ -315,7 +315,8 @@ def main() -> int:
     p.add_argument("--cam", default="",
                    help="per-camera manifests to write next to the main one: 'all' or "
                         "comma list of camera ids -> session_manifest_cam{N}.jsonl "
-                        "(四相机决策记录 §4-1); default none")
+                        "(四相机决策记录 §4-1; cam3 = 主 manifest 不另写 per-camera 文件，"
+                        "2026-10-24 修订); default none")
     p.add_argument("--output", type=Path, default=WORKSPACE / "protocol/manifests/session_manifest.csv")
     p.add_argument("--index", type=Path, default=WORKSPACE / "protocol/manifests/raw_session_index.jsonl")
     build_args = argv[1:] if argv and argv[0] == "build" else argv
@@ -324,7 +325,7 @@ def main() -> int:
     print(f"wrote {a.output} and {a.output.with_suffix('.jsonl')} ({len(rows)} sessions); split file unchanged")
     if a.cam:
         if a.cam.strip() == "all":
-            cams = (1, 2, 3, 4)
+            cams = (1, 2, 4)
         else:
             try:
                 cams = tuple(int(item.strip()) for item in a.cam.split(",") if item.strip())
@@ -333,6 +334,7 @@ def main() -> int:
             unknown = set(cams) - {1, 2, 3, 4}
             if unknown:
                 raise SystemExit(f"unknown camera(s): {sorted(unknown)}")
+        cams = tuple(c for c in cams if c != 3)  # cam3 = 主 manifest，不另写 per-camera 文件
         for cam in cams:
             per_output = a.output.with_name(f"session_manifest_cam{cam}.jsonl")
             per_rows, _ = build(a.fps, f"cam{cam}", per_output, a.index, jsonl_only=True)

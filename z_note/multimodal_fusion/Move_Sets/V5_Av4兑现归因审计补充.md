@@ -1,6 +1,6 @@
 # V5_Av4 兑现归因审计补充（2026-10-24）
 
-对「V5_Av1 T2M 极度退化 / Av4 修好 T2M 但 occ 兑现缩水」论断逐项核实。数据源 = `results/experiments/per_action_folds/*/metrics/{session_detail_test,test}.json` 逐 fold 重算（动作映射 = `session_manifest_cam3.jsonl` 官方口径，与 10-24 修正版报告数字一致）。
+对「V5_Av1 T2M 极度退化 / Av4 修好 T2M 但 occ 兑现缩水」论断逐项核实。数据源 = `results/experiments/per_action_folds/*/metrics/{session_detail_test,test}.json` 逐 fold 重算（动作映射 = `session_manifest.jsonl` 官方口径（cam3 = 主 manifest，2026-10-24 起），与 10-24 修正版报告数字一致）。
 
 ## 1 核实成立
 
