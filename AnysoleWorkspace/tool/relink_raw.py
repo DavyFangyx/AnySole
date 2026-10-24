@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Build the raw/ modality link farm (plan: reports/raw_relink_plan_20261001.md §4).
 
-``hf-raw/{rgb,bvh,smpl}`` become per-modality filtered views over the
+``AnysoleWorkspace/hf-raw/{rgb,bvh,smpl}`` become per-modality filtered views over the
 upstream tree, shape-preserving with respect to the frozen manifest URIs
 (relative paths inside each entry match ``raw://`` URIs segment by segment).
-pressure 不再由本脚本建农场：触觉正典 = hf-raw/pressure 数据树
+pressure 不再由本脚本建农场：触觉正典 = AnysoleWorkspace/hf-raw/pressure 数据树
 （tactile_v3 清洗产物，见 build_shared.py）。
 ``raw/{calibration,human_masks}`` stay plain symlinks and are managed by
 ``tool/workspace.py`` (RAW_SYMLINKS), not by this script.
 
-Glob-safety: every level that is hit by a recursive ``**`` glob (hf-raw/smpl
+Glob-safety: every level that is hit by a recursive ``**`` glob (AnysoleWorkspace/hf-raw/smpl
 by ``build_raw_index.py``) is a real directory here; symlinks are only leaves
-(files) or camera directories under hf-raw/rgb (never ``**``-traversed).
+(files) or camera directories under AnysoleWorkspace/hf-raw/rgb (never ``**``-traversed).
 
 Usage:
     python3 AnysoleWorkspace/tool/relink_raw.py build [--dates ...] [--cam 3] [--dry-run]
@@ -30,7 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "AnysoleWorkspace"
-RAW = ROOT / "hf-raw"
+RAW = WORKSPACE / "hf-raw"
 UP = Path("/data/lizhe/projects/Tactile")
 UP_DATA = UP / "1_Data"
 UP_MOCAP = UP / "Mocap"

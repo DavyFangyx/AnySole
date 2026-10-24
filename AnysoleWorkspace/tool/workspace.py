@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "AnysoleWorkspace"
 
 CANONICAL_ROOTS = {
-    "raw": ROOT / "hf-raw",
+    "raw": WORKSPACE / "hf-raw",
     "protocol": WORKSPACE / "protocol",
     "shared": WORKSPACE / "shared",
     "model_inputs": WORKSPACE / "model_inputs",
@@ -26,16 +26,16 @@ CANONICAL_ROOTS = {
     "results": ROOT / "results",
 }
 URI_ROOTS = {key: CANONICAL_ROOTS[key] for key in ("raw", "protocol", "shared", "work", "results")}
-URI_ROOTS.update({"asset": CANONICAL_ROOTS["assets"], "hfraw": ROOT / "hf-raw"})
+URI_ROOTS.update({"asset": CANONICAL_ROOTS["assets"], "hfraw": WORKSPACE / "hf-raw"})
 
 # hf-raw/{rgb,bvh,smpl} are modality link farms built by tool/relink_raw.py
 # (shape-preserving views over the upstream tree; see reports/raw_relink_plan_20261001.md).
-# 2026-10-24: raw 数据包化为根目录 hf-raw/；pressure 不再进农场（正典 =
-# hf-raw/pressure 数据树）。标定消费形态 = protocol/calibration/{date}.json
-# （HF 拷贝在 hf-raw/config/calibration），human_masks 导入入口迁至
+# 2026-10-24: raw 数据包化为 AnysoleWorkspace/hf-raw/；pressure 不再进农场（正典 =
+# AnysoleWorkspace/hf-raw/pressure 数据树）。标定消费形态 = protocol/calibration/{date}.json
+# （正典唯一，hf-raw 内不再镜像标定），human_masks 导入入口迁至
 # assets/upstream/human_masks。无遗留外部整目录软链。
 RAW_FARM_ENTRIES = ("rgb", "bvh", "smpl")
-# 兼容桥：AnysoleWorkspace/raw -> ../hf-raw（存量 facts/model_inputs 相对软链
+# 兼容桥：AnysoleWorkspace/raw -> hf-raw（存量 facts/model_inputs 相对软链
 # 仍按旧深度解析；最后阶段重建 facts/适配器后删除）。桥内不含 human_masks
 # 等非 raw 内容，HF 数据包不受影响。
 RAW_SYMLINKS = {}
@@ -97,7 +97,7 @@ def canonical_uri(path: str | Path) -> str:
 
 
 CANONICAL_DIRS = (
-    ROOT / "hf-raw",
+    WORKSPACE / "hf-raw",
     WORKSPACE / "protocol/manifests",
     WORKSPACE / "protocol/splits/default",
     WORKSPACE / "protocol/schemas",
@@ -106,7 +106,7 @@ CANONICAL_DIRS = (
     WORKSPACE / "shared/representations/tactile/mmvp_31x11",
     WORKSPACE / "shared/frontends",
     WORKSPACE / "model_inputs",
-    ROOT / "hf-raw/pressure",
+    WORKSPACE / "hf-raw/pressure",
     WORKSPACE / "assets",
     WORKSPACE / "reports",
 )
@@ -153,7 +153,7 @@ def doctor() -> int:
         elif not link.exists():
             errors.append(f"broken raw link: {link}")
     for name in RAW_FARM_ENTRIES:
-        entry = ROOT / "hf-raw" / name
+        entry = WORKSPACE / "hf-raw" / name
         if entry.is_symlink() or not entry.is_dir():
             errors.append(f"missing raw farm entry: {entry}")
     manifest = WORKSPACE / "protocol/manifests/session_manifest.jsonl"

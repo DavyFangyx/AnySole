@@ -55,7 +55,7 @@ def build(input_manifest: Path, output: Path) -> int:
         if not bvh_matches:
             raise RuntimeError(f"missing raw BVH for {sid}")
         smpl_matches = sorted(resolve_uri("raw://smpl").glob(f"**/{sid}/motion_neutral_smpl.npz"))
-        quality_root = ROOT / "hf-raw/pressure/data/dataset"
+        quality_root = WORKSPACE / "hf-raw/pressure/data/dataset"
         pressure_dir = quality_root / date / subject
         item = {
             "schema_version": "raw.session-index.v1",

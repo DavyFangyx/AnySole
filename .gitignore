@@ -40,8 +40,8 @@ __pycache__/
 
 # AnysoleWorkspace v2: raw links and generated facts/representations are
 # machine-local outputs. Keep protocol contracts and hand-off reports tracked.
-# raw 已数据包化为根目录 hf-raw/（2026-10-24）；AnysoleWorkspace/raw 现为
-# 存量相对软链的兼容桥（symlink -> ../hf-raw），同样不进 git。
+# raw 已数据包化为 AnysoleWorkspace/AnysoleWorkspace/hf-raw/（2026-10-24）；
+# AnysoleWorkspace/raw 现为存量相对软链的兼容桥（symlink -> hf-raw），同样不进 git。
 /AnysoleWorkspace/raw
 /AnysoleWorkspace/assets/upstream/
 /AnysoleWorkspace/shared/
@@ -119,4 +119,4 @@ z_note/data_pressure_fixpipe/backup/
 
 # HF 原始数据包（部署者下载；含四相机 jpg/触觉 tactile_v3 树/BVH/SMPL npz/
 # 空间时间配置，机器本地数据，不进 git）
-/hf-raw/
+/AnysoleWorkspace/hf-raw/

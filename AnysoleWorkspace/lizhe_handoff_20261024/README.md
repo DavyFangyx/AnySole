@@ -27,18 +27,19 @@
 逐字节相同 = 与 `/data/lizhe/projects/Tactile/tactile_pipeline/` 现役文件
 md5 全等（2026-10-24 实测）。
 
-## 二、这里有但 lizhe 没有的数据
+## 二、触觉质量数据（评级 + Fake 标记）
 
-对照结论：**无缺口**。lizhe 现有交付已含全部生产数据：
-
-| 项 | lizhe 侧现状 |
+| 文件 | 说明 |
 | --- | --- |
-| `inputs/`（raw_manifest.csv 891 行、raw_csv、metadata 313 份、AI/D3 裁定件） | 已有 |
-| `data/`（file_manifest.csv、pressure_quality.csv、quality_rows 245 份含 provenance.json） | 已有 |
-| `evidence/`、`reports/`、交付文档、RELEASE.json、MANIFEST.sha256.json | 已有 |
-| 我方独有数据 = 消费端 `hf-raw`（890 份自包含 npz、offset 修正表） | 按定妆照裁定属消费端资产，**不交付** |
+| `data/pressure_quality_manifest_144.csv` | 现行 A/B/C/D 评级（144 session：A127/B17）。唯一存活副本 = 主 manifest 的 `pressure_quality_class/pressure_quality_reason` 两列（10-24 17:0x join 版），此处为导出件；330 录音全量原始 csv（08-14 版）在生产端 `tactile_pipeline/data/pressure_quality.csv` 存档、未改动 |
+| `data/quality_rows/`（245 npz + provenance.json） | 行级 Fake/valid 标记（`{left,right}_{t_us,raw_t_us,valid,fake}`，吸收自旧 mark-fake 链），管线重建时按录制名烤进 dataset npz 的源数据；provenance.json 为血缘说明 |
 
-## 三、使用方式
+## 三、不交付项
+
+- 消费端 `AnysoleWorkspace/hf-raw/`（890 份自包含 npz、rgb/bvh/smpl 农场）——按定妆照裁定属消费端资产，不交付。
+- offset 修正表（`protocol/calibration/offset_correction.csv`）——用户裁定「给 lizhe 的只有触觉」，不在本包范围。
+
+## 四、使用方式
 
 1. 用本包 3 个改动文件覆盖现有交付同名文件。
 2. 重跑 `python3 rebuild.py --package-root . --output <新目录>` 产出含质量包

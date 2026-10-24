@@ -33,12 +33,12 @@ FACTS_ROOT = WORKSPACE / "shared/facts/sessions"
 MMVP_ROOT = WORKSPACE / "shared/representations/tactile/mmvp_31x11/v1"
 MANIFEST = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
 ESSENTIALS = ROOT / "Baselines/VP-MoCap/FPP-Net/essentials/insole2cont"
-LAYOUT = ROOT / "hf-raw" / "config" / "foot_sensor_layout"
+LAYOUT = WORKSPACE / "hf-raw" / "config" / "foot_sensor_layout"
 # 触觉值正典（2026-10-22 生产替换）：tactile_pipeline 的清洗产物 dataset
 # npz（processed48 + wall_time_day_s，与 jpeg 文件名同一日秒墙钟）。
 # 2026-10-24 定妆照：行级质量包（{side}_{t_us,raw_t_us,valid,fake}）已由生产
 # 端烤进 npz 本身，消费端不再依赖 quality_rows 生产中间件。
-TACTILE_DATA_ROOT = ROOT / "hf-raw" / "pressure"
+TACTILE_DATA_ROOT = WORKSPACE / "hf-raw" / "pressure"
 OFFSET_TABLE_CSV = WORKSPACE / "protocol" / "calibration" / "offset_correction.csv"
 
 _OFFSET_TABLE: dict[str, float] | None = None
@@ -180,9 +180,9 @@ def build_one(sid: str, row: dict, cam: int, *, force: bool = False) -> Path:
     right_pack = v3_value_pack(date, subject, sid, "right")
     left_values, left_wall = left_pack["values"], left_pack["wall"]
     right_values, right_wall = right_pack["values"], right_pack["wall"]
-    left_uri = (f"hf-raw/pressure/"
+    left_uri = (f"AnysoleWorkspace/hf-raw/pressure/"
                 f"data/dataset/{date}/{subject}/{sid}/left.npz")
-    right_uri = (f"hf-raw/pressure/"
+    right_uri = (f"AnysoleWorkspace/hf-raw/pressure/"
                  f"data/dataset/{date}/{subject}/{sid}/right.npz")
     if left_pack["quality"] is None or right_pack["quality"] is None:
         raise ValueError(f"{sid}: npz lacks producer-side quality rows (valid/fake pack)")

@@ -172,7 +172,7 @@ def join_pressure_quality(rows: list[dict]) -> None:
     definitions in protocol/splits/default/README.md).  A manifest rebuilt
     without this join silently drops the columns, so the join lives here.
     """
-    stats_path = ROOT / "hf-raw/pressure/data/pressure_quality.csv"
+    stats_path = WORKSPACE / "hf-raw/pressure/data/pressure_quality.csv"
     if not stats_path.is_file():
         print("join_pressure_quality: no pressure stats table under %s; columns left empty" % stats_path,
               file=sys.stderr)
@@ -268,7 +268,7 @@ def build(fps: float, camera: str, output: Path,
         )
         # 触觉值正典 = v3 数据包 dataset npz 目录（2026-10-22 生产替换；
         # 2026-10-24 定妆照：processed_csv 导出件已剔除）
-        pressure_uri = (f"hf-raw/pressure/"
+        pressure_uri = (f"AnysoleWorkspace/hf-raw/pressure/"
                         f"data/dataset/{meta['date']}/{subject}/{sid}")
         rows.append({"session_id": sid, "subject_id": subject, "action": meta.get("action", ""),
                      "trial": meta.get("trial", ""), "camera": camera,
