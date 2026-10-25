@@ -1,4 +1,4 @@
-"""Checkpoint policy regression tests: real saves, legacy integration, strict grids.
+"""Checkpoint policy regression tests: candidate pool, gates, selection rules.
 
 Run with touch_gait Python: python -m unittest discover -s tests -p test_checkpoint_policy.py
 """
@@ -46,28 +46,40 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             infer_role({"config_probs": [0, float("nan"), 1]})
 
-    def test_early_expert_t_champion_survives_late_worse_epochs(self):
-        archive = CandidateArchive(self.root / "archive", "S_T", pareto_keep=2)
+    def test_gate_passing_epochs_are_all_retained(self):
+        # Every epoch passing its role's gates is kept in full — the formal
+        # review needs the complete selection domain.
+        archive = CandidateArchive(self.root / "archive", "U")
         for epoch in range(1, 31):
-            # VT keeps getting better, T degrades after epoch 1.
-            state = archive.update(checkpoint(epoch), dashboard(t=20 + epoch, gt=200 + epoch, gvt=90 - epoch))
-        self.assertEqual(set(state["champions"].values()), {"epoch_000001"})
-        self.assertTrue((archive.root / state["candidates"]["epoch_000001"]["file"]).is_file())
-        self.assertLessEqual(len(list((archive.root / "weights").glob("*.pt"))), 4)
-        payload = torch.load(archive.root / state["candidates"]["epoch_000001"]["file"], weights_only=False)
-        self.assertNotIn("optimizer", payload)
-        self.assertTrue(payload["checkpoint_selection"]["inference_only"])
-        self.assertNotIn("MPJPE", state["dashboard_metrics"])
+            state = archive.update(checkpoint(epoch), dashboard())
+        self.assertEqual(len(state["candidates"]), 30)
+        self.assertEqual(len(list((archive.root / "weights").glob("*.pt"))), 30)
+        self.assertTrue(all(state["candidates"][i]["gate_pass"]
+                            for i in state["candidates"]))
 
-    def test_guarded_and_unrestricted_champions_are_independent(self):
-        archive = CandidateArchive(self.root / "archive", "U", pareto_keep=1)
-        archive.update(checkpoint(1), dashboard(t=30, gt=200))
-        state = archive.update(checkpoint(2), dashboard(t=15, gt=100, vt=20, gvt=80))
-        self.assertEqual(state["champions"]["all/T/GlobalMPJPE"], "epoch_000002")
-        self.assertEqual(state["champions"]["guarded/T/GlobalMPJPE"], "epoch_000001")
-        self.assertTrue(all((archive.root / x["file"]).exists() for x in state["candidates"].values()))
-        with self.assertRaises(FileExistsError):
-            CandidateArchive(archive.root, "U")
+    def test_gate_failure_survives_only_as_champion(self):
+        archive = CandidateArchive(self.root / "archive", "U")
+        state = archive.update(checkpoint(1), dashboard(t=30, gt=200))
+        # VT 50 > 40 fails the gate; retained only as the VT Global champion.
+        state = archive.update(checkpoint(2), dashboard(t=15, gt=100, vt=50, gvt=80))
+        self.assertEqual(set(state["candidates"]), {"epoch_000001", "epoch_000002"})
+        self.assertEqual(state["champions"]["VT/GlobalMPJPE"], "epoch_000002")
+        self.assertFalse(state["candidates"]["epoch_000002"]["gate_pass"])
+        # A later gate-failing epoch beats it on every champion axis: evicted.
+        state = archive.update(checkpoint(3), dashboard(t=14, gt=90, vt=45, gvt=70))
+        self.assertEqual(set(state["candidates"]), {"epoch_000001", "epoch_000003"})
+        self.assertFalse((archive.root / "weights/epoch_000002.pt").exists())
+        self.assertTrue((archive.root / "weights/epoch_000003.pt").exists())
+
+    def test_expert_gate_uses_only_its_own_condition(self):
+        archive = CandidateArchive(self.root / "archive", "S_T")
+        # S_T only checks the T gate (<= 90); V/VT scores are irrelevant.
+        state = archive.update(checkpoint(1), dashboard(v=500, vt=500, t=20))
+        self.assertTrue(state["candidates"]["epoch_000001"]["gate_pass"])
+        # T 95 > 90 fails; still retained as the only (T PA/Global) champion.
+        state = archive.update(checkpoint(2), dashboard(v=500, vt=500, t=95, gt=150))
+        self.assertFalse(state["candidates"]["epoch_000002"]["gate_pass"])
+        self.assertEqual(set(state["candidates"]), {"epoch_000001", "epoch_000002"})
 
     def test_nonfinite_does_not_mutate_archive(self):
         archive = CandidateArchive(self.root / "archive", "S_T")
@@ -75,7 +87,13 @@ class ArchiveTests(unittest.TestCase):
             archive.update(checkpoint(1), dashboard(gt=float("nan")))
         self.assertFalse(archive.root.exists())
         with self.assertRaises(ValueError):
-            CandidateArchive(self.root / "other", "U", pareto_keep=-1)
+            CandidateArchive(self.root / "other", "U", v_pa_max=-1)
+
+    def test_fresh_directory_is_required(self):
+        archive = CandidateArchive(self.root / "archive", "U")
+        archive.update(checkpoint(1), dashboard())
+        with self.assertRaises(FileExistsError):
+            CandidateArchive(self.root / "archive", "U")
 
     def test_failed_save_never_publishes_missing_checkpoint(self):
         archive = CandidateArchive(self.root / "archive", "S_T")
@@ -106,8 +124,8 @@ class ArchiveTests(unittest.TestCase):
             out = self.root / ("enabled" if enabled else "legacy")
             model = torch.nn.Linear(1, 1)
             optimizer = torch.optim.Adam(model.parameters())
-            cfg = {"survey_save": True, "survey_keep": 1, "wandb_eval_interval": 1}
-            archive = CandidateArchive(out / "multi_metric", "U", 2) if enabled else None
+            cfg = {"wandb_eval_interval": 1}
+            archive = CandidateArchive(out / "multi_metric", "U") if enabled else None
             namespace = {"model": model, "optimizer": optimizer, "config": cfg, "out_dir": out,
                          "torch": torch, "os": os, "json": json, "val_loader": [1], "diffusion": None,
                          "device": "cpu", "occ_mix_kwargs": {}, "best_vt": None,
@@ -119,13 +137,13 @@ class ArchiveTests(unittest.TestCase):
                 exec(code, namespace)
             self.assertEqual(torch.load(out / "ckpt_last.pt", weights_only=False)["epoch"], 3)
             self.assertEqual(torch.load(out / "ckpt_best.pt", weights_only=False)["epoch"], 3)
-            self.assertEqual([p.name for p in (out / "survey").glob("*.pt")], ["survey_ep3.pt"])
-            self.assertEqual(len((out / "survey_log.jsonl").read_text().splitlines()), 3)
             self.assertEqual((out / "multi_metric").exists(), enabled)
             if not enabled:
                 self.assertEqual(set(p.name for p in out.iterdir()),
-                                 {"ckpt_last.pt", "ckpt_best.pt", "survey", "survey_log.jsonl"})
+                                 {"ckpt_last.pt", "ckpt_best.pt"})
             else:
+                # All three epochs pass the gates: the pool keeps them all.
+                self.assertEqual(len(list(archive.root.glob("weights/*.pt"))), 3)
                 invalid = dashboard()
                 del invalid["val/pa_mpjpe/T"]
                 namespace["epoch"] = 3
@@ -168,16 +186,83 @@ class ReviewTests(unittest.TestCase):
                            for mode in ("V2M", "T2M", "VT2M")}}))
         return path
 
+    def candidate(self, name, v=30.0, t=80.0, vt=31.0):
+        result = self.result(name)
+        obj = json.loads(result.read_text())
+        obj["metrics"]["V2M"]["PA-MPJPE"] = v
+        obj["metrics"]["T2M"]["PA-MPJPE"] = t
+        obj["metrics"]["VT2M"]["PA-MPJPE"] = vt
+        result.write_text(json.dumps(obj))
+        return result
+
+    def rules_spec(self, results, role="U", dpa_max=0.5,
+                   gates=None, experiment="E2"):
+        path = self.root / "manifest_rules.json"
+        reference = next(iter(results.values()))
+        path.write_text(json.dumps({"split": "val", "experiment": experiment,
+            "rules": {"thresholds": {"V": (gates or {}).get("V", 40.0),
+                                     "T": (gates or {}).get("T", 90.0),
+                                     "VT": (gates or {}).get("VT", 40.0),
+                                     "dpa": dpa_max}},
+            "candidates": [{"id": name, "role": role, "result": str(r)}
+                           for name, r in results.items()],
+            "references": {mode: {"result": str(reference), "mode": mode}
+                           for mode in ("V2M", "T2M", "VT2M")}}))
+        return path
+
     def test_full_ten_units_one_weight_and_no_automatic_winner(self):
         c, r = self.result("candidate", 90), self.result("reference")
         result = review(self.spec(c, r), self.root / "out")
         state = result["candidates"]["candidate"]
         self.assertIsNone(result["selected_checkpoint"])
+        self.assertEqual(result["status"], "comparison_only")
         self.assertEqual(len(state["panels"]), 3)
         self.assertEqual(state["panels"]["T2M"]["numerically_lower_count"], 10)
         self.assertEqual(state["panels"]["T2M"]["metrics"]["RootOrientationDrift"]["unit"], "deg")
         self.assertEqual(state["panels"]["T2M"]["metrics"]["Jitter_pred"]["unit"], "m/s^3")
         self.assertEqual(len((self.root / "out/ten_metrics.csv").read_text().splitlines()), 31)
+
+    def test_selection_picks_best_vt_among_four_threshold_passers(self):
+        a = self.candidate("a", v=30, t=80, vt=32)    # dpa +2.0: out of band
+        b = self.candidate("b", v=31, t=81, vt=31.5)  # dpa +0.5: in band
+        c = self.candidate("c", v=32, t=82, vt=31.2)  # dpa -0.8: in band, best VT
+        result = review(self.rules_spec({"a": a, "b": b, "c": c}), self.root / "out")
+        self.assertEqual(result["status"], "selection_applied")
+        self.assertEqual(result["selected_checkpoint"], str(c.with_name("weight.pt")))
+        self.assertTrue("选中：c" in (self.root / "out/comparison.md").read_text())
+
+    def test_gate_failure_is_not_band_member(self):
+        a = self.candidate("a", v=30, t=95, vt=31)    # T gate fails
+        result = review(self.rules_spec({"a": a}), self.root / "out")
+        self.assertEqual(result["status"], "no_qualified_candidate")
+        self.assertIsNone(result["selected_checkpoint"])
+        self.assertIn("无候选通过全部四个阈值", (self.root / "out/comparison.md").read_text())
+
+    def test_delta_gate_failure_is_not_selected(self):
+        a = self.candidate("a", v=30, t=80, vt=33)    # dpa +3.0 > 0.5: delta gate fails
+        result = review(self.rules_spec({"a": a}), self.root / "out")
+        self.assertEqual(result["status"], "no_qualified_candidate")
+        self.assertIsNone(result["selected_checkpoint"])
+        self.assertEqual(result["candidates"]["a"]["gate_pass"], False)
+
+    def test_experts_are_compared_but_not_selected(self):
+        a = self.candidate("a", v=30, t=20, vt=31)
+        result = review(self.rules_spec({"a": a}, role="S_T"), self.root / "out")
+        self.assertEqual(result["status"], "no_qualified_candidate")
+        self.assertIsNone(result["selected_checkpoint"])
+
+    def test_invalid_rules_are_rejected(self):
+        a = self.candidate("a")
+        path = self.rules_spec({"a": a})
+        obj = json.loads(path.read_text())
+        obj["rules"]["thresholds"] = {"V": 40.0, "T": 90.0}  # VT / dpa missing
+        path.write_text(json.dumps(obj))
+        with self.assertRaisesRegex(ValueError, "rules.thresholds"):
+            review(path, self.root / "out")
+        obj["rules"]["thresholds"] = {"V": 40.0, "T": 90.0, "VT": 40.0, "dpa": float("nan")}
+        path.write_text(json.dumps(obj))
+        with self.assertRaisesRegex(ValueError, "rules.thresholds"):
+            review(path, self.root / "out")
 
     def test_test_split_is_rejected(self):
         c, r = self.result("candidate"), self.result("reference")

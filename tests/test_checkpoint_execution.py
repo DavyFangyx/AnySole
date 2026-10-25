@@ -108,9 +108,13 @@ class CheckpointExecutionTests(unittest.TestCase):
         command = []
         runner._append_train_args(command, {"train_args": {
             "checkpoint_policy": "multi_metric", "checkpoint_role": "U",
-            "checkpoint_pareto_keep": 8}})
+            "checkpoint_gate_v": 40, "checkpoint_gate_t": 90,
+            "checkpoint_gate_vt": 40}})
         self.assertEqual(command, ["--checkpoint-policy", "multi_metric",
-                                   "--checkpoint-role", "U", "--checkpoint-pareto-keep", "8"])
+                                   "--checkpoint-role", "U",
+                                   "--checkpoint-gate-v", "40",
+                                   "--checkpoint-gate-t", "90",
+                                   "--checkpoint-gate-vt", "40"])
 
     def test_survey_review_defaults_to_validation(self):
         ckpt = self.save("ckpt_last.pt", 10)

@@ -430,8 +430,8 @@ for _suf, _mod, _note in (
             "v5_1": "V5_Av4_wo05"}[_mod]
     MODEL_REGISTRY[_pre + _suf] = ModelEntry(_pre + _suf, _mod, _note)
 
-# wo05 survey 轮（2026-10-24 用户裁定）：基名 + _drop 两变体
-# （vonly/tonly 本轮不训）；survey_save 双条件 ckpt 系列（train.py）。
+# wo05 survey 轮（2026-10-24 用户裁定，已跑完）：基名 + _drop 两变体。
+# 双条件 survey 系列已由 2026-10-25 候选池取代；条目仅作历史权重 eval 寻址。
 for _suf, _mod in (("", "v4_1"), ("_drop", "v4_1"),
                    ("", "v5_1"), ("_drop", "v5_1")):
     _pre = "V4_Av1_wo05" if _mod == "v4_1" else "V5_Av4_wo05"

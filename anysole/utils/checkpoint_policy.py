@@ -1,8 +1,11 @@
-"""Additive validation checkpoint retention; legacy best/last/survey stay independent.
+"""Training-time candidate pool: every gate-passing epoch is retained.
 
-Training dashboards do NOT contain the formal ten metrics. This archive protects
-PA/GlobalMPJPE champions and a bounded dashboard Pareto sample for later formal
-validation. It makes no claim to find the ten-metric optimum over every epoch.
+Training dashboards do NOT contain the formal ten metrics. The pool keeps
+every epoch whose three-condition val PA passes the gates, plus per-axis
+PA/GlobalMPJPE champions as a bounded fallback for gate-failing epochs, so
+the post-training formal validation review sees the complete selection
+domain. Selection itself (gates + zero-tax band + best VT PA) happens in
+checkpoint_review.py on formal ten-metric results.
 """
 from __future__ import annotations
 
@@ -21,6 +24,9 @@ UNITS = {key: ("deg" if key in ("MPJRE", "RootOrientationDrift") else
 ROLE_MODES = {"U": ("V", "T", "VT"), "S_V": ("V",),
               "S_T": ("T",), "S_VT": ("VT",)}
 FORMAL_MODES = {"V": "V2M", "T": "T2M", "VT": "VT2M"}
+# val PA-MPJPE gates per condition (2026-10-25 裁定): a healthy candidate
+# must pass all of its role's conditions; U needs V <= 40, T <= 90, VT <= 40.
+DEFAULT_GATES = {"V": 40.0, "T": 90.0, "VT": 40.0}
 
 
 class DashboardUnavailable(ValueError):
@@ -80,76 +86,50 @@ def pareto_ids(rows, keys):
                        for m, j in enumerate(ids) if j != i)]
 
 
-def diverse_ids(rows, ids, keys, keep):
-    """Deterministic farthest-point sample after per-axis range normalization.
-
-    This controls storage ONLY; it is not a weighted score or a scientific
-    winner selection. Objective champions are separately protected.
-    """
-    if len(ids) <= keep:
-        return list(ids)
-    if keep == 0:
-        return []
-    lo = {k: min(rows[i]["scores"][k] for i in ids) for k in keys}
-    hi = {k: max(rows[i]["scores"][k] for i in ids) for k in keys}
-    vec = {i: [(rows[i]["scores"][k] - lo[k]) / (hi[k] - lo[k] or 1.0)
-               for k in keys] for i in ids}
-    chosen = [min(ids, key=lambda i: (rows[i]["epoch"], i))]
-    while len(chosen) < keep:
-        remaining = [i for i in ids if i not in chosen]
-        best = max(remaining, key=lambda i: (
-            min(sum((a - b) ** 2 for a, b in zip(vec[i], vec[j])) for j in chosen),
-            -rows[i]["epoch"], i))
-        chosen.append(best)
-    return chosen
-
-
 class CandidateArchive:
     """One writer per fresh training run; own files only, atomic manifest commit."""
 
-    def __init__(self, root, role, pareto_keep=8, dpa_max=0.5, t2m_pa_max=90.0):
+    def __init__(self, root, role, v_pa_max=40.0, t_pa_max=90.0, vt_pa_max=40.0):
         if role not in ROLE_MODES:
             raise ValueError("Unknown checkpoint role: " + str(role))
-        if int(pareto_keep) != pareto_keep or pareto_keep < 0:
-            raise ValueError("checkpoint_pareto_keep must be a nonnegative integer")
-        if not finite(dpa_max) or not finite(t2m_pa_max):
-            raise ValueError("Nonfinite defensive thresholds")
+        gates = {"V": v_pa_max, "T": t_pa_max, "VT": vt_pa_max}
+        if any(not finite(x) or x <= 0 for x in gates.values()):
+            raise ValueError("Checkpoint gates must be positive finite numbers")
         self.root = Path(root)
         if self.root.exists() and any(self.root.iterdir()):
             raise FileExistsError("Use a fresh run directory; candidate archive already exists: %s" % self.root)
-        self.role, self.keep = role, int(pareto_keep)
-        self.dpa_max, self.t2m_pa_max = dpa_max, t2m_pa_max
+        self.role, self.gates = role, gates
         self.keys = tuple(mode + "/" + metric for mode in ROLE_MODES[role]
                           for metric in ("PA-MPJPE", "GlobalMPJPE"))
-        self.rows, self.champions, self.pool = {}, {}, []
-        self.last_epoch = 0
+        self.rows, self.champions, self.last_epoch = {}, {}, 0
+
+    def _gate_pass(self, metrics):
+        for mode in ROLE_MODES[self.role]:
+            value = metrics.get("val/pa_mpjpe/" + mode)
+            if not finite(value) or value > self.gates[mode]:
+                return False
+        return True
 
     def update(self, checkpoint, metrics, save=None):
         epoch = int(checkpoint["epoch"])
         if epoch <= self.last_epoch:
             raise ValueError("Checkpoint epochs must increase")
         scores = dashboard_scores(metrics, ROLE_MODES[self.role])
-        required = [metrics.get("val/pa_mpjpe/" + x) for x in ("V", "T", "VT")]
-        guarded = (all(finite(x) for x in required) and required[2] - required[0] <= self.dpa_max
-                   and required[1] <= self.t2m_pa_max)
+        gate_pass = self._gate_pass(metrics)
         ident = "epoch_%06d" % epoch
-        row = {"epoch": epoch, "scores": scores, "defensive_pass": guarded,
+        row = {"epoch": epoch, "scores": scores, "gate_pass": gate_pass,
                "file": "weights/" + ident + ".pt"}
         rows = dict(self.rows, **{ident: row})
         champions = dict(self.champions)
         for key in self.keys:
-            for guarded_only in (False, True) if self.role == "U" else (False,):
-                if guarded_only and not guarded:
-                    continue
-                label = ("guarded/" if guarded_only else "all/") + key
-                old = champions.get(label)
-                if old is None or scores[key] < rows[old]["scores"][key]:
-                    champions[label] = ident
-        # Previously discarded epochs are unavailable. This is a bounded
-        # online Pareto sample over retained candidates + the current epoch.
-        front = pareto_ids(rows, self.keys)
-        pool = diverse_ids(rows, front, self.keys, self.keep)
-        kept = set(champions.values()) | set(pool)
+            old = champions.get(key)
+            if old is None or scores[key] < rows[old]["scores"][key]:
+                champions[key] = ident
+        # Gate passers are retained in full — the formal review needs the
+        # complete selection domain. Gate failures survive only as champions.
+        # No cap, no sampling, no filtering: eviction only touches epochs
+        # that never passed the gates and lost their champion status.
+        kept = {i for i, r in rows.items() if r["gate_pass"]} | set(champions.values())
         self.root.mkdir(parents=True, exist_ok=True)
         if ident in kept:
             if save is None:
@@ -159,23 +139,22 @@ class CandidateArchive:
             destination.parent.mkdir(parents=True, exist_ok=True)
             tmp = destination.with_name(destination.name + ".tmp%d" % os.getpid())
             payload = {key: checkpoint[key] for key in ("model", "epoch", "config")}
-            payload["checkpoint_selection"] = {"policy": "multi_metric_v1", "role": self.role,
+            payload["checkpoint_selection"] = {"policy": "candidate_pool_v2", "role": self.role,
                                                "inference_only": True, "dashboard": row}
             save(payload, tmp)
             os.replace(str(tmp), str(destination))
         retained = {i: rows[i] for i in sorted(kept)}
-        state = {"version": 1, "role": self.role, "last_epoch": epoch,
-                 "dashboard_metrics": list(self.keys), "pareto_keep": self.keep,
-                 "max_weight_files": len(self.keys) * (2 if self.role == "U" else 1) + self.keep,
-                 "defense": {"dpa_max_mm": self.dpa_max, "t2m_pa_max_mm": self.t2m_pa_max},
-                 "champions": champions, "pareto_sample": pool, "candidates": retained,
+        state = {"version": 2, "role": self.role, "last_epoch": epoch,
+                 "dashboard_metrics": list(self.keys),
+                 "gates": {"val_pa_max_mm": dict(self.gates)},
+                 "champions": champions, "candidates": retained,
                  "formal_ten_metric_selection": "pending_validation_review"}
         atomic_json(self.root / "manifest.json", state)
         # The manifest always references committed files before old files go.
         for old in set(self.rows) - kept:
             (self.root / self.rows[old]["file"]).unlink()
-        log = {"epoch": epoch, "dashboard": row, "retained": sorted(kept), "champions": champions}
+        log = {"epoch": epoch, "dashboard": row, "gate_pass": gate_pass, "retained": sorted(kept)}
         with (self.root / "history.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(log, allow_nan=False) + "\n")
-        self.rows, self.champions, self.pool, self.last_epoch = retained, champions, pool, epoch
+        self.rows, self.champions, self.last_epoch = retained, champions, epoch
         return state

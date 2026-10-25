@@ -707,40 +707,28 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                              "knob dominates total time: 10 -> 57s stall every 10 epochs (~64%% overhead), "
                              "50 -> ~26%% overhead. Runs regardless of wandb mode.")
     parser.add_argument("--wandb_experiment_tag", default=None, help="Batch tag used by Wandb_Analyzer to group runs.")
-    parser.add_argument("--survey-save", action="store_true",
-                        help="wo05 survey round (2026-10-24 裁定): at every val eval, snapshot the "
-                             "checkpoint into checkpoints/survey/survey_ep{N}.pt when both conditions "
-                             "hold — (1) val/pa_mpjpe/VT - val/pa_mpjpe/V <= --survey-dpa-max (VT must "
-                             "not severely degrade vs V), (2) val/pa_mpjpe/T <= --survey-t2m-pa-max "
-                             "(T2M must not collapse). A rolling cap of --survey-keep files is kept; "
-                             "every val step (pass or fail) is appended to survey_log.jsonl. "
-                             "ckpt_best/ckpt_last keep their existing behavior.")
-    parser.add_argument("--survey-dpa-max", type=float, default=None,
-                        help="Survey condition 1 threshold: max allowed PA-MPJPE delta "
-                             "VT minus V in mm (default 0.5; the 2026-10-24 harmful-gate "
-                             "readings were +1.3~+1.8).")
-    parser.add_argument("--survey-t2m-pa-max", type=float, default=None,
-                        help="Survey condition 2 threshold: max allowed val T2M PA-MPJPE "
-                             "in mm (default 90; user ruling 2026-10-24).")
-    parser.add_argument("--survey-keep", type=int, default=None,
-                        help="Rolling cap on kept survey checkpoints (default 10; a ckpt "
-                             "is ~232MB). The full pass/fail trajectory stays in "
-                             "survey_log.jsonl regardless of the cap.")
     parser.add_argument("--v5-conditioning", choices=("legacy", "availability_v1"), default=None,
                         help="V5 training recipe: legacy reproduces old conditioning; availability_v1 "
                              "aligns V/T/VT supervision with config and structured/random input dropout. "
                              "Use a fresh output directory; saved in checkpoint config.")
     parser.add_argument("--checkpoint-policy", choices=("legacy", "multi_metric"), default=None,
-                        help="Default legacy: retain existing best/last/survey behavior. "
-                             "multi_metric ADDS protected PA/GlobalMPJPE champions and a bounded "
-                             "candidate archive for later full ten-metric validation review. "
-                             "It never replaces legacy saves or declares a final winner.")
+                        help="Default legacy: keep only ckpt_last/ckpt_best. "
+                             "multi_metric ADDS the candidate pool: every epoch whose val PA "
+                             "passes its three condition gates is retained in full (plus "
+                             "per-axis PA/GlobalMPJPE champions for gate-failing epochs). "
+                             "Selection happens after training, on formal ten-metric validation.")
     parser.add_argument("--checkpoint-role", choices=("auto", "U", "S_V", "S_T", "S_VT"), default=None,
                         help="Candidate objective inputs; auto infers from config_probs [VT,V,T]. "
                              "Explicit roles must agree with the actual training inputs.")
-    parser.add_argument("--checkpoint-pareto-keep", type=int, default=None,
-                        help="Additional dashboard Pareto sample cap, default 8; objective champions "
-                             "are protected independently. Only used by multi_metric.")
+    parser.add_argument("--checkpoint-gate-v", type=float, default=None,
+                        help="Candidate pool gate: max val V-only PA-MPJPE in mm (default 40; "
+                             "2026-10-25 裁定). Only used by multi_metric.")
+    parser.add_argument("--checkpoint-gate-t", type=float, default=None,
+                        help="Candidate pool gate: max val T-only PA-MPJPE in mm (default 90; "
+                             "2026-10-25 裁定). Only used by multi_metric.")
+    parser.add_argument("--checkpoint-gate-vt", type=float, default=None,
+                        help="Candidate pool gate: max val VT PA-MPJPE in mm (default 40; "
+                             "2026-10-25 裁定). Only used by multi_metric.")
     parser.add_argument("--loss-cap", type=float, default=None,
                         help="If set, clip the logged train loss metrics (loss_total, loss_pose, loss_traj, "
                              "loss_con, loss_kp, loss_Trec_Tmissing, loss_Vrec_Vmissing, grad_norm) at this "
@@ -1015,10 +1003,10 @@ def _evaluate(model, diffusion, loader, config, device):
                             )
                     totals["mpjpe"] += float(torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1).mean().item()) * n * 1000.0
                     if not pos_mode and totals.get("pa_ok", True):
-                        # Survey screening (2026-10-24): frame-level PA-MPJPE on
-                        # the FK keypoints, same formula family as eval.py
-                        # (similarity_align + mean_point_error, mm). The
-                        # survey_save conditions read val/pa_mpjpe/{V,VT,T}.
+                        # Candidate pool gates (2026-10-25): frame-level
+                        # PA-MPJPE on the FK keypoints, same formula family as
+                        # eval.py (similarity_align + mean_point_error, mm).
+                        # The three gates read val/pa_mpjpe/{V,T,VT}.
                         try:
                             _pa = pa_mpjpe(
                                 pred_kp.reshape(bsz * pred_kp.shape[1], -1, 3).detach().float().contiguous().cpu().numpy(),
@@ -1225,12 +1213,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         value = getattr(args, key)
         if value is not None:
             config[key] = value
-    config["survey_save"] = bool(args.survey_save)
-    for key in ("survey_dpa_max", "survey_t2m_pa_max", "survey_keep"):
-        value = getattr(args, key)
-        if value is not None:
-            config[key] = value
-    for key in ("checkpoint_policy", "checkpoint_role", "checkpoint_pareto_keep"):
+    for key in ("checkpoint_policy", "checkpoint_role",
+                "checkpoint_gate_v", "checkpoint_gate_t", "checkpoint_gate_vt"):
         value = getattr(args, key)
         if value is not None:
             config[key] = value
@@ -1662,8 +1646,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_dir = Path(config["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     warn_legacy_output_checkpoint(out_dir)
-    # Optional additive archive. Default legacy runs execute the unchanged
-    # best/last/survey blocks below and create no additional archive/files.
+    # Optional additive candidate pool. Default legacy runs execute the
+    # unchanged best/last blocks below and create no additional pool/files.
     checkpoint_archive = None
     if config.get("checkpoint_policy", "legacy") == "multi_metric":
         if (config.get("modal") != MODEL_ANYSOLEV2 or bool(config.get("v3f", False))
@@ -1673,11 +1657,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise ValueError("multi_metric requires a validation loader")
         checkpoint_archive = CandidateArchive(
             out_dir / "multi_metric", infer_role(config),
-            pareto_keep=config.get("checkpoint_pareto_keep", 8),
-            dpa_max=float(config.get("survey_dpa_max", 0.5)),
-            t2m_pa_max=float(config.get("survey_t2m_pa_max", 90.0)),
+            v_pa_max=float(config.get("checkpoint_gate_v", 40.0)),
+            t_pa_max=float(config.get("checkpoint_gate_t", 90.0)),
+            vt_pa_max=float(config.get("checkpoint_gate_vt", 40.0)),
         )
-        print("additive checkpoint archive: role=%s, path=%s" %
+        print("additive candidate pool: role=%s, path=%s" %
               (checkpoint_archive.role, checkpoint_archive.root))
 
     # V3 structural steps (fix_plan_v3 §2.2): linear LR warmup over the first
@@ -2114,64 +2098,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 torch.save(best_ckpt, best_tmp)
                 os.replace(best_tmp, best_path)
                 print("saved best %s (epoch %d, val/tau0 VT %.4f)" % (best_path, epoch + 1, best_vt))
-            if bool(config.get("survey_save", False)):
-                # Survey round (2026-10-24 裁定): dual-condition checkpoint
-                # series on top of the ordinary ckpt_best/ckpt_last track.
-                # Every val step is logged (pass or fail); a pass snapshots
-                # the checkpoint with a rolling cap.  The criteria screen for
-                # "T is alive and not hurting VT" without optimizing for it —
-                # the survey series is then evaluated on the full condition
-                # suite (test cam3 + occ010-050) to see whether any training
-                # point actually delivers.
-                dpa_vt_v = (eval_results.get("val/pa_mpjpe/VT")
-                            - eval_results.get("val/pa_mpjpe/V")
-                            if eval_results.get("val/pa_mpjpe/VT") is not None
-                            and eval_results.get("val/pa_mpjpe/V") is not None else None)
-                t2m_pa = eval_results.get("val/pa_mpjpe/T")
-                dpa_max = float(config.get("survey_dpa_max", 0.5))
-                t2m_max = float(config.get("survey_t2m_pa_max", 90.0))
-                cond1 = dpa_vt_v is not None and dpa_vt_v <= dpa_max
-                cond2 = t2m_pa is not None and t2m_pa <= t2m_max
-                passed = cond1 and cond2
-                row = {key: eval_results[key] for key in sorted(eval_results)}
-                row["survey_epoch"] = epoch + 1
-                row["survey_dpa_vt_minus_v"] = dpa_vt_v
-                row["survey_t2m_pa"] = t2m_pa
-                row["survey_dpa_max"] = dpa_max
-                row["survey_t2m_pa_max"] = t2m_max
-                row["survey_pass"] = bool(passed)
-                survey_log = out_dir / "survey_log.jsonl"
-                with open(survey_log, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(row) + "\n")
-                if passed:
-                    survey_dir = out_dir / "survey"
-                    survey_dir.mkdir(parents=True, exist_ok=True)
-                    survey_ckpt = {
-                        "model": model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "epoch": epoch + 1,
-                        "config": dict(config),
-                        "survey": row,
-                    }
-                    survey_tmp = survey_dir / ("survey_ep%d.pt.tmp%d" % (epoch + 1, os.getpid()))
-                    survey_path = survey_dir / ("survey_ep%d.pt" % (epoch + 1))
-                    torch.save(survey_ckpt, survey_tmp)
-                    os.replace(survey_tmp, survey_path)
-                    keep = int(config.get("survey_keep", 10))
-                    kept = sorted(survey_dir.glob("survey_ep*.pt"),
-                                  key=lambda p: int(p.stem.split("_ep")[1].split(".")[0]))
-                    for old in kept[:-keep] if keep > 0 else kept:
-                        old.unlink()
-                    print("survey save %s (epoch %d, dpa %.2f <= %.2f, t2m %.1f <= %.1f)"
-                          % (survey_path, epoch + 1, dpa_vt_v, dpa_max, t2m_pa, t2m_max))
-                else:
-                    print("survey skip epoch %d (dpa %.2f vs %.2f, t2m %.1f vs %.1f)"
-                          % (epoch + 1, dpa_vt_v if dpa_vt_v is not None else float("nan"),
-                             dpa_max, t2m_pa if t2m_pa is not None else float("nan"), t2m_max))
             if checkpoint_archive is not None:
                 try:
                     state = checkpoint_archive.update(checkpoint, eval_results)
-                    print("multi_metric archive epoch %d: %d unique candidates; final selection pending full validation" %
+                    print("candidate pool epoch %d: %d unique candidates; final selection pending full validation" %
                           (epoch + 1, len(state["candidates"])))
                 except DashboardUnavailable as exc:
                     # Degenerate PA is undefined, not zero. Legacy saves have
@@ -2179,7 +2109,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     checkpoint_archive.root.mkdir(parents=True, exist_ok=True)
                     with (checkpoint_archive.root / "skipped_validation.jsonl").open("a", encoding="utf-8") as fh:
                         fh.write(json.dumps({"epoch": epoch + 1, "reason": str(exc)}) + "\n")
-                    print("multi_metric skip epoch %d: %s" % (epoch + 1, exc))
+                    print("candidate pool skip epoch %d: %s" % (epoch + 1, exc))
         if wandb_run is not None:
             denom = max(epoch_sums["n"], 1)
             log = {"epoch": epoch + 1}

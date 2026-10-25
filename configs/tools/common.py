@@ -84,18 +84,16 @@ TRAIN_ARG_FLAG_MAP = {
     # 双阶段精调骨架学习率倍率（V4_Av4，2026-10-25；0 = 冻结口径）。
     "carrier_lr_mult": "--carrier-lr-mult",
 
-    # wo05 survey round (2026-10-24)：双条件 ckpt 系列（val VT−V 不严重
-    # 退化 + T2M 不塌缩），见 anysole/train.py --survey-save。
-    "survey_save": "--survey-save",
-    "survey_dpa_max": "--survey-dpa-max",
-    "survey_t2m_pa_max": "--survey-t2m-pa-max",
-    "survey_keep": "--survey-keep",
+    # 候选池（2026-10-25 裁定）：三门通过者全留（val PA V≤40 / T≤90 /
+    # VT≤40），见 anysole/train.py --checkpoint-policy multi_metric。
     "checkpoint_policy": "--checkpoint-policy",
     "checkpoint_role": "--checkpoint-role",
-    "checkpoint_pareto_keep": "--checkpoint-pareto-keep",
+    "checkpoint_gate_v": "--checkpoint-gate-v",
+    "checkpoint_gate_t": "--checkpoint-gate-t",
+    "checkpoint_gate_vt": "--checkpoint-gate-vt",
 }
 TRAIN_STORE_TRUE = {"assign_cluster", "occ_mix", "occ_a3_monitor",
-                    "t_phys_v2", "d8_heads", "survey_save"}
+                    "t_phys_v2", "d8_heads"}
 
 
 def _parse_value(raw: str) -> Any:

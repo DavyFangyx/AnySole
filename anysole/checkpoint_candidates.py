@@ -19,8 +19,8 @@ def prepare(archive_path, config, out, device="cuda:0", include_legacy=True):
     archive_path, config, out = Path(archive_path).resolve(), Path(config).resolve(), Path(out).resolve()
     manifest = json.loads(archive_path.read_text())
     role = manifest["role"]
-    if role not in ROLE_MODES or manifest.get("version") != 1:
-        raise ValueError("Unsupported checkpoint archive manifest")
+    if role not in ROLE_MODES or manifest.get("version") not in (1, 2):
+        raise ValueError("Unsupported checkpoint pool manifest")
     if out.exists() and any(out.iterdir()):
         raise FileExistsError("Use a fresh evaluation directory")
     if not config.is_file():

@@ -274,14 +274,6 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
             "V5_Av1_cam3_v3off", "V5_Av4_cam3_v3off"],
         "REQUIRES": [],
     },
-    # wo05 survey 轮（2026-10-24 用户裁定）：V4_Av1/V5_Av4 ×（基名、
-    # _drop）；vonly/tonly 本轮不训。survey_save=True（双条件 ckpt 系列）。
-    "wo05_survey": {
-        "KIND": "model_suite",
-        "MODEL_IDS": ["V4_Av1_wo05_survey", "V4_Av1_wo05_survey_drop",
-                      "V5_Av4_wo05_survey", "V5_Av4_wo05_survey_drop"],
-        "REQUIRES": [],
-    },
     # tw × 遮挡交互（2026-10-24）：occ020/030 × tw{5,10,15,20}（v3off 轴），
     # V3_Bv1 / V5_Av4 两模型。参照 = tw_scan 的 cam3 与 occ010 腿。
     "tw_occ_scan": {
