@@ -251,8 +251,8 @@ C1–M3 不生成 queue conf，只读取 `results/`：
 | M2 | `singlemodal_eval` + `rho_grid_eval` | `results_display/script/trust.py` |
 | M3 | `rho_grid_eval` | `results_display/script/rho_grid_analysis.py` |
 
-> 2026-10-06 起编号为 C1–M3（实验一 `Test1_ComplementTest` / 实验二 `Test2_MissingTest`），
-> 同步自任务书 `missing_rate_experiment_plan.md`；此前的跨模态表征对齐类实验（F_V–F_T
+> 2026-10-06 起编号为 C1–M3（实验一 `Test1_ComplementTest` / 实验二 `Test2_MissingTest`）；
+> 此前的跨模态表征对齐类实验（F_V–F_T
 > 相似度、错位时刻）已取消，不在本表。
 
 ## 7. 运行命令

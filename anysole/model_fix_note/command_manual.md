@@ -27,6 +27,9 @@
 
 # --which {last,best}: 自动选择 ckpt_last.pt 或 ckpt_best.pt，默认 last
 # --ckpt FILE: 仅供调试、旧脚本和文件型探针
+# checkpoint 选点机制（2026-10-25 二版）：候选池（multi_metric，三门通过者
+#   全留）+ 四阈值门选点（V≤40/T≤90/VT≤40/ΔPA≤0.5，全过取 VT 最优），
+#   规则与入口见 z_note/multimodal_fusion/ckpt规则.md
 
 # --tw INT (>=1): 窗口长度，默认 20；扫描可用 40/80/120 或其他正整数
 # --stride INT (>=1): 窗口步长；扫描时必须显式设置为与 tw 相同的值

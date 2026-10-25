@@ -66,8 +66,6 @@ C/M 系列分析入口为语义化脚本（`complement.py`、`dropout_ablation.p
 | M3 | 连续缺失鲁棒性 | `rho_grid_analysis.py`（→ `utils/rho_grid_display.py`） |
 | Test6_VdegradTest | V 削弱难度轴（两套件 × 8 配置，Δ=VT−V 面板 + decile 分层） | `vdegrad.py` |
 
-任务书 = `anysole/model_fix_note/missing_rate_experiment_plan.md`（实验编号 C1–M3）。
-
 ## 目录结构
 
 ```text

@@ -2,7 +2,7 @@
 
 > 2026-09-20 重写 · 标准 SMPL-24 协议（旧 BVH-23 协议的历史文档见 git 历史与
 > `model_fix_note/`）。本文描述**当前代码结构**；实验结论与演进史见
-> `anysole/model_fix_note/model_fix_note.md`，当前基座训练命令见
+> `z_note/multimodal_fusion/`，当前基座训练命令见
 > `anysole/model_fix_note/command_manual.md`。
 
 约定：`B`=batch、`tw`=窗口长度（默认 20）、`d`=隐维 256、帧率 40 Hz。

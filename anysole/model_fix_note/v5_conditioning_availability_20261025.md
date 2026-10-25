@@ -37,9 +37,9 @@ T 的额外 CoP、着地类型等辅助头也遵循 T 可用性。条件修正�
 --v5-conditioning availability_v1 --out-dir /path/to/a/fresh/checkpoints
 ```
 
-也可在配置中写 `v5_conditioning: availability_v1`。`--model-name` 继续使用实际注册名，例如 `V5_Av4_wo05_survey_drop`；`V5_Av4` 是家族简称，不是当前注册表中的模型名。新模式会拒绝非空输出目录，避免与旧结果混写。日志会打印实际 V、T、VT 可用窗口及两者都缺失的窗口数量。
+也可在配置中写 `v5_conditioning: availability_v1`。`--model-name` 继续使用实际注册名，例如 `V5_Av4_wo05`；`V5_Av4` 是家族简称，不是当前注册表中的模型名。新模式会拒绝非空输出目录，避免与旧结果混写。日志会打印实际 V、T、VT 可用窗口及两者都缺失的窗口数量。
 
-原 best、last、survey 和可选 `multi_metric` 保存机制独立保留。默认不传此选项仍为 legacy。旧检查点缺少该字段也按旧配方解释；其推理不受影响。
+原 best、last 与可选 `multi_metric` 候选池保存机制独立保留。默认不传此选项仍为 legacy。旧检查点缺少该字段也按旧配方解释；其推理不受影响。
 
 ## 检查结果
 
