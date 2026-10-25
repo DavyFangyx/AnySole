@@ -9,8 +9,10 @@ import torch
 import torch.nn.functional as F
 
 from anysole.utils.geometry import f2_to_world, fk_pose6d
+from anysole.utils.v5_conditioning import availability_masks, conditioning_policy
 from anysole.types import (
     CONFIG_T,
+    CONFIG_V,
     FPS,
     JOINT_PARENTS,
     KNEE_ANKLE_FOOT_JOINTS,
@@ -180,6 +182,10 @@ def _cluster_assign_terms(assign, anneal, dead_beta):
 
 def compute_losses(out, batch, config_id, weights) -> dict:
     """Return all frozen V1 loss terms as scalar tensors."""
+    # V7（2026-10-25）：config 带 v7 标志 → 走独立损失（train.py 分发入口
+    # 不改为 v7 单开分支——另一个会话在改 train.py，此处路由保持零侵入）。
+    if bool(weights.get("v7")):
+        return compute_losses_v7(out, batch, config_id, weights)
     pose_gt = batch["pose_gt"]
     trans_gt = batch["trans_gt"]
     # E6.1: pose_repr "pos" switches the pose target to root-local positions.
@@ -584,6 +590,17 @@ def _masked_mean(loss_per_sample: torch.Tensor, mask: torch.Tensor):
     return loss_per_sample.new_zeros(())
 
 
+def _cond_contract_weight(e_v, tau):
+    """条件契约权重（2026-10-25，V5_Av5/V4_Av2）：窗口级 V-only 误差低于
+    运行阈值 tau 的窗口 w→1（惩罚修正量——零税契约），V 失效窗口 w→0
+    （修正自由，由主损失兑现侧监督）。tau 由 train.py 以批中位数 EMA
+    维护（V 在场窗口）；边界软度 = 0.25·tau；触发侧无梯度（契约不是
+    触发器自身的监督——避免误差-权重互训回路）。"""
+    with torch.no_grad():
+        s = tau * 0.25 + 1e-8
+        return torch.sigmoid((tau - e_v) / s)
+
+
 def _v5_1_traj_losses(v_hat, trans_hat, vel_gt, mask, weights):
     """V5_Av1 L_traj（VT 行，live 样本掩码）：velocity + multi-scale
     displacement 的逐样本版本（_trajectory_losses 的口径，逐样本聚合后
@@ -635,8 +652,14 @@ def _v5_1_gauss_mu_mse(mu, gt, gt_mask, live):
     return (err * valid).sum() / valid.sum().clamp(min=1.0)
 
 
-def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
+def compute_losses_v5_1(out, batch, config_id, weights, cond_tau=None) -> dict:
     """V5_Av1 training losses (2026-10-19, V5_A方案.md §3).
+
+    v5_conditioning=availability_v1 gates every branch by actual observations:
+    V readout on V-present windows, VT on both-present, T prior/heads on
+    T-present. V-only trajectory uses v_hat_v/trans_v. Contact class weights
+    use the corresponding branch's valid rows. The description below records
+    the unchanged default legacy recipe.
 
     单点预注册权重（λ 不设网格，z_gen/model_registry.py train_args 携带）：
       L_pose 3.0（6D MSE，V2M 行 + VT2M 行，live 样本）
@@ -646,60 +669,96 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
       L_phase 1.0 / L_cop 1.0（只监督各专家 μ，掩码跳过；CoP 只在接触帧
         ——掩码即接触帧且和值>0；PoE 合成由闭式决定不额外监督）
       L_prior_pose 1.0（T2M 行健全性，不参与承诺）
+      L_cond λ_cond（条件契约，2026-10-25；cond_tau 由 train.py 注入——
+        V 健康窗口罚修正量 ‖x0_hat−x0_v‖²，V 失效窗口自由；λ_cond=0 关）
 
     batch["v_zero"] (B,) = V 零化样本（VT 90% / V 零化 10%，H 口径）：
     零化样本只监督 T2M 行 + g_T 读出（g_V 读零化 V 无意义，PoE 混入
     垃圾 g_V 同样掩掉）。其余键与 compute_losses 同构（统一日志面板）。
     """
     pose_gt = batch["pose_gt"]
-    live = ~batch.get("v_zero", torch.zeros(pose_gt.shape[0], dtype=torch.bool,
-                                            device=pose_gt.device)).bool()
-    live = live.to(pose_gt.device)
+    available = conditioning_policy(weights) == "availability_v1"
+    if available:
+        live, t_live = availability_masks(config_id, batch)
+        live, t_live = live.to(pose_gt.device), t_live.to(pose_gt.device)
+        joint_live = live & t_live
+    else:
+        live = ~batch.get("v_zero", torch.zeros(pose_gt.shape[0], dtype=torch.bool,
+                                                device=pose_gt.device)).bool()
+        live = live.to(pose_gt.device)
+        t_live, joint_live = torch.ones_like(live), live
 
     def per_pose_mse(pred):
         return (pred - pose_gt).square().mean(dim=(-1, -2))
 
-    # L_pose：V2M 行 + VT2M 行同批监督（live 样本）。
-    l_pose = _masked_mean(per_pose_mse(out["x0_hat"]) + per_pose_mse(out["x0_v"]),
-                          live)
+    # Preserve legacy scale: both pose readouts on observed VT windows; in
+    # availability_v1 V-only windows supervise the V readout alone.
+    vt_error = per_pose_mse(out["x0_hat"])
+    if available:
+        vt_error = torch.where(joint_live, vt_error, torch.zeros_like(vt_error))
+    l_pose = _masked_mean(vt_error + per_pose_mse(out["x0_v"]), live)
     # L_traj：VT 行（live 样本）。
+    v_hat, trans_hat = out["v_hat"], out["trans_hat"]
+    if available and bool((live & ~t_live).any()):
+        if out.get("v_hat_v") is None or out.get("trans_v") is None:
+            raise ValueError("availability_v1 V-only trajectory requires the z_src=all visual readout")
+        v_hat = torch.where(joint_live[:, None, None], v_hat, out["v_hat_v"])
+        trans_hat = torch.where(joint_live[:, None, None], trans_hat, out["trans_v"])
     l_traj, l_traj_vel, l_traj_delta = _v5_1_traj_losses(
-        out["v_hat"], out["trans_hat"], batch["vel_gt"], live, weights)
+        v_hat, trans_hat, batch["vel_gt"], live, weights)
 
     # L_contact：z 接触分量三读数 + 接触头（air 加权，G 配方）。
     gt = batch["contact_gt"]
     pos = gt.float().mean().clamp(1e-4, 1.0 - 1e-4)
     pos_weight = ((1.0 - pos) / pos).clamp(0.05, 20.0)
+    def contact_pos(mask):
+        if not available:
+            return pos_weight
+        if not bool(mask.any()):
+            return gt.new_ones(())
+        p = gt[mask].float().mean().clamp(1e-4, 1.0-1e-4)
+        return ((1.0-p)/p).clamp(0.05, 20.0)
     air_w = _weight(weights, "lambda_air", 0.0)
     zs = out["z"]
-    l_contact = _v5_1_contact_bce(out["contact_logits"], gt, torch.ones_like(live),
-                                  air_w, pos_weight) \
-        + _v5_1_contact_bce(zs["logit_gT"], gt, torch.ones_like(live),
-                            air_w, pos_weight) \
-        + _v5_1_contact_bce(zs["logit_gV"], gt, live, air_w, pos_weight) \
-        + _v5_1_contact_bce(zs["logit_poe"], gt, live, air_w, pos_weight)
+    l_contact = _v5_1_contact_bce(out["contact_logits"], gt, t_live,
+                                  air_w, contact_pos(t_live)) \
+        + _v5_1_contact_bce(zs["logit_gT"], gt, t_live,
+                            air_w, contact_pos(t_live)) \
+        + _v5_1_contact_bce(zs["logit_gV"], gt, live, air_w, contact_pos(live)) \
+        + _v5_1_contact_bce(zs["logit_poe"], gt, joint_live, air_w, contact_pos(joint_live))
 
     # L_phase / L_cop：各专家 μ 监督（g_V 仅 live 样本；g_T 恒监督——
     # T 流输入三条件恒定）。掩码跳过（静止会话掩码全空 → 0）。
     l_phase = _v5_1_gauss_mu_mse(zs["mu_gV"][..., 0:4], batch["phase_gt"],
                                  batch["phase_mask"], live) \
         + _v5_1_gauss_mu_mse(zs["mu_gT"][..., 0:4], batch["phase_gt"],
-                             batch["phase_mask"], torch.ones_like(live))
+                             batch["phase_mask"], t_live)
     l_cop = _v5_1_gauss_mu_mse(zs["mu_gV"][..., 4:8], batch["cop_gt"],
                                batch["cop_mask"], live) \
         + _v5_1_gauss_mu_mse(zs["mu_gT"][..., 4:8], batch["cop_gt"],
-                             batch["cop_mask"], torch.ones_like(live))
+                               batch["cop_mask"], t_live)
+
+    # 条件契约（2026-10-25，V5_Av5）：V 健康窗口罚修正量，V 失效窗口自由。
+    # 修正量 = VT 读出对 V 读出的偏离（FiLM 调制差）；触发器 = V-only 误差
+    # 对运行阈值 tau（stopgrad）。live 掩码与 L_pose 同口径。
+    lambda_cond = _weight(weights, "lambda_cond", 0.0)
+    l_cond = l_pose.new_zeros(())
+    if lambda_cond > 0.0 and cond_tau is not None:
+        e_v = per_pose_mse(out["x0_v"])
+        corr = (out["x0_hat"] - out["x0_v"]).square().mean(dim=(-1, -2))
+        l_cond = _masked_mean(corr * _cond_contract_weight(e_v, cond_tau), joint_live)
 
     # T2M 行 L_prior_pose 健全性（全样本；不参与承诺——约 90mm 量级参照，
     # G 前科 315.5 防回归）。
-    l_prior_pose = F.mse_loss(out["x0_prior"], pose_gt)
+    l_prior_pose = (_masked_mean(per_pose_mse(out["x0_prior"]), t_live)
+                    if available and not bool(t_live.all()) else F.mse_loss(out["x0_prior"], pose_gt))
 
     # T2M 行 L_prior_traj（V5_Av4 修复，2026-10-22）：先验塔轨迹头此前零
     # 监督（L_prior_traj 恒 0）→ T2M ATE 崩溃（291 vs E 配方 84）。E 配方
     # λ_prior_traj=1.0 全样本（先验塔不依赖 V，live 掩码不适用）。
     l_prior_traj, l_prior_traj_vel, l_prior_traj_delta = _v5_1_traj_losses(
         out["v_prior"], out["trans_prior"], batch["vel_gt"],
-        torch.ones_like(live), weights)
+        t_live, weights)
 
     # 维度 3 足-地监督三损失（2026-10-21，T增强三组实验方案.md；只读
     # t_tok 侧读出，与 z/PoE 结构无关）。
@@ -713,11 +772,15 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
             tgt = torch.cat([tphys[..., 0:2], tphys[..., 6:8]], -1)  # (B,tw,4)
             m4 = torch.cat([fmask[..., 0:1], fmask[..., 0:1],
                             fmask[..., 1:2], fmask[..., 1:2]], dim=-1)
+            if available:
+                m4 = m4 & t_live[:, None, None]
             if bool(m4.any()):
                 l_tcop = F.mse_loss(out["tcop"][m4], tgt[m4])
         if _weight(weights, "lambda_strike", 0.0) > 0.0:
             sm = batch.get("strike_mask")
             sg = batch.get("strike_gt")
+            if available and sm is not None:
+                sm = sm & t_live[:, None, None]
             if sm is not None and sg is not None and bool(sm.any()):
                 logits = out["strike_logits"].reshape(
                     *out["strike_logits"].shape[:2], 2, 3)
@@ -725,6 +788,8 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
         if _weight(weights, "lambda_gtcop", 0.0) > 0.0:
             cm = batch.get("cop_mask")
             cg = batch.get("cop_gt")
+            if available and cm is not None:
+                cm = cm & t_live[:, None, None]
             if cm is not None and cg is not None and bool(cm.any()):
                 m4 = torch.cat([cm[..., 0:1], cm[..., 0:1],
                                 cm[..., 1:2], cm[..., 1:2]], dim=-1)
@@ -742,6 +807,7 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
         + _weight(weights, "lambda_tcop", 0.0) * l_tcop
         + _weight(weights, "lambda_strike", 0.0) * l_strike
         + _weight(weights, "lambda_gtcop", 0.0) * l_gtcop
+        + lambda_cond * l_cond
     )
     zero = l_pose.new_zeros(())
     return {
@@ -769,6 +835,106 @@ def compute_losses_v5_1(out, batch, config_id, weights) -> dict:
         "L_tcop": l_tcop,
         "L_strike": l_strike,
         "L_gtcop": l_gtcop,
+        "L_cond": l_cond,
+        "loss": total,
+    }
+
+
+def compute_losses_v7(out, batch, config_id, weights) -> dict:
+    """V7 训练损失（2026-10-25，模型设计思路 §4）。
+
+      L_pose 3.0：单一生成器输出的完整运动监督（当前输入条件，全样本
+        ——T-only 也接受正式运动标签；上身经共享先验回退，设计思路 §2）。
+      L_traj 1.0：根速度 + 多尺度位移（同一读出，FK 一致性）。
+      L_contact 1.0：f6_soft pos-weighted BCE + air 加权——仅 T 在场窗口
+        （缺失 T 不要求编码器凭零输入重建，设计思路 §4）。
+      L_foot λ_foot（仅 B）：可信支撑窗口足底世界速度 → 0，软权重 =
+        接触概率 × T 在场；经 FK 回传到姿态与根（接触参与根运动通道）。
+      L_route λ_route（仅 C）：窗口级 T 信任门的正则（v1 = 无显式标签，
+        λ_route=0 纯端到端；预留键位）。
+    """
+    if bool(weights.get("v7_contact_root")) and "lambda_foot" not in weights:
+        raise ValueError("V7 contact-root training requires explicit lambda_foot in the effective config")
+    pose_gt = batch["pose_gt"]
+    t_present = (config_id != CONFIG_V).to(pose_gt.device)
+    l_pose = F.mse_loss(out["x0_hat"], pose_gt)
+    l_traj, l_traj_vel, l_traj_delta = _trajectory_losses(
+        {"v_hat": out["v_hat"], "trans_hat": out["trans_hat"]}, batch, weights)
+
+    gt = batch["contact_gt"]
+    pos = gt.float().mean().clamp(1e-4, 1.0 - 1e-4)
+    pos_weight = ((1.0 - pos) / pos).clamp(0.05, 20.0)
+    air_w = _weight(weights, "lambda_air", 0.0)
+    l_contact = _v5_1_contact_bce(out["contact_logits"], gt, t_present,
+                                  air_w, pos_weight)
+
+    l_foot = l_pose.new_zeros(())
+    if out.get("z_root") is not None and bool(weights.get("v7_contact_root")):
+        # B：支撑帧足-地一致性（2026-10-25 修订）。fk 出足部世界位置 →
+        # 每帧位移（m/帧 @40Hz）的平方——40Hz 下等价于零速度约束；软权重
+        # = 接触概率（detach——防止接触头通过压低难帧概率逃避约束；仅 T
+        # 在场窗口）。梯度经 FK 回传姿态与根速度。λ_foot = 1.0 预注册
+        # （对 (m/帧)²；若换算 (m/s)² 尺度 = ×FPS² = ×1600），由 STRUCTURE
+        # 标志驱动（train.py 无对应 CLI）。v1 简化：仅软权重，无连续支撑
+        # 区间筛选（模型设计思路 §3 候选 B 的「可信支撑区间」留待 v2——
+        # 简化已登记于 V7_B方案.md）。
+        anchor = batch.get("trans_anchor")
+        if anchor is None:
+            anchor = pose_gt.new_zeros((pose_gt.shape[0], 3))
+        fk = fk_pose6d(out["x0_hat"], out["trans_hat"] + anchor[:, None, :],
+                       batch["offsets"], batch["parents"])
+        foot = fk[..., [LEFT_FOOT_JOINT, RIGHT_FOOT_JOINT], :]   # (B, tw, 2, 3)
+        disp = foot[:, 1:] - foot[:, :-1]                       # (B, tw-1, 2, 3) m/帧
+        disp_sq = disp.square().sum(dim=-1)
+        w = torch.sigmoid(out["contact_logits"]).detach()[:, 1:]  # (B, tw-1, 2)
+        w = w * t_present.view(-1, 1, 1).float()
+        l_foot = (disp_sq * w).sum() / w.sum().clamp(min=1.0)
+
+    l_route = l_pose.new_zeros(())
+    gate = out.get("route_gate")
+    if gate is not None:
+        lambda_route = _weight(weights, "lambda_route", 0.0)
+        if lambda_route > 0.0:
+            # 预留：质量标签接入前的温和正则（向中性 0.5 收缩——防止门
+            # 无监督塌缩到 0/1 两端）。
+            l_route = (gate - 0.5).square().mean()
+
+    total = (
+        _weight(weights, "lambda_pose", 3.0) * l_pose
+        + _weight(weights, "lambda_traj", 1.0) * l_traj
+        + _weight(weights, "lambda_contact", 0.0) * l_contact
+        + _weight(weights, "lambda_foot", 0.0) * l_foot
+        + _weight(weights, "lambda_route", 0.0) * l_route
+    )
+    zero = l_pose.new_zeros(())
+    return {
+        "L_pose": l_pose,
+        "L_traj": l_traj,
+        "L_traj_vel": l_traj_vel,
+        "L_traj_delta": l_traj_delta,
+        "L_Trec": zero,
+        "L_Vrec": zero,
+        "L_kp": zero,
+        "L_pos": zero,
+        "L_con": zero,
+        "L_pose_vel": zero,
+        "L_bone": zero,
+        "L_assign": zero,
+        "L_sigma": zero,
+        "L_contact": l_contact,
+        "L_nll": zero,
+        "L_prior_pose": zero,
+        "L_prior_nll": zero,
+        "L_prior_traj": zero,
+        "L_foot_res": zero,
+        "L_phase": zero,
+        "L_cop": zero,
+        "L_tcop": zero,
+        "L_strike": zero,
+        "L_gtcop": zero,
+        "L_cond": zero,
+        "L_foot": l_foot,
+        "L_route": l_route,
         "loss": total,
     }
 
@@ -783,7 +949,7 @@ def per_sample_contact_bce(logits, gt, pos_weight, air_w):
     return (elem * w).mean(dim=(-1, -2))  # (B,)
 
 
-def compute_losses_v4_1(out, batch, config_id, weights) -> dict:
+def compute_losses_v4_1(out, batch, config_id, weights, cond_tau=None) -> dict:
     """V4_Av1 training losses (2026-10-19, V4_A方案.md §3).
 
     单点预注册权重（λ 不设网格，z_gen/model_registry.py train_args 携带）：
@@ -796,6 +962,8 @@ def compute_losses_v4_1(out, batch, config_id, weights) -> dict:
         骨盆相对位置（残差监督 x_gt−x_V 在位置空间，V4_A方案 §3）
       L_corr_prior（out["pos_corr_prior"] 同式，λ 同为 3.0 单点注册——
         T2M 行 = 先验 + 修正分支，同式监督）
+      L_cond λ_cond（条件契约，2026-10-25；cond_tau 由 train.py 注入——
+        V 健康窗口罚修正量 ‖pos_corr‖²，V 失效窗口自由；λ_cond=0 关）
     sigma NLL 恒 0（继承冻结）。其余键与 compute_losses 同构（统一日志
     面板）。"""
     pose_gt = batch["pose_gt"]
@@ -833,6 +1001,17 @@ def compute_losses_v4_1(out, batch, config_id, weights) -> dict:
     l_corr = F.mse_loss(
         out["pos_corr"].reshape(*out["pos_corr"].shape[:2], len(six), 3),
         gt_rel - v_rel)
+    # 条件契约（2026-10-25，V4_Av2）：V 健康窗口罚修正量 ‖pos_corr‖²，
+    # V 失效窗口自由。触发器 = V 读出误差对运行阈值 tau（stopgrad）。
+    # 与 L_corr 的目标（gt−v 残差）成对：健康窗口契约压制、失效窗口
+    # L_corr 兑现——两侧同时存在才产生条件性（V6 occmix 单侧无效的补全）。
+    lambda_cond = _weight(weights, "lambda_cond", 0.0)
+    l_cond = l_pose.new_zeros(())
+    if lambda_cond > 0.0 and cond_tau is not None:
+        e_v = (out["x0_hat"] - pose_gt).square().mean(dim=(-1, -2))
+        corr = out["pos_corr"].square().flatten(1).mean(dim=1)
+        l_cond = (corr * _cond_contract_weight(e_v, cond_tau)).mean()
+
     # T2M 行同式（修正分支读先验塔部位 token，V4_A方案 §2.3）。
     fk_prior = fk_pose6d(out["x0_prior"], out["trans_prior"] + anchor[:, None, :],
                          batch["offsets"], batch["parents"])
@@ -847,6 +1026,7 @@ def compute_losses_v4_1(out, batch, config_id, weights) -> dict:
         + _weight(weights, "lambda_prior_pose", 0.0) * l_prior_pose
         + _weight(weights, "lambda_prior_traj", 0.0) * l_prior_traj
         + _weight(weights, "lambda_pos", 0.0) * (l_corr + l_corr_prior)
+        + lambda_cond * l_cond
     )
     zero = l_pose.new_zeros(())
     return {
@@ -858,6 +1038,7 @@ def compute_losses_v4_1(out, batch, config_id, weights) -> dict:
         "L_Vrec": zero,
         "L_kp": zero,
         "L_pos": l_corr,                # lambda_pos 复用键（VT 行修正）
+        "L_cond": l_cond,               # 条件契约（λ_cond，2026-10-25）
         "L_corr_prior": l_corr_prior,   # T2M 行修正（同 λ）
         "L_con": zero,
         "L_pose_vel": zero,

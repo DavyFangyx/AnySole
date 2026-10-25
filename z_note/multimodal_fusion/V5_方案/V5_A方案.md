@@ -161,3 +161,4 @@ occmix 第三配置（2026-10-20 test 落盘）：PA Δ −0.000、MPJPE Δ −0
 - **V5_Av1（现行）**：PoE z 专家（接触/相位/CoP）+ FiLM 注入下肢与根轨迹；载体 = 冻结 E v2.1。
 - **V5_Av4**：V5_Av1 结构 + V 流从零训练（carrier_from=scratch）、λ_prior 3/1——T2M 修复、兑现缩水（天花板效应）。（Av2 / Av3 空号。）
 - **V5_Av4_TTA（2026-10-24）**：V5_Av4 + 多视角 TTA 适配（第一版 = 模型+TTA；足-地接触约束为第二版待启动。v_tok_override 注入点 + Δt 平移残差叶子；改动说明见 z_note/HMR2.0/hmr2_gait/notes/实验报告_V5_Av4_TTA.md）。
+- **V5_Av5**：V5_Av4 结构（scratch V + λ_prior 3/1）+ occ_mix（训练侧 V 失效窗口）+ 条件契约损失 λ_cond（V 健康窗口罚 ‖x0_hat−x0_v‖²、V 失效窗口自由；τ = V-only 误差批中位数 EMA）。_nocond = 去契约对照。

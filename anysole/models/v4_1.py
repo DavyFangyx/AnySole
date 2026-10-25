@@ -53,14 +53,21 @@ def build(config: dict, part_joints=None):
         raise ValueError(
             "V4_Av1 beta must be one of the pre-registered sweep %s, got %r"
             % (BETA_SWEEP, beta))
+    # V4_Av2（2026-10-25）：carrier_from="scratch" → V 流从零可训（无 E
+    # 载体、不冻结；E 式双流同训）。CONFIG_EXTRA 记录 scratch provenance。
+    carrier = str(config.get("carrier_from") or "")
+    carrier_scratch = carrier.strip().lower() in ("scratch", "none", "")
     model = AnySoleModelV41(
         d=int(config["d_model"]),
         tw=int(config["tw"]),
         dropout=float(config.get("dropout", 0.1)),
         pose_layers=int(config.get("pose_layers", 6)),
         beta=beta,
+        carrier_scratch=carrier_scratch,
     )
-    carrier = str(config.get("carrier_from") or "")
+    if carrier_scratch:
+        CONFIG_EXTRA["carrier"] = {"source": "scratch", "n_keys": 0}
+        return model
     if not carrier:
         raise ValueError(
             "V4_Av1 requires carrier_from (the E v2.1 ckpt_best whose V stream "

@@ -76,6 +76,47 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
                               "V5_Av1 + V6_Av1 occ_mix 对照（训练侧 V 失效态混合，2026-10-20）"),
     "V4_Av1_occmix": ModelEntry("V4_Av1_occmix", "v4_1",
                               "V4_Av1 + V6_Av1 occ_mix 对照（训练侧 V 失效态混合，2026-10-20）"),
+    # 条件合作线（2026-10-25）：V5_Av5 / V4_Av2 = scratch 载体（E 式双流
+    # 同训）+ occ_mix + 条件契约损失（λ_cond——V 健康窗口罚修正量）。
+    # _nocond = 同配方去契约的对照（隔离契约贡献）。
+    "V5_Av5": ModelEntry("V5_Av5", "v5_1",
+                       "V5_Av5: V5 结构 + scratch V + λ3/1 + occ_mix + 条件契约（2026-10-25）"),
+    "V5_Av5_nocond": ModelEntry("V5_Av5_nocond", "v5_1",
+                              "V5_Av5 − 条件契约（对照，2026-10-25）"),
+    "V4_Av2": ModelEntry("V4_Av2", "v4_1",
+                       "V4_Av2: V4 结构 + scratch V + occ_mix + 条件契约（2026-10-25）"),
+    "V4_Av3": ModelEntry("V4_Av3", "v4b",
+                       "V4_Av3: V4 修正分支挂冻结 B 骨架（两阶段，T 解毒，2026-10-25）"),
+    "V4_Av3_cam3_occ010": ModelEntry("V4_Av3_cam3_occ010", "v4b",
+                                   "V4_Av3 occ010 轴（2026-10-25；yaml 按名尾缀推导）"),
+    "V4_Av4": ModelEntry("V4_Av4", "v4b",
+                       "V4_Av4: V4_Av3 + 骨架双阶段精调（carrier_lr_mult=0.1，不冻结，2026-10-25）"),
+    "V4_Av4_cam3_occ010": ModelEntry("V4_Av4_cam3_occ010", "v4b",
+                                   "V4_Av4 occ010 轴（2026-10-25；yaml 按名尾缀推导）"),
+    "V4_Av4_drop": ModelEntry("V4_Av4_drop", "v4b",
+                            "V4_Av4 drop 对照（0.5/0.25/0.25；drop 毒性 vs 可训载体，2026-10-25）"),
+    "V4_Av4_drop_cam3_occ010": ModelEntry("V4_Av4_drop_cam3_occ010", "v4b",
+                                        "V4_Av4 drop 对照 occ010 轴（2026-10-25）"),
+    # V7 候选 A/B/C（2026-10-25，模型设计思路.md §3）：独立证据 + 共享生成。
+    "V7_Av1": ModelEntry("V7_Av1", "v7_a", "候选 A：独立证据 + 共享生成（2026-10-25）"),
+    "V7_Bv1": ModelEntry("V7_Bv1", "v7_b", "候选 B：A + 接触参与根运动（2026-10-25）"),
+    "V7_Cv1": ModelEntry("V7_Cv1", "v7_c", "候选 C：A + 窗口级可靠性路由（2026-10-25）"),
+    "V7_Av1_cam3_occ010": ModelEntry("V7_Av1_cam3_occ010", "v7_a", "候选 A occ010 轴"),
+    "V7_Bv1_cam3_occ010": ModelEntry("V7_Bv1_cam3_occ010", "v7_b", "候选 B occ010 轴"),
+    "V7_Cv1_cam3_occ010": ModelEntry("V7_Cv1_cam3_occ010", "v7_c", "候选 C occ010 轴"),
+    "V7_Av1_precheck": ModelEntry("V7_Av1_precheck", "v7_a", "候选 A 端到端预检（epochs=6）"),
+    "V7_Bv1_precheck": ModelEntry("V7_Bv1_precheck", "v7_b", "候选 B 端到端预检（epochs=6）"),
+    "V7_Cv1_precheck": ModelEntry("V7_Cv1_precheck", "v7_c", "候选 C 端到端预检（epochs=6）"),
+    "V4_Av2_nocond": ModelEntry("V4_Av2_nocond", "v4_1",
+                              "V4_Av2 − 条件契约（对照，2026-10-25）"),
+    "V5_Av5_cam3_occ010": ModelEntry("V5_Av5_cam3_occ010", "v5_1",
+                                   "条件合作线 occ010 轴（2026-10-25；yaml 按名尾缀推导）"),
+    "V5_Av5_nocond_cam3_occ010": ModelEntry("V5_Av5_nocond_cam3_occ010", "v5_1",
+                                          "条件合作线 occ010 轴去契约对照（2026-10-25）"),
+    "V4_Av2_cam3_occ010": ModelEntry("V4_Av2_cam3_occ010", "v4_1",
+                                   "条件合作线 occ010 轴（2026-10-25；yaml 按名尾缀推导）"),
+    "V4_Av2_nocond_cam3_occ010": ModelEntry("V4_Av2_nocond_cam3_occ010", "v4_1",
+                                          "条件合作线 occ010 轴去契约对照（2026-10-25）"),
     "V3_4a": ModelEntry("V3_4a", "v3_4a", "9-part on f2"),
     "V3_4b": ModelEntry("V3_4b", "v3_4b", "9-part soft A on f2"),
     "V3_4c": ModelEntry("V3_4c", "v3_4c", "9-part soft A + sigma gate on f2"),
@@ -389,6 +430,15 @@ for _suf, _mod, _note in (
             "v5_1": "V5_Av4_wo05"}[_mod]
     MODEL_REGISTRY[_pre + _suf] = ModelEntry(_pre + _suf, _mod, _note)
 
+# wo05 survey 轮（2026-10-24 用户裁定）：基名 + _drop 两变体
+# （vonly/tonly 本轮不训）；survey_save 双条件 ckpt 系列（train.py）。
+for _suf, _mod in (("", "v4_1"), ("_drop", "v4_1"),
+                   ("", "v5_1"), ("_drop", "v5_1")):
+    _pre = "V4_Av1_wo05" if _mod == "v4_1" else "V5_Av4_wo05"
+    _n = _pre + "_survey" + _suf
+    MODEL_REGISTRY[_n] = ModelEntry(
+        _n, _mod, "wo05 survey %s%s (2026-10-24)" % (_pre, _suf))
+
 # λ 扫描（2026-10-24，用户裁定「先扫描一下这几个参数点」）：V5_Av1 / V5_Av4 /
 # V4_Av1 × λ_prior_pose {1,2,3,4} × λ_prior_traj {0,1} 共 24 模型；cam3 +
 # v1_wo05.yaml 纯扫描。结构与 v3off 条目逐项一致（v4_1 / v5_1 入口）。
@@ -401,3 +451,20 @@ for _m, _mod, _fam in (("V5_Av1", "v5_1", "V5_Av1_wo05"),
             MODEL_REGISTRY[_n] = ModelEntry(
                 _n, _mod, "prior-lambda scan %s lp%s lt%s (2026-10-24)"
                 % (_m, _lp, _lt))
+
+# tw × 遮挡交互（2026-10-24）：occ020/030 × tw{5,10,15,20}（v3off 轴）。
+# 模型 = V3_Bv1（v3_3b）/ V5_Av4（v5_1，carrier_from=scratch）。
+for _occ in ("020", "030"):
+    for _tw in (5, 10, 15):
+        MODEL_REGISTRY[f"V3_Bv1_cam3_occ{_occ}_v3off_tw{_tw}"] = ModelEntry(
+            f"V3_Bv1_cam3_occ{_occ}_v3off_tw{_tw}", "v3_3b",
+            "tw x occlusion interaction cell (2026-10-24)")
+        MODEL_REGISTRY[f"V5_Av4_cam3_occ{_occ}_v3off_tw{_tw}"] = ModelEntry(
+            f"V5_Av4_cam3_occ{_occ}_v3off_tw{_tw}", "v5_1",
+            "tw x occlusion interaction cell (2026-10-24)")
+    MODEL_REGISTRY[f"V3_Bv1_cam3_occ{_occ}_v3off"] = ModelEntry(
+        f"V3_Bv1_cam3_occ{_occ}_v3off", "v3_3b",
+        "tw x occlusion interaction cell (2026-10-24)")
+    MODEL_REGISTRY[f"V5_Av4_cam3_occ{_occ}_v3off"] = ModelEntry(
+        f"V5_Av4_cam3_occ{_occ}_v3off", "v5_1",
+        "tw x occlusion interaction cell (2026-10-24)")

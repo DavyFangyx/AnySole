@@ -357,7 +357,7 @@ def build_corrected_skeleton(pose, trans, offsets, parents, pos_corr):
 
 class AnySoleModelV41(nn.Module):
     def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, pose_layers=6,
-                 beta=1.0):
+                 beta=1.0, carrier_scratch: bool = False):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -395,13 +395,16 @@ class AnySoleModelV41(nn.Module):
         self.contact_gate = ContactGate(n_reach=len(REACH_PARTS))
         self.corr_heads = PositionCorrHeads(dim=d)
         self.sg7 = SG7Smooth()
-        # Carrier rule: the V stream is frozen at construction.  The E
-        # ckpt_best weights are loaded by the entry (anysole/models/v4_1.py);
-        # freezing here makes the carrier identity load-independent.  The T
-        # stream and the correction branch stay trainable.
-        for name, param in self.named_parameters():
-            if name.startswith(CARRIER_PREFIXES):
-                param.requires_grad_(False)
+        # Carrier rule: the V stream is frozen at construction unless
+        # carrier_scratch (V4_Av2, 2026-10-25 — E 式双流同训：V 流从零可训，
+        # 无载体装载）。The E ckpt_best weights are loaded by the entry
+        # (anysole/models/v4_1.py); freezing here makes the carrier identity
+        # load-independent.  The T stream and the correction branch stay
+        # trainable.
+        if not carrier_scratch:
+            for name, param in self.named_parameters():
+                if name.startswith(CARRIER_PREFIXES):
+                    param.requires_grad_(False)
         for head in list(self.pose_head.sig_parts) + list(self.prior_head.sig_parts):
             for param in head.parameters():
                 param.requires_grad_(False)

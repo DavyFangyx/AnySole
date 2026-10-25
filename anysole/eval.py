@@ -422,6 +422,11 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
                     % (key, saved_config.get(key), model_name, value)
                 )
         build_cfg = dict(config)
+        # 结构标志进 build_cfg（2026-10-25 修订）：V7 的
+        # v7_contact_root/v7_reliability_route 决定模型构造（route_mlp 的
+        # 存在与否）——此前只校验了 ckpt 与 entry 的结构一致，却没有把
+        # 结构键传给 build，C 类模型的 state_dict 装载必然 mismatch。
+        build_cfg.update(entry.STRUCTURE)
         build_cfg["d_model"] = d_model
         build_cfg["tw"] = tw
         build_cfg["dropout"] = dropout

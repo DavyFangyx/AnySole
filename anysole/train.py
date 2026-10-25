@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import random
@@ -59,6 +60,7 @@ from anysole.data.workspace_adapter import ADAPTER_VERSION, sha256_file
 from AnysoleWorkspace.tool.workspace import resolve_uri
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.utils.geometry import f2_to_world, fk_pose6d
+from anysole.utils.metrics import pa_mpjpe
 from anysole.utils.constraints import apply_v3e_constraints
 from anysole.utils.constraints_g import apply_v3g_constraints
 from anysole.utils.constraints_h import apply_v3h
@@ -68,6 +70,8 @@ from anysole.models.common.model_v5_1 import v5_1_z_src
 from anysole.data.occ_mix import SRC_CAM3, SRC_OCC, grouped_mean
 from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.types import CONFIG_NAMES
+from anysole.utils.checkpoint_policy import CandidateArchive, DashboardUnavailable, infer_role
+from anysole.utils.v5_conditioning import apply_availability, conditioning_policy, require_fresh_output
 
 
 DEFAULT_CONFIG = {
@@ -620,6 +624,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="维度 3：着地模式三分类权重")
     parser.add_argument("--lambda-gtcop", type=float, default=None,
                         help="维度 3：GT CoP 回归权重")
+    parser.add_argument("--lambda-cond", type=float, default=None,
+                        help="V5_Av5/V4_Av2: conditional contract weight "
+                             "(V 健康窗口罚修正量，V 失效窗口自由；0 = 关).")
+    parser.add_argument("--carrier-lr-mult", type=float, default=None,
+                        help="V4_Av4: two-stage fine-tune — the B backbone "
+                             "trains at this lr multiplier (0.1), other "
+                             "modules at 1.0; 0 = freeze (V4_Av3 口径).")
     parser.add_argument("--g-floor-src", type=str, default=None, choices=("gt", "t"),
                         help="V3_Gv1: observation-layer floor source (gt = E v2.1 口径, default; t = T-derived diagnostic).")
     parser.add_argument("--carrier-from", type=Path, default=None,
@@ -696,6 +707,40 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                              "knob dominates total time: 10 -> 57s stall every 10 epochs (~64%% overhead), "
                              "50 -> ~26%% overhead. Runs regardless of wandb mode.")
     parser.add_argument("--wandb_experiment_tag", default=None, help="Batch tag used by Wandb_Analyzer to group runs.")
+    parser.add_argument("--survey-save", action="store_true",
+                        help="wo05 survey round (2026-10-24 裁定): at every val eval, snapshot the "
+                             "checkpoint into checkpoints/survey/survey_ep{N}.pt when both conditions "
+                             "hold — (1) val/pa_mpjpe/VT - val/pa_mpjpe/V <= --survey-dpa-max (VT must "
+                             "not severely degrade vs V), (2) val/pa_mpjpe/T <= --survey-t2m-pa-max "
+                             "(T2M must not collapse). A rolling cap of --survey-keep files is kept; "
+                             "every val step (pass or fail) is appended to survey_log.jsonl. "
+                             "ckpt_best/ckpt_last keep their existing behavior.")
+    parser.add_argument("--survey-dpa-max", type=float, default=None,
+                        help="Survey condition 1 threshold: max allowed PA-MPJPE delta "
+                             "VT minus V in mm (default 0.5; the 2026-10-24 harmful-gate "
+                             "readings were +1.3~+1.8).")
+    parser.add_argument("--survey-t2m-pa-max", type=float, default=None,
+                        help="Survey condition 2 threshold: max allowed val T2M PA-MPJPE "
+                             "in mm (default 90; user ruling 2026-10-24).")
+    parser.add_argument("--survey-keep", type=int, default=None,
+                        help="Rolling cap on kept survey checkpoints (default 10; a ckpt "
+                             "is ~232MB). The full pass/fail trajectory stays in "
+                             "survey_log.jsonl regardless of the cap.")
+    parser.add_argument("--v5-conditioning", choices=("legacy", "availability_v1"), default=None,
+                        help="V5 training recipe: legacy reproduces old conditioning; availability_v1 "
+                             "aligns V/T/VT supervision with config and structured/random input dropout. "
+                             "Use a fresh output directory; saved in checkpoint config.")
+    parser.add_argument("--checkpoint-policy", choices=("legacy", "multi_metric"), default=None,
+                        help="Default legacy: retain existing best/last/survey behavior. "
+                             "multi_metric ADDS protected PA/GlobalMPJPE champions and a bounded "
+                             "candidate archive for later full ten-metric validation review. "
+                             "It never replaces legacy saves or declares a final winner.")
+    parser.add_argument("--checkpoint-role", choices=("auto", "U", "S_V", "S_T", "S_VT"), default=None,
+                        help="Candidate objective inputs; auto infers from config_probs [VT,V,T]. "
+                             "Explicit roles must agree with the actual training inputs.")
+    parser.add_argument("--checkpoint-pareto-keep", type=int, default=None,
+                        help="Additional dashboard Pareto sample cap, default 8; objective champions "
+                             "are protected independently. Only used by multi_metric.")
     parser.add_argument("--loss-cap", type=float, default=None,
                         help="If set, clip the logged train loss metrics (loss_total, loss_pose, loss_traj, "
                              "loss_con, loss_kp, loss_Trec_Tmissing, loss_Vrec_Vmissing, grad_norm) at this "
@@ -969,6 +1014,21 @@ def _evaluate(model, diffusion, loader, config, device):
                                 + out["pos_corr"].reshape(bsz, -1, len(KNEE_ANKLE_FOOT_JOINTS), 3)
                             )
                     totals["mpjpe"] += float(torch.linalg.vector_norm(pred_kp - batch["kp_gt"], dim=-1).mean().item()) * n * 1000.0
+                    if not pos_mode and totals.get("pa_ok", True):
+                        # Survey screening (2026-10-24): frame-level PA-MPJPE on
+                        # the FK keypoints, same formula family as eval.py
+                        # (similarity_align + mean_point_error, mm). The
+                        # survey_save conditions read val/pa_mpjpe/{V,VT,T}.
+                        try:
+                            _pa = pa_mpjpe(
+                                pred_kp.reshape(bsz * pred_kp.shape[1], -1, 3).detach().float().contiguous().cpu().numpy(),
+                                batch["kp_gt"].reshape(bsz * batch["kp_gt"].shape[1], -1, 3).detach().float().contiguous().cpu().numpy())
+                            totals["pa_sum"] = totals.get("pa_sum", 0.0) + float(_pa.mean()) * n
+                        except ValueError:
+                            # Degenerate predicted point set (variance ~0): the
+                            # condition metric is undefined for this epoch —
+                            # mark the row unusable instead of poisoning the sum.
+                            totals["pa_ok"] = False
                 if first_batch and not regress_mode:
                     # tau=0 clean-input reconstruction MPJPE on one batch (no
                     # diffusion sampling): tells apart "cannot fit the training
@@ -1040,6 +1100,8 @@ def _evaluate(model, diffusion, loader, config, device):
                            f"val/contact_balanced_acc/{config_name}": balanced_acc,
                            f"val/foot_slide/{config_name}": totals.get("foot_slide_sum", 0.0) / max(totals.get("foot_slide_n", 0), 1),
                            f"val/tau0_mpjpe/{config_name}": tau0_mpjpe})
+            if totals.get("pa_ok", True) and not pos_mode:
+                result[f"val/pa_mpjpe/{config_name}"] = totals.get("pa_sum", 0.0) / count
     result["val/gap_mpjpe_dropT"] = result["val/mpjpe/V"] - result["val/mpjpe/VT"]
     result["val/gap_mpjpe_dropV"] = result["val/mpjpe/T"] - result["val/mpjpe/VT"]
     return result
@@ -1163,6 +1225,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         value = getattr(args, key)
         if value is not None:
             config[key] = value
+    config["survey_save"] = bool(args.survey_save)
+    for key in ("survey_dpa_max", "survey_t2m_pa_max", "survey_keep"):
+        value = getattr(args, key)
+        if value is not None:
+            config[key] = value
+    for key in ("checkpoint_policy", "checkpoint_role", "checkpoint_pareto_keep"):
+        value = getattr(args, key)
+        if value is not None:
+            config[key] = value
+    if config.get("checkpoint_policy", "legacy") not in ("legacy", "multi_metric"):
+        raise ValueError("Unknown checkpoint_policy")
     # Registered experiment names identify the model branch; the architecture
     # comes from the model's entry script (anysole/models/<module>.py), which
     # fixes the structure — structure flags are not a CLI choice (2026-09-24
@@ -1179,6 +1252,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     v3h_mode = bool(config.get("v3h", False))
     v5_1_mode = bool(config.get("v5_1", False))
     v4_1_mode = bool(config.get("v4_1", False))
+    if args.v5_conditioning is not None:
+        config["v5_conditioning"] = args.v5_conditioning
+    v5_availability = conditioning_policy(config) == "availability_v1"
+    if v5_availability and not v5_1_mode:
+        raise ValueError("availability_v1 requires the V5 model family")
+    if v5_1_mode:
+        config["v5_conditioning"] = conditioning_policy(config)
+        print("V5 training conditioning: %s" % config["v5_conditioning"])
     if config.get("modal", MODEL_ANYSOLEV1) not in MODEL_NAMES:
         raise ValueError("Unknown modal %r; expected one of %s" % (config.get("modal"), MODEL_NAMES))
     if config.get("modal") == MODEL_ANYSOLEV2 and not v3f_mode and (
@@ -1281,7 +1362,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "lambda_contact", "lambda_nll", "lambda_prior_pose",
                 "lambda_prior_nll", "lambda_prior_traj", "lambda_air",
                 "lambda_foot_res", "lambda_phase", "lambda_cop",
-                "lambda_tcop", "lambda_strike", "lambda_gtcop"):
+                "lambda_tcop", "lambda_strike", "lambda_gtcop",
+                "lambda_cond"):
         value = getattr(args, key)
         if value is not None:
             config[key] = float(value)
@@ -1289,6 +1371,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["g_floor_src"] = str(args.g_floor_src)
     if args.carrier_from is not None:
         config["carrier_from"] = str(args.carrier_from)
+    if args.carrier_lr_mult is not None:
+        config["carrier_lr_mult"] = float(args.carrier_lr_mult)
     if args.beta is not None:
         config["beta"] = float(args.beta)
     if args.occ_mix:
@@ -1436,6 +1520,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "output dir is inferred as <model-name>_<contact>[/<stacked fields>]/checkpoints, "
                 "or pass --out-dir explicitly for a custom experiment."
             )
+    if v5_availability:
+        require_fresh_output(config["out_dir"])
     if modal == MODEL_ANYSOLEV2:
         # Registered models are built from their entry script — the structure
         # is fixed by the model name (anysole/models/<module>.py), and the
@@ -1544,8 +1630,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     # multiplier, so the assignment can move faster than the heads while they
     # co-train (soft EM).  The per-epoch/per-step lr setters below multiply
     # by each group's "assign_mult".
+    # 双阶段精调（V4_Av4, 2026-10-25）：carrier_lr_mult != 1.0 时骨架
+    # （B backbone，模型暴露 carrier_param_ids）与其他模块分组——骨架组
+    # assign_mult = carrier_lr_mult（0.1），其余 1.0。与 V4A 的 assign_lr_mult
+    # 分组互斥（后者只对 soft_parts 的 A 矩阵生效；两者不同时出现）。
     assign_lr_mult = float(config.get("assign_lr_mult", 1.0))
-    if assign_lr_mult != 1.0 and bool(config.get("soft_parts", False)):
+    carrier_lr_mult = float(config.get("carrier_lr_mult", 1.0))
+    if carrier_lr_mult != 1.0 and hasattr(model, "carrier_param_ids"):
+        carrier_ids = set(model.carrier_param_ids())
+        carrier = [p for p in model.parameters() if id(p) in carrier_ids]
+        rest = [p for p in model.parameters() if id(p) not in carrier_ids]
+        optimizer = torch.optim.Adam(
+            [
+                {"params": rest, "assign_mult": 1.0},
+                {"params": carrier, "assign_mult": carrier_lr_mult},
+            ],
+            lr=float(config["lr"]),
+        )
+    elif assign_lr_mult != 1.0 and bool(config.get("soft_parts", False)):
         part_logits = model.pose_head.part_logits
         rest = [p for p in model.parameters() if p is not part_logits]
         optimizer = torch.optim.Adam(
@@ -1560,6 +1662,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_dir = Path(config["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     warn_legacy_output_checkpoint(out_dir)
+    # Optional additive archive. Default legacy runs execute the unchanged
+    # best/last/survey blocks below and create no additional archive/files.
+    checkpoint_archive = None
+    if config.get("checkpoint_policy", "legacy") == "multi_metric":
+        if (config.get("modal") != MODEL_ANYSOLEV2 or bool(config.get("v3f", False))
+                or str(config.get("pose_repr", "6d")) != "6d"):
+            raise ValueError("multi_metric currently requires a 6D regression model with validation PA")
+        if val_loader is None:
+            raise ValueError("multi_metric requires a validation loader")
+        checkpoint_archive = CandidateArchive(
+            out_dir / "multi_metric", infer_role(config),
+            pareto_keep=config.get("checkpoint_pareto_keep", 8),
+            dpa_max=float(config.get("survey_dpa_max", 0.5)),
+            t2m_pa_max=float(config.get("survey_t2m_pa_max", 90.0)),
+        )
+        print("additive checkpoint archive: role=%s, path=%s" %
+              (checkpoint_archive.role, checkpoint_archive.root))
 
     # V3 structural steps (fix_plan_v3 §2.2): linear LR warmup over the first
     # lr_warmup_frac of the total planned steps, multiplying the epoch cosine
@@ -1620,6 +1739,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         epoch_start_step = global_step
         nonfinite_skips = 0
         epoch_sums = {"loss_total": 0.0, "loss_pose": 0.0, "loss_traj": 0.0, "loss_con": 0.0, "loss_kp": 0.0, "loss_pos": 0.0, "loss_pose_vel": 0.0, "loss_bone": 0.0, "loss_assign": 0.0, "loss_sigma": 0.0, "loss_contact": 0.0, "loss_phase": 0.0, "loss_cop": 0.0, "loss_Trec_Tmissing": 0.0, "loss_Vrec_Vmissing": 0.0, "grad_norm": 0.0, "n": 0, "n_tmissing": 0, "n_vmissing": 0}
+        availability_counts = {k: 0 for k in ("windows", "V", "T", "VT", "neither")}
+        # 条件契约运行阈值（V5_Av5/V4_Av2，2026-10-25）：V-only 窗口误差的
+        # 批中位数 EMA（只统计 V 在场窗口；occ 窗口误差自然抬高、中位数
+        # 稳健）。首批直接取中位数，其后 α=0.05 慢跟踪。
+        cond_tau = None
         # V6_Av1 A1/A2 窗源分层累计（occ_mix 启用时；key -> [sum, count]）。
         occ_acc: Dict[str, tuple] = {}
         # epoch_sums 的损失键映射：L_corr_prior 只在 v4_1_mode 存在
@@ -1633,7 +1757,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                       ("L_contact", "loss_contact"), ("L_phase", "loss_phase"),
                       ("L_cop", "loss_cop"),
                       ("L_tcop", "loss_tcop"), ("L_strike", "loss_strike"),
-                      ("L_gtcop", "loss_gtcop")]
+                      ("L_gtcop", "loss_gtcop"), ("L_cond", "loss_cond")]
         if v4_1_mode:
             loss_pairs.append(("L_corr_prior", "loss_corr_prior"))
             epoch_sums["loss_corr_prior"] = 0.0
@@ -1698,16 +1822,30 @@ def main(argv: Optional[List[str]] = None) -> int:
                     v_feat = torch.where(v_drop.view(-1, 1, 1),
                                          torch.zeros_like(v_feat), v_feat)
                 if v5_1_mode:
-                    # V5_Av1 条件配比：VT 90% / V 零化 10%（H 口径，T2M 行
-                    # 代价）。零化样本的 V 行（V2M/VT2M）损失按掩码跳过，
-                    # 只监督 T2M 行 + g_T 读出（compute_losses_v5_1 读
-                    # batch["v_zero"]）。T 流三条件恒定，不零化。
+                    # legacy keeps the historical random-null-V-only mask.
+                    # availability_v1 also records config/occ missing inputs.
                     v_drop = torch.rand(batch_size, device=device) < float(
                         config.get("v_cond_dropout", 0.1))
-                    if bool(v_drop.any()):
-                        v_feat = torch.where(v_drop.view(-1, 1, 1),
-                                             torch.zeros_like(v_feat), v_feat)
-                    batch["v_zero"] = v_drop
+                    if v5_availability:
+                        (v_feat, t_raw, t_phys, t_s2m), masks = apply_availability(
+                            (v_feat, t_raw, t_phys, t_s2m), config_id, batch, v_drop)
+                        batch.update(masks)
+                        if v_kw.get("V_hmr") is not None:
+                            v_kw["V_hmr"] = torch.where(masks["v_available"][:, None, None],
+                                                       v_kw["V_hmr"], torch.zeros_like(v_kw["V_hmr"]))
+                        va, ta = masks["v_available"], masks["t_available"]
+                        availability_counts["windows"] += batch_size
+                        for key, mask in (("V", va), ("T", ta), ("VT", va & ta), ("neither", ~(va | ta))):
+                            availability_counts[key] += int(mask.sum())
+                        if not bool((va | ta).any()):
+                            # No observed input can supervise a branch. Skip
+                            # the optimizer too (including any old momentum).
+                            continue
+                    else:
+                        if bool(v_drop.any()):
+                            v_feat = torch.where(v_drop.view(-1, 1, 1),
+                                                 torch.zeros_like(v_feat), v_feat)
+                        batch["v_zero"] = v_drop
                 z_kw = {"z_src": "all"} if v5_1_mode else {}
                 out = model(v_feat, t_raw, t_phys, config_id, batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw)
             else:
@@ -1741,12 +1879,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                 x_tau = diffusion.q_sample(pose_target, tau, noise=noise)
                 out = model(v_feat, t_raw, t_phys, x_tau, tau, config_id,
                             batch.get("session_id"), T_s2m=t_s2m, **v_kw)
+            if float(config.get("lambda_cond", 0.0)) > 0.0 and (v5_1_mode or v4_1_mode):
+                # 契约触发器：V-only 误差（v5 = x0_v 行；v4 = V 读出
+                # x0_hat）批中位数更新 τ。T-only 窗口 V 已零化 → 剔除。
+                with torch.no_grad():
+                    pred_v = out["x0_v"] if v5_1_mode else out["x0_hat"]
+                    e_v = (pred_v - batch["pose_gt"]).square().mean(dim=(-1, -2))
+                    v_present = config_id != CONFIG_T
+                    if v5_availability:
+                        v_present = batch["v_available"] & batch["t_available"]
+                    if bool(v_present.any()):
+                        e_v = e_v[v_present]
+                    if e_v.numel():
+                        med = float(e_v.median())
+                        cond_tau = med if cond_tau is None else 0.95 * cond_tau + 0.05 * med
+
             if v3f_mode:
                 losses = compute_losses_v3f(out, x0_n, batch, config)
             elif v5_1_mode:
-                losses = compute_losses_v5_1(out, batch, config_id, config)
+                losses = compute_losses_v5_1(out, batch, config_id, config, cond_tau=cond_tau)
             elif v4_1_mode:
-                losses = compute_losses_v4_1(out, batch, config_id, config)
+                losses = compute_losses_v4_1(out, batch, config_id, config, cond_tau=cond_tau)
             else:
                 losses = compute_losses(out, batch, config_id, config)
 
@@ -1875,6 +2028,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 values = " ".join("%s=%.6f" % (key, value.detach().item()) for key, value in losses.items())
                 print("epoch=%d step=%d %s" % (epoch + 1, global_step, values))
             global_step += 1
+        if v5_availability:
+            if epoch_sums["n"] == 0:
+                raise RuntimeError("availability_v1 epoch has no usable optimizer updates; check input/dropout settings")
+            print("v5 availability epoch %d: %s" % (epoch + 1, availability_counts))
         if occ_mix_kwargs and occ_acc:
             parts = ["%s=%.4f(n=%d)" % (key, total / max(count, 1), count)
                      for key, (total, count) in occ_acc.items()]
@@ -1930,6 +2087,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         if val_loader is not None and (epoch + 1) % eval_interval == 0:
             model.eval()
             eval_results = _evaluate(model, diffusion, val_loader, config, device)
+            if checkpoint_archive is not None:
+                # Compatibility aliases remain intact. The explicit new name
+                # describes the actual world-coordinate dashboard definition.
+                for mode in ("V", "T", "VT"):
+                    if "val/mpjpe/" + mode in eval_results:
+                        eval_results["val/global_mpjpe/" + mode] = eval_results["val/mpjpe/" + mode]
             if occ_mix_kwargs and bool(config.get("occ_a3_monitor", False)):
                 # V6_Av1 A3 分层监控（默认关）：窗口级 VT2M ≤ V2M 占比
                 # occ vs cam3 对照（曲线分离方向）。
@@ -1951,12 +2114,82 @@ def main(argv: Optional[List[str]] = None) -> int:
                 torch.save(best_ckpt, best_tmp)
                 os.replace(best_tmp, best_path)
                 print("saved best %s (epoch %d, val/tau0 VT %.4f)" % (best_path, epoch + 1, best_vt))
+            if bool(config.get("survey_save", False)):
+                # Survey round (2026-10-24 裁定): dual-condition checkpoint
+                # series on top of the ordinary ckpt_best/ckpt_last track.
+                # Every val step is logged (pass or fail); a pass snapshots
+                # the checkpoint with a rolling cap.  The criteria screen for
+                # "T is alive and not hurting VT" without optimizing for it —
+                # the survey series is then evaluated on the full condition
+                # suite (test cam3 + occ010-050) to see whether any training
+                # point actually delivers.
+                dpa_vt_v = (eval_results.get("val/pa_mpjpe/VT")
+                            - eval_results.get("val/pa_mpjpe/V")
+                            if eval_results.get("val/pa_mpjpe/VT") is not None
+                            and eval_results.get("val/pa_mpjpe/V") is not None else None)
+                t2m_pa = eval_results.get("val/pa_mpjpe/T")
+                dpa_max = float(config.get("survey_dpa_max", 0.5))
+                t2m_max = float(config.get("survey_t2m_pa_max", 90.0))
+                cond1 = dpa_vt_v is not None and dpa_vt_v <= dpa_max
+                cond2 = t2m_pa is not None and t2m_pa <= t2m_max
+                passed = cond1 and cond2
+                row = {key: eval_results[key] for key in sorted(eval_results)}
+                row["survey_epoch"] = epoch + 1
+                row["survey_dpa_vt_minus_v"] = dpa_vt_v
+                row["survey_t2m_pa"] = t2m_pa
+                row["survey_dpa_max"] = dpa_max
+                row["survey_t2m_pa_max"] = t2m_max
+                row["survey_pass"] = bool(passed)
+                survey_log = out_dir / "survey_log.jsonl"
+                with open(survey_log, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(row) + "\n")
+                if passed:
+                    survey_dir = out_dir / "survey"
+                    survey_dir.mkdir(parents=True, exist_ok=True)
+                    survey_ckpt = {
+                        "model": model.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "epoch": epoch + 1,
+                        "config": dict(config),
+                        "survey": row,
+                    }
+                    survey_tmp = survey_dir / ("survey_ep%d.pt.tmp%d" % (epoch + 1, os.getpid()))
+                    survey_path = survey_dir / ("survey_ep%d.pt" % (epoch + 1))
+                    torch.save(survey_ckpt, survey_tmp)
+                    os.replace(survey_tmp, survey_path)
+                    keep = int(config.get("survey_keep", 10))
+                    kept = sorted(survey_dir.glob("survey_ep*.pt"),
+                                  key=lambda p: int(p.stem.split("_ep")[1].split(".")[0]))
+                    for old in kept[:-keep] if keep > 0 else kept:
+                        old.unlink()
+                    print("survey save %s (epoch %d, dpa %.2f <= %.2f, t2m %.1f <= %.1f)"
+                          % (survey_path, epoch + 1, dpa_vt_v, dpa_max, t2m_pa, t2m_max))
+                else:
+                    print("survey skip epoch %d (dpa %.2f vs %.2f, t2m %.1f vs %.1f)"
+                          % (epoch + 1, dpa_vt_v if dpa_vt_v is not None else float("nan"),
+                             dpa_max, t2m_pa if t2m_pa is not None else float("nan"), t2m_max))
+            if checkpoint_archive is not None:
+                try:
+                    state = checkpoint_archive.update(checkpoint, eval_results)
+                    print("multi_metric archive epoch %d: %d unique candidates; final selection pending full validation" %
+                          (epoch + 1, len(state["candidates"])))
+                except DashboardUnavailable as exc:
+                    # Degenerate PA is undefined, not zero. Legacy saves have
+                    # already completed; record the skip without stopping training.
+                    checkpoint_archive.root.mkdir(parents=True, exist_ok=True)
+                    with (checkpoint_archive.root / "skipped_validation.jsonl").open("a", encoding="utf-8") as fh:
+                        fh.write(json.dumps({"epoch": epoch + 1, "reason": str(exc)}) + "\n")
+                    print("multi_metric skip epoch %d: %s" % (epoch + 1, exc))
         if wandb_run is not None:
             denom = max(epoch_sums["n"], 1)
             log = {"epoch": epoch + 1}
             log["train/global_step"] = global_step
             log["train/steps_per_epoch"] = global_step - epoch_start_step
             log["train/nonfinite_skips"] = nonfinite_skips
+            if v5_availability:
+                for key, count in availability_counts.items():
+                    log["train/v5_availability/" + key] = (count if key == "windows" else
+                        count / max(availability_counts["windows"], 1))
             for key, value in epoch_sums.items():
                 if key in ("n", "n_tmissing", "n_vmissing") or key.startswith("z_"):
                     continue

@@ -509,13 +509,18 @@ class PoseHead(nn.Module):
             out[..., j * self.per_joint:(j + 1) * self.per_joint] = flat[..., k * self.per_joint:(k + 1) * self.per_joint]
         return out
 
-    def forward(self, x_tau=None, tau=None, F=None):
+    def forward(self, x_tau=None, tau=None, F=None, return_z: bool = False):
         """Dispatch by head_mode.
 
         Diffusion keeps the ``(x_tau, tau, F)`` positional signature so every
         pre-F0b caller/checkpoint works unchanged.  Regress takes only the
         fused memory — call it with ``F=...`` (positional args are rejected so
         a diffusion-style call cannot silently feed x_tau in as the memory).
+
+        ``return_z``（V4_Av3 B-基座挂接，2026-10-25；仅 regress 模式）：
+        True 时返回 (x0, z_tokens)——z_tokens (B, tw, n_tokens, dim) 为
+        decoder 之后、out_parts 之前的部位 token 槽位（V4 修正分支挂接点，
+        与 V41PoseHead return_z 同义）。签名级扩展，state dict 不变。
         """
         if self.head_mode == "regress":
             if x_tau is not None or tau is not None:
@@ -525,7 +530,7 @@ class PoseHead(nn.Module):
                 )
             if F is None:
                 raise ValueError("regress head requires F")
-            return self._forward_regress(F)
+            return self._forward_regress(F, return_z=return_z)
         if x_tau is None or tau is None or F is None:
             raise ValueError("diffusion head requires (x_tau, tau, F)")
         return self._forward_diffusion(x_tau, tau, F)
@@ -546,7 +551,7 @@ class PoseHead(nn.Module):
         x0 = self._unembed(h)
         return x0 * self.pose_std + self.pose_mean
 
-    def _forward_regress(self, F):
+    def _forward_regress(self, F, return_z: bool = False):
         """F0b: token = query + time PE + group embedding, straight through the
         6-layer decoder (self-attention, cross-attention to F, FFN), then
         unembed and denormalize with the same fitted stats as the diffusion
@@ -581,6 +586,9 @@ class PoseHead(nn.Module):
         else:
             h = self.decoder(h, F)
         x0 = self._unembed(h)
+        if return_z:
+            z_tokens = h.view(F.shape[0], self.tw, self.n_tokens, self.dim)
+            return x0 * self.pose_std + self.pose_mean, z_tokens
         return x0 * self.pose_std + self.pose_mean
 
     def _part_hypotheses(self, h):

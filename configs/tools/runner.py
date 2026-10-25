@@ -222,6 +222,32 @@ def _train_command(registry: dict[str, Any], model_id: str,
     return command
 
 
+def _assert_training_complete(ckpt: Path, expected_epochs: int | None = None) -> int:
+    """An intermediate candidate is valid only after its source run completed."""
+    import torch
+
+    last = next((parent / "ckpt_last.pt" for parent in ckpt.parents
+                 if (parent / "ckpt_last.pt").is_file()), None)
+    if last is None:
+        raise FileNotFoundError("Cannot verify training completion: no ckpt_last.pt for %s" % ckpt)
+    final = torch.load(last, map_location="cpu", mmap=True, weights_only=False)
+    planned = final.get("config", {}).get("epochs")
+    epoch = final.get("epoch")
+    if (not isinstance(planned, int) or planned <= 0 or epoch != planned
+            or (expected_epochs is not None and planned != expected_epochs)):
+        raise RuntimeError("Incomplete or mismatched training: %s epoch=%s planned=%s requested=%s; "
+                           "do not reuse it as a completed run" % (last, epoch, planned, expected_epochs))
+    chosen = final if ckpt == last else torch.load(ckpt, map_location="cpu", mmap=True, weights_only=False)
+    chosen_epoch = chosen.get("epoch")
+    if (not isinstance(chosen_epoch, int) or not 1 <= chosen_epoch <= planned
+            or chosen.get("config", {}).get("epochs") != planned):
+        raise RuntimeError("Candidate epoch/config disagrees with its completed source run: %s" % ckpt)
+    for key in ("model_name", "tw", "stride", "split_csv", "config_probs", "carrier_from", "seed"):
+        if chosen.get("config", {}).get(key) != final.get("config", {}).get(key):
+            raise RuntimeError("Candidate/source config mismatch for %s: %s" % (key, ckpt))
+    return chosen_epoch
+
+
 def _materialize_checkpoint(registry: dict[str, Any], experiment_id: str, model_id: str, root: Path, log: Path, force: bool,
                              train_overrides: dict[str, Any] | None = None) -> Path:
     spec = _merge_model_spec(registry, model_id)
@@ -234,29 +260,28 @@ def _materialize_checkpoint(registry: dict[str, Any], experiment_id: str, model_
             paths = specialist_paths(registry, model_id)
             if paths is None:
                 raise ValueError("specialist resolution failed for %s" % model_id)
-            candidates = [paths["ckpt_best"], paths["ckpt_last"]]
+            last = paths["ckpt_last"]
         else:
             variant = effective_variant(spec)
-            candidates = [
-                infer_anysole_paths(str(spec["name"]), variant=variant, contact=contact, which=which)["ckpt"]
-                for which in ("best", "last")
-            ]
-        if not force:
-            existing = next((candidate for candidate in candidates if candidate.is_file()), None)
-            if existing is not None:
-                return existing
-        command = _train_command(registry, model_id, train_overrides)
-        code = _command_log(command, log)
-        if code != 0:
-            raise RuntimeError("training failed for %s (exit %d); see %s" % (model_id, code, log))
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
-        raise FileNotFoundError("training completed without checkpoint for %s (expected %s)" % (model_id, candidates[0]))
+            last = infer_anysole_paths(str(spec["name"]), variant=variant, contact=contact, which="last")["ckpt"]
+        if not force and last.is_file():
+            _assert_training_complete(last, int(spec.get("epochs", 800)))
+        elif not force and last.with_name("ckpt_best.pt").is_file():
+            raise RuntimeError("Found best without a completed last checkpoint for %s: %s" % (model_id, last))
+        else:
+            command = _train_command(registry, model_id, train_overrides)
+            code = _command_log(command, log)
+            if code != 0:
+                raise RuntimeError("training failed for %s (exit %d); see %s" % (model_id, code, log))
+            _assert_training_complete(last, int(spec.get("epochs", 800)))
+        ckpt = checkpoint_path(registry, experiment_id, model_id)
+        _assert_training_complete(ckpt, int(spec.get("epochs", 800)))
+        return ckpt
 
     ckpt = checkpoint_path(registry, experiment_id, model_id)
     if not ckpt.is_file():
         raise FileNotFoundError("checkpoint missing for registered model %s: %s" % (model_id, ckpt))
+    _assert_training_complete(ckpt)
     (root / "checkpoints").mkdir(parents=True, exist_ok=True)
     (root / "checkpoints" / "source_checkpoint.txt").write_text(str(ckpt) + "\n", encoding="utf-8")
     return ckpt
@@ -323,13 +348,18 @@ def _run_model(registry: dict[str, Any], experiment_id: str, model_id: str, forc
     try:
         ckpt = _materialize_checkpoint(registry, experiment_id, model_id, root, log, force,
                                        train_overrides)
+        ckpt_hash = sha256_file(ckpt)
+        ckpt_epoch = _assert_training_complete(ckpt)
         (root / "checkpoint_used.txt").write_text(str(ckpt) + "\n", encoding="utf-8")
         _formal_eval(registry, model_id, root, ckpt, log)
+        if sha256_file(ckpt) != ckpt_hash:
+            raise RuntimeError("Checkpoint changed during val/test evaluation: %s" % ckpt)
         _update_manifest(
             manifest,
             status="complete",
             checkpoint=str(ckpt),
-            checkpoint_sha256=sha256_file(ckpt),
+            checkpoint_sha256=ckpt_hash,
+            checkpoint_epoch=ckpt_epoch,
             metrics={
                 "val": str(root / "metrics" / "val.json"),
                 "test": str(root / "metrics" / "test.json"),
@@ -505,6 +535,63 @@ def _run_task(
                           train_overrides=train_overrides)
         if str(experiment_spec(registry, experiment_id).get("kind")) == "rho_grid":
             _rho_grid(registry, experiment_id, model_id, root, root / "run.log")
+    elif task == "survey_eval":
+        # Candidate review defaults to validation. Test requires an explicit
+        # SPLIT=test after one checkpoint has been fixed for every condition.
+        # CONFIG: cam3 -> the survey model's own config (v1_wo05.yaml);
+        # occ010-050 -> anysole/configs/v1_cam3_{cond}_wo05.yaml.
+        model_id = str(values.get("MODEL_ID", "")).strip()
+        ckpt_path = Path(str(values.get("CKPT_PATH", "")).strip())
+        cond = str(values.get("COND", "cam3")).strip()
+        split = str(values.get("SPLIT", "val")).strip()
+        if split not in ("val", "test"):
+            raise ValueError("survey_eval SPLIT must be val or test")
+        if not model_id or not ckpt_path.is_file():
+            raise ValueError("TASK=survey_eval requires MODEL_ID and an existing CKPT_PATH")
+        if cond == "cam3":
+            config = config_path(registry, model_id)
+        elif cond in ("occ010", "occ020", "occ030", "occ050"):
+            config = REPO / ("anysole/configs/v1_cam3_%s_wo05.yaml" % cond)
+            if not config.is_file():
+                raise FileNotFoundError("survey_eval occ config missing: %s" % config)
+        else:
+            raise ValueError("survey_eval COND must be cam3 or occ010-050, got %r" % cond)
+        spec = _merge_model_spec(registry, model_id)
+        contact = str(spec.get("contact_method", "joint_and"))
+        device = str(spec.get("device", registry.get("defaults", {}).get("device", "cuda")))
+        metrics_dir = (REPO / "results" / "experiments" / "wo05_survey"
+                       / model_id / ckpt_path.stem / cond / "metrics")
+        if dry_run:
+            print("survey_eval %s %s %s split=%s -> %s" % (model_id, ckpt_path, cond, split, metrics_dir))
+            return
+        epoch = _assert_training_complete(ckpt_path)
+        digest = sha256_file(ckpt_path)
+        if (metrics_dir / (split + ".json")).exists() and not force:
+            raise FileExistsError("Evaluation already exists; preserve it or explicitly request FORCE: %s" % metrics_dir)
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            str(PYTHON), "-m", "anysole.eval",
+            "--config", str(config),
+            "--ckpt", str(ckpt_path),
+            "--split", split,
+            "--device", device,
+            "--contact-method", contact,
+            "--no-robustness", "--no-write-motion", "--dump-detail",
+            "--metrics-out", str(metrics_dir / (split + "_brief.json")),
+            "--protocol-out", str(metrics_dir / (split + ".json")),
+        ]
+        log = metrics_dir / ("eval_" + split + ".log")
+        code = _command_log(cmd, log)
+        if code != 0:
+            raise RuntimeError("survey_eval failed for %s %s %s; see %s"
+                               % (model_id, ckpt_path, cond, log))
+        if sha256_file(ckpt_path) != digest:
+            raise RuntimeError("Checkpoint changed during candidate evaluation: %s" % ckpt_path)
+        write_json(metrics_dir / ("receipt.json" if split == "val" else "receipt_test.json"), {
+            "status": "complete", "split": split, "checkpoint": str(ckpt_path.resolve()),
+            "checkpoint_sha256": digest, "checkpoint_epoch": epoch,
+            "config_sha256": sha256_file(config),
+        })
     elif task == "rho_grid":
         model_id = str(values.get("MODEL_ID", "")).strip()
         split = str(values.get("GRID_SPLIT", "")).strip()

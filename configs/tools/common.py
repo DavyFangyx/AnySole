@@ -79,9 +79,23 @@ TRAIN_ARG_FLAG_MAP = {
     "lambda_tcop": "--lambda-tcop",
     "lambda_strike": "--lambda-strike",
     "lambda_gtcop": "--lambda-gtcop",
+    # 条件契约（V5_Av5/V4_Av2，2026-10-25）：V 健康窗口罚修正量的权重。
+    "lambda_cond": "--lambda-cond",
+    # 双阶段精调骨架学习率倍率（V4_Av4，2026-10-25；0 = 冻结口径）。
+    "carrier_lr_mult": "--carrier-lr-mult",
+
+    # wo05 survey round (2026-10-24)：双条件 ckpt 系列（val VT−V 不严重
+    # 退化 + T2M 不塌缩），见 anysole/train.py --survey-save。
+    "survey_save": "--survey-save",
+    "survey_dpa_max": "--survey-dpa-max",
+    "survey_t2m_pa_max": "--survey-t2m-pa-max",
+    "survey_keep": "--survey-keep",
+    "checkpoint_policy": "--checkpoint-policy",
+    "checkpoint_role": "--checkpoint-role",
+    "checkpoint_pareto_keep": "--checkpoint-pareto-keep",
 }
 TRAIN_STORE_TRUE = {"assign_cluster", "occ_mix", "occ_a3_monitor",
-                    "t_phys_v2", "d8_heads"}
+                    "t_phys_v2", "d8_heads", "survey_save"}
 
 
 def _parse_value(raw: str) -> Any:
@@ -394,26 +408,25 @@ def model_root(registry: dict[str, Any], experiment_id: str, model_id: str) -> P
 
 def checkpoint_path(registry: dict[str, Any], experiment_id: str, model_id: str) -> Path:
     spec = resolved_model_spec(registry, model_id)
-    if spec.get("name"):
-        if split_specialist(model_id):
+    external = resolve_path(spec.get("checkpoint"))
+    which = str(spec.get("which", "last"))
+    if which not in ("best", "last"):
+        raise ValueError("which must be best or last; use checkpoint for an explicit candidate path")
+    if external is not None:
+        candidate = external
+    elif spec.get("name"):
+        if spec.get("specialist_kind"):
             paths = specialist_paths(registry, model_id)
             assert paths is not None
-            for candidate in (paths["ckpt_best"], paths["ckpt_last"]):
-                if candidate.is_file():
-                    return candidate
+            candidate = paths["ckpt_" + which]
         else:
-            for which in (str(spec.get("which", "last")), "last", "best"):
-                candidate = registry_ckpt(registry, model_id, which=which)
-                if candidate is not None and candidate.is_file():
-                    return candidate
-    root = model_root(registry, experiment_id, model_id)
-    for candidate in (root / "checkpoints" / "ckpt_best.pt", root / "checkpoints" / "ckpt_last.pt"):
-        if candidate.is_file():
-            return candidate
-    external = resolve_path(spec.get("checkpoint"))
-    if external is None:
-        raise FileNotFoundError("No checkpoint for %s: expected registry ckpt under %s or a conf CHECKPOINT" % (model_id, root))
-    return external
+            candidate = registry_ckpt(registry, model_id, which=which)
+    else:
+        candidate = model_root(registry, experiment_id, model_id) / "checkpoints" / ("ckpt_" + which + ".pt")
+    if candidate is None or not candidate.is_file():
+        raise FileNotFoundError("Requested checkpoint missing for %s (%s): %s; no fallback" %
+                                (model_id, which, candidate))
+    return candidate
 
 
 def source_checkpoint(registry: dict[str, Any], model_id: str) -> Path | None:

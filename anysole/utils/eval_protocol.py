@@ -646,6 +646,7 @@ def _evaluate_config(
     # 载体（修正不应用）、VT2M = V + pos_corr 软骨架（seq 层应用）、
     # T2M = 先验 + pos_corr_prior。
     v4_1_mode = bool(getattr(model, "v4_1", False))
+    v7_mode = bool(getattr(model, "v7", False))
     accum = _Accum()
     contact = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
     window_rows = {"session_ids": [], "frame_starts": [], "n_frames": [], "metrics": {}}
@@ -714,6 +715,11 @@ def _evaluate_config(
             anchor = batch["trans_anchor"][:, None, :]
             if not v3f_mode:
                 v3e_contact = None
+            if v7_mode and config_value != CONFIG_V:
+                # V7（2026-10-25 预检项）：接触头指标直读 contact_logits
+                # （T 在场行）；V-only 行 T 分支硬关闭、接触头读零输入 →
+                # 该行保留几何回退（不声称是接触头读数）。
+                v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
             if v3e_mode:
                 # V3_Ev1 condition selection: VT = constraint layer on the
                 # full forward, V = raw V pose, T = the T pose prior.

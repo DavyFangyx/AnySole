@@ -363,6 +363,151 @@ for _suf, _cprobs in (("", [1.0, 0.0, 0.0]), ("_drop", [0.5, 0.25, 0.25]),
         "name": "V5_Av4_cam3_v3off" + _suf,
         "train_args": {**_V5_AV4_TA, "config_probs": _cprobs}}
 
+# 条件合作线（2026-10-25，用户裁定「做几个新模型，cam3 + cam3_occ010 实验」）：
+# 框架保留 V4/V5 融合读出（门控/FiLM），通路换 E 式双流同训
+# （carrier_from="scratch"——V 流可训、不再压倒 T）+ occ_mix（V6 配方：
+# 训练侧 V 失效窗口 p_occ=0.2 / V 零化 0.1 / T 零化 0.1）+ 条件契约
+# λ_cond=3.0（V 健康窗口罚修正量、V 失效窗口自由——让位规则写进目标
+# 函数，不靠初始化）。_nocond = 同配方去契约（隔离契约贡献）。先验塔
+# λ 沿用各家族现有配方（V5 = 3/1；V4 = 3/1 + L_corr 3.0）。which=last
+# （避免 ep5 选择假象重演；occ010 轴无 occ_mix——窗口天然 V 退化）。
+_V5_AV5_TA = {**_V5_AV4_TA, "occ_mix": True,
+              "p_occ": 0.2, "p_nullV": 0.1, "p_nullT": 0.1,
+              "lambda_cond": 3.0}
+_V4_AV2_TA = {**MODELS["V4_Av1"]["train_args"], "carrier_from": "scratch",
+              "occ_mix": True, "p_occ": 0.2, "p_nullV": 0.1, "p_nullT": 0.1,
+              "lambda_cond": 3.0}
+_OCC_MIX_KEYS = ("occ_mix", "p_occ", "p_nullV", "p_nullT")
+for _name, _ta in (("V5_Av5", _V5_AV5_TA), ("V4_Av2", _V4_AV2_TA)):
+    for _suf, _suf_ta in (("", _ta),
+                          ("_nocond", {k: v for k, v in _ta.items()
+                                       if k != "lambda_cond"})):
+        _id = _name + _suf
+        MODELS[_id] = dict(label=_id.replace("_", "-"), name=_id, which="last",
+                           train=True, epochs=740, contact_method="f6_soft",
+                           provides=("base",), train_args=_suf_ta)
+        _occ_id = _id + "_cam3_occ010"
+        MODELS[_occ_id] = dict(
+            label=_occ_id.replace("_", "-"), name=_occ_id, which="last",
+            train=True, epochs=740, contact_method="f6_soft",
+            provides=("base",),
+            train_args={k: v for k, v in _suf_ta.items() if k not in _OCC_MIX_KEYS})
+
+# V4_Av3（2026-10-25，用户裁定「B 的 V 部分作为通路、T 解毒」折中方案）：
+# V4 修正分支挂冻结 B 骨架（两阶段：阶段 1 = V3_Bv1 生产 ckpt_best 冻结
+# ——其 V2M 读出带融合税，修正分支在健康窗口学解毒、失效窗口学地面帮助；
+# 阶段 2 = 只训修正分支 + 接触头）。无条件契约（解毒要求健康窗口也出手，
+# 契约会压制它）；occ_mix 提供 V 失效窗口训练分布（cam3 轴）。λ_pose/
+# λ_prior 置 0（骨架冻结、其损失恒为常数）。
+_V4_AV3_CARRIER = ("results/AnySole/V3_Bv1_cam3_v3off_joint_and/"
+                   "tw20_st20_lr0.0001_lp3_lt1_lk1_la0.05_ls0.01_sf0.1_wu0.05_gc5_ep740_bs256_sd1/"
+                   "checkpoints/ckpt_best.pt")
+_V4_AV3_TA = {
+    "config_probs": [1.0, 0.0, 0.0],
+    "lambda_trec": 0.0, "lambda_vrec": 0.0,
+    "lambda_pose": 0.0,
+    "lambda_contact": 1.0, "lambda_nll": 0.0,
+    "lambda_prior_pose": 0.0, "lambda_prior_nll": 0.0, "lambda_prior_traj": 0.0,
+    "lambda_air": 2.0, "lambda_pos": 3.0, "beta": 1.0,
+    "carrier_from": _V4_AV3_CARRIER,
+    "lr_warmup_frac": 0.05, "grad_clip": 5.0}
+MODELS["V4_Av3"] = dict(label="V4-Av3", name="V4_Av3", which="last",
+                        train=True, epochs=740, contact_method="f6_soft",
+                        provides=("base",), train_args={**_V4_AV3_TA,
+                        "occ_mix": True, "p_occ": 0.2,
+                        "p_nullV": 0.1, "p_nullT": 0.1})
+MODELS["V4_Av3_cam3_occ010"] = dict(label="V4-Av3-cam3-occ010",
+                                    name="V4_Av3_cam3_occ010", which="last",
+                                    train=True, epochs=740,
+                                    contact_method="f6_soft",
+                                    provides=("base",), train_args=_V4_AV3_TA)
+
+# V4_Av3 ckpt_last 重读（2026-10-25）：正式评估落 ckpt_best=ep5（骨架冻结
+# → val/tau0 VT 平坦 → 选择假象重演）——补 eval-only last 重读。
+for _b in ("V4_Av3", "V4_Av3_cam3_occ010"):
+    MODELS[_b + "_last_eval"] = {
+        **MODELS[_b], "label": MODELS[_b]["label"] + "-last-eval",
+        "train": False, "which": "last"}
+
+# V4_Av4（2026-10-25，用户裁定「冻结并非合适选择」→ 双阶段精调）：V4_Av3
+# 结构 + 骨架不冻结、carrier_lr_mult=0.1（骨架组学习率 0.1×、修正分支与
+# 接触头 1.0——阶段 1 = B 生产 ckpt 作初始化，阶段 2 = 全模型微调，上限
+# 不锁死但骨架有锚）。V4_Av3（冻结）保留为对照。
+for _n, _ta in (("V4_Av4", {**_V4_AV3_TA, "carrier_lr_mult": 0.1}),):
+    MODELS[_n] = dict(label=_n.replace("_", "-"), name=_n, which="last",
+                      train=True, epochs=740, contact_method="f6_soft",
+                      provides=("base",), train_args={**_ta,
+                      "occ_mix": True, "p_occ": 0.2,
+                      "p_nullV": 0.1, "p_nullT": 0.1})
+    _occ_id = _n + "_cam3_occ010"
+    MODELS[_occ_id] = dict(label=_occ_id.replace("_", "-"), name=_occ_id,
+                           which="last", train=True, epochs=740,
+                           contact_method="f6_soft", provides=("base",),
+                           train_args=_ta)
+
+# V4_Av4_drop 对照（2026-10-25 用户追加）：同配方 + config_probs 0.5/0.25/0.25
+# ——检验 drop 的毒性是否随「载体可训」消失（vs 冻结载体 drop = T 死/有害；
+# vs V4_Av4 [1,0,0] = 无 drop 基准）。cam3 轴继承 occ_mix、occ010 轴无。
+_V4_AV4_DROP_TA = {**MODELS["V4_Av4"]["train_args"],
+                   "config_probs": [0.5, 0.25, 0.25]}
+MODELS["V4_Av4_drop"] = {**MODELS["V4_Av4"], "label": "V4-Av4-drop",
+                         "name": "V4_Av4_drop",
+                         "train_args": _V4_AV4_DROP_TA}
+MODELS["V4_Av4_drop_cam3_occ010"] = {
+    **MODELS["V4_Av4_cam3_occ010"], "label": "V4-Av4-drop-cam3-occ010",
+    "name": "V4_Av4_drop_cam3_occ010",
+    "train_args": {k: v for k, v in _V4_AV4_DROP_TA.items()
+                   if k not in _OCC_MIX_KEYS}}
+
+# V7 候选 A/B/C（2026-10-25，模型设计思路.md §3，用户裁定「编号 + 实现 +
+# 接入管线 + 冒烟」）：独立证据流 + 共享运动解码 + 三条件硬关闭分支；
+# 从零训练（无载体）；config_probs [0.5,0.25,0.25]（ckpt 规则 §3：明确
+# 三条件采样）；checkpoint_policy = multi_metric（ckpt 规则：角色按
+# config_probs 推断为 U）。B = A + 足-地一致性（λ_foot 1.0）；C = A +
+# 窗口级 T 信任门（v1 端到端，λ_route 0）。
+_V7_TA = {
+    "config_probs": [0.5, 0.25, 0.25],
+    "lambda_pose": 3.0, "lambda_traj": 1.0,
+    "lambda_contact": 1.0, "lambda_air": 2.0,
+    "lambda_trec": 0.0, "lambda_vrec": 0.0, "lambda_nll": 0.0,
+    "lr_warmup_frac": 0.05, "grad_clip": 5.0,
+    "checkpoint_policy": "multi_metric", "checkpoint_role": "auto",
+    "checkpoint_pareto_keep": 8,
+}
+# B/C 的机制由 STRUCTURE 标志驱动（v7_contact_root / v7_reliability_route，
+# 随 config 注入）——train.py 无 --lambda-foot/--lambda-route CLI（曾被
+# argparse 前缀匹配静默接到 --lambda-foot-res），损失侧改用结构开关。
+for _name, _extra in (("V7_Av1", {}), ("V7_Bv1", {}), ("V7_Cv1", {})):
+    MODELS[_name] = dict(label=_name.replace("_", "-"), name=_name, which="last",
+                         train=True, epochs=740, contact_method="f6_soft",
+                         provides=("base",),
+                         config="anysole/configs/v1_wo05.yaml",
+                         train_args={**_V7_TA, **_extra})
+
+# V7 端到端预检条目（2026-10-25 计划步骤 1）：同名结构、epochs=6 进 spec
+# ——EPOCHS conf 覆盖不可行（变体推断/完成度检查/multi_metric 存档都按
+# spec epochs 走），预检必须用独立条目（独立 run 目录、新鲜存档）。
+# V7 E5 occ050 筛选（2026-10-25 计划步骤 3）：eval-only 零重训——C = 保留
+# 候选（val E2 零税筛查通过）；A/B = 无门对照行（同 ckpt 的 occ050 读数
+# 用于解释门在 V 失效下的价值）。which=last（正式 ckpt 口径）。
+for _v7 in ("V7_Av1", "V7_Bv1", "V7_Cv1"):
+    for _occ in ("010", "020", "030", "050"):
+        MODELS[f"{_v7}_evalocc{_occ}"] = {
+            **MODELS[_v7], "label": MODELS[_v7]["label"] + f"-evalocc{_occ}",
+            "train": False, "which": "last",
+            "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml"}
+
+for _name in ("V7_Av1", "V7_Bv1", "V7_Cv1"):
+    _pid = _name + "_precheck"
+    MODELS[_pid] = {**MODELS[_name], "label": _pid.replace("_", "-"),
+                    "name": _pid, "epochs": 6}
+    _occ_id = _name + "_cam3_occ010"
+    MODELS[_occ_id] = dict(label=_occ_id.replace("_", "-"), name=_occ_id,
+                           which="last", train=True, epochs=740,
+                           contact_method="f6_soft", provides=("base",),
+                           config="anysole/configs/v1_cam3_occ010_wo05.yaml",
+                           train_args={**_V7_TA, **_extra})
+
 # 5-fold 动作覆盖实验（2026-10-22，AnysoleWorkspace/protocol/splits/default/
 # splits_test_*.csv）：受试者轮换 leave-subjects-out——5 个 fold 各自一个
 # split 文件，test 覆盖全部 11 动作。fold 命名 = 统一编号 plain 名 + fold
@@ -804,6 +949,14 @@ for _prefix, _occ_base in (("V4_Av1", "V4_Av1_cam3_occ010"),
                           _b_occ["train_args"], _tw,
                           _e_carrier_cell(f"V3_Ev1_cam3_occ010_v3off_tw{_tw}", _tw))}
 
+# session_detail 重评（2026-10-24）：全部 35 个 tw_scan 格 dump_detail=True——
+# eval 同源同公式落 session_detail_<split>.json（与 test.json 同目录），
+# 供逐会话配对检验；仅影响评估输出，不动训练。
+for _mid in list(MODELS):
+    if "_v3off" in _mid and _mid.startswith(("V3_Ev1", "V3_Bv1", "V4_Av1", "V5_Av1", "V5_Av4")):
+        if "_tw" in _mid or _mid.endswith(("cam3_v3off", "cam3_occ010_v3off")):
+            MODELS[_mid] = {**MODELS[_mid], "dump_detail": True}
+
 # wo05 实验轴（2026-10-24，AnysoleWorkspace/protocol/splits/default/
 # splits_wo05.csv）：canonical split 去掉动作 05（绕圈跑）全部 4 条 train
 # 会话（S11051/S11053/S7053/S8053）→ train 92→88，val/test 不变。3 家族 ×
@@ -855,6 +1008,59 @@ for _f in ("V3_Ev1", "V4_Av1", "V5_Av4"):
         }
 
 
+# ckpt_last 重读（2026-10-24，用户裁定）：选择假象检查——V4_Av1_wo05_drop 的
+# ckpt_best 是 T 死的（val/tau0 VT 选择器在 T 的 val 边际为负时选走 T），
+# ckpt_last 门控活着（cam3 面板已有）；E5 的 occ 四档与 cam3 用 ckpt_last
+# 重读。V5_Av1_fS13S14（5-fold 塌缩 fold，ckpt_best T2M 296.9）的 ckpt_last
+# 同查。eval-only 零重训；name 保持源模型名 → ckpt 落源 run 目录的
+# ckpt_last.pt。
+for _occ in ("010", "020", "030", "050"):
+    _src = MODELS["V4_Av1_wo05_drop"]
+    _rid = "V4_Av1_wo05_drop_last_evalocc" + _occ
+    MODELS[_rid] = {
+        **_src, "label": _src["label"] + "-last-evalocc" + _occ,
+        "train": False, "which": "last",
+        "config": "anysole/configs/v1_cam3_occ%s_wo05.yaml" % _occ}
+MODELS["V4_Av1_wo05_drop_last_evalcam3"] = {
+    **MODELS["V4_Av1_wo05_drop"], "label": "V4-1-wo05-drop-last-evalcam3",
+    "train": False, "which": "last", "config": _WO05_CONFIG}
+MODELS["V5_Av1_fS13S14_last_evalcam3"] = {
+    **MODELS["V5_Av1_fS13S14"], "label": "V5-1-fS13S14-last-evalcam3",
+    "train": False, "which": "last"}
+# 5-fold 其余污染格（2026-10-24 查验补充）：V4_Av1/V5_Av1 的 fold 基名
+# 变体 ckpt_best 在平坦 val 曲线上落到 ep5~10（fS5S11S12/fS5S6S8 的
+# V5_Av1/V4_Av1 T2M 与 fS13S14 同型选择假象）。补全 ckpt_last 重读 →
+# 修正后的按动作表需要全部 5 fold 同口径（V5_Av1 fS13S14 已有、其余
+# 4 fold 补；V4_Av1 5 fold 全补）。dump_detail 随源条目继承。
+for _f in ("fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8"):
+    _src = MODELS["V5_Av1_" + _f]
+    MODELS["V5_Av1_%s_last_evalcam3" % _f] = {
+        **_src, "label": _src["label"] + "-last-evalcam3",
+        "train": False, "which": "last"}
+for _f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8"):
+    _src = MODELS["V4_Av1_" + _f]
+    MODELS["V4_Av1_%s_last_evalcam3" % _f] = {
+        **_src, "label": _src["label"] + "-last-evalcam3",
+        "train": False, "which": "last"}
+
+# wo05 survey 轮（2026-10-24 用户裁定）：只训 基名 + _drop 两变体
+# （vonly/tonly 专家本轮不训）；survey_save=True —— val 双条件
+# （ΔPA(VT−V) ≤ 0.5 且 T2M PA ≤ 90）满足即存 checkpoints/survey/
+# 系列（滚动保留 10 个），全程记 survey_log.jsonl；ckpt_best/ckpt_last
+# 照旧。训练完成后对 survey 系列跑 survey_eval（test cam3 + occ010–050）。
+for _suf in ("", "_drop"):
+    _b4 = MODELS["V4_Av1_wo05" + _suf]
+    MODELS["V4_Av1_wo05_survey" + _suf] = {
+        **_b4, "label": "V4-1-wo05-survey" + _suf.replace("_", "-"),
+        "name": "V4_Av1_wo05_survey" + _suf,
+        "train_args": {**_b4["train_args"], "survey_save": True}}
+    _b5 = MODELS["V5_Av4_wo05" + _suf]
+    MODELS["V5_Av4_wo05_survey" + _suf] = {
+        **_b5, "label": "V5-Av4-wo05-survey" + _suf.replace("_", "-"),
+        "name": "V5_Av4_wo05_survey" + _suf,
+        "train_args": {**_b5["train_args"], "survey_save": True}}
+
+
 # λ 扫描（2026-10-24，用户裁定「先扫描一下这几个参数点」）：V5_Av1 / V5_Av4 /
 # V4_Av1 × λ_prior_pose {1,2,3,4} × λ_prior_traj {0,1} 共 24 格。cam3 训练 +
 # 评估、splits_wo05.csv（v1_wo05.yaml）；纯扫描、无调参目标——每格产出三条件
@@ -864,6 +1070,8 @@ for _f in ("V3_Ev1", "V4_Av1", "V5_Av4"):
 # 各基座现役 carrier（v3off E / scratch）——wo05 批次的 wo05-E 载体因 GPU
 # OOM 未产出，扫描不依赖（occ 档先例：冻结载体与 split 无关）。
 # conf 生成 = configs/z_gen/prior_lambda_scan.py。
+# 2026-10-25 重跑：追加 multi_metric 候选机制（ckpt规则.md §3；role auto
+# 按 config_probs [1,0,0] 推断 = 始终双模态专家）。
 for _m in ("V5_Av1", "V5_Av4", "V4_Av1"):
     for _lp in (1.0, 2.0, 3.0, 4.0):
         for _lt in (0.0, 1.0):
@@ -874,4 +1082,68 @@ for _m in ("V5_Av1", "V5_Av4", "V4_Av1"):
                 "config": _WO05_CONFIG,
                 "train_args": {**_b["train_args"],
                                "lambda_prior_pose": _lp,
-                               "lambda_prior_traj": _lt}}
+                               "lambda_prior_traj": _lt,
+                               "checkpoint_policy": "multi_metric",
+                               "checkpoint_role": "auto",
+                               "checkpoint_pareto_keep": 8}}
+
+# ckpt_last 全量重定基线（2026-10-24，用户裁定）：三批 eval-only 零重训——
+#   批 1：E1 生产轴 V5_Av1/V4_Av1 的 base/drop/vonly/tonly 8 格（T2M 选择污染）；
+#   批 2：tw_scan 28 格（「零兑现 tw 不变式」是否选择假象——V3_Bv1/V4_Av1/
+#         V5_Av1/V5_Av4 各 7 格，E 载体 7 格不在重读范围）；
+#   批 3：λ 扫描 18 格（绝对值 last 复核）。
+# name 保持源模型名 → ckpt 落源 run 目录的 ckpt_last.pt。
+_E1_LAST_CELLS = ("V5_Av1_cam3_v3off", "V5_Av1_cam3_v3off_drop",
+                  "V5_Av1_cam3_v3off_vonly", "V5_Av1_cam3_v3off_tonly",
+                  "V4_Av1_cam3_v3off", "V4_Av1_cam3_v3off_drop",
+                  "V4_Av1_cam3_v3off_vonly", "V4_Av1_cam3_v3off_tonly")
+for _src_id in _E1_LAST_CELLS:
+    MODELS[_src_id + "_last_eval"] = {
+        **MODELS[_src_id], "label": MODELS[_src_id]["label"] + "-last-eval",
+        "train": False, "which": "last"}
+for _f in ("V3_Bv1", "V4_Av1", "V5_Av1", "V5_Av4"):
+    for _tw in (5, 10, 15):
+        for _ax in ("cam3", "cam3_occ010"):
+            _src_id = "%s_%s_v3off_tw%d" % (_f, _ax, _tw)
+            MODELS[_src_id + "_last_eval"] = {
+                **MODELS[_src_id], "label": MODELS[_src_id]["label"] + "-last-eval",
+                "train": False, "which": "last"}
+    _src_id = "%s_cam3_occ010_v3off" % _f
+    MODELS[_src_id + "_last_eval"] = {
+        **MODELS[_src_id], "label": MODELS[_src_id]["label"] + "-last-eval",
+        "train": False, "which": "last"}
+for _m in ("V5_Av1", "V5_Av4", "V4_Av1"):
+    for _lp in (1.0, 2.0, 3.0, 4.0):
+        for _lt in (0.0, 1.0):
+            if _m == "V5_Av4" and not (_lp == 1.0):
+                continue
+            _src_id = "%s_wo05_lp%s_lt%s" % (_m, "%g" % _lp, "%g" % _lt)
+            MODELS[_src_id + "_last_eval"] = {
+                **MODELS[_src_id], "label": MODELS[_src_id]["label"] + "-last-eval",
+                "train": False, "which": "last"}
+
+
+# tw × 遮挡交互（2026-10-24，z_note/multimodal_fusion/Time_Windows/时间窗扫描实验.md §9）：
+# occ020/030 × tw{5,10,15,20}（v3off 轴）。问题 = V2M 行（单 V）的遮挡惩罚
+# 是否随 tw 缩短增大（相位知识假说）。模型 = V3_Bv1 / V5_Av4（从零 V 流，
+# 与 tw_scan occ010 腿同规格同口径）；参照 = tw_scan 的 cam3（occ0）与
+# occ010 腿。occ050 用户裁定不试。dump_detail 同 tw_scan 政策。
+for _occ in ("020", "030"):
+    for _b3 in (MODELS["V3_Bv1"],):
+        _n = f"V3_Bv1_cam3_occ{_occ}_v3off"
+        MODELS[_n] = {**_b3, "label": _n.replace("_", "-"), "name": _n,
+                      "train_args": {**_b3["train_args"]}, "dump_detail": True}
+        for _tw in (5, 10, 15):
+            _n = f"V3_Bv1_cam3_occ{_occ}_v3off_tw{_tw}"
+            MODELS[_n] = {**_b3, "label": _n.replace("_", "-"), "name": _n,
+                          "train_args": _tw_args(_b3["train_args"], _tw),
+                          "dump_detail": True}
+    _b4 = MODELS["V5_Av4_cam3_v3off"]
+    _n = f"V5_Av4_cam3_occ{_occ}_v3off"
+    MODELS[_n] = {**_b4, "label": _n.replace("_", "-"), "name": _n,
+                  "train_args": {**_b4["train_args"]}, "dump_detail": True}
+    for _tw in (5, 10, 15):
+        _n = f"V5_Av4_cam3_occ{_occ}_v3off_tw{_tw}"
+        MODELS[_n] = {**_b4, "label": _n.replace("_", "-"), "name": _n,
+                      "train_args": _tw_args(_b4["train_args"], _tw),
+                      "dump_detail": True}

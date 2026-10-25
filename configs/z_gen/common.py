@@ -268,7 +268,33 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
             "V5_Av1_cam3_v3off_tw5", "V5_Av1_cam3_v3off_tw10",
             "V5_Av1_cam3_v3off_tw15", "V5_Av1_cam3_occ010_v3off",
             "V5_Av1_cam3_occ010_v3off_tw5", "V5_Av1_cam3_occ010_v3off_tw10",
-            "V5_Av1_cam3_occ010_v3off_tw15"],
+            "V5_Av1_cam3_occ010_v3off_tw15",
+            # 锚点格（tw20×cam3，E1 波 ckpt）：纳入以便 session_detail 重评
+            "V3_Bv1_cam3_v3off", "V4_Av1_cam3_v3off",
+            "V5_Av1_cam3_v3off", "V5_Av4_cam3_v3off"],
+        "REQUIRES": [],
+    },
+    # wo05 survey 轮（2026-10-24 用户裁定）：V4_Av1/V5_Av4 ×（基名、
+    # _drop）；vonly/tonly 本轮不训。survey_save=True（双条件 ckpt 系列）。
+    "wo05_survey": {
+        "KIND": "model_suite",
+        "MODEL_IDS": ["V4_Av1_wo05_survey", "V4_Av1_wo05_survey_drop",
+                      "V5_Av4_wo05_survey", "V5_Av4_wo05_survey_drop"],
+        "REQUIRES": [],
+    },
+    # tw × 遮挡交互（2026-10-24）：occ020/030 × tw{5,10,15,20}（v3off 轴），
+    # V3_Bv1 / V5_Av4 两模型。参照 = tw_scan 的 cam3 与 occ010 腿。
+    "tw_occ_scan": {
+        "KIND": "model_suite",
+        "MODEL_IDS": [
+            "V3_Bv1_cam3_occ020_v3off", "V3_Bv1_cam3_occ020_v3off_tw5",
+            "V3_Bv1_cam3_occ020_v3off_tw10", "V3_Bv1_cam3_occ020_v3off_tw15",
+            "V3_Bv1_cam3_occ030_v3off", "V3_Bv1_cam3_occ030_v3off_tw5",
+            "V3_Bv1_cam3_occ030_v3off_tw10", "V3_Bv1_cam3_occ030_v3off_tw15",
+            "V5_Av4_cam3_occ020_v3off", "V5_Av4_cam3_occ020_v3off_tw5",
+            "V5_Av4_cam3_occ020_v3off_tw10", "V5_Av4_cam3_occ020_v3off_tw15",
+            "V5_Av4_cam3_occ030_v3off", "V5_Av4_cam3_occ030_v3off_tw5",
+            "V5_Av4_cam3_occ030_v3off_tw10", "V5_Av4_cam3_occ030_v3off_tw15"],
         "REQUIRES": [],
     },
     # T 增强三组（2026-10-21，T增强三组实验方案.md）：维度 2 显式物理特征
@@ -480,5 +506,113 @@ EXPERIMENTS["prior_lambda_scan"] = {
     "MODEL_IDS": ["%s_wo05_lp%s_lt%s" % (m, lp, lt)
                   for m in ("V5_Av1", "V5_Av4", "V4_Av1")
                   for lp in ("1", "2", "3", "4") for lt in ("0", "1")],
+    "REQUIRES": [],
+}
+
+# V4_Av3 B-基座线（2026-10-25，用户裁定）：V4 修正分支挂冻结 B 骨架
+# （T 解毒折中方案）×（cam3 / cam3_occ010）2 格——训练+评估一体事务
+# （条目定义见 model_registry 同名块）。
+EXPERIMENTS["v4b_carrier"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V4_Av3", "V4_Av3_cam3_occ010"],
+    "REQUIRES": [],
+}
+EXPERIMENTS["v4b_carrier_last"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V4_Av3_last_eval", "V4_Av3_cam3_occ010_last_eval"],
+    "REQUIRES": [],
+}
+# V4_Av4 双阶段精调（2026-10-25，用户裁定「冻结并非合适选择」）：
+# B 骨架 0.1× 学习率微调 ×（cam3 / cam3_occ010）2 格。
+EXPERIMENTS["v4b_finetune"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V4_Av4", "V4_Av4_cam3_occ010",
+                  "V4_Av4_drop", "V4_Av4_drop_cam3_occ010"],
+    "REQUIRES": [],
+}
+
+EXPERIMENTS["v7_precheck"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V7_Av1_precheck", "V7_Bv1_precheck", "V7_Cv1_precheck"],
+    "REQUIRES": [],
+}
+
+# V7 候选 A/B/C 第一轮（2026-10-25，模型设计思路.md §7）：三候选 ×
+# （cam3 / cam3_occ010）6 格——注册但本轮不发射（用户裁定：先实现 +
+# 冒烟，发射时机另定）。
+# V7 端到端预检（2026-10-25 计划步骤 1）：三个预检条目（epochs=6 进 spec）。
+EXPERIMENTS["v7_precheck"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V7_Av1_precheck", "V7_Bv1_precheck", "V7_Cv1_precheck"],
+    "REQUIRES": [],
+}
+
+# V7 E5 occ050 筛选（2026-10-25 计划步骤 3）：eval-only 三格（val 口径）。
+EXPERIMENTS["v7_e5_screen"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V7_Av1_evalocc010", "V7_Bv1_evalocc010", "V7_Cv1_evalocc010",
+                  "V7_Av1_evalocc020", "V7_Bv1_evalocc020", "V7_Cv1_evalocc020",
+                  "V7_Av1_evalocc030", "V7_Bv1_evalocc030", "V7_Cv1_evalocc030",
+                  "V7_Av1_evalocc050", "V7_Bv1_evalocc050", "V7_Cv1_evalocc050"],
+    "REQUIRES": [],
+}
+
+EXPERIMENTS["v7_first_round"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V7_Av1", "V7_Av1_cam3_occ010",
+                  "V7_Bv1", "V7_Bv1_cam3_occ010",
+                  "V7_Cv1", "V7_Cv1_cam3_occ010"],
+    "REQUIRES": [],
+}
+
+# 条件合作线（2026-10-25，用户裁定）：V5_Av5 / V4_Av2 ×（契约/去契约
+# 对照）×（cam3 / cam3_occ010）8 格——训练+评估一体事务（条目定义见
+# model_registry 同名块）。
+EXPERIMENTS["cond_coop"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V5_Av5", "V5_Av5_nocond", "V4_Av2", "V4_Av2_nocond",
+                  "V5_Av5_cam3_occ010", "V5_Av5_nocond_cam3_occ010",
+                  "V4_Av2_cam3_occ010", "V4_Av2_nocond_cam3_occ010"],
+    "REQUIRES": [],
+}
+
+# ckpt_last 重读（2026-10-24，用户裁定）：选择假象检查——V4_Av1_wo05_drop
+# 的 ckpt_last 跑 E5 occ 四档 + cam3；V5_Av1_fS13S14 的 ckpt_last cam3。
+# V4_Av1/V5_Av1 其余 fold 格（5-fold 按动作表修正口径）。eval-only 零重训
+# （条目定义见 model_registry 同名块）。
+EXPERIMENTS["ckpt_last_reread"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V4_Av1_wo05_drop_last_evalcam3",
+                  "V4_Av1_wo05_drop_last_evalocc010",
+                  "V4_Av1_wo05_drop_last_evalocc020",
+                  "V4_Av1_wo05_drop_last_evalocc030",
+                  "V4_Av1_wo05_drop_last_evalocc050",
+                  "V5_Av1_fS13S14_last_evalcam3"]
+    + ["V5_Av1_%s_last_evalcam3" % f
+       for f in ("fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
+    + ["V4_Av1_%s_last_evalcam3" % f
+       for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")],
+    "REQUIRES": [],
+}
+
+# ckpt_last 全量重定基线（2026-10-24，用户裁定）：三批 eval-only 零重训，
+# 条目定义见 model_registry 同名块。顺序 = E1 8 → tw_scan 28 → λ 扫描 18。
+EXPERIMENTS["ckpt_last_rebaseline"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": (
+        ["%s_last_eval" % m for m in (
+            "V5_Av1_cam3_v3off", "V5_Av1_cam3_v3off_drop",
+            "V5_Av1_cam3_v3off_vonly", "V5_Av1_cam3_v3off_tonly",
+            "V4_Av1_cam3_v3off", "V4_Av1_cam3_v3off_drop",
+            "V4_Av1_cam3_v3off_vonly", "V4_Av1_cam3_v3off_tonly")]
+        + ["%s_%s_v3off_tw%d_last_eval" % (f, ax, tw)
+           for f in ("V3_Bv1", "V4_Av1", "V5_Av1", "V5_Av4")
+           for tw in (5, 10, 15) for ax in ("cam3", "cam3_occ010")]
+        + ["%s_cam3_occ010_v3off_last_eval" % f
+           for f in ("V3_Bv1", "V4_Av1", "V5_Av1", "V5_Av4")]
+        + ["%s_wo05_lp%s_lt%s_last_eval" % (m, lp, lt)
+           for m in ("V5_Av1", "V5_Av4", "V4_Av1")
+           for lp in ("1", "2", "3", "4") for lt in ("0", "1")
+           if not (m == "V5_Av4" and lp != "1")]),
     "REQUIRES": [],
 }
