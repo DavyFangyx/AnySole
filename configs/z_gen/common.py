@@ -548,6 +548,14 @@ EXPERIMENTS["v7_precheck"] = {
 }
 
 # V7 E5 occ050 筛选（2026-10-25 计划步骤 3）：eval-only 三格（val 口径）。
+# V7_Cv1 候选复评（2026-10-25）：五候选 val 复评（Δ 全指标 + 部位分解）。
+EXPERIMENTS["v7_cand_review"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V7_Cv1_cand600", "V7_Cv1_cand665", "V7_Cv1_cand670",
+                  "V7_Cv1_cand680", "V7_Cv1_cand740"],
+    "REQUIRES": [],
+}
+
 EXPERIMENTS["v7_e5_screen"] = {
     "KIND": "model_suite",
     "MODEL_IDS": ["V7_Av1_evalocc010", "V7_Bv1_evalocc010", "V7_Cv1_evalocc010",

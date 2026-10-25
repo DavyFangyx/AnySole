@@ -490,6 +490,21 @@ for _name, _extra in (("V7_Av1", {}), ("V7_Bv1", {}), ("V7_Cv1", {})):
 # V7 E5 occ050 筛选（2026-10-25 计划步骤 3）：eval-only 零重训——C = 保留
 # 候选（val E2 零税筛查通过）；A/B = 无门对照行（同 ckpt 的 occ050 读数
 # 用于解释门在 V 失效下的价值）。which=last（正式 ckpt 口径）。
+# V7_Cv1 候选复评（2026-10-25）：multi_metric 保留权重 + last 的 val 复评
+# ——回答「dPA 最优点在其他 Δ 上是否也最优」。注意：ep730 未被档案保留
+# （权重不存在），晚期候选用 670/680 替代。name 保持 V7_Cv1（入口与
+# ckpt 口径），explicit checkpoint 指向档案权重。
+_V7_C_ARCHIVE = ("results/AnySole/V7_Cv1_f6_soft/"
+                 "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
+                 "checkpoints/multi_metric/weights/epoch_000%s.pt")
+for _ep in ("600", "665", "670", "680"):
+    MODELS[f"V7_Cv1_cand{_ep}"] = {
+        **MODELS["V7_Cv1"], "label": f"V7-Cv1-cand{_ep}", "name": "V7_Cv1",
+        "train": False, "which": "last",
+        "checkpoint": _V7_C_ARCHIVE % _ep}
+MODELS["V7_Cv1_cand740"] = {**MODELS["V7_Cv1"], "label": "V7-Cv1-cand740",
+                            "name": "V7_Cv1", "train": False, "which": "last"}
+
 for _v7 in ("V7_Av1", "V7_Bv1", "V7_Cv1"):
     for _occ in ("010", "020", "030", "050"):
         MODELS[f"{_v7}_evalocc{_occ}"] = {
