@@ -116,34 +116,6 @@ class CheckpointExecutionTests(unittest.TestCase):
                                    "--checkpoint-gate-t", "90",
                                    "--checkpoint-gate-vt", "40"])
 
-    def test_survey_review_defaults_to_validation(self):
-        ckpt = self.save("ckpt_last.pt", 10)
-        config = self.root / "eval.yaml"
-        config.write_text("contact_method: f6_soft\n")
-        values = {"TASK": "survey_eval", "MODEL_ID": "demo", "CKPT_PATH": str(ckpt)}
-        commands = []
-        with patch.object(runner, "REPO", self.root), \
-             patch.object(runner, "config_path", return_value=config), \
-             patch.object(runner, "_command_log", side_effect=lambda cmd, log: commands.append(cmd) or 0):
-            runner._run_task(self.registry, "wo05_survey_eval", values)
-        cmd = commands[0]
-        self.assertEqual(cmd[cmd.index("--split") + 1], "val")
-        self.assertIn("--dump-detail", cmd)
-        receipt = next(self.root.glob("results/experiments/**/receipt.json"))
-        self.assertEqual(json.loads(receipt.read_text())["checkpoint_epoch"], 10)
-
-    def test_partial_survey_checkpoint_is_rejected(self):
-        ckpt = self.save("ckpt_last.pt", 3)
-        config = self.root / "eval.yaml"
-        config.write_text("contact_method: f6_soft\n")
-        values = {"TASK": "survey_eval", "MODEL_ID": "demo", "CKPT_PATH": str(ckpt)}
-        with patch.object(runner, "REPO", self.root), \
-             patch.object(runner, "config_path", return_value=config), \
-             patch.object(runner, "_command_log") as command:
-            with self.assertRaisesRegex(RuntimeError, "Incomplete"):
-                runner._run_task(self.registry, "wo05_survey_eval", values)
-            command.assert_not_called()
-
     def test_mutated_checkpoint_does_not_publish_a_complete_run(self):
         ckpt = self.save("ckpt_last.pt", 10)
         config = self.root / "eval.yaml"

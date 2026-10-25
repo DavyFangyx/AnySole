@@ -535,63 +535,6 @@ def _run_task(
                           train_overrides=train_overrides)
         if str(experiment_spec(registry, experiment_id).get("kind")) == "rho_grid":
             _rho_grid(registry, experiment_id, model_id, root, root / "run.log")
-    elif task == "survey_eval":
-        # Candidate review defaults to validation. Test requires an explicit
-        # SPLIT=test after one checkpoint has been fixed for every condition.
-        # CONFIG: cam3 -> the survey model's own config (v1_wo05.yaml);
-        # occ010-050 -> anysole/configs/v1_cam3_{cond}_wo05.yaml.
-        model_id = str(values.get("MODEL_ID", "")).strip()
-        ckpt_path = Path(str(values.get("CKPT_PATH", "")).strip())
-        cond = str(values.get("COND", "cam3")).strip()
-        split = str(values.get("SPLIT", "val")).strip()
-        if split not in ("val", "test"):
-            raise ValueError("survey_eval SPLIT must be val or test")
-        if not model_id or not ckpt_path.is_file():
-            raise ValueError("TASK=survey_eval requires MODEL_ID and an existing CKPT_PATH")
-        if cond == "cam3":
-            config = config_path(registry, model_id)
-        elif cond in ("occ010", "occ020", "occ030", "occ050"):
-            config = REPO / ("anysole/configs/v1_cam3_%s_wo05.yaml" % cond)
-            if not config.is_file():
-                raise FileNotFoundError("survey_eval occ config missing: %s" % config)
-        else:
-            raise ValueError("survey_eval COND must be cam3 or occ010-050, got %r" % cond)
-        spec = _merge_model_spec(registry, model_id)
-        contact = str(spec.get("contact_method", "joint_and"))
-        device = str(spec.get("device", registry.get("defaults", {}).get("device", "cuda")))
-        metrics_dir = (REPO / "results" / "experiments" / "wo05_survey"
-                       / model_id / ckpt_path.stem / cond / "metrics")
-        if dry_run:
-            print("survey_eval %s %s %s split=%s -> %s" % (model_id, ckpt_path, cond, split, metrics_dir))
-            return
-        epoch = _assert_training_complete(ckpt_path)
-        digest = sha256_file(ckpt_path)
-        if (metrics_dir / (split + ".json")).exists() and not force:
-            raise FileExistsError("Evaluation already exists; preserve it or explicitly request FORCE: %s" % metrics_dir)
-        metrics_dir.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            str(PYTHON), "-m", "anysole.eval",
-            "--config", str(config),
-            "--ckpt", str(ckpt_path),
-            "--split", split,
-            "--device", device,
-            "--contact-method", contact,
-            "--no-robustness", "--no-write-motion", "--dump-detail",
-            "--metrics-out", str(metrics_dir / (split + "_brief.json")),
-            "--protocol-out", str(metrics_dir / (split + ".json")),
-        ]
-        log = metrics_dir / ("eval_" + split + ".log")
-        code = _command_log(cmd, log)
-        if code != 0:
-            raise RuntimeError("survey_eval failed for %s %s %s; see %s"
-                               % (model_id, ckpt_path, cond, log))
-        if sha256_file(ckpt_path) != digest:
-            raise RuntimeError("Checkpoint changed during candidate evaluation: %s" % ckpt_path)
-        write_json(metrics_dir / ("receipt.json" if split == "val" else "receipt_test.json"), {
-            "status": "complete", "split": split, "checkpoint": str(ckpt_path.resolve()),
-            "checkpoint_sha256": digest, "checkpoint_epoch": epoch,
-            "config_sha256": sha256_file(config),
-        })
     elif task == "rho_grid":
         model_id = str(values.get("MODEL_ID", "")).strip()
         split = str(values.get("GRID_SPLIT", "")).strip()

@@ -33,7 +33,6 @@ def prepare(archive_path, config, out, device="cuda:0", include_legacy=True):
     if include_legacy:
         ckpts = archive_root.parent
         files += [(p.stem, p, None) for p in [ckpts / "ckpt_best.pt", ckpts / "ckpt_last.pt"] if p.is_file()]
-        files += [(p.stem, p, None) for p in sorted((ckpts / "survey").glob("survey_ep*.pt"))]
     modes = [FORMAL_MODES[m] for m in ROLE_MODES[role]]
     jobs = []
     hashes = {}

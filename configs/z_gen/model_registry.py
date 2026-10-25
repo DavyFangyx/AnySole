@@ -1057,22 +1057,6 @@ for _f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8"):
         **_src, "label": _src["label"] + "-last-evalcam3",
         "train": False, "which": "last"}
 
-# wo05 survey 轮（2026-10-24 用户裁定，已跑完）：只训 基名 + _drop 两变体。
-# 双条件 survey 系列已由 2026-10-25 候选池（三门通过者全留）取代，train
-# 侧不再带 survey_save；这 4 个条目仅保留用于历史 survey 权重的 eval 寻址
-# （wo05_survey_eval 任务、survey_eval_emit / survey_eval_c1c4 只读复评）。
-for _suf in ("", "_drop"):
-    _b4 = MODELS["V4_Av1_wo05" + _suf]
-    MODELS["V4_Av1_wo05_survey" + _suf] = {
-        **_b4, "label": "V4-1-wo05-survey" + _suf.replace("_", "-"),
-        "name": "V4_Av1_wo05_survey" + _suf,
-        "train_args": dict(_b4["train_args"])}
-    _b5 = MODELS["V5_Av4_wo05" + _suf]
-    MODELS["V5_Av4_wo05_survey" + _suf] = {
-        **_b5, "label": "V5-Av4-wo05-survey" + _suf.replace("_", "-"),
-        "name": "V5_Av4_wo05_survey" + _suf,
-        "train_args": dict(_b5["train_args"])}
-
 
 # λ 扫描（2026-10-24，用户裁定「先扫描一下这几个参数点」）：V5_Av1 / V5_Av4 /
 # V4_Av1 × λ_prior_pose {1,2,3,4} × λ_prior_traj {0,1} 共 24 格。cam3 训练 +

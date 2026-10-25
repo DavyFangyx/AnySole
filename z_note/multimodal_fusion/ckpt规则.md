@@ -6,19 +6,19 @@
 
 ## 1 机制（单一通道，2026-10-25 用户裁定）
 
-**第一阶段（训练时，候选池）**：`--checkpoint-policy multi_metric` 下，每轮 **val 检查**凡**三门通过**的 epoch 权重全部保留
+**第一阶段（训练时，候选池）「存不存」**：`--checkpoint-policy multi_metric` 下，每轮 **val 检查**凡**三门通过**的 epoch 权重全部保留
+
 （val PA-MPJPE：V ≤ 40、T ≤ 90、VT ≤ 40），不设数量上限、不做采样；
 
-三门不过的 epoch 仅当它是某模式 PA/GlobalMPJPE 全程最优（冠军）时保留一份（这一份仅仅是用于研究）。旧的双条件 survey 系列、Pareto cap 采样已从代码中删除。
+三门不过的 epoch 仅当它是某模式 PA/GlobalMPJPE 全程最优（冠军）时保留一份（这一份仅仅是用于研究）。
 
-**第二阶段（训练后，正式选点）**：候选池 + ckpt_last/ckpt_best 做原生 val 十指标复评后，`checkpoint_review` 按注册规则选点——**四个阈值全部通过**（V ≤ 40、T ≤ 90、VT ≤ 40、ΔPA = val PA(VT) − val PA(V) ≤ 0.5）的候选中，取 **VT PA 最小**者；无人通过 → **报告失败，不选**。选中的一份 U 固定权重，跑 test E2/E5 各一次。
+**第二阶段（训练后，正式选点）「选谁」**：候选池 + ckpt_last/ckpt_best 做原生 val 十指标复评后，`checkpoint_review` 按注册规则选点——**四个阈值全部通过**（V ≤ 40、T ≤ 90、VT ≤ 40、ΔPA = val PA(VT) − val PA(V) ≤ 0.5）的候选中，取 **VT PA 最小**者；无人通过 → **报告失败，不选**。选中的一份 U 固定权重，跑 test E2/E5 各一次。
 
 | 产物 | 含义 | 状态 |
 | --- | --- | --- |
 | `ckpt_last.pt` | 最近完成 epoch 的训练状态 | 保留（评估锚、结论点）；文件存在不等于训练完成，必须核对 epoch 与 config.epochs |
 | `ckpt_best.pt` | 按 val/tau0_mpjpe/VT 的快照 | 保留但**降级**：仅作防有限梯度爆炸的备份（F0b_warm ep370 / V3_2_part9 ep271 教训），不再承担任何选点语义 |
 | `checkpoints/multi_metric/` | 候选池：三门通过者全留 + 门不过者的 PA/Global 冠军（manifest.json 记账，v2） | 保留，选点的唯一来源 |
-| `checkpoints/survey/`（历史） | 双条件 survey 系列 | **已弃用**：保存代码已删除；历史 37 份权重只读保留，仅经 survey_eval 复评，不再产生新文件 |
 | 原生 val 十指标明细及 receipt | 候选正式比较依据 | 需同会话、同帧轴、同窗口、同评估协议，并核对 checkpoint 哈希 |
 
 训练监控的旧 `val/mpjpe` 是世界坐标误差，不能抄到正式骨盆对齐 MPJPE 一列。旧配置、权重、指标不回写。
@@ -63,7 +63,7 @@
 python -m anysole.checkpoint_candidates --archive /path/to/checkpoints/multi_metric/manifest.json --config /path/to/run.yaml --out /path/to/new_validation_directory --device cuda:0
 ```
 
-默认只生成计划，`--execute` 才运行验证。执行前必须确认源运行完整结束；该独立工具不能代替 runner 的全部完成度检查。历史 best/last/survey 的重评使用显式 `--ckpt`，命令见 [重执行清单与候选](实验重执行清单与候选checkpoint.md)。不伪造 manifest 来绕过真实存档情况。
+默认只生成计划，`--execute` 才运行验证。执行前必须确认源运行完整结束；该独立工具不能代替 runner 的全部完成度检查。历史 best/last 的重评使用显式 `--ckpt`，命令见 [重执行清单与候选](实验重执行清单与候选checkpoint.md)。不伪造 manifest 来绕过真实存档情况。
 
 ```bash
 python -m anysole.checkpoint_review --manifest /path/to/review_manifest.json --out /path/to/new_comparison_directory

@@ -4,7 +4,7 @@
 
 ## 1 执行结论
 
-当前仅继续现有调度中 tw_occ_scan 的原 8 个历史缺格收尾，不重复入队；其他历史训练和评估不整批重跑。先读取 C1 的 val E2/E5，按结果决定其余候选及遮挡验证；固定 U 后执行 5 次 test E2/E5，最后才条件性验证 E1。保存机制不能追溯恢复未留存 epoch，历史诊断不伪称按新机制重训。
+当前仅继续现有调度中 tw_occ_scan 的原 8 个历史缺格收尾，不重复入队；其他历史训练和评估不整批重跑。正式候选按四阈值门在 val 上复评选点（见 ckpt规则.md），固定一份 U 后执行 test E2/E5 各一次，最后才条件性验证 E1。保存机制不能追溯恢复未留存 epoch，历史诊断不伪称按新机制重训。
 
 | 实验 | 本轮实查 | 不需要重训的部分 | 需要补的工作 |
 | --- | --- | --- | --- |
@@ -15,8 +15,6 @@
 | `ckpt_last_rebaseline` | 54/54 格有结果 | 已完成，不重训、不重复全量复评 | 作为选点敏感性和整行取数的来源 |
 | `ckpt_last_reread` | 15/15 格有结果 | 已完成，不重训、不重复全量复评 | 含 V4 wo05-drop 的 cam3+四遮挡档，以及 V4/V5 的 cam3 folds |
 | `wo05` | 12/12 格有结果 | 可复用原权重 | 正式候选先补严格 val 明细；V4 drop/tonly 的 ep5 best 只能作欠训诊断，不能据此宣称坍塌 |
-| `wo05_survey` | 4 个源运行完成，现存 37 份 survey 权重 | 不为候选搜索重新训练 | 下方先筛 4 份；旧 survey 测试只覆盖少量格，不能拿多候选 test 选赢家 |
-| 旧 `survey_eval` test 波 | 178 个配置已搁置；done 共 11 个，包含 7 个旧 test 与后续 4 个候选 val | 旧 185 个 test 计划作废，已完成 test 只作诊断，不继续执行搁置项 | 候选只用 val 筛选；固定一份 U 哈希后才执行正式 test |
 | `cond_coop` | 旧 test 与持续更新的 last 不能直接对应；本次两项 last 已到 740，另有一项仍为 3/740 | 保留现存权重与历史诊断，不自动重训 | 本轮仅核查状态，不另发批量补评；是否并入后续候选另行决定 |
 | `v4b_carrier` / `v4b_carrier_last` | 各 2 格有结果 | best/last 两口径均有，不重复跑 | 属于折中结构诊断，不能当新设计已通过 E1 |
 | `v4b_finetune` | 审查结束时 4/4 格有结果，源训练完成 | 保留权重，不重复训练 | canonical 与 wo05 不能混比；载体训练履历与公平对照未核实，暂不放入本轮 wo05 主候选 |
@@ -62,45 +60,7 @@ V5_Av4_cam3_occ030_v3off_tw15
 
 六个 λ 缺格为 `V5_Av4_wo05_lp{2,3,4}_lt{0,1}`。不立即发射重训队列；先区分仍在跑、完整权重待评、失败欠训三种情况。
 
-## 3 四份候选：先供人工检查
-
-均为现存 survey 快照，所属源训练已到 ep740。V5 三份来自同一个 wo05-drop 运行，V 流从零训练；V4 的 E 载体配置记录为 wo05。以下数值来自快照内的训练验证监控，尚不是新流程的完整十指标复评。
-
-| ID | 运行 / epoch | val PA：V / T / VT，mm | val Global：V / T / VT，mm | 保留理由 |
-| --- | --- | --- | --- | --- |
-| C1 | `V5_Av4_wo05_survey_drop` / 735 | 32.769 / 65.273 / 32.658 | 65.175 / 166.425 / 64.049 | T Global 与 VT PA 较好的代表，先看这一份 |
-| C2 | 同运行 / 690 | 33.173 / 64.546 / 33.244 | 63.932 / 172.385 / 64.014 | 现存该运行 survey 的 T PA 最低点，用于观察姿态与轨迹的取舍 |
-| C3 | 同运行 / 720 | 32.625 / 68.490 / 32.729 | 64.098 / 180.130 / 63.533 | V PA、VT Global 较好的代表，不把单指标极值拼成一行 |
-| C4 | `V4_Av1_wo05_survey_drop` / 105 | 29.828 / 76.057 / 30.026 | 56.418 / 161.650 / 56.674 | 视觉较强的旧结构参照；冻结载体使其不适合承载 E1 的 T→V 证明 |
-
-这些候选不保证通过 E2 或 E5；也不代表所有十指标的 Pareto 最优。没有根据它们的 test 数字排序。V5 的 epoch715 是另一项 V Global 极值，但先不扩张候选数量，必要时再复核。
-
-路径均保留历史双层 checkpoints 目录：
-
-```text
-results/AnySole/V5_Av4_wo05_survey_drop_f6_soft/tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/checkpoints/checkpoints/survey/survey_ep735.pt
-results/AnySole/V5_Av4_wo05_survey_drop_f6_soft/tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/checkpoints/checkpoints/survey/survey_ep690.pt
-results/AnySole/V5_Av4_wo05_survey_drop_f6_soft/tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/checkpoints/checkpoints/survey/survey_ep720.pt
-results/AnySole/V4_Av1_wo05_survey_drop_f6_soft/tw20_st20_lr0.0001_lp3_lt1_lk1_lpos3_wu0.05_gc5_ep740_bs256_sd1/checkpoints/checkpoints/survey/survey_ep105.pt
-```
-
-## 4 最小执行顺序与命令
-
-第一阶段：先读 C1 的 cam3 val 三条件面板，再决定是否保留及是否需要 C2–C4。当前四份 cam3 val 文件都已存在，直接复用，不重复执行下方示例。随后仅对保留候选补 occ010/020/030/050 val。四份全部保留时连同 cam3 共最多 20 次评估，不需要训练。每次开启十指标及逐会话/逐窗明细，输出到新目录。
-
-下面只执行 C1 的 cam3 验证；从仓库根目录运行。
-
-```bash
-GAIT_PY=/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python
-GAIT_CKPT=results/AnySole/V5_Av4_wo05_survey_drop_f6_soft/tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/checkpoints/checkpoints/survey/survey_ep735.pt
-GAIT_OUT=results/experiments/checkpoint_review_20261025/C1/cam3
-test ! -e "$GAIT_OUT" || exit 1
-"$GAIT_PY" -B -m anysole.eval --config anysole/configs/v1_wo05.yaml --ckpt "$GAIT_CKPT" --split val --config-id V2M,T2M,VT2M --device cuda:0 --contact-method f6_soft --no-robustness --no-write-motion --dump-detail --protocol-out "$GAIT_OUT/val.json" --metrics-out "$GAIT_OUT/val_brief.json"
-```
-
-执行前按规则核对源训练完成度并记录实际 checkpoint 哈希；输出目录已存在时停止，不继续评估。其余候选替换路径和输出 ID。遮挡配置分别为 `anysole/configs/v1_cam3_occ010_wo05.yaml`、020、030、050，checkpoint 保持同一个，输出到对应条件子目录。
-
-V5 可用现有 `--z-src V` 在相同权重和输入上关闭触觉专家，作为 E5 触觉贡献对照。时间错位、跨会话错配若没有现成正式接口，先登记为待实现，不能用文字宣称已经验收。
+## 3 最小执行顺序与命令
 
 第二阶段：用户固定一份 U 与其哈希，使用这份权重跑 test cam3+四遮挡档，共 5 次评估，形成 E2/E5 的完整面板。外部基线只有在骨架、评分帧和监督边界明确后才能作严格比较；本轮未重新跑外部基线。
 

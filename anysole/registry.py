@@ -430,15 +430,6 @@ for _suf, _mod, _note in (
             "v5_1": "V5_Av4_wo05"}[_mod]
     MODEL_REGISTRY[_pre + _suf] = ModelEntry(_pre + _suf, _mod, _note)
 
-# wo05 survey 轮（2026-10-24 用户裁定，已跑完）：基名 + _drop 两变体。
-# 双条件 survey 系列已由 2026-10-25 候选池取代；条目仅作历史权重 eval 寻址。
-for _suf, _mod in (("", "v4_1"), ("_drop", "v4_1"),
-                   ("", "v5_1"), ("_drop", "v5_1")):
-    _pre = "V4_Av1_wo05" if _mod == "v4_1" else "V5_Av4_wo05"
-    _n = _pre + "_survey" + _suf
-    MODEL_REGISTRY[_n] = ModelEntry(
-        _n, _mod, "wo05 survey %s%s (2026-10-24)" % (_pre, _suf))
-
 # λ 扫描（2026-10-24，用户裁定「先扫描一下这几个参数点」）：V5_Av1 / V5_Av4 /
 # V4_Av1 × λ_prior_pose {1,2,3,4} × λ_prior_traj {0,1} 共 24 模型；cam3 +
 # v1_wo05.yaml 纯扫描。结构与 v3off 条目逐项一致（v4_1 / v5_1 入口）。
