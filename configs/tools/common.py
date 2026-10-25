@@ -40,6 +40,7 @@ TRAIN_ARG_FLAG_MAP = {
     "sigma_freeze_frac": "--sigma-freeze-frac",
     "lr_warmup_frac": "--lr-warmup-frac",
     "grad_clip": "--grad-clip",
+    "lr_schedule": "--lr-schedule",
     "loss_cap": "--loss-cap",
     "tw": "--tw",
     "stride": "--stride",
@@ -91,9 +92,18 @@ TRAIN_ARG_FLAG_MAP = {
     "checkpoint_gate_v": "--checkpoint-gate-v",
     "checkpoint_gate_t": "--checkpoint-gate-t",
     "checkpoint_gate_vt": "--checkpoint-gate-vt",
+    # checkpoint_all（2026-10-26 裁定）：true=全留协议；false（默认）=
+    # 只滚存最近一个过线者。仅 multi_metric 下生效。
+    "checkpoint_all": "--checkpoint-all",
+    # wandb（2026-10-25）：在线实验日志（mode/entity/project/tag/评估间隔）。
+    "wandb_mode": "--wandb_mode",
+    "wandb_project": "--wandb_project",
+    "wandb_entity": "--wandb_entity",
+    "wandb_experiment_tag": "--wandb_experiment_tag",
+    "wandb_eval_interval": "--wandb_eval_interval",
 }
 TRAIN_STORE_TRUE = {"assign_cluster", "occ_mix", "occ_a3_monitor",
-                    "t_phys_v2", "d8_heads"}
+                    "t_phys_v2", "d8_heads", "checkpoint_all"}
 
 
 def _parse_value(raw: str) -> Any:

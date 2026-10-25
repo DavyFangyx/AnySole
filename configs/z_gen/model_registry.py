@@ -472,6 +472,10 @@ _V7_TA = {
     "lambda_trec": 0.0, "lambda_vrec": 0.0, "lambda_nll": 0.0,
     "lr_warmup_frac": 0.05, "grad_clip": 5.0,
     "checkpoint_policy": "multi_metric", "checkpoint_role": "auto",
+    # E2/E5 选点需要完整选域：四阈值带内取 VT 最优要求全留协议
+    # （2026-10-26 裁定；其余实验默认 checkpoint_all=false 只滚存最近过线者）。
+    "checkpoint_all": True,
+    "wandb_mode": "online", "wandb_experiment_tag": "v7_first_round",
 }
 # B/C 的机制由 STRUCTURE 标志驱动（v7_contact_root / v7_reliability_route，
 # 随 config 注入）——train.py 无 --lambda-foot/--lambda-route CLI（曾被
@@ -996,6 +1000,12 @@ for _suf in ("", "_drop", "_vonly", "_tonly"):
     MODELS["V5_Av4_wo05" + _suf] = {
         **_b, "label": "V5-Av4-wo05" + _suf.replace("_", "-"),
         "name": "V5_Av4_wo05" + _suf, "config": _WO05_CONFIG}
+# V5_Av1_wo05 平条目（2026-10-26）：wo05 轴调参基座（wo05 批次不含 V5_Av1；
+# λ 扫描条目名带 λ 尾缀不可作基座）。基座 = V5_Av1_cam3_v3off（v3off E
+# 载体、config_probs [1,0,0]），唯一差异 = config → v1_wo05.yaml。
+MODELS["V5_Av1_wo05"] = {
+    **MODELS["V5_Av1_cam3_v3off"], "label": "V5-1-wo05",
+    "name": "V5_Av1_wo05", "config": _WO05_CONFIG}
 for _suf in ("", "_drop", "_vonly", "_tonly"):
     _b = MODELS["V4_Av1_cam3_v3off" + _suf]
     MODELS["V4_Av1_wo05" + _suf] = {

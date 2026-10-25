@@ -89,6 +89,19 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             CandidateArchive(self.root / "other", "U", v_pa_max=-1)
 
+    def test_latest_mode_keeps_only_the_most_recent_gate_passer(self):
+        archive = CandidateArchive(self.root / "archive", "U", keep_latest=True)
+        state = archive.update(checkpoint(1), dashboard())          # pass -> stored
+        state = archive.update(checkpoint(2), dashboard(vt=50, gvt=70))  # VT gate fail -> keep ep1
+        self.assertEqual(set(state["candidates"]), {"epoch_000001"})
+        self.assertFalse((archive.root / "weights/epoch_000002.pt").exists())
+        state = archive.update(checkpoint(3), dashboard(gv=50))     # pass -> replaces ep1
+        self.assertEqual(set(state["candidates"]), {"epoch_000003"})
+        self.assertFalse((archive.root / "weights/epoch_000001.pt").exists())
+        self.assertTrue((archive.root / "weights/epoch_000003.pt").exists())
+        self.assertEqual(state["mode"], "latest")
+        self.assertEqual(state["champions"], {})
+
     def test_fresh_directory_is_required(self):
         archive = CandidateArchive(self.root / "archive", "U")
         archive.update(checkpoint(1), dashboard())

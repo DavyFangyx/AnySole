@@ -87,9 +87,15 @@ def pareto_ids(rows, keys):
 
 
 class CandidateArchive:
-    """One writer per fresh training run; own files only, atomic manifest commit."""
+    """One writer per fresh training run; own files only, atomic manifest commit.
 
-    def __init__(self, root, role, v_pa_max=40.0, t_pa_max=90.0, vt_pa_max=40.0):
+    keep_latest=False（checkpoint_all=true，2026-10-25 裁定）：三门通过者全留
+    + 门不过者的 PA/Global 冠军。keep_latest=True（checkpoint_all=false）：
+    只滚存最近一个过线者（本轮过线则覆盖，没过线保留前一个），不存冠军。
+    """
+
+    def __init__(self, root, role, v_pa_max=40.0, t_pa_max=90.0, vt_pa_max=40.0,
+                 keep_latest=False):
         if role not in ROLE_MODES:
             raise ValueError("Unknown checkpoint role: " + str(role))
         gates = {"V": v_pa_max, "T": t_pa_max, "VT": vt_pa_max}
@@ -98,7 +104,7 @@ class CandidateArchive:
         self.root = Path(root)
         if self.root.exists() and any(self.root.iterdir()):
             raise FileExistsError("Use a fresh run directory; candidate archive already exists: %s" % self.root)
-        self.role, self.gates = role, gates
+        self.role, self.gates, self.keep_latest = role, gates, bool(keep_latest)
         self.keys = tuple(mode + "/" + metric for mode in ROLE_MODES[role]
                           for metric in ("PA-MPJPE", "GlobalMPJPE"))
         self.rows, self.champions, self.last_epoch = {}, {}, 0
@@ -120,16 +126,24 @@ class CandidateArchive:
         row = {"epoch": epoch, "scores": scores, "gate_pass": gate_pass,
                "file": "weights/" + ident + ".pt"}
         rows = dict(self.rows, **{ident: row})
-        champions = dict(self.champions)
-        for key in self.keys:
-            old = champions.get(key)
-            if old is None or scores[key] < rows[old]["scores"][key]:
-                champions[key] = ident
-        # Gate passers are retained in full — the formal review needs the
-        # complete selection domain. Gate failures survive only as champions.
-        # No cap, no sampling, no filtering: eviction only touches epochs
-        # that never passed the gates and lost their champion status.
-        kept = {i for i, r in rows.items() if r["gate_pass"]} | set(champions.values())
+        if self.keep_latest:
+            # Lean mode: a rolling single file holding the most recent
+            # gate-passer. A gate-failing epoch keeps the previous one, so a
+            # late spike never replaces the last healthy checkpoint.
+            kept = ({ident} if gate_pass else set(self.rows))
+        else:
+            # Full mode: gate passers are retained in full — the formal
+            # review needs the complete selection domain. Gate failures
+            # survive only as champions. No cap, no sampling: eviction only
+            # touches epochs that never passed the gates and lost their
+            # champion status.
+            champions = dict(self.champions)
+            for key in self.keys:
+                old = champions.get(key)
+                if old is None or scores[key] < rows[old]["scores"][key]:
+                    champions[key] = ident
+            kept = {i for i, r in rows.items() if r["gate_pass"]} | set(champions.values())
+            self.champions = champions
         self.root.mkdir(parents=True, exist_ok=True)
         if ident in kept:
             if save is None:
@@ -145,9 +159,10 @@ class CandidateArchive:
             os.replace(str(tmp), str(destination))
         retained = {i: rows[i] for i in sorted(kept)}
         state = {"version": 2, "role": self.role, "last_epoch": epoch,
+                 "mode": "latest" if self.keep_latest else "full",
                  "dashboard_metrics": list(self.keys),
                  "gates": {"val_pa_max_mm": dict(self.gates)},
-                 "champions": champions, "candidates": retained,
+                 "champions": self.champions, "candidates": retained,
                  "formal_ten_metric_selection": "pending_validation_review"}
         atomic_json(self.root / "manifest.json", state)
         # The manifest always references committed files before old files go.
@@ -156,5 +171,6 @@ class CandidateArchive:
         log = {"epoch": epoch, "dashboard": row, "gate_pass": gate_pass, "retained": sorted(kept)}
         with (self.root / "history.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(log, allow_nan=False) + "\n")
-        self.rows, self.champions, self.last_epoch = retained, champions, epoch
+        self.rows = retained
+        self.last_epoch = epoch
         return state

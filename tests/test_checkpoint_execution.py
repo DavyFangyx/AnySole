@@ -109,12 +109,21 @@ class CheckpointExecutionTests(unittest.TestCase):
         runner._append_train_args(command, {"train_args": {
             "checkpoint_policy": "multi_metric", "checkpoint_role": "U",
             "checkpoint_gate_v": 40, "checkpoint_gate_t": 90,
-            "checkpoint_gate_vt": 40}})
+            "checkpoint_gate_vt": 40, "checkpoint_all": True}})
         self.assertEqual(command, ["--checkpoint-policy", "multi_metric",
                                    "--checkpoint-role", "U",
                                    "--checkpoint-gate-v", "40",
                                    "--checkpoint-gate-t", "90",
-                                   "--checkpoint-gate-vt", "40"])
+                                   "--checkpoint-gate-vt", "40",
+                                   "--checkpoint-all"])
+
+    def test_checkpoint_all_false_defaults_to_latest_mode(self):
+        # False (the 2026-10-26 default) omits the store-true flag; train.py's
+        # config default is False -> the pool keeps only the latest passer.
+        command = []
+        runner._append_train_args(command, {"train_args": {
+            "checkpoint_policy": "multi_metric", "checkpoint_all": False}})
+        self.assertEqual(command, ["--checkpoint-policy", "multi_metric"])
 
     def test_mutated_checkpoint_does_not_publish_a_complete_run(self):
         ckpt = self.save("ckpt_last.pt", 10)

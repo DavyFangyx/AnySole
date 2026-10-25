@@ -667,6 +667,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "under model_inputs/AnySole by anysole.data.contact_adapter.",
     )
     parser.add_argument("--out-dir", type=Path, default=None, help="Override checkpoint output directory.")
+    parser.add_argument("--lr-schedule", choices=("constant", "cosine"), default=None,
+                        help="LR schedule override: constant (E3 口径) or "
+                        "cosine (epoch decay; V7 设计稿写过 cosine 但从未实际执行).")
     parser.add_argument(
         "--model-name",
         type=str,
@@ -729,6 +732,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--checkpoint-gate-vt", type=float, default=None,
                         help="Candidate pool gate: max val VT PA-MPJPE in mm (default 40; "
                              "2026-10-25 裁定). Only used by multi_metric.")
+    parser.add_argument("--checkpoint-all", action="store_true", default=None,
+                        help="Candidate pool retention switch (2026-10-26 裁定): default false "
+                             "keeps only the most recent gate-passer as a rolling single file "
+                             "(a gate-failing epoch keeps the previous passer); true keeps every "
+                             "gate-passing epoch in full (the 2026-10-25 protocol). "
+                             "Only used by multi_metric.")
     parser.add_argument("--loss-cap", type=float, default=None,
                         help="If set, clip the logged train loss metrics (loss_total, loss_pose, loss_traj, "
                              "loss_con, loss_kp, loss_Trec_Tmissing, loss_Vrec_Vmissing, grad_norm) at this "
@@ -1209,6 +1218,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["contact_method"] = args.contact_method
     if args.out_dir is not None:
         config["out_dir"] = str(args.out_dir)
+    if args.lr_schedule is not None:
+        config["lr_schedule"] = args.lr_schedule
     for key in ("wandb_mode", "wandb_project", "wandb_entity", "wandb_eval_interval", "wandb_experiment_tag"):
         value = getattr(args, key)
         if value is not None:
@@ -1218,6 +1229,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         value = getattr(args, key)
         if value is not None:
             config[key] = value
+    if args.checkpoint_all is not None:
+        config["checkpoint_all"] = bool(args.checkpoint_all)
     if config.get("checkpoint_policy", "legacy") not in ("legacy", "multi_metric"):
         raise ValueError("Unknown checkpoint_policy")
     # Registered experiment names identify the model branch; the architecture
@@ -1456,7 +1469,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             wandb_identity = {
                 "experiment_tag": str(config.get("wandb_experiment_tag") or "anysole_v1"),
                 "run_kind": "train",
-                "model": str(config.get("modal", MODEL_ANYSOLEV1)),
+                # run 名称用模型编号（用户裁定 2026-10-25）——model_name 即
+                # 注册表编号（如 V7_Av1），不再是笼统的 modal（anysole_v2）。
+                "model": str(config.get("model_name")
+                             or config.get("modal", MODEL_ANYSOLEV1)),
                 "stage": "single",
                 "fold": "fold0",
             }
@@ -1660,9 +1676,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             v_pa_max=float(config.get("checkpoint_gate_v", 40.0)),
             t_pa_max=float(config.get("checkpoint_gate_t", 90.0)),
             vt_pa_max=float(config.get("checkpoint_gate_vt", 40.0)),
+            keep_latest=not bool(config.get("checkpoint_all", False)),
         )
-        print("additive candidate pool: role=%s, path=%s" %
-              (checkpoint_archive.role, checkpoint_archive.root))
+        print("additive candidate pool: role=%s, mode=%s, path=%s" %
+              (checkpoint_archive.role,
+               "latest" if checkpoint_archive.keep_latest else "full",
+               checkpoint_archive.root))
 
     # V3 structural steps (fix_plan_v3 §2.2): linear LR warmup over the first
     # lr_warmup_frac of the total planned steps, multiplying the epoch cosine
