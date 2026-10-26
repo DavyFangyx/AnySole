@@ -424,8 +424,7 @@ class AnySoleModelV41(nn.Module):
         return self.sg7(self.corr_heads(zc))          # (B, tw, 18), SG-7
 
     def forward(self, V_feat, T_raw, T_phys, config_id=None, subject_ids=None,
-                T_s2m=None, V_hmr=None, mask_v=None, mask_t=None,
-                v_tok_override=None):
+                T_s2m=None, V_hmr=None, mask_v=None, mask_t=None):
         """config_id is accepted for the train/eval call contract and
         deliberately IGNORED — both streams always live, and the three eval
         conditions are three readouts of this one forward (V3_Ev1 protocol;
@@ -436,8 +435,6 @@ class AnySoleModelV41(nn.Module):
         cid = torch.zeros(V_feat.shape[0], dtype=torch.long, device=V_feat.device)
         v_tok, t_tok = self.encoders(V_feat, T_tac, cid, V_hmr=V_hmr,
                                      mask_v=mask_v, mask_t=mask_t)
-        if v_tok_override is not None:
-            v_tok = v_tok_override  # TTA 注入点（V4_Av1_TTA）
         v_mem = self.v_temporal(v_tok)
         pose_v, sigma_v, z_v = self.pose_head(v_mem, return_z=True)
         v_hat, trans_hat = self.traj_head(v_mem)

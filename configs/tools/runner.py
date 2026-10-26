@@ -324,10 +324,17 @@ def _eval_command(registry: dict[str, Any], model_id: str, root: Path, ckpt: Pat
     return command
 
 
+def _evaluation_splits(registry: dict[str, Any], model_id: str) -> tuple[str, ...]:
+    splits = tuple(_merge_model_spec(registry, model_id).get("eval_splits", ("val", "test")))
+    if not splits or len(set(splits)) != len(splits) or any(x not in ("val", "test") for x in splits):
+        raise ValueError("eval_splits must contain distinct val/test splits")
+    return splits
+
+
 def _formal_eval(registry: dict[str, Any], model_id: str, root: Path, ckpt: Path, log: Path) -> None:
     metrics_dir = root / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
-    for split in ("val", "test"):
+    for split in _evaluation_splits(registry, model_id):
         code = _command_log(_eval_command(registry, model_id, root, ckpt, split), log)
         if code != 0:
             raise RuntimeError("formal %s evaluation failed for %s; see %s" % (split, model_id, log))
@@ -360,10 +367,8 @@ def _run_model(registry: dict[str, Any], experiment_id: str, model_id: str, forc
             checkpoint=str(ckpt),
             checkpoint_sha256=ckpt_hash,
             checkpoint_epoch=ckpt_epoch,
-            metrics={
-                "val": str(root / "metrics" / "val.json"),
-                "test": str(root / "metrics" / "test.json"),
-            },
+            metrics={split: str(root / "metrics" / (split + ".json"))
+                     for split in _evaluation_splits(registry, model_id)},
         )
         (root / "finished_at").write_text(time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n", encoding="utf-8")
         (root / ".done").write_text("complete\n", encoding="utf-8")
@@ -489,7 +494,7 @@ def _print_dry_run(registry: dict[str, Any], experiment_id: str, model_id: str,
         except FileNotFoundError:
             ckpt = "<missing>"
         print("# train skipped: external checkpoint %s" % ckpt)
-    for split in ("val", "test"):
+    for split in _evaluation_splits(registry, model_id):
         print("$ " + subprocess.list2cmdline(_eval_command(registry, model_id, root, Path("<ckpt>"), split)))
     if str(experiment_spec(registry, experiment_id).get("kind")) == "rho_grid":
         try:
@@ -522,6 +527,16 @@ def _run_task(
         # V6_Av1 occ_mix：conf 直写开关（默认关）。OCC_MIX=true 时注入
         # train_args；P_OCC/P_NULLV/P_NULLT 覆盖预注册默认 0.2/0.1/0.1。
         train_overrides: dict[str, Any] = {}
+        # wandb 开关（2026-10-25）：conf 行 WANDB=true/false 决定在线日志；
+        # true → wandb_mode=online（覆盖 train_args），false → disabled。
+        if str(values.get("WANDB", "")).strip().lower() in {"1", "true", "yes", "on"}:
+            train_overrides["wandb_mode"] = "online"
+        elif str(values.get("WANDB", "")).strip().lower() in {"0", "false", "no", "off"}:
+            train_overrides["wandb_mode"] = "disabled"
+        if str(values.get("CHECKPOINT_ALL", "")).strip().lower() in {"1", "true", "yes", "on"}:
+            train_overrides["checkpoint_all"] = True
+        elif str(values.get("CHECKPOINT_ALL", "")).strip().lower() in {"0", "false", "no", "off"}:
+            train_overrides["checkpoint_all"] = False
         if str(values.get("OCC_MIX", "false")).strip().lower() in {"1", "true", "yes", "on"}:
             train_overrides["occ_mix"] = True
             for conf_key, arg_key in (("P_OCC", "p_occ"), ("P_NULLV", "p_nullV"),
@@ -569,7 +584,7 @@ def _run_task(
         study_name = str(values.get("STUDY_NAME", "")).strip()
         if not study_name:
             raise ValueError("TASK=optuna_tune without STUDY_NAME")
-        cmd = [sys.executable, "configs/tools/tune_v5.py",
+        cmd = [sys.executable, "configs/tools/tune.py",
                "--study-name", study_name]
         cmd += _shlex.split(str(values.get("TUNE_ARGS", "")))
         if dry_run:

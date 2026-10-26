@@ -47,6 +47,8 @@ TRAIN_ARG_FLAG_MAP = {
     "dropout": "--dropout",
     "lr": "--lr",
     "config_probs": "--config-probs",
+    "condition_sampling": "--condition-sampling",
+    "final_eval_split": "--final-eval-split",
     "lambda_pose": "--lambda-pose",
     "lambda_kp": "--lambda-kp",
     "lambda_pos": "--lambda-pos",

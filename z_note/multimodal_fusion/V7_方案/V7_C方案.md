@@ -40,3 +40,6 @@
 ## 6. 版本
 
 - **V7_Cv1**：V7_Av1 + 窗口级 T 信任门（端到端学习，无显式质量标签）。
+- **V7_Cv2**：V7_Cv1 + 根/姿态双独立 T 门（task_routes）。
+- **V7_Cv3**：V7_Cv1 + T-only 私有残差适配器（t_only_adapters）。
+- **V7_Cv4**：V7_Cv1 + 枚举三条件训练（condition_sampling=enum；结构同 Cv1）。

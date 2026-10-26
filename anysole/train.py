@@ -212,6 +212,45 @@ def condition_inputs(batch: dict, config_id: torch.Tensor, t_s2m_dim: int = T_S2
     return v_feat, t_raw, t_phys, t_s2m
 
 
+def backward_v7_enum(model, batch, config):
+    """Enumerate the same windows, accumulate gradients, then update once.
+
+    Motion keeps config_probs weights. T-only auxiliary terms normalize over
+    T-present modes, matching their masked-mean definition in sampled batches.
+    Graphs are released after each backward, rather than retaining 3 batches.
+    """
+    probs = [float(x) for x in config["config_probs"]]
+    if (len(probs) != 3 or not all(math.isfinite(x) and x >= 0 for x in probs)
+            or sum(probs) <= 0):
+        raise ValueError("enum requires three finite nonnegative config_probs")
+    probs = [x / sum(probs) for x in probs]
+    t_probability = probs[CONFIG_VT] + probs[CONFIG_T]
+    mode_config = dict(config)
+    for key in ("lambda_contact", "lambda_foot"):
+        if key in mode_config:
+            mode_config[key] = float(config[key]) / t_probability if t_probability > 0 else 0.0
+    metrics = {}
+    batch_size = batch["pose_gt"].shape[0]
+    for mode, probability in enumerate(probs):
+        if probability == 0:
+            continue
+        cid = torch.full((batch_size,), mode, dtype=torch.long, device=batch["pose_gt"].device)
+        v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, cid)
+        out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m)
+        losses = compute_losses(out, batch, cid, mode_config)
+        if not bool(torch.isfinite(losses["loss"]) & torch.isfinite(out["F"]).all()):
+            # The caller discards all accumulated gradients on failure.
+            return out, losses
+        (probability * losses["loss"]).backward()
+        for key, value in losses.items():
+            weight = probability
+            if key in ("L_contact", "L_foot") and t_probability > 0:
+                weight /= t_probability
+            contribution = weight * value.detach()
+            metrics[key] = metrics.get(key, 0.0) + contribution
+    return out, metrics
+
+
 def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt") -> Tuple[torch.Tensor, torch.Tensor]:
     """One pass over the training loader: per-dim mean/std of the pose target.
 
@@ -467,6 +506,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "Accepts '--dropoutVT 20 30' or '--dropoutVT 20,30'; '0,0' disables modality dropout.",
     )
     parser.add_argument("--limit-sessions", type=int, default=None)
+    parser.add_argument("--condition-sampling", choices=("sample", "enum"), default=None,
+                        help="enum: each window sees VT/V/T, with config_probs loss weights and one optimizer update")
+    parser.add_argument("--final-eval-split", choices=("val", "test", "none"), default=None,
+                        help="Post-training evaluation split; new feasibility runs use val")
     parser.add_argument(
         "--tau-max",
         type=int,
@@ -1203,6 +1246,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["dropout"] = float(args.dropout)
     if args.config_probs is not None:
         config["config_probs"] = args.config_probs
+    for key in ("condition_sampling", "final_eval_split"):
+        if getattr(args, key) is not None:
+            config[key] = getattr(args, key)
+    if config.get("condition_sampling", "sample") not in ("sample", "enum"):
+        raise ValueError("condition_sampling must be sample or enum")
+    if config.get("final_eval_split", "test") not in ("val", "test", "none"):
+        raise ValueError("final_eval_split must be val, test or none")
     if args.dropout_vt is not None:
         tokens = [item for item in " ".join(args.dropout_vt).replace(",", " ").split() if item]
         if len(tokens) != 2:
@@ -1249,6 +1299,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     v3h_mode = bool(config.get("v3h", False))
     v5_1_mode = bool(config.get("v5_1", False))
     v4_1_mode = bool(config.get("v4_1", False))
+    enum_mode = config.get("condition_sampling", "sample") == "enum"
+    if enum_mode and (not bool(config.get("v7")) or bool(config.get("occ_mix", False)) or args.occ_mix):
+        raise ValueError("enum currently requires a V7-derived model without occ_mix")
     if args.v5_conditioning is not None:
         config["v5_conditioning"] = args.v5_conditioning
     v5_availability = conditioning_policy(config) == "availability_v1"
@@ -1767,7 +1820,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         for raw_batch in loader:
             batch = move_batch(raw_batch, device)
             batch_size = batch["pose_gt"].shape[0]
-            config_id = sample_config_ids(batch_size, probs=config["config_probs"]).to(device)
+            config_id = (torch.full((batch_size,), CONFIG_VT, device=device, dtype=torch.long)
+                         if enum_mode else sample_config_ids(batch_size, probs=config["config_probs"]).to(device))
             batch["config_id"] = config_id
             assert_batch_shapes(batch, batch_size, tw=int(config["tw"]),
                         t_phys_v2=bool(config.get("t_phys_v2", False)))
@@ -1798,7 +1852,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             optimizer.zero_grad(set_to_none=True)
             if sigma_freeze_steps:
                 model.pose_head.set_sigma_frozen(global_step < sigma_freeze_steps)
-            if v3f_mode:
+            if enum_mode:
+                out, losses = backward_v7_enum(model, batch, config)
+            elif v3f_mode:
                 # V3_Fv1: diffuse the full normalized state [pose | trans |
                 # contact]; 10% V zeroing is the unconditional prior pass
                 # (no learned null tokens — 方案 §2.1).
@@ -1897,7 +1953,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                         med = float(e_v.median())
                         cond_tau = med if cond_tau is None else 0.95 * cond_tau + 0.05 * med
 
-            if v3f_mode:
+            if enum_mode:
+                pass  # Losses and backward were accumulated one condition at a time.
+            elif v3f_mode:
                 losses = compute_losses_v3f(out, x0_n, batch, config)
             elif v5_1_mode:
                 losses = compute_losses_v5_1(out, batch, config_id, config, cond_tau=cond_tau)
@@ -1982,7 +2040,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     }
                     for key, value in z_now.items():
                         epoch_sums[key] = epoch_sums.get(key, 0.0) + float(value) * batch_size
-            losses["loss"].backward()
+            if not enum_mode:
+                losses["loss"].backward()
             # NaN-grad guard (fix_plan_v3 §2.2): check every parameter BEFORE
             # the clip, because clip_grad_norm_ mixes one non-finite gradient
             # into every parameter (F5B_gated failure mode).  Same treatment
@@ -2021,6 +2080,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     epoch_sums[name] = epoch_sums.get(name, 0.0) + float(losses[key].detach().item()) * n
             n_tmissing = int((config_id == CONFIG_T).sum().item())
             n_vmissing = int((config_id == CONFIG_V).sum().item())
+            if enum_mode:
+                n_tmissing = batch_size if config["config_probs"][CONFIG_T] > 0 else 0
+                n_vmissing = batch_size if config["config_probs"][CONFIG_V] > 0 else 0
             if n_tmissing:
                 epoch_sums["loss_Trec_Tmissing"] += float(losses["L_Trec"].detach().item()) * n_tmissing
                 epoch_sums["n_tmissing"] += n_tmissing
@@ -2211,11 +2273,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             wandb_run.log(log, step=epoch + 1)
     if wandb_run is not None:
         wandb_run.finish()
+    final_split = str(config.get("final_eval_split", "test"))
+    if final_split == "none":
+        return 0
     try:
         from anysole.eval import main as eval_main
         # Training-time auto-eval stays lean: metrics only and no protocol pass.
         eval_main(["--config", str(args.config), "--ckpt", str(out_dir / "ckpt_last.pt"),
-                   "--split", "test", "--device", str(device),
+                   "--split", final_split, "--device", str(device),
                    "--contact-method", str(config["contact_method"]), "--no-write-motion"])
     except Exception as exc:
         print("automatic test evaluation failed: %s" % exc)

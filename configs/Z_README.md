@@ -265,3 +265,30 @@ python configs/z_gen/rho_grid_eval.py --models V3_Bv1
 CUDA_VISIBLE_DEVICES=4 bash configs/bg.sh
 python configs/tools/status.py
 ```
+
+## 4. 实验套餐（2026-10-26 用户裁定）
+
+训练套餐与实验解耦：训练按需选一档；实验（E1/E2/E5）单独选择、不捆绑。
+
+### 训练套餐
+
+| 套餐 | 训练内容 | 用途 |
+|---|---|---|
+| 全量 | U + S_V + S_T（同架构、同数据、同预算 740 epoch 单 seed） | 一次训齐，E1 随时可补 |
+| 仅 U | U（统一模型，[0.5,0.25,0.25]） | 结构筛选阶段 |
+
+### 实验（单独选择）
+
+| 实验 | 前置 | 内容 |
+|---|---|---|
+| E1 | U + 专家 | U@T vs S_T@T、U@V vs S_V@V、U@VT（附录表 A 五行口径） |
+| E2 | U | 三块十指标 vs 外部基线（表 2） |
+| E5 | U | occ000/010/020/030/050 五档交叉评估，固定 ckpt_last（表 3） |
+
+### 注册约定
+
+- 模型名：统一编号格式（`V7_CvN` 家族）——conf 文件、模型本体文件、result 目录、wandb tag 全链同名
+- 选点：统一 ckpt_last（epoch 740，记 sha256）；候选池 + 四阈值门 = 训练健康度诊断，不参与选点（ckpt 规则第三版）
+- 评估口径：`eval_splits=["val","test"]` 显式声明——「val 先评、test 后跑」只用于选点前筛查，正式统计必须两 split 齐出
+- 专家：S_V/S_T 固定各自 ckpt_last，不参与 U 的选点
+- conf 参数：`WANDB=true`、`CHECKPOINT_ALL=true`

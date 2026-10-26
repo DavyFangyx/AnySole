@@ -26,6 +26,8 @@ T-only 的上身经「共享运动先验」回退（部位 query 只 attend 到 
 
 from __future__ import annotations
 
+import copy
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -82,9 +84,14 @@ class _V7DecoderLayer(nn.Module):
         h = self.ln_v(h + v_out * v_present.view(-1, 1, 1))
         t_out = self.xattn_t(h, m_t, m_t, need_weights=False)[0]
         if gate is not None:
-            # C：窗口级 T 信任门（B, tw, 1）→ (B, tw*nq, d) 逐窗缩放。
-            t_out = t_out.view(-1, tw, t_out.shape[1] // tw, t_out.shape[2])
-            t_out = t_out * gate.view(-1, tw, 1, 1)
+            batch, queries, dim = t_out.shape
+            nq = queries // tw
+            t_out = t_out.view(batch, tw, nq, dim)
+            if gate.shape == (batch, tw, 1):
+                gate = gate.unsqueeze(2)
+            elif gate.shape != (batch, tw, nq, 1):
+                raise ValueError("T gate must be window-level or match the motion queries")
+            t_out = t_out * gate
             t_out = t_out.view(q.shape[0], q.shape[1], q.shape[2])
         h = self.ln_t(h + t_out * t_present.view(-1, 1, 1))
         return self.ln_f(h + self.ffn(h))
@@ -124,7 +131,8 @@ class V7MotionHead(nn.Module):
         self.pose_mean = pose_mean.to(self.pose_mean.dtype)
         self.pose_std = pose_std.to(self.pose_std.dtype)
 
-    def forward(self, m_v, m_t, v_present, t_present, gate=None):
+    def forward(self, m_v, m_t, v_present, t_present, gate=None,
+                t_only_mask=None, t_only_adapters=None):
         """→ (pose (B,tw,POSE_DIM), v_hat (B,tw,3), z_root, z_parts)"""
         B = m_v.shape[0]
         q_root = self.root_query.expand(B, -1, -1, -1) \
@@ -138,6 +146,12 @@ class V7MotionHead(nn.Module):
         q = q.reshape(B, self.tw, 1 + self.n_parts, self.dim)
         z_root = q[:, :, 0:1, :]
         z_parts = q[:, :, 1:, :]
+        if t_only_adapters is not None:
+            if t_only_mask is None:
+                raise ValueError("T-only adapters require an explicit availability mask")
+            mask = t_only_mask.to(q.dtype).view(B, 1, 1, 1)
+            z_root = z_root + mask * t_only_adapters[0](z_root)
+            z_parts = z_parts + mask * t_only_adapters[1](z_parts)
         v_hat = self.root_head(z_root)[:, :, 0, :]       # (B, tw, 3)
         pose_parts = torch.cat(
             [self.out_parts[p](z_parts[..., p, :]) for p in range(self.n_parts)],
@@ -150,7 +164,8 @@ class AnySoleModelV7(nn.Module):
     """独立证据 + 共享生成（候选 A/B/C 载体）。"""
 
     def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, pose_layers=6,
-                 contact_root: bool = False, reliability_route: bool = False):
+                 contact_root: bool = False, reliability_route: bool = False,
+                 task_routes: bool = False, t_only_adapters: bool = False):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -162,6 +177,10 @@ class AnySoleModelV7(nn.Module):
         self.f2_repr = False
         self.contact_root = bool(contact_root)
         self.reliability_route = bool(reliability_route)
+        self.task_routes = bool(task_routes)
+        self.t_only_adapters = bool(t_only_adapters)
+        if self.task_routes and not self.reliability_route:
+            raise ValueError("Task routes require tactile reliability routing")
         self.embeddings = SharedEmbeddings(dim=d, tw=tw)
         self.encoders = ModalEncoders(
             self.embeddings, dim=d, tw=tw, tactile_input="raw108",
@@ -179,12 +198,33 @@ class AnySoleModelV7(nn.Module):
             # 思路 §3 候选 C 的第一版）。输入 = V/T 编码 token 的窗口均值。
             self.route_mlp = nn.Sequential(
                 nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 1))
+        # Add private parameters after shared initialization. V2 initially
+        # reproduces C's single gate, then learns independent root routing.
+        if self.task_routes:
+            self.route_root_mlp = copy.deepcopy(self.route_mlp)
+        if self.t_only_adapters:
+            with torch.random.fork_rng(devices=[]):
+                self.t_only_root_adapter = self._make_t_only_adapter(d)
+                self.t_only_pose_adapter = self._make_t_only_adapter(d)
+
+    @staticmethod
+    def _make_t_only_adapter(dim):
+        adapter = nn.Sequential(
+            nn.LayerNorm(dim), nn.Linear(dim, max(dim // 4, 1)), nn.GELU(),
+            nn.Linear(max(dim // 4, 1), dim))
+        nn.init.zeros_(adapter[-1].weight)
+        nn.init.zeros_(adapter[-1].bias)
+        return adapter
 
     def _route_gate(self, v_tok, t_tok):
         # 窗口级池化（2026-10-25 修订）：两路 token 的窗口均值 → 每训练
         # 窗口一个标量门（设计思路 §3 候选 C 的「窗口级」原义）。
         x = torch.cat([v_tok, t_tok], dim=-1).mean(dim=1)   # (B, 2d)
         g = torch.sigmoid(self.route_mlp(x))                # (B, 1)
+        if self.task_routes:
+            root = torch.sigmoid(self.route_root_mlp(x))
+            gates = torch.cat([root, g.expand(-1, self.pose_head.n_parts)], dim=1)
+            return gates[:, None, :, None].expand(-1, self.tw, -1, -1)
         return g.view(-1, 1, 1).expand(-1, self.tw, 1)      # (B, tw, 1)
 
     def forward(self, V_feat, T_raw, T_phys, config_id=None, subject_ids=None,
@@ -206,8 +246,12 @@ class AnySoleModelV7(nn.Module):
         m_v = self.v_temporal(v_tok)
         m_t = self.t_temporal(t_tok)
         gate = self._route_gate(v_tok, t_tok) if self.reliability_route else None
+        adapters = ((self.t_only_root_adapter, self.t_only_pose_adapter)
+                    if self.t_only_adapters else None)
+        t_only = (~v_present.bool()) & t_present.bool()
         pose, v_hat, z_root, z_parts = self.pose_head(
-            m_v, m_t, v_present, t_present, gate=gate)
+            m_v, m_t, v_present, t_present, gate=gate,
+            t_only_mask=t_only, t_only_adapters=adapters)
         trans_hat = torch.cumsum(v_hat, dim=1) / float(FPS)
         contact_logits = self.contact_head(t_tok)
         return {

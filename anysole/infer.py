@@ -296,6 +296,7 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
                 % (model_name, saved_struct, dict(entry.STRUCTURE))
             )
         build_cfg = dict(config)
+        build_cfg.update(entry.STRUCTURE)
         build_cfg["d_model"] = d_model
         build_cfg["tw"] = tw
         build_cfg["dropout"] = dropout

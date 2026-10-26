@@ -92,15 +92,12 @@ class AnySoleModelV4B(AnySoleModelV2):
         return self.sg7(self.corr_heads(zc))          # (B, tw, 18), SG-7
 
     def forward(self, V_feat, T_raw, T_phys, config_id=None, subject_ids=None,
-                T_s2m=None, V_hmr=None, mask_v=None, mask_t=None,
-                v_tok_override=None):
+                T_s2m=None, V_hmr=None, mask_v=None, mask_t=None):
         T_tac = torch.cat([T_raw, T_phys], dim=-1)
         # VT pass: B pipeline verbatim + return_z（config_id 零化与 B 同口径
         # —— eval 三条件的 V2M/VT2M 由评估侧输入零化区分，训练 = VT 窗）。
         v_tok, t_tok = self.encoders(V_feat, T_tac, config_id, V_hmr=V_hmr,
                                      mask_v=mask_v, mask_t=mask_t)
-        if v_tok_override is not None:
-            v_tok = v_tok_override  # TTA 注入点（与 V4_Av1_TTA 同款）
         fused = self.fusion(v_tok, t_tok)
         x0_hat, z_v = self.pose_head(F=fused, return_z=True)
         v_hat, trans_hat = self.traj_head(fused)
