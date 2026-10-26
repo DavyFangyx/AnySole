@@ -533,6 +533,39 @@ MODELS["V7_Cv5_precheck"] = {**MODELS["V7_Cv5"], "label": "V7-Cv5-precheck",
                              "train_args": {**MODELS["V7_Cv5"]["train_args"],
                                             "wandb_experiment_tag": "v7_variants_precheck"}}
 
+# V7_Cv6（2026-10-26 用户裁定，消融组「V5 无模态缺失训练版」）：双门结构
+# （v7_c2 入口）同 Cv5，训练始终输入 VT（config_probs [1,0,0] + sample——
+# 不做模态 mask/dropout，也不枚举）——验证三条件训练是否有必要。
+# checkpoint_role auto → S_VT（仅 VT 单条件选点）。
+MODELS["V7_Cv6"] = {**MODELS["V7_Cv2"], "label": "V7-Cv6", "name": "V7_Cv6",
+                    "train_args": {**MODELS["V7_Cv2"]["train_args"],
+                                   "config_probs": [1.0, 0.0, 0.0],
+                                   "condition_sampling": "sample"}}
+MODELS["V7_Cv6_precheck"] = {**MODELS["V7_Cv6"], "label": "V7-Cv6-precheck",
+                             "name": "V7_Cv6_precheck", "epochs": 6,
+                             "train_args": {**MODELS["V7_Cv6"]["train_args"],
+                                            "wandb_experiment_tag": "v7_variants_precheck"}}
+
+# V7_Cv7（2026-10-26 用户裁定，消融组「A＋枚举训练版」）：无门控（v7_a
+# 入口）+ 枚举三条件训练，其余配方与 V7_Cv5 相同——验证可靠性门控是否
+# 有必要。checkpoint_role auto → U（三条件同 Cv5）。
+MODELS["V7_Cv7"] = {**MODELS["V7_Cv5"], "label": "V7-Cv7", "name": "V7_Cv7"}
+MODELS["V7_Cv7_precheck"] = {**MODELS["V7_Cv7"], "label": "V7-Cv7-precheck",
+                             "name": "V7_Cv7_precheck", "epochs": 6,
+                             "train_args": {**MODELS["V7_Cv7"]["train_args"],
+                                            "wandb_experiment_tag": "v7_variants_precheck"}}
+
+# V7_Cv5 全量套餐专家（2026-10-26 用户裁定）：同架构 = v7_c2（双门结构
+# 本体），仅训练配比不同——与 U 逐参数同构（E1 的同架构要求）。对比：
+# 早期的 V7_SV1/V7_ST1 是 v7_a 骨架，与 V7_Cv1（v7_c）非同架构。
+for _exp, _cprobs in (("V7_Cv5_SV1", [0.0, 1.0, 0.0]), ("V7_Cv5_ST1", [0.0, 0.0, 1.0])):
+    MODELS[_exp] = {**MODELS["V7_Cv5"], "label": _exp.replace("_", "-"),
+                    "name": _exp,
+                    "eval_splits": ["val", "test"],
+                    "train_args": {**MODELS["V7_Cv5"]["train_args"],
+                                   "config_probs": _cprobs,
+                                   "wandb_experiment_tag": "v7_variants_experts"}}
+
 
 
 # V1-last 统计（2026-10-26 用户裁定「统一口径」）：V1 = V7_Cv1 基准——
@@ -550,7 +583,39 @@ for _occ in ("010", "020", "030", "050"):
 # V1–V3 统计评估（2026-10-26 用户裁定「进行统计」）：各变体四门选点 =
 # ckpt_last（V2/V3/V1_enum 各仅 1 份四门通过者 = ep740）。cam3 test 面板 +
 # occ 四档交叉评估（V1 = V7_Cv1 基准，数字已有）。
+# 专家 test 补跑（2026-10-26：clean 条目继承 eval_splits=["val"] 导致
+# 专家 test 缺失——eval-only 格补，不重训）。
+for _exp in ("V7_Cv5_SV1", "V7_Cv5_ST1"):
+    MODELS[f"{_exp}_stat"] = {**MODELS[_exp], "label": _exp + "-stat",
+                              "name": _exp, "train": False, "which": "last",
+                              "eval_splits": ["val", "test"]}
+
 for _v in ("V7_Cv2", "V7_Cv3", "V7_Cv4"):
+    MODELS[f"{_v}_stat"] = {**MODELS[_v], "label": _v.replace("_", "-") + "-stat",
+                            "name": _v, "train": False, "which": "last",
+                            "eval_splits": ["val", "test"]}
+    for _occ in ("010", "020", "030", "050"):
+        MODELS[f"{_v}_stat_evalocc{_occ}"] = {
+            **MODELS[_v], "label": _v.replace("_", "-") + f"-stat-evalocc{_occ}",
+            "name": _v, "train": False, "which": "last",
+            "eval_splits": ["val", "test"],
+            "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml"}
+
+# V7_Cv5 统计（2026-10-26）：ckpt_last 固定口径（选点规则第三版）。
+MODELS["V7_Cv5_stat"] = {**MODELS["V7_Cv5"], "label": "V7-Cv5-stat",
+                         "name": "V7_Cv5", "train": False, "which": "last",
+                         "eval_splits": ["val", "test"]}
+for _occ in ("010", "020", "030", "050"):
+    MODELS[f"V7_Cv5_stat_evalocc{_occ}"] = {
+        **MODELS["V7_Cv5"], "label": f"V7-Cv5-stat-evalocc{_occ}",
+        "name": "V7_Cv5", "train": False, "which": "last",
+        "eval_splits": ["val", "test"],
+        "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml"}
+
+# V7_Cv6/Cv7 统计条目（2026-10-27 接入，消融组 E4 用）：eval-only 零重训，
+# 口径与 Cv5 stat 一致——cam3 test 面板 + occ 四档交叉评估（name 落训练
+# 条目名、which=last）。训练（00139/00140）完成后由 gen 接线发射。
+for _v in ("V7_Cv6", "V7_Cv7"):
     MODELS[f"{_v}_stat"] = {**MODELS[_v], "label": _v.replace("_", "-") + "-stat",
                             "name": _v, "train": False, "which": "last",
                             "eval_splits": ["val", "test"]}
@@ -656,7 +721,7 @@ for _name in ("V7_Av1", "V7_Bv1", "V7_Cv1"):
 #             按动作聚合的 canonical 数据源）。
 # 波次：波 1 = V3_Ev1 ×5；波 2 = V3_Bv1/V5_Av4 ×5（无依赖，随波 1 并行）；
 # 波 3 = V5_Av1/V4_Av1 ×5（闸门 = 对应 fold E1 完成）。conf 生成 =
-# configs/z_gen/per_action_folds.py（--stage 12|3，波 3 带闸门断言）。
+# configs/z_gen/gen.py per_action_folds --wave 12|3（波 3 带闸门断言）。
 _FOLDS = (("fS13S14", "anysole/configs/v1.yaml"),
           ("fS5S6S11", "anysole/configs/v1_fold_S5S6S11.yaml"),
           ("fS5S11S12", "anysole/configs/v1_fold_S5S11S12.yaml"),
@@ -1102,7 +1167,7 @@ for _mid in list(MODELS):
 # V5_Av4 保持 carrier_from="scratch"（v5_1 entry 的 scratch 分支在
 # torch.load 之前返回——不装载任何 E ckpt，无 E 依赖，随波 1 并行）。
 # 波次：波 1 = V3_Ev1_wo05 + V5_Av4_wo05 ×8；波 2 = V4_Av1_wo05 ×4
-# （闸门 = 波 1 的 V3_Ev1_wo05 完成）。conf 生成 = configs/z_gen/wo05.py。
+# （闸门 = 波 1 的 V3_Ev1_wo05 完成）。conf 生成 = configs/z_gen/gen.py wo05。
 _WO05_CONFIG = "anysole/configs/v1_wo05.yaml"
 _WO05_E1_CKPT = ("results/AnySole/V3_Ev1_wo05_f6_soft/"
                  "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
@@ -1135,7 +1200,7 @@ for _suf in ("", "_drop", "_vonly", "_tonly"):
 # 模型的 ckpt（name 保持 _drop 基名；which=best → ckpt_best，对齐 E5 口径与
 # canonical occ json 的 checkpoint 字段），数据根 = v1_cam3_occ{N}_wo05.yaml
 # （显式 config 键）。零重训；入队闸门 = 对应家族 _drop conf 进 done/
-# （configs/z_gen/wo05.py 波 3 按家族把控）。
+# （configs/z_gen/gen.py wo05 --wave 3 按家族把控）。
 for _f in ("V3_Ev1", "V4_Av1", "V5_Av4"):
     for _occ in ("010", "020", "030", "050"):
         _eval_id = f"{_f}_wo05_drop_evalocc{_occ}"

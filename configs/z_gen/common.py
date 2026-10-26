@@ -1,9 +1,11 @@
-"""Shared registry and queue writer for the two data-producing experiments."""
+"""Shared registry and queue writer for the offline experiments."""
 
 from __future__ import annotations
 
+import json
 import re
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -29,20 +31,9 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "MODEL_IDS": ["V3_Bv2", "V3_Bv3"],
         "REQUIRES": [],
     },
-    "all_models": {
-        "KIND": "model_suite",
-        "MODEL_IDS": list(MODELS),
-        "REQUIRES": [],
-    },
-    "singlemodal_eval": {
-        "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_Bv1"],
-        "SPECIALISTS": ["vonly", "tonly"],
-        "REQUIRES": [],
-    },
     # 5-fold 动作覆盖实验（2026-10-22）：受试者轮换 leave-subjects-out，
     # test 覆盖 11/11 动作；波 1/2/3 与 fold 条目见 model_registry 同名块。
-    # 生成 = configs/z_gen/per_action_folds.py（--stage 12 先入队，
+    # 生成 = configs/z_gen/gen.py per_action_folds（--wave 12 先入队，
     # 波 3 待波 1 E1 ckpt 完成后生成）。
     "per_action_folds": {
         "KIND": "model_suite",
@@ -87,34 +78,23 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
             "V5_Av4_occ010_fS5S6S8",
         ],
         "REQUIRES": [],
-    },
-    # 四相机扩展 D2 (2026-10-12): same protocol on the three new cameras.
-    # tonly is deliberately absent -- the T stream is camera-independent and
-    # the shared V3_Bv1_tonly specialist serves all four cameras.
-    "singlemodal_eval_cams": {
-        "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_Bv1_cam1", "V3_Bv1_cam2", "V3_Bv1_cam4"],
-        "SPECIALISTS": ["vonly"],
-        "REQUIRES": [],
-    },
-    # V-degradation 遮挡组 (2026-10-13): cam3 with the bottom fraction of the
-    # person bbox occluded.  tonly is absent for the same reason as the camera
-    # group -- the T stream is occlusion-independent, V3_Bv1_tonly serves all.
-    "singlemodal_eval_occl": {
-        "KIND": "singlemodal_compare",
-        "MODEL_IDS": ["V3_Bv1_cam3_occ010", "V3_Bv1_cam3_occ020",
-                      "V3_Bv1_cam3_occ030", "V3_Bv1_cam3_occ050"],
-        "SPECIALISTS": ["vonly"],
-        "REQUIRES": [],
-    },
-    "rho_grid_eval": {
-        "KIND": "rho_grid",
-        "MODEL_IDS": ["V3_Bv1"],
-        "REQUIRES": [],
-        "RHOS": "0,20,40,60,80,100",
-        "TRAIN_REPR_RHOS": "0,100",
-        "VAL_SEEDS": "0,1,2",
-        "TEST_SEEDS": "0",
+        # 波次（2026-10-22，原 per_action_folds.py 数据迁入）：波 3 闸门 =
+        # 波 1 的 5 个 V3_Ev1 fold conf 全部进 done/（carrier 依赖）。
+        "DEFAULT_WAVE": "12",
+        "WAVES": {
+            "12": ["V3_Ev1_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
+            + ["V3_Bv1_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
+            + ["V5_Av4_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")],
+            "3": ["V5_Av1_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
+            + ["V4_Av1_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
+            # occ050 档（2026-10-23 裁定「加」；载体闸门同波 3）
+            + ["V5_Av1_occ050_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
+            + ["V4_Av1_occ050_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")],
+        },
+        "WAVE_GATES": {
+            "3": ["*__V3_Ev1_%s.conf" % f
+                  for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")],
+        },
     },
     "residual_test": {
         "KIND": "model_suite",
@@ -240,6 +220,33 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
             "V4_Av1_wo05", "V4_Av1_wo05_drop",
             "V4_Av1_wo05_vonly", "V4_Av1_wo05_tonly"],
         "REQUIRES": [],
+        # 波次（2026-10-24，原 wo05.py 数据迁入）：波 2 闸门 = 波 1 的
+        # V3_Ev1_wo05 conf 进 done/（训练+评估完成，ckpt_best 不作数）；
+        # 波 3 = wo05_eval 条目（E5 遮挡交叉评估），闸门 = 对应家族 _drop
+        # conf 进 done/（gate_experiment 即训练条目的 conf 名前缀）。
+        # DEFAULT_WAVE=auto：波 1 + 闸门满足的后续波，逐波跳过已入队模型。
+        "DEFAULT_WAVE": "auto",
+        "WAVES": {
+            1: ["V3_Ev1_wo05", "V3_Ev1_wo05_drop", "V3_Ev1_wo05_vonly",
+                "V3_Ev1_wo05_tonly",
+                "V5_Av4_wo05", "V5_Av4_wo05_drop", "V5_Av4_wo05_vonly",
+                "V5_Av4_wo05_tonly"],
+            2: ["V4_Av1_wo05", "V4_Av1_wo05_drop", "V4_Av1_wo05_vonly",
+                "V4_Av1_wo05_tonly"],
+        },
+        "WAVE_GATES": {
+            2: ["*__V3_Ev1_wo05.conf"],
+        },
+        "WAVE_EVAL": {
+            "wave": 3,
+            "experiment": "wo05_eval",
+            "gate_experiment": "wo05",
+            "families": {
+                "V3_Ev1": "V3_Ev1_wo05_drop",
+                "V4_Av1": "V4_Av1_wo05_drop",
+                "V5_Av4": "V5_Av4_wo05_drop",
+            },
+        },
     },
     # 时间窗扫描（2026-10-22，z_note/multimodal_fusion/时间窗扫描实验.md）：
     # 五家族 x tw{5,10,15,20} x cam3/cam3_occ010（v3off 生产轴）。
@@ -273,6 +280,31 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
             "V3_Bv1_cam3_v3off", "V4_Av1_cam3_v3off",
             "V5_Av1_cam3_v3off", "V5_Av4_cam3_v3off"],
         "REQUIRES": [],
+        # 波次（2026-10-24，原 tw_scan.py 数据迁入）：波 2 = V4_Av1/V5_Av1
+        # 格（carrier 依赖波 1 的 E 格；原脚本只按 --wave 手动分波，无闸门）。
+        "DEFAULT_WAVE": 1,
+        "WAVES": {
+            1: ["V3_Ev1_cam3_v3off_tw5", "V3_Ev1_cam3_v3off_tw10",
+                "V3_Ev1_cam3_v3off_tw15", "V3_Ev1_cam3_occ010_v3off",
+                "V3_Ev1_cam3_occ010_v3off_tw5", "V3_Ev1_cam3_occ010_v3off_tw10",
+                "V3_Ev1_cam3_occ010_v3off_tw15",
+                "V3_Bv1_cam3_v3off_tw5", "V3_Bv1_cam3_v3off_tw10",
+                "V3_Bv1_cam3_v3off_tw15", "V3_Bv1_cam3_occ010_v3off",
+                "V3_Bv1_cam3_occ010_v3off_tw5", "V3_Bv1_cam3_occ010_v3off_tw10",
+                "V3_Bv1_cam3_occ010_v3off_tw15",
+                "V5_Av4_cam3_v3off_tw5", "V5_Av4_cam3_v3off_tw10",
+                "V5_Av4_cam3_v3off_tw15", "V5_Av4_cam3_occ010_v3off",
+                "V5_Av4_cam3_occ010_v3off_tw5", "V5_Av4_cam3_occ010_v3off_tw10",
+                "V5_Av4_cam3_occ010_v3off_tw15"],
+            2: ["V4_Av1_cam3_v3off_tw5", "V4_Av1_cam3_v3off_tw10",
+                "V4_Av1_cam3_v3off_tw15", "V4_Av1_cam3_occ010_v3off",
+                "V4_Av1_cam3_occ010_v3off_tw5", "V4_Av1_cam3_occ010_v3off_tw10",
+                "V4_Av1_cam3_occ010_v3off_tw15",
+                "V5_Av1_cam3_v3off_tw5", "V5_Av1_cam3_v3off_tw10",
+                "V5_Av1_cam3_v3off_tw15", "V5_Av1_cam3_occ010_v3off",
+                "V5_Av1_cam3_occ010_v3off_tw5", "V5_Av1_cam3_occ010_v3off_tw10",
+                "V5_Av1_cam3_occ010_v3off_tw15"],
+        },
     },
     # tw × 遮挡交互（2026-10-24）：occ020/030 × tw{5,10,15,20}（v3off 轴），
     # V3_Bv1 / V5_Av4 两模型。参照 = tw_scan 的 cam3 与 occ010 腿。
@@ -310,13 +342,6 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
     "v4_1_test": {
         "KIND": "model_suite",
         "MODEL_IDS": ["V4_Av1", "V4_Av1_cam3_occ010", "V4_Av1_occmix_cam3_occ010"],
-        "REQUIRES": [],
-    },
-    "position_test_vdegrad": {
-        "KIND": "model_suite",
-        "MODEL_IDS": ["V3_Dv1_cam1", "V3_Dv1_cam2", "V3_Dv1_cam4",
-                      "V3_Dv1_cam3_occ010", "V3_Dv1_cam3_occ020",
-                      "V3_Dv1_cam3_occ030", "V3_Dv1_cam3_occ050"],
         "REQUIRES": [],
     },
 }
@@ -410,35 +435,67 @@ def _task_specs(spec: dict[str, Any], models: list[str]) -> list[tuple[str, str 
         # specialists, no grid cells).
         for model_id in models:
             tasks.append(("model_run", model_id))
-    elif kind == "singlemodal_compare":
-        for model_id in models:
-            tasks.append(("model_run", model_id))
-            for specialist in spec.get("SPECIALISTS", []):
-                tasks.append(("model_run", f"{model_id}_{specialist}"))
-    elif kind == "rho_grid":
-        train_rhos = [int(value) for value in str(spec["TRAIN_REPR_RHOS"]).split(",")]
-        rhos = [int(value) for value in str(spec["RHOS"]).split(",")]
-        val_seeds = [int(value) for value in str(spec["VAL_SEEDS"]).split(",")]
-        test_seeds = [int(value) for value in str(spec["TEST_SEEDS"]).split(",")]
-        for model_id in models:
-            for split, split_rhos, seeds in (
-                ("train", train_rhos, [0]),
-                ("val", rhos, val_seeds),
-                ("test", rhos, test_seeds),
-            ):
-                for seed in seeds:
-                    for rho_v in split_rhos:
-                        for rho_t in split_rhos:
-                            tasks.append((
-                                "rho_grid",
-                                f"{model_id}|{split}|{seed}|{rho_v}|{rho_t}",
-                            ))
     else:
         raise ValueError(f"unsupported data-producing experiment kind: {kind}")
     return tasks
 
 
-def emit_experiment(experiment_id: str, selected_models: list[str] | None = None) -> int:
+@lru_cache(maxsize=1)
+def _cached_registry() -> dict[str, Any]:
+    from configs.tools.common import build_registry
+    return build_registry()
+
+
+def results_complete(model_id: str) -> bool:
+    """该 cell（模型×条件）的结果目录是否已有 complete 产物（生成期跳过用）。
+
+    conf 与结果目录一一对应（results/cells/<model_id>/，2026-10-26 裁定）；
+    只查 run_manifest.status——ckpt 是否变化由 runner 执行级跳过复核
+    （重训后旧结果的 cell 须 --force 重发）。
+    """
+    try:
+        registry = _cached_registry()
+        from configs.tools.common import cell_root
+        manifest = cell_root(registry, model_id) / "run_manifest.json"
+        if not manifest.is_file():
+            return False
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return data.get("status") == "complete"
+    except Exception:
+        return False
+
+
+def queued_model_ids() -> set[str]:
+    """queue/running/done/failed 任一状态已有同名 conf 的 cell（模型）名。
+
+    conf 命名 = {seq}__{model_id}.conf（cell 即命名，2026-10-26 裁定）；
+    同时识别旧命名 {seq}__{experiment}__{model}.conf（历史 conf 仍可跳过）。
+    """
+    names: set[str] = set()
+    for state in STATES:
+        for path in (CONFIG_DIR / state).glob("*.conf"):
+            base = path.name[: -len(".conf")]
+            names.add(base.split("__", 1)[-1])
+            names.add(base.rsplit("__", 1)[-1])
+    return names
+
+
+def emit_experiment(experiment_id: str, selected_models: list[str] | None = None, *,
+                    wandb: bool | None = None,
+                    checkpoint_all: bool | None = None,
+                    force: bool | None = None,
+                    dry_run: bool = False,
+                    skip: bool = True) -> int:
+    """把 EXPERIMENTS 条目展开成 queue conf（统一生成器 gen.py 的引擎）。
+
+    wandb/checkpoint_all/force 为 None 时取 EXPERIMENTS 级默认
+    （缺省 false/false/false）；dry_run 只打印不落盘。
+
+    skip=True（默认，2026-10-26 用户裁定「conf 与结果一一对应」）：跳过
+    queue/running/done/failed 已有同名 conf、或结果目录已有 complete 产物
+    的模型——先做 E5 后做 E2 时，E2 生成器发现共用格已在队伍/已有结果即
+    不生成。force=true 绕过 skip 并写 FORCE=true（强制重跑）。
+    """
     try:
         raw = EXPERIMENTS[experiment_id]
     except KeyError as exc:
@@ -449,47 +506,104 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
     if not models:
         raise SystemExit(f"no models selected for {experiment_id}")
 
-    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    if skip and not bool(force):
+        queued = queued_model_ids()
+        kept: list[str] = []
+        for item in models:
+            if item in queued:
+                print("[skip] %s: conf 已在 queue/running/done/failed" % item)
+            elif results_complete(item):
+                print("[skip] %s: 结果目录已有 complete 产物" % item)
+            else:
+                kept.append(item)
+        models = kept
+        if not models:
+            print("[skip] %s: nothing to emit（--force 强制重发）" % experiment_id)
+            return 0
+
+    wandb_line = "WANDB=%s" % str(
+        raw.get("WANDB", False) if wandb is None else wandb).lower()
+    ckpt_line = "CHECKPOINT_ALL=%s" % str(
+        raw.get("CHECKPOINT_ALL", False) if checkpoint_all is None else checkpoint_all).lower()
+    force_line = "FORCE=%s" % str(False if force is None else force).lower()
+
     sequence = _next_sequence()
     count = 0
     for task, model_id in _task_specs(raw, models):
         task_model = model_id or "display"
-        if task == "rho_grid":
-            base_model, split, seed, rho_v, rho_t = task_model.split("|")
-            suffix = f"{base_model}__{split}__s{seed}__rhoV{rho_v}__rhoT{rho_t}"
-        else:
-            suffix = task_model
-        path = QUEUE_DIR / f"{sequence:05d}__{experiment_id}__{suffix}.conf"
+        suffix = task_model
+        path = QUEUE_DIR / f"{sequence:05d}__{suffix}.conf"
         lines = [
-            f"# Generated by configs/z_gen/{experiment_id}.py",
+            f"# Generated by configs/z_gen/gen.py {experiment_id}",
             f"EXPERIMENT_ID={experiment_id}",
             f"TASK={task}",
-            f"MODEL_ID={task_model.split('|')[0] if task == 'rho_grid' else task_model}" if model_id else "",
-            f"GRID_SPLIT={task_model.split('|')[1]}" if task == "rho_grid" else "",
-            f"GRID_SEED={task_model.split('|')[2]}" if task == "rho_grid" else "",
-            f"RHO_V={task_model.split('|')[3]}" if task == "rho_grid" else "",
-            f"RHO_T={task_model.split('|')[4]}" if task == "rho_grid" else "",
+            f"MODEL_ID={task_model}" if model_id else "",
             # Generated tasks reuse existing checkpoints by default; the
             # runner only retrains when an explicit FORCE=true is set
             # (it skips the checkpoint/grid reuse check then).
-            "FORCE=false",
+            force_line,
             # wandb 开关（用户裁定 2026-10-25）：每个 conf 恒带一行，
             # 实验级默认取 EXPERIMENTS[].WANDB（缺省 false）；true 时
             # runner 注入 wandb_mode=online 覆盖 train_args。
-            "WANDB=%s" % str(raw.get("WANDB", "false")).lower(),
+            wandb_line,
             # checkpoint_all 开关（2026-10-26 裁定）：true=候选全留协议；
             # false=只滚存最近过线者。实验级默认取 EXPERIMENTS[].CHECKPOINT_ALL。
-            "CHECKPOINT_ALL=%s" % str(raw.get("CHECKPOINT_ALL", "false")).lower(),
+            ckpt_line,
         ]
-        path.write_text("\n".join(line for line in lines if line) + "\n", encoding="utf-8")
-        print(f"[queue] {path}")
+        content = "\n".join(line for line in lines if line) + "\n"
+        if dry_run:
+            print(f"[dry-run] {path}")
+            print(content, end="")
+        else:
+            path.write_text(content, encoding="utf-8")
+            print(f"[queue] {path}")
         sequence += 1
         count += 1
     return count
 
 
+def parse_bool(value: str | None, flag: str) -> bool | None:
+    """true/false 命令行参数解析（gen.py 与 gen_*.py 共用）。"""
+    if value is None:
+        return None
+    if value.strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if value.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    raise SystemExit("%s must be true/false, got %r" % (flag, value))
+
+
+def add_gen_args(parser) -> None:
+    """gen_*.py 公共参数：模型选择与 conf 覆盖开关。"""
+    parser.add_argument("--models", default=None,
+                        help="comma-separated model IDs（默认：脚本内 DEFAULT_MODELS）")
+    parser.add_argument("--wandb", default=None, help="true/false，覆盖实验级默认")
+    parser.add_argument("--checkpoint-all", default=None, help="true/false，覆盖实验级默认")
+    parser.add_argument("--force", action="store_true",
+                        help="绕过生成期 skip 并写 FORCE=true（强制重跑，含重训）")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="只打印将写入的 conf，不落盘")
+
+
+def emit_subset(experiment_id: str, models: list[str], **kwargs) -> int:
+    """emit_experiment 的选集版：models 与该条目 MODEL_IDS 无交集时跳过。
+
+    gen_*.py 用——一个脚本发多个底层条目、共用一个 --models 列表时，
+    不属于本条目的模型静默跳过（如 gen_full_package 的 V7_Cv5_SV1 不进
+    v7_variants_clean）。models 为空 = 发该条目全部 MODEL_IDS。
+    """
+    if not models:
+        return emit_experiment(experiment_id, None, **kwargs)
+    allowed = set(str(item) for item in EXPERIMENTS[experiment_id]["MODEL_IDS"])
+    subset = [str(item) for item in models if str(item) in allowed]
+    if not subset:
+        print("[skip] %s: no selected model belongs to this entry" % experiment_id)
+        return 0
+    return emit_experiment(experiment_id, subset, **kwargs)
+
+
 # wo05 E5 遮挡交叉评估（2026-10-24）：eval-only 12 条目（3 家族 × occ010–050），
-# 复用 _drop 统一模型 ckpt_best；入队闸门由 wo05.py 波 3 按家族把控。
+# 复用 _drop 统一模型 ckpt_best；入队闸门由 gen.py wo05 --wave 3 按家族把控。
 EXPERIMENTS["wo05_eval"] = {
     "KIND": "model_suite",
     "MODEL_IDS": ["V3_Ev1_wo05_drop_evalocc010", "V3_Ev1_wo05_drop_evalocc020", "V3_Ev1_wo05_drop_evalocc030", "V3_Ev1_wo05_drop_evalocc050", "V4_Av1_wo05_drop_evalocc010", "V4_Av1_wo05_drop_evalocc020", "V4_Av1_wo05_drop_evalocc030", "V4_Av1_wo05_drop_evalocc050", "V5_Av4_wo05_drop_evalocc010", "V5_Av4_wo05_drop_evalocc020", "V5_Av4_wo05_drop_evalocc030", "V5_Av4_wo05_drop_evalocc050"],
@@ -597,21 +711,36 @@ EXPERIMENTS["v7_r2_eval"] = {
 
 EXPERIMENTS["v7_variants_precheck"] = {
     "KIND": "model_suite", "WANDB": True, "CHECKPOINT_ALL": True,
-    "MODEL_IDS": ["V7_Cv2_precheck", "V7_Cv3_precheck", "V7_Cv4_precheck", "V7_Cv5_precheck"],
+    "MODEL_IDS": ["V7_Cv2_precheck", "V7_Cv3_precheck", "V7_Cv4_precheck", "V7_Cv5_precheck",
+                  "V7_Cv6_precheck", "V7_Cv7_precheck"],
     "REQUIRES": [],
 }
 # V1–V3 统计（2026-10-26）：cam3 test 面板 + occ 四档交叉评估（15 格）。
 EXPERIMENTS["v7_variants_stats"] = {
     "KIND": "model_suite", "WANDB": False,
-    "MODEL_IDS": [f"{v}_stat" for v in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv4")]
+    "MODEL_IDS": [f"{v}_stat" for v in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv4", "V7_Cv5")]
     + [f"{v}_stat_evalocc{o}" for o in ("010","020","030","050")
-       for v in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv4")],
+       for v in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv4", "V7_Cv5")],
+    "REQUIRES": [],
+}
+
+# V7_Cv5 全量套餐专家（2026-10-26）。
+# 专家 test 补跑（2026-10-26）。
+EXPERIMENTS["v7_cv5_experts_stat"] = {
+    "KIND": "model_suite", "WANDB": False,
+    "MODEL_IDS": ["V7_Cv5_SV1_stat", "V7_Cv5_ST1_stat"],
+    "REQUIRES": [],
+}
+
+EXPERIMENTS["v7_cv5_experts"] = {
+    "KIND": "model_suite", "WANDB": True, "CHECKPOINT_ALL": True,
+    "MODEL_IDS": ["V7_Cv5_SV1", "V7_Cv5_ST1"],
     "REQUIRES": [],
 }
 
 EXPERIMENTS["v7_variants_clean"] = {
     "KIND": "model_suite", "WANDB": True, "CHECKPOINT_ALL": True,
-    "MODEL_IDS": ["V7_Cv2", "V7_Cv3", "V7_Cv4", "V7_Cv5"],
+    "MODEL_IDS": ["V7_Cv2", "V7_Cv3", "V7_Cv4", "V7_Cv5", "V7_Cv6", "V7_Cv7"],
     "REQUIRES": [],
 }
 

@@ -1,4 +1,10 @@
-"""New model numbering, isolated structural changes and enumerated training."""
+"""V7 C 变体族（2026-10-26 统一编号 V7_Cv*）：结构隔离与枚举训练。
+
+历史：本文件原名所指的 V1/V2/V3/V1_enum 编号已随统一编号改为
+V7_Cv1（单门基准）/ V7_Cv2（双门）/ V7_Cv3（T-only 适配器）/
+V7_Cv4（枚举训练），2026-10-26 消融组新增 V7_Cv6（双门+始终 VT）/
+V7_Cv7（无门控+枚举）。
+"""
 import copy
 import io
 import unittest
@@ -45,18 +51,20 @@ def forward(model, data, mode):
 
 
 class NewModelTests(unittest.TestCase):
-    def test_v1_is_the_existing_c_architecture(self):
-        a, b = build("V1"), build("V7_Cv1")
-        self.assertEqual(set(a.state_dict()), set(b.state_dict()))
-        data = batch()
-        with torch.no_grad():
-            for mode in range(3):
-                x, y = forward(a, data, mode), forward(b, data, mode)
-                for key in ("x0_hat", "v_hat", "trans_hat"):
-                    torch.testing.assert_close(x[key], y[key], rtol=0, atol=0)
+    def test_cv6_cv7_reuse_v5_and_a_skeletons(self):
+        # Cv6 = 双门结构（同 Cv5/Cv2）；Cv7 = 无门控 A 骨架（同 Av1）。
+        for variant, base in (("V7_Cv6", "V7_Cv2"), ("V7_Cv7", "V7_Av1")):
+            a, b = build(variant), build(base)
+            self.assertEqual(set(a.state_dict()), set(b.state_dict()))
+            data = batch()
+            with torch.no_grad():
+                for mode in range(3):
+                    x, y = forward(a, data, mode), forward(b, data, mode)
+                    for key in ("x0_hat", "v_hat", "trans_hat"):
+                        torch.testing.assert_close(x[key], y[key], rtol=0, atol=0)
 
     def test_v2_starts_as_v1_and_has_independent_task_gates(self):
-        a, b = build("V1"), build("V2")
+        a, b = build("V7_Cv1"), build("V7_Cv2")
         data = batch()
         with torch.no_grad():
             x, y = forward(a, data, 0), forward(b, data, 0)
@@ -71,7 +79,7 @@ class NewModelTests(unittest.TestCase):
         self.assertFalse(any(k.startswith("t_only_") for k in b.state_dict()))
 
     def test_v3_adapters_start_at_identity_and_only_affect_t_only(self):
-        a, b = build("V1"), build("V3")
+        a, b = build("V7_Cv1"), build("V7_Cv3")
         data = batch()
         with torch.no_grad():
             for mode in range(3):
@@ -90,7 +98,7 @@ class NewModelTests(unittest.TestCase):
         self.assertFalse(hasattr(b, "route_root_mlp"))
 
     def test_adapter_gradients_are_private_to_t_only(self):
-        model = build("V3")
+        model = build("V7_Cv3")
         data = batch()
         for mode in range(3):
             model.zero_grad(set_to_none=True)
@@ -105,7 +113,7 @@ class NewModelTests(unittest.TestCase):
 
     def test_missing_inputs_do_not_leak_and_all_gradients_are_finite(self):
         data = batch()
-        for name in ("V1", "V2", "V3"):
+        for name in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv6", "V7_Cv7"):
             model = build(name)
             for mode, keys in ((CONFIG_V, ("T_raw", "T_phys")), (CONFIG_T, ("V_feat",))):
                 changed = dict(data)
@@ -121,7 +129,7 @@ class NewModelTests(unittest.TestCase):
 
     def test_checkpoint_reload_preserves_each_new_structure(self):
         data = batch()
-        for name in ("V1", "V2", "V3"):
+        for name in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv6", "V7_Cv7"):
             model = build(name)
             stream = io.BytesIO()
             torch.save({"model": model.state_dict(), "config": config(name), "epoch": 1}, stream)
@@ -137,50 +145,59 @@ class NewModelTests(unittest.TestCase):
 
 class EnumerationTests(unittest.TestCase):
     def test_streamed_enum_matches_weighted_objective_and_gradients(self):
-        model = build("V1_enum")
-        reference = copy.deepcopy(model)
-        data = batch()
-        cfg = config("V1_enum")
-        original = {k: v.clone() for k, v in data.items()}
-        _, actual = backward_v7_enum(model, data, cfg)
-        objective = 0.
-        t_probability = .75
-        for mode, probability in enumerate(cfg["config_probs"]):
-            cid = torch.full((2,), mode, dtype=torch.long)
-            v, t, p, s = condition_inputs(data, cid)
-            out = reference(v, t, p, cid, T_s2m=s)
-            loss = compute_losses(out, data, cid, cfg)
-            objective = objective + probability * (3 * loss["L_pose"] + loss["L_traj"])
-            objective = objective + probability / t_probability * loss["L_contact"]
-        objective.backward()
-        torch.testing.assert_close(actual["loss"], objective.detach())
-        for (name, p), (other, q) in zip(model.named_parameters(), reference.named_parameters()):
-            self.assertEqual(name, other)
-            if p.grad is None or q.grad is None:
-                self.assertIsNone(p.grad)
-                self.assertIsNone(q.grad)
-            else:
-                torch.testing.assert_close(p.grad, q.grad, rtol=1e-5, atol=1e-6)
-        for key in original:
-            torch.testing.assert_close(data[key], original[key], rtol=0, atol=0)
-        self.assertFalse(actual["loss"].requires_grad)
+        for name in ("V7_Cv4", "V7_Cv7"):
+            model = build(name)
+            reference = copy.deepcopy(model)
+            data = batch()
+            cfg = config(name)
+            original = {k: v.clone() for k, v in data.items()}
+            _, actual = backward_v7_enum(model, data, cfg)
+            objective = 0.
+            t_probability = .75
+            for mode, probability in enumerate(cfg["config_probs"]):
+                cid = torch.full((2,), mode, dtype=torch.long)
+                v, t, p, s = condition_inputs(data, cid)
+                out = reference(v, t, p, cid, T_s2m=s)
+                loss = compute_losses(out, data, cid, cfg)
+                objective = objective + probability * (3 * loss["L_pose"] + loss["L_traj"])
+                objective = objective + probability / t_probability * loss["L_contact"]
+            objective.backward()
+            torch.testing.assert_close(actual["loss"], objective.detach())
+            for (n, p), (other, q) in zip(model.named_parameters(), reference.named_parameters()):
+                self.assertEqual(n, other)
+                if p.grad is None or q.grad is None:
+                    self.assertIsNone(p.grad)
+                    self.assertIsNone(q.grad)
+                else:
+                    torch.testing.assert_close(p.grad, q.grad, rtol=1e-5, atol=1e-6)
+            for key in original:
+                torch.testing.assert_close(data[key], original[key], rtol=0, atol=0)
+            self.assertFalse(actual["loss"].requires_grad)
 
     def test_invalid_enum_probabilities_are_rejected(self):
-        model, data = build("V1"), batch()
+        model, data = build("V7_Cv1"), batch()
         for probs in ([0, 0, 0], [.5, -.1, .6], [float("nan"), 0, 1], [1, 0]):
             with self.assertRaises(ValueError):
-                backward_v7_enum(model, data, {**config("V1"), "config_probs": probs})
+                backward_v7_enum(model, data, {**config("V7_Cv1"), "config_probs": probs})
 
     def test_new_runs_have_matching_recipes_and_no_automatic_test(self):
         registry = load_registry()
-        for name in ("V1", "V2", "V3", "V1_enum"):
+        # 消融组（2026-10-26）：Cv6 = 双门 + 始终 VT（无模态缺失训练）；
+        # Cv7 = 无门控 + 枚举。其余变体沿用 [0.5,0.25,0.25] 采样。
+        probs = {"V7_Cv6": [1.0, 0.0, 0.0]}
+        enum = {"V7_Cv4", "V7_Cv7"}
+        for name in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv4", "V7_Cv6", "V7_Cv7"):
             spec = registry["models"][name]
             args = parse_args(_train_command(registry, name)[3:])
-            self.assertEqual(args.config_probs, [.5, .25, .25])
+            self.assertEqual(args.config_probs, probs.get(name, [.5, .25, .25]))
             self.assertFalse(args.occ_mix)
-            self.assertEqual(args.final_eval_split, "none")
-            self.assertEqual(args.condition_sampling, "enum" if name == "V1_enum" else "sample")
-            self.assertEqual(_evaluation_splits(registry, name), ("val",))
+            # Cv1 = 首轮基线（缺省 test 终评）；变体族显式 none（统计另跑）。
+            self.assertEqual(args.final_eval_split, "none" if name != "V7_Cv1" else None)
+            # Cv4/Cv7 显式枚举；Cv2/Cv3/Cv6 显式 sample；Cv1 缺省（sample）。
+            self.assertEqual(args.condition_sampling,
+                             "enum" if name in enum else (None if name == "V7_Cv1" else "sample"))
+            self.assertEqual(_evaluation_splits(registry, name),
+                             ("val", "test") if name == "V7_Cv1" else ("val",))
             self.assertEqual(spec["epochs"], 740)
             self.assertTrue(args.checkpoint_all)
 

@@ -36,6 +36,11 @@
 
 - `anysole/models/v7_c.py`（入口，STRUCTURE 带 `v7_reliability_route`）；门在 A 的骨架文件内（`_V7DecoderLayer(route=True)`）；双 registry（V7_Cv1 × cam3/cam3_occ010）。
 - CPU 冒烟过：门 (B,tw,1) 有梯度、范围正常、V-only 前向正常；未发射训练。
+- TTA 管线接入（2026-10-27）：`z_note/HMR2.0/hmr2_gait/anysole_tta/run_tta.py --model V7_Cv1..Cv5`——
+  叶子 = z（V7MotionHead decoder 输出 = 根+9 部位 query，out_parts/root_head 前，论文
+  token_out 对应位置；`z_override` 注入点，model_v7.py 纯签名扩展、state dict 不变）。
+  与 V3_Bv1（h 叶子）共用同一 TTA 驱动（E3 的 TTA 框架线与 E7 的多视角阶段共用）；
+  Cv1–Cv5 五模型 ckpt 已接线（ckpt_best），冒烟通过（Cv5：S12011 init 29.3 / 聚合 24.5）。
 
 ## 6. 版本
 
@@ -43,3 +48,22 @@
 - **V7_Cv2**：V7_Cv1 + 根/姿态双独立 T 门（task_routes）。
 - **V7_Cv3**：V7_Cv1 + T-only 私有残差适配器（t_only_adapters）。
 - **V7_Cv4**：V7_Cv1 + 枚举三条件训练（condition_sampling=enum；结构同 Cv1）。
+- **V7_Cv5**：V7_Cv2 双独立 T 门 + V7_Cv4 枚举三条件训练（组合格；消融组主模型）。
+- **V7_Cv6**：V7_Cv5 双门 + 无模态缺失训练（config_probs [1,0,0]，始终 VT；ckpt 角色 S_VT）。
+- **V7_Cv7**：V7_Av1 无门控 + 枚举三条件训练（结构入口 v7_a；其余配方同 Cv5）。
+
+## 7. 消融组
+
+主模型 **V5**＝双门控＋枚举三条件训练（V7_Cv5）。2026-10-26 用户裁定消融清单（表中 Vx 为 V7_Cvx 简称）：
+
+| 消融模型 | 编号 | 具体配置 | 与 V5 比较，验证什么 |
+|---|---|---|---|
+| V5（主模型） | V7_Cv5 | 双门控＋枚举三条件训练 | 完整模型 |
+| V4 | V7_Cv4 | 单门控＋枚举三条件训练 | 双门控是否优于单门控 |
+| V2 | V7_Cv2 | 双门控＋随机模态 dropout | 枚举是否优于随机 dropout |
+| V5 无模态缺失训练版 | V7_Cv6 | 双门控＋训练始终输入 VT，不做模态 mask/dropout，也不枚举 | 三条件训练是否有必要 |
+| A＋枚举训练版 | V7_Cv7 | 无门控＋枚举三条件训练；其余配方与 V5 相同 | 可靠性门控是否有必要 |
+
+- 结构入口：Cv5/Cv6 与 Cv2 = v7_c2（根/姿态双门）；Cv4 = v7_c（单门，结构同 Cv1）；Cv7 = v7_a（无门）。
+- 训练协议：枚举 = `condition_sampling=enum`；随机 dropout = `config_probs [0.5,0.25,0.25]` + sample；无模态缺失 = `config_probs [1,0,0]` + sample（checkpoint_role auto → S_VT，仅 VT 单条件选点）。
+- 状态（2026-10-26）：Cv2/Cv4/Cv5 已训满 740 ep，E2/E5 数字见 [C版本对照/E2E5_V1V3变体统计.md](../../E_Test/C版本对照/E2E5_V1V3变体统计.md)；Cv6/Cv7 已注册（anysole/registry.py + z_gen 条目）并 conf 入队（precheck 00137/00138、clean 00139/00140），训练未开始。

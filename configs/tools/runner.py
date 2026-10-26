@@ -37,7 +37,6 @@ from configs.tools.common import (
     config_path,
     effective_value,
     effective_variant,
-    experiment_root,
     experiment_spec,
     git_sha,
     load_conf,
@@ -340,9 +339,45 @@ def _formal_eval(registry: dict[str, Any], model_id: str, root: Path, ckpt: Path
             raise RuntimeError("formal %s evaluation failed for %s; see %s" % (split, model_id, log))
 
 
+def _results_complete(root: Path, ckpt: Path, splits: tuple[str, ...]) -> bool:
+    """该 conf 的结果目录是否已有当前 ckpt 的完整评估产物（执行级跳过）。
+
+    生成期 skip 只查 status（快）；这里补 ckpt sha256 复核与 metrics 文件
+    齐备检查——ckpt 变化/口径变化/文件缺失都会落到重跑。
+    """
+    manifest_path = root / "run_manifest.json"
+    if not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if manifest.get("status") != "complete":
+        return False
+    if manifest.get("checkpoint_sha256") != sha256_file(ckpt):
+        return False
+    metrics_dir = root / "metrics"
+    for split in splits:
+        for suffix in ("%s.json" % split, "%s_brief.json" % split):
+            if not (metrics_dir / suffix).is_file():
+                return False
+    return True
+
+
 def _run_model(registry: dict[str, Any], experiment_id: str, model_id: str, force: bool = False,
                train_overrides: dict[str, Any] | None = None) -> Path:
     root = model_root(registry, experiment_id, model_id)
+    # 执行级跳过（2026-10-26 用户裁定「conf 与结果一一对应」）：结果完整
+    # 且 ckpt 未变 → 整 conf 跳过，结果目录零写入。FORCE=true 强制重跑。
+    if not force:
+        try:
+            ckpt = checkpoint_path(registry, experiment_id, model_id)
+        except Exception:
+            ckpt = None
+        if (ckpt is not None and ckpt.is_file()
+                and _results_complete(root, ckpt, _evaluation_splits(registry, model_id))):
+            print("[skip] %s: results complete for this conf (FORCE=true to re-run)" % model_id)
+            return root
     root.mkdir(parents=True, exist_ok=True)
     snapshot = config_path(registry, model_id)
     if snapshot.is_file():
@@ -377,85 +412,6 @@ def _run_model(registry: dict[str, Any], experiment_id: str, model_id: str, forc
         (root / "finished_at").write_text(time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n", encoding="utf-8")
         _update_manifest(manifest, status="failed", error=str(exc))
         raise
-
-
-def _rho_grid_commands(registry: dict[str, Any], experiment_id: str, model_id: str, root: Path) -> list[tuple[str, list[str]]]:
-    spec = experiment_spec(registry, experiment_id)
-    ckpt = checkpoint_path(registry, experiment_id, model_id)
-    config = config_path(registry, model_id)
-    device = str(effective_value(registry, model_id, "device", "cuda"))
-
-    def seed_list(key: str, default: list[int]) -> list[int]:
-        value = spec.get(key, default)
-        if value is None or value == "":
-            return default
-        if isinstance(value, (list, tuple)):
-            return [int(item) for item in value]
-        return [int(value)]
-
-    rhos = ",".join(str(value) for value in seed_list("rhos", [0, 20, 40, 60, 80, 100]))
-    train_rhos = ",".join(str(value) for value in seed_list("train_repr_rhos", [0, 100]))
-    val_seeds = ",".join(str(value) for value in seed_list("val_seeds", [0, 1, 2]))
-    test_seeds = ",".join(str(value) for value in seed_list("test_seeds", [0]))
-    commands: list[tuple[str, list[str]]] = []
-    for split, seeds, grid in (
-        ("train", "0", train_rhos),
-        ("val", val_seeds, rhos),
-        ("test", test_seeds, rhos),
-    ):
-        # Keep one shared repr/npz directory per model.  Train/val/test session
-        # IDs are disjoint in the fixed AnySole split, while the grid metrics
-        # remain split-specific JSON files in this same model directory.
-        commands.append((split, [
-            PYTHON,
-            "-m",
-            "anysole.rho_grid",
-            "--ckpt",
-            str(ckpt),
-            "--config",
-            str(config),
-            "--split",
-            split,
-            "--seeds",
-            seeds,
-            "--rhos",
-            grid,
-            "--out-dir",
-            str(root),
-            "--device",
-            device,
-        ]))
-    return commands
-
-
-def _rho_grid(registry: dict[str, Any], experiment_id: str, model_id: str, root: Path, log: Path) -> None:
-    for split, command in _rho_grid_commands(registry, experiment_id, model_id, root):
-        code = _command_log(command, log)
-        if code != 0:
-            raise RuntimeError("rho grid failed for %s/%s; see %s" % (model_id, split, log))
-
-
-def _rho_grid_cell(
-    registry: dict[str, Any], experiment_id: str, model_id: str,
-    split: str, seed: int, rho_v: int, rho_t: int, root: Path, log: Path,
-) -> None:
-    """Execute exactly one model + split + seed + rhoV/rhoT configuration."""
-    ckpt = checkpoint_path(registry, experiment_id, model_id)
-    config = config_path(registry, model_id)
-    device = str(effective_value(registry, model_id, "device", "cuda"))
-    command = [
-        PYTHON, "-m", "anysole.rho_grid",
-        "--ckpt", str(ckpt), "--config", str(config),
-        "--split", split, "--seeds", str(seed),
-        "--rho-v", str(rho_v), "--rho-t", str(rho_t),
-        "--out-dir", str(root), "--device", device,
-    ]
-    code = _command_log(command, log)
-    if code != 0:
-        raise RuntimeError(
-            "rho grid cell failed for %s/%s/%s/%s/%s (exit %d)"
-            % (model_id, split, seed, rho_v, rho_t, code)
-        )
 
 
 def _validate_model_capabilities(registry: dict[str, Any], experiment_id: str) -> None:
@@ -496,14 +452,6 @@ def _print_dry_run(registry: dict[str, Any], experiment_id: str, model_id: str,
         print("# train skipped: external checkpoint %s" % ckpt)
     for split in _evaluation_splits(registry, model_id):
         print("$ " + subprocess.list2cmdline(_eval_command(registry, model_id, root, Path("<ckpt>"), split)))
-    if str(experiment_spec(registry, experiment_id).get("kind")) == "rho_grid":
-        try:
-            rho_commands = _rho_grid_commands(registry, experiment_id, model_id, root)
-        except FileNotFoundError as exc:
-            print("# rho grid skipped: %s" % exc)
-        else:
-            for _split, command in rho_commands:
-                print("$ " + subprocess.list2cmdline(command))
 
 
 def _run_task(
@@ -546,30 +494,8 @@ def _run_task(
         if dry_run:
             _print_dry_run(registry, experiment_id, model_id, train_overrides)
             return
-        root = _run_model(registry, experiment_id, model_id, force=force,
-                          train_overrides=train_overrides)
-        if str(experiment_spec(registry, experiment_id).get("kind")) == "rho_grid":
-            _rho_grid(registry, experiment_id, model_id, root, root / "run.log")
-    elif task == "rho_grid":
-        model_id = str(values.get("MODEL_ID", "")).strip()
-        split = str(values.get("GRID_SPLIT", "")).strip()
-        seed = int(values.get("GRID_SEED", 0))
-        rho_v = int(values.get("RHO_V", 0))
-        rho_t = int(values.get("RHO_T", 0))
-        if not model_id or split not in {"train", "val", "test"}:
-            raise ValueError("rho_grid task requires MODEL_ID and GRID_SPLIT")
-        root = model_root(registry, experiment_id, model_id)
-        root.mkdir(parents=True, exist_ok=True)
-        if dry_run:
-            print(
-                "# task rho_grid experiment=%s model=%s split=%s seed=%d rhoV=%d rhoT=%d"
-                % (experiment_id, model_id, split, seed, rho_v, rho_t)
-            )
-            return
-        _rho_grid_cell(
-            registry, experiment_id, model_id, split, seed, rho_v, rho_t,
-            root, root / "run.log",
-        )
+        _run_model(registry, experiment_id, model_id, force=force,
+                  train_overrides=train_overrides)
     elif task == "display":
         raise ValueError(
             "display tasks are not queue tasks anymore; run the matching "

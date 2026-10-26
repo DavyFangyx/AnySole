@@ -236,10 +236,15 @@ def resolve_path(value: str | os.PathLike[str] | None) -> Path | None:
     return path if path.is_absolute() else REPO / path
 
 
-def experiment_root(registry: dict[str, Any], experiment_id: str) -> Path:
+def cell_root(registry: dict[str, Any], model_id: str) -> Path:
+    """cell（模型×条件）的结果目录，实验无关（2026-10-26 用户裁定）。
+
+    conf ↔ 结果一一对应，实验 = cell 的组合：同一 cell 跨实验共享同一
+    结果目录（先到先评，后到生成期 skip）；实验归属只记进 run_manifest。
+    """
     results_root = resolve_path(registry.get("defaults", {}).get("results_root", "results"))
     assert results_root is not None
-    return results_root / "experiments" / experiment_id
+    return results_root / "cells" / model_id
 
 
 def display_root(registry: dict[str, Any], experiment_id: str) -> Path:
@@ -413,7 +418,13 @@ def model_run_name(registry: dict[str, Any], model_id: str) -> str:
 
 
 def model_root(registry: dict[str, Any], experiment_id: str, model_id: str) -> Path:
-    return experiment_root(registry, experiment_id) / model_run_name(registry, model_id)
+    """一个 conf 的结果目录 = 该 cell 的目录（experiment_id 只作兼容参数）。
+
+    2026-10-26 用户裁定：conf 与结果一一对应（模型×条件），实验由这些
+    cell 组合而成——E2 是 E1/E5 的子集，跨实验共享同一结果目录。
+    历史结果仍在 results/experiments/（归档，不迁移）。
+    """
+    return cell_root(registry, model_id)
 
 
 def checkpoint_path(registry: dict[str, Any], experiment_id: str, model_id: str) -> Path:
@@ -457,7 +468,7 @@ def config_path(registry: dict[str, Any], model_id: str | None = None) -> Path:
     # 四相机扩展 D2/D3 (2026-10-12/13): the data config is part of the model
     # identity, not a config override -- V3_Bv1_cam{N} / V3_Bv1_cam3_occ{M} (and
     # their derived specialists) read the matching per-config yaml so
-    # train/eval/rho_grid all land on that config's roots.
+    # train/eval all land on that config's roots.
     suffix = _model_v_config_suffix(model_id) if model_id is not None else None
     if suffix is not None:
         value = "anysole/configs/v1_%s.yaml" % suffix

@@ -1,1 +1,1 @@
-"""Experiment-specific task generators."""
+"""统一生成器（gen.py）+ 实验/模型注册表。"""

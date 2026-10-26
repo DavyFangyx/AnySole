@@ -132,8 +132,14 @@ class V7MotionHead(nn.Module):
         self.pose_std = pose_std.to(self.pose_std.dtype)
 
     def forward(self, m_v, m_t, v_present, t_present, gate=None,
-                t_only_mask=None, t_only_adapters=None):
-        """→ (pose (B,tw,POSE_DIM), v_hat (B,tw,3), z_root, z_parts)"""
+                t_only_mask=None, t_only_adapters=None, z_override=None):
+        """→ (pose (B,tw,POSE_DIM), v_hat (B,tw,3), z_root, z_parts)
+
+        ``z_override``（TTA 注入点，2026-10-27）：给定 (B, tw*(1+n_parts), d)
+        时替换 decoder 输出（out_parts/root_head 前的部位表示，论文 token_out
+        的对应位置；梯度只经冻结的 out_parts/root_head，不回传 decoder/
+        temporal/编码器）；默认 None = 原行为不变。
+        """
         B = m_v.shape[0]
         q_root = self.root_query.expand(B, -1, -1, -1) \
             + self.embeddings.time_pe.to(self.root_query.dtype).view(1, self.tw, 1, self.dim)
@@ -143,6 +149,8 @@ class V7MotionHead(nn.Module):
         q = q.reshape(B, self.tw * (1 + self.n_parts), self.dim)
         for layer in self.layers:
             q = layer(q, m_v, m_t, v_present, t_present, self.tw, gate=gate)
+        if z_override is not None:
+            q = z_override  # TTA 注入点（decoder 输出 / out_parts·root_head 前）
         q = q.reshape(B, self.tw, 1 + self.n_parts, self.dim)
         z_root = q[:, :, 0:1, :]
         z_parts = q[:, :, 1:, :]
@@ -229,7 +237,7 @@ class AnySoleModelV7(nn.Module):
 
     def forward(self, V_feat, T_raw, T_phys, config_id=None, subject_ids=None,
                 T_s2m=None, V_hmr=None, mask_v=None, mask_t=None,
-                v_present=None, t_present=None):
+                v_present=None, t_present=None, z_override=None):
         """三条件 = 同一前向的三种输入组合。存在掩码默认由 config_id 决定
         （与输入置零同一决定，设计思路 §4）；v_present/t_present 允许调用
         侧覆盖（诊断/干预用）。"""
@@ -251,7 +259,8 @@ class AnySoleModelV7(nn.Module):
         t_only = (~v_present.bool()) & t_present.bool()
         pose, v_hat, z_root, z_parts = self.pose_head(
             m_v, m_t, v_present, t_present, gate=gate,
-            t_only_mask=t_only, t_only_adapters=adapters)
+            t_only_mask=t_only, t_only_adapters=adapters,
+            z_override=z_override)
         trans_hat = torch.cumsum(v_hat, dim=1) / float(FPS)
         contact_logits = self.contact_head(t_tok)
         return {
@@ -260,6 +269,7 @@ class AnySoleModelV7(nn.Module):
             "trans_hat": trans_hat,          # 根轨迹（cumsum）
             "contact_logits": contact_logits,
             "route_gate": gate,              # C：窗口级 T 信任门（监控/损失）
+            "z": torch.cat([z_root, z_parts], dim=2),  # (B,tw,1+n_parts,d) TTA 叶子
             "F": m_v + m_t,                  # train.py finite check
             "v_tok": v_tok,
             "t_tok": t_tok,
