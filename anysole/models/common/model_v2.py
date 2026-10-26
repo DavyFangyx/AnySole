@@ -92,7 +92,7 @@ class AnySoleModelV2(nn.Module):
             if self.position_head else None
 
     def forward(self, V_feat, T_raw, T_phys, config_id, subject_ids=None, T_s2m=None,
-                V_hmr=None, mask_v=None, mask_t=None, F_override=None):
+                V_hmr=None, mask_v=None, mask_t=None, h_override=None):
         """F0b: same inputs as V1 minus the diffusion pair (x_tau, tau).
 
         The visual stream follows ``v_input``: hrnet = V_feat (2051-d);
@@ -102,10 +102,10 @@ class AnySoleModelV2(nn.Module):
         T_s2m.  ``mask_v/mask_t`` (bool, B×tw) are the ρ-grid per-frame
         null-token masks (missing-rate 实验 1); None = old path.
 
-        ``F_override``（TTA 实验注入点，2026-10-26）：给定 (B,2tw,dim) 张量时
-        跳过 fusion 输出、直接用作 F（pose head 前的最终姿态 token，论文
-        token_out 的对应物——梯度只经冻结 pose·traj head，不回传 fusion 与
-        编码器）；默认 None = 原行为不变。
+        ``h_override``（TTA 实验注入点，2026-10-26）：给定 (B,tw*n_tokens,dim)
+        张量时替换 pose head 的部位表示 h（decoder 输出、_unembed 前，论文
+        token_out 的对应位置——梯度只经冻结的 _unembed/FK·SMPL 层，不回传
+        decoder/fusion/编码器）；默认 None = 原行为不变。
         """
         if self.tactile_input == "s2m50":
             if T_s2m is None:
@@ -128,8 +128,6 @@ class AnySoleModelV2(nn.Module):
             fused = self.fusion(v_tok, self.embeddings.null_t.expand_as(t_tok))
         else:
             fused = self.fusion(v_tok, t_tok)
-        if F_override is not None:
-            fused = F_override  # TTA 注入点（pose head 前最终姿态 token）
         memory = fused
         if self.tactile_direct:
             # E6.6b-style direct tactile memory next to the fused F (the null
@@ -137,7 +135,9 @@ class AnySoleModelV2(nn.Module):
             memory = torch.cat([fused, t_tok], dim=1)
         # Regression head: the fused memory is the only pose source.  Keyword
         # call — the pose head rejects positional diffusion-style arguments.
-        x0_hat = self.pose_head(F=memory)
+        # return_z=True 暴露部位表示 h（TTA 叶子捕获用；纯 view，零成本）。
+        x0_hat, h_ret = self.pose_head(F=memory, return_z=True,
+                                       h_override=h_override)
         residual = None
         if self.t_residual is not None:
             # V3_Cv1: the real tactile stream feeds only this branch; the
@@ -177,6 +177,8 @@ class AnySoleModelV2(nn.Module):
             "pressure_hat": pressure_hat,
             "vfeat_hat": vfeat_hat,
             "F": fused,
+            # pose head 部位表示（B,tw,n_tokens,dim；TTA 叶子捕获/注入位置）
+            "h": h_ret,
             # ρ 网格 repr dump（missing-rate 实验 2c/5 消费）：编码后 token 流。
             "v_tok": v_tok,
             "t_tok": t_tok,

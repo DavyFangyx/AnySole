@@ -509,7 +509,8 @@ class PoseHead(nn.Module):
             out[..., j * self.per_joint:(j + 1) * self.per_joint] = flat[..., k * self.per_joint:(k + 1) * self.per_joint]
         return out
 
-    def forward(self, x_tau=None, tau=None, F=None, return_z: bool = False):
+    def forward(self, x_tau=None, tau=None, F=None, return_z: bool = False,
+                h_override=None):
         """Dispatch by head_mode.
 
         Diffusion keeps the ``(x_tau, tau, F)`` positional signature so every
@@ -530,7 +531,8 @@ class PoseHead(nn.Module):
                 )
             if F is None:
                 raise ValueError("regress head requires F")
-            return self._forward_regress(F, return_z=return_z)
+            return self._forward_regress(F, return_z=return_z,
+                                         h_override=h_override)
         if x_tau is None or tau is None or F is None:
             raise ValueError("diffusion head requires (x_tau, tau, F)")
         return self._forward_diffusion(x_tau, tau, F)
@@ -551,7 +553,7 @@ class PoseHead(nn.Module):
         x0 = self._unembed(h)
         return x0 * self.pose_std + self.pose_mean
 
-    def _forward_regress(self, F, return_z: bool = False):
+    def _forward_regress(self, F, return_z: bool = False, h_override=None):
         """F0b: token = query + time PE + group embedding, straight through the
         6-layer decoder (self-attention, cross-attention to F, FFN), then
         unembed and denormalize with the same fitted stats as the diffusion
@@ -561,6 +563,10 @@ class PoseHead(nn.Module):
         the first tw tokens V-sourced and the last tw T-sourced (fusion's cat
         order).  Each layer cross-attends twice — once per modality view —
         and routes them per slot via the sigma gate (tau_p = prior bias).
+
+        ``h_override``（TTA 注入点，2026-10-26）：给定 (B, tw*n_tokens, dim)
+        时替换 decoder 输出的部位表示 h（_unembed 前，论文 token_out 对应
+        位置）；默认 None = 原行为不变。
         """
         batch = F.shape[0]
         tokens = self.query.expand(batch, -1, -1, -1)  # (B, tw, n_tokens, dim)
@@ -585,6 +591,8 @@ class PoseHead(nn.Module):
             self._last_hypo = self._part_hypotheses(h).detach()
         else:
             h = self.decoder(h, F)
+        if h_override is not None:
+            h = h_override  # TTA 注入点（decoder 输出 / _unembed 前）
         x0 = self._unembed(h)
         if return_z:
             z_tokens = h.view(F.shape[0], self.tw, self.n_tokens, self.dim)
