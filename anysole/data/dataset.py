@@ -225,9 +225,12 @@ class AnySoleDataset(Dataset):
         self.window_length = int(window_length)
         self.tactile_input = str(tactile_input)
         self.t_phys_v2 = bool(t_phys_v2)
-        # 四相机扩展 D2: camera id selects the per-camera GVHMR cache dir
-        # (hrnet cache is addressed via cache_root, already camera-scoped).
         self.cam_id = int(cam_id)
+        # 四相机扩展 D2：cam_id 切换缓存目录——GVHMR 经 hmr_cache_path(cam)；
+        # HRNet 经 cache_root 重定向到 <hrnet_root>/cam{N}（extract_hrnet
+        # --cam-id N 的落盘布局；默认值指向 cam3，显式传入的 cache_root 不动）。
+        if cache_root == HRNET_CACHE_ROOT:
+            cache_root = HRNET_CACHE_ROOT.parent / ("cam%d" % self.cam_id)
         if self.tactile_input not in ("raw108", "s2m50"):
             raise ValueError("tactile_input must be 'raw108' or 's2m50'")
         if no_imu and self.tactile_input != "s2m50":
