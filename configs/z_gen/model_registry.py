@@ -490,6 +490,16 @@ for _name, _extra in (("V7_Av1", {}), ("V7_Bv1", {}), ("V7_Cv1", {})):
 # V7 端到端预检条目（2026-10-25 计划步骤 1）：同名结构、epochs=6 进 spec
 # ——EPOCHS conf 覆盖不可行（变体推断/完成度检查/multi_metric 存档都按
 # spec epochs 走），预检必须用独立条目（独立 run 目录、新鲜存档）。
+# V7 E1 专家（2026-10-26 用户裁定「补 E1 缺口」）：同架构 S_V / S_T——
+# 骨架 = 候选 A（v7_a 入口），仅训练配比不同；checkpoint_role auto 按
+# config_probs 推断为对应专家（不参与 U 的选点判定，固定各自完整权重）。
+for _exp, _cprobs in (("V7_SV1", [0.0, 1.0, 0.0]), ("V7_ST1", [0.0, 0.0, 1.0])):
+    MODELS[_exp] = {**MODELS["V7_Av1"], "label": _exp.replace("_", "-"),
+                    "name": _exp,
+                    "train_args": {**MODELS["V7_Av1"]["train_args"],
+                                   "config_probs": _cprobs,
+                                   "wandb_experiment_tag": "v7_experts"}}
+
 # V7 E5 occ050 筛选（2026-10-25 计划步骤 3）：eval-only 零重训——C = 保留
 # 候选（val E2 零税筛查通过）；A/B = 无门对照行（同 ckpt 的 occ050 读数
 # 用于解释门在 V 失效下的价值）。which=last（正式 ckpt 口径）。
@@ -497,6 +507,62 @@ for _name, _extra in (("V7_Av1", {}), ("V7_Bv1", {}), ("V7_Cv1", {})):
 # ——回答「dPA 最优点在其他 Δ 上是否也最优」。注意：ep730 未被档案保留
 # （权重不存在），晚期候选用 670/680 替代。name 保持 V7_Cv1（入口与
 # ckpt 口径），explicit checkpoint 指向档案权重。
+_V7_CX_TA = {**_V7_TA, "checkpoint_all": True, "final_eval_split": "none",
+             "wandb_experiment_tag": "v7_variants"}
+for _new_name in ("V7_Cv2", "V7_Cv3", "V7_Cv4"):
+    _new_ta = {**_V7_CX_TA, "condition_sampling": "enum" if _new_name == "V7_Cv4" else "sample"}
+    MODELS[_new_name] = dict(
+        label=_new_name.replace("_", "-"), name=_new_name, which="last",
+        train=True, epochs=740, contact_method="f6_soft", provides=("base",),
+        config="anysole/configs/v1_wo05.yaml",
+        eval_splits=["val"], dump_detail=True, train_args=_new_ta)
+    _check_name = _new_name + "_precheck"
+    MODELS[_check_name] = {
+        **MODELS[_new_name], "label": _check_name.replace("_", "-"),
+        "name": _check_name, "epochs": 6,
+        "train_args": {**_new_ta, "wandb_experiment_tag": "v7_variants_precheck"}}
+
+# V7_Cv5（2026-10-26 用户裁定落地）：V7_Cv2 双独立 T 门 + 枚举三条件
+# 训练（Cv4 的 condition_sampling=enum）——E2 侧（枚举）与 E5 侧（双门）
+# 两个已兑现的改进合并。
+MODELS["V7_Cv5"] = {**MODELS["V7_Cv2"], "label": "V7-Cv5", "name": "V7_Cv5",
+                    "train_args": {**MODELS["V7_Cv2"]["train_args"],
+                                   "condition_sampling": "enum"}}
+MODELS["V7_Cv5_precheck"] = {**MODELS["V7_Cv5"], "label": "V7-Cv5-precheck",
+                             "name": "V7_Cv5_precheck", "epochs": 6,
+                             "train_args": {**MODELS["V7_Cv5"]["train_args"],
+                                            "wandb_experiment_tag": "v7_variants_precheck"}}
+
+
+
+# V1-last 统计（2026-10-26 用户裁定「统一口径」）：V1 = V7_Cv1 基准——
+# name 落 V7_Cv1 的 run 目录，which=last（与 V2/V3/V1_enum 同口径）。
+MODELS["V7_Cv1_stat"] = {**MODELS["V7_Cv1"], "label": "V7-Cv1-stat",
+                           "name": "V7_Cv1", "train": False, "which": "last",
+                           "eval_splits": ["val", "test"]}
+for _occ in ("010", "020", "030", "050"):
+    MODELS[f"V7_Cv1_stat_evalocc{_occ}"] = {
+        **MODELS["V7_Cv1"], "label": f"V7-Cv1-stat-evalocc{_occ}",
+        "name": "V7_Cv1", "train": False, "which": "last",
+        "eval_splits": ["val", "test"],
+        "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml"}
+
+# V1–V3 统计评估（2026-10-26 用户裁定「进行统计」）：各变体四门选点 =
+# ckpt_last（V2/V3/V1_enum 各仅 1 份四门通过者 = ep740）。cam3 test 面板 +
+# occ 四档交叉评估（V1 = V7_Cv1 基准，数字已有）。
+for _v in ("V7_Cv2", "V7_Cv3", "V7_Cv4"):
+    MODELS[f"{_v}_stat"] = {**MODELS[_v], "label": _v.replace("_", "-") + "-stat",
+                            "name": _v, "train": False, "which": "last",
+                            "eval_splits": ["val", "test"]}
+    for _occ in ("010", "020", "030", "050"):
+        MODELS[f"{_v}_stat_evalocc{_occ}"] = {
+            **MODELS[_v], "label": _v.replace("_", "-") + f"-stat-evalocc{_occ}",
+            "name": _v, "train": False, "which": "last",
+            "eval_splits": ["val", "test"],
+            "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml"}
+
+
+
 _V7_C_ARCHIVE = ("results/AnySole/V7_Cv1_f6_soft/"
                  "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
                  "checkpoints/multi_metric/weights/epoch_000%s.pt")
@@ -508,11 +574,62 @@ for _ep in ("600", "665", "670", "680"):
 MODELS["V7_Cv1_cand740"] = {**MODELS["V7_Cv1"], "label": "V7-Cv1-cand740",
                             "name": "V7_Cv1", "train": False, "which": "last"}
 
+# 第二轮选点（2026-10-26，ckpt 规则 §2：四门全过 → VT PA 最小）：
+# A=ep210（VT 36.33）/ B=ep205（37.02）/ C=ep665（31.49，dPA −0.24）。
+# E2/E5 评估 = 固定该权重（explicit checkpoint + 哈希登记）。
+_V7_R2_SEL = {
+    "V7_Av1": ("epoch_000210.pt", "V7-Av1-sel"),
+    "V7_Bv1": ("epoch_000205.pt", "V7-Bv1-sel"),
+    "V7_Cv1": ("epoch_000665.pt", "V7-Cv1-sel"),
+}
+for _v7, (_w, _lab) in _V7_R2_SEL.items():
+    _base = f"results/AnySole/{_v7}_f6_soft/"
+    _base += ("tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
+              "checkpoints/multi_metric/weights/%s" % _w)
+    MODELS[f"{_v7}_sel"] = {**MODELS[_v7], "label": _lab, "name": _v7,
+                            "train": False, "which": "last",
+                            "checkpoint": _base}
+    for _occ in ("010", "020", "030", "050"):
+        MODELS[f"{_v7}_sel_evalocc{_occ}"] = {
+            **MODELS[_v7], "label": _lab + f"-evalocc{_occ}", "name": _v7,
+            "train": False, "which": "last", "checkpoint": _base,
+            "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml"}
+
+# V7_Cv1 第一轮调参 18 格（2026-10-26 用户裁定）：固定 λ_pose 3 / λ_traj 1 /
+# λ_air 2（基座不变），网格 = lr {5e-5,1e-4,2e-4} × λ_contact {0.1,0.3,1.0}
+# × lr_schedule {constant,cosine}。名称编码参数——λ_contact 与 lr_schedule
+# 不在 VARIANT_FIELDS 内，同名会撞运行目录（λ 扫描先例）。
+_V7C_LR = {"5e-05": 5e-5, "0.0001": 1e-4, "0.0002": 2e-4}
+_V7C_LC = {"0.1": 0.1, "0.3": 0.3, "1": 1.0}
+_V7C_CS = {"const": "constant", "cos": "cosine"}
+for _lrk, _lr in _V7C_LR.items():
+    for _lck, _lc in _V7C_LC.items():
+        for _csk, _cs in _V7C_CS.items():
+            _n = "V7_Cv1_lr%s_lc%s_%s" % (_lrk, _lck, _csk)
+            MODELS[_n] = {
+                **MODELS["V7_Cv1"], "label": _n.replace("_", "-"),
+                "name": _n,
+                "train_args": {**MODELS["V7_Cv1"]["train_args"],
+                               "lr": _lr, "lambda_contact": _lc,
+                               "lr_schedule": _cs}}
+
 for _v7 in ("V7_Av1", "V7_Bv1", "V7_Cv1"):
     for _occ in ("010", "020", "030", "050"):
         MODELS[f"{_v7}_evalocc{_occ}"] = {
             **MODELS[_v7], "label": MODELS[_v7]["label"] + f"-evalocc{_occ}",
             "train": False, "which": "last",
+            "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml"}
+
+# ckpt 口径对照（2026-10-26 用户裁定）：E2/E5 对照补 best 口径行
+# （V4/V5 时代对照曾用 best；V7 统一 last 前，best 行作对照参考）。
+for _v7 in ("V7_Av1", "V7_Bv1", "V7_Cv1"):
+    MODELS[f"{_v7}_evalbest"] = {
+        **MODELS[_v7], "label": MODELS[_v7]["label"] + "-evalbest",
+        "train": False, "which": "best"}
+    for _occ in ("010", "020", "030", "050"):
+        MODELS[f"{_v7}_evalbest_occ{_occ}"] = {
+            **MODELS[_v7], "label": MODELS[_v7]["label"] + f"-evalbest-occ{_occ}",
+            "train": False, "which": "best",
             "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml"}
 
 for _name in ("V7_Av1", "V7_Bv1", "V7_Cv1"):

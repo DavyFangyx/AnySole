@@ -473,6 +473,13 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
             # runner only retrains when an explicit FORCE=true is set
             # (it skips the checkpoint/grid reuse check then).
             "FORCE=false",
+            # wandb 开关（用户裁定 2026-10-25）：每个 conf 恒带一行，
+            # 实验级默认取 EXPERIMENTS[].WANDB（缺省 false）；true 时
+            # runner 注入 wandb_mode=online 覆盖 train_args。
+            "WANDB=%s" % str(raw.get("WANDB", "false")).lower(),
+            # checkpoint_all 开关（2026-10-26 裁定）：true=候选全留协议；
+            # false=只滚存最近过线者。实验级默认取 EXPERIMENTS[].CHECKPOINT_ALL。
+            "CHECKPOINT_ALL=%s" % str(raw.get("CHECKPOINT_ALL", "false")).lower(),
         ]
         path.write_text("\n".join(line for line in lines if line) + "\n", encoding="utf-8")
         print(f"[queue] {path}")
@@ -557,8 +564,61 @@ EXPERIMENTS["v7_e5_screen"] = {
     "REQUIRES": [],
 }
 
+# ckpt 口径对照（2026-10-26 用户裁定）：E2/E5 对照补 best/last 双口径行。
+# last occ 12 格（重跑批次权重）+ best cam3 3 格 + best occ 12 格，
+# eval-only 零重训（条目定义见 model_registry 同名块）。
+EXPERIMENTS["v7_ckpt_caliber"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ([f"{_v}_evalocc{_occ}" for _v in ("V7_Av1", "V7_Bv1", "V7_Cv1")
+                   for _occ in ("010", "020", "030", "050")]
+                  + [f"{_v}_evalbest" for _v in ("V7_Av1", "V7_Bv1", "V7_Cv1")]
+                  + [f"{_v}_evalbest_occ{_occ}" for _v in ("V7_Av1", "V7_Bv1", "V7_Cv1")
+                     for _occ in ("010", "020", "030", "050")]),
+    "REQUIRES": [],
+}
+
+# 第二轮 E2/E5 评估（2026-10-26）：固定选点权重（四门规则）+ occ 四档。
+# V7 E1 专家（2026-10-26）：S_V/S_T 两格训练。
+EXPERIMENTS["v7_experts"] = {
+    "KIND": "model_suite",
+    "WANDB": True,
+    "CHECKPOINT_ALL": True,
+    "MODEL_IDS": ["V7_SV1", "V7_ST1"],
+    "REQUIRES": [],
+}
+
+EXPERIMENTS["v7_r2_eval"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V7_Av1_sel", "V7_Bv1_sel", "V7_Cv1_sel"]
+    + [f"{m}_sel_evalocc{o}" for o in ("010","020","030","050")
+       for m in ("V7_Av1","V7_Bv1","V7_Cv1")],
+    "REQUIRES": [],
+}
+
+EXPERIMENTS["v7_variants_precheck"] = {
+    "KIND": "model_suite", "WANDB": True, "CHECKPOINT_ALL": True,
+    "MODEL_IDS": ["V7_Cv2_precheck", "V7_Cv3_precheck", "V7_Cv4_precheck", "V7_Cv5_precheck"],
+    "REQUIRES": [],
+}
+# V1–V3 统计（2026-10-26）：cam3 test 面板 + occ 四档交叉评估（15 格）。
+EXPERIMENTS["v7_variants_stats"] = {
+    "KIND": "model_suite", "WANDB": False,
+    "MODEL_IDS": [f"{v}_stat" for v in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv4")]
+    + [f"{v}_stat_evalocc{o}" for o in ("010","020","030","050")
+       for v in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv4")],
+    "REQUIRES": [],
+}
+
+EXPERIMENTS["v7_variants_clean"] = {
+    "KIND": "model_suite", "WANDB": True, "CHECKPOINT_ALL": True,
+    "MODEL_IDS": ["V7_Cv2", "V7_Cv3", "V7_Cv4", "V7_Cv5"],
+    "REQUIRES": [],
+}
+
 EXPERIMENTS["v7_first_round"] = {
     "KIND": "model_suite",
+    "WANDB": True,
+    "CHECKPOINT_ALL": True,
     "MODEL_IDS": ["V7_Av1", "V7_Av1_cam3_occ010",
                   "V7_Bv1", "V7_Bv1_cam3_occ010",
                   "V7_Cv1", "V7_Cv1_cam3_occ010"],
@@ -614,5 +674,18 @@ EXPERIMENTS["ckpt_last_rebaseline"] = {
            for m in ("V5_Av1", "V5_Av4", "V4_Av1")
            for lp in ("1", "2", "3", "4") for lt in ("0", "1")
            if not (m == "V5_Av4" and lp != "1")]),
+    "REQUIRES": [],
+}
+
+# V7_Cv1 第一轮调参 18 格（2026-10-26 用户裁定）：lr × λ_contact ×
+# lr_schedule 全网格，λ_pose 3 / λ_traj 1 / λ_air 2 固定（条目定义见
+# model_registry 同名块）。每格 train+val+test 走 runner 标准事务，
+# multi_metric 候选池随基座继承（checkpoint-all = 三门通过者全留）。
+EXPERIMENTS["v7c_tune18"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V7_Cv1_lr%s_lc%s_%s" % (lrk, lck, csk)
+                  for lrk in ("5e-05", "0.0001", "0.0002")
+                  for lck in ("0.1", "0.3", "1")
+                  for csk in ("const", "cos")],
     "REQUIRES": [],
 }
