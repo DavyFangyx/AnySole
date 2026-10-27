@@ -29,8 +29,8 @@ def check_manifest() -> dict[str, int]:
         for key in split_counts:
             if (row.get(key) or "").strip():
                 split_counts[key] += 1
-    # 08 全局审阅：split 以用户生成的 canonical CSV 为准（当前 104/36/36），
-    # 不再按固定 92/12/36 断言。
+    # Split follows the canonical A3 CSV (92/12/36); do not infer membership
+    # from the historical val=test generator defaults.
     for row in split_rows:
         for key in split_counts:
             value = (row.get(key) or "").strip()

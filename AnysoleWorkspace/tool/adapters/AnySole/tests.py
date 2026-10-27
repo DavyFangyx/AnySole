@@ -8,8 +8,8 @@ Run from the repo root in the ``touch_gait`` environment:
 
 T1 段 (always): per-method ``artifact.json`` contract (method, 140 sessions,
 deterministic manifest hashes recomputed from the npz tree), the 140-file
-session set against ``protocol/splits/default/splits.csv`` (104/36/36, val ==
-test), the npz frame axis against the shared facts (frame_id / valid / fake),
+session set against ``protocol/splits/default/splits.csv`` (92/12/36, disjoint),
+the npz frame axis against the shared facts (frame_id / valid / fake),
 and the AnySole-private loader ``workspace_adapter.load_contact_label`` the
 dataset itself calls.
 
@@ -51,7 +51,7 @@ CLIFF_ROOT = ROOT / "AnysoleWorkspace/model_inputs/PoseTransOpt/adapter_v1"
 CREATE_PROVENANCE_SCHEMA = "model_input.anysole.v1"
 V_FEAT_DIM = 2051
 SAMPLE_SESSIONS = ("S5011", "S10101", "S11073", "S13011", "S14103")
-EXPECTED_SPLIT_SIZES = {"train": 104, "val": 36, "test": 36}
+EXPECTED_SPLIT_SIZES = {"train": 92, "val": 12, "test": 36}
 
 _PASSED = 0
 _NOTES = []
@@ -107,7 +107,7 @@ def test_split_contract() -> dict:
               len(columns[column]) == expected, "got %d" % len(columns[column]))
         check("split %s has no duplicate session" % column,
               len(set(columns[column])) == len(columns[column]))
-    check("val == test (T1 ruling)", columns["val"] == columns["test"])
+    check("val and test are disjoint", not (set(columns["val"]) & set(columns["test"])))
     check("train/val disjoint", not (set(columns["train"]) & set(columns["val"])))
     union = set(columns["train"]) | set(columns["val"]) | set(columns["test"])
     check("split union has 140 sessions", len(union) == 140, "got %d" % len(union))

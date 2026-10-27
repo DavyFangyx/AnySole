@@ -75,6 +75,17 @@ def test_event_matching_maximizes_pairs_before_minimizing_error():
     assert match_events([0],[.1])==[(0,0)]
 
 
+def test_event_boundary_keeps_four_frames_at_large_absolute_clock():
+    from anysole.utils.a2eval_metrics import EVENT_METRIC_VERSION
+    assert EVENT_METRIC_VERSION=='anysole.a2.events.v2-roundoff1ns'
+    truth=75313.956
+    predicted=75314.05600000001
+    assert predicted-truth>.1+1e-12
+    assert match_events([predicted],[truth])==[(0,0)]
+    assert match_events([truth+.100001],[truth])==[]
+    assert match_events([truth+.099999],[truth])==[(0,0)]
+
+
 def test_event_transitions_and_missing_gap_censoring():
     x=item(16);x['gt_pressure'][:]=0;x['pressure'][:]=0
     x['gt_pressure'][4:9]=.1;x['pressure'][5:10]=.1

@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from anysole import train
 from anysole.models import visual
 from anysole.models.common.pressure_a2 import QueryPressureHead, CapacityPressureHead, split_feet, join_feet
-from anysole.utils.a2_config import a2_budget, validate_a2_config, A2_RUNS
+from anysole.utils.a2_config import a2_budget, validate_a2_config, A2_RUNS, A3_RUNS, A3_VERSION
 from anysole.utils.a2_gradients import parameter_groups, routed_backward, gradient_statistics
 from anysole.utils.a2_training import initialization_identity, fixed_gradient_probe
 from anysole.utils.a2_pressure_losses import a2_pressure_counts, modify_pressure_terms, calibrate_auxiliary_coefficient
@@ -367,3 +367,145 @@ def test_measurement_replicas_get_distinct_identity_and_are_forbidden_formal():
             validate_a2_config({**base,'measurement_replica_id':value})
     with pytest.raises(ValueError,match='measurement_replica_id'):
         validate_a2_config({**first,'stage':'formal'},formal=True)
+
+
+def a3_config(run="R-HF-VT40", seed=1, **extra):
+    experiment, head, pose, pressure, pair, supervised = A3_RUNS[run]
+    return {"a2_version": A3_VERSION, "a2_run_id": run, "seed": seed,
+            "a2_head_seed": seed, "experiment": experiment, "pressure_head": head,
+            "query_memory": "fusion_tactile_slice" if run.endswith("-T20") else "fusion_all",
+            "pressure_pair_route": pair, "supervised_pressure_route": supervised,
+            "lambda_mv": .2 if pose or pressure else 0., "mv_pose_weight": pose/.2, "mv_pressure_weight": pressure/.2,
+            "effective_pose_pair_peak": pose, "effective_pressure_pair_peak": pressure,
+            "budget_mode": "a3_extended", "stage": "formal", "target_updates": 10360,
+            "effective_batch_rgb_windows": 252, "microbatch_rgb_windows": 6,
+            "target_rgb_windows": 10360*252, "snapshot_updates": [5180, 10360],
+            "train_cameras": [1,2,4], "validation_cameras": [1,2,4],
+            "selection_motion_weight": .8, "selection_pressure_weight": .2,
+            "selection_m_ref": .1, "selection_p_ref": .2, "save_initial_checkpoint": True,
+            "pressure_cell_mean": [.1]*96, "pressure_contact_rate": [.3,.7],
+            "pressure_contact_threshold": [.1,.1], "pressure_contact_pos_weight": [1.,1.],
+            "lambda_contact": .01, "pressure_train_statistics_hash": "train-only-fixture", **extra}
+
+
+@pytest.mark.parametrize("run", list(A3_RUNS))
+@pytest.mark.parametrize("seed", [1,2,3])
+def test_a3_complete_configuration_matrix(run, seed):
+    config = a3_config(run, seed)
+    validate_a2_config(config, formal=True)
+    train._validate_visual_experiment(config)
+    assert config["pressure_pair_route"] == "HF"
+    assert not (config["effective_pose_pair_peak"] and config["effective_pressure_pair_peak"])
+
+
+def test_a3_formal_config_supports_read_only_preflight(tmp_path):
+    import yaml
+    from anysole.types import validate_view_config
+    template = yaml.safe_load((Path(__file__).resolve().parents[1]/"anysole/configs/view_consistency.yaml").read_text())
+    config = {**template, **a3_config()}
+    validate_view_config(config, formal=False)
+    for key in ("manifest_path", "hrnet_checkpoint", "hrnet_config", "detector_checkpoint", "smpl_model_path"):
+        config[key] = str(tmp_path/("missing-"+key))
+    report = train.visual_preflight(config)
+    assert report["ready"] is False and report["errors"]
+    assert all("stage" not in error for error in report["errors"])
+    with pytest.raises(ValueError, match="stage"):
+        validate_a2_config({**a3_config(), "stage":"pilot"}, formal=True)
+
+
+@pytest.mark.parametrize("override", [
+    {"seed": 4}, {"seed": True}, {"a2_head_seed": 2}, {"a2_run_id": "Q-FACT"},
+    {"pressure_head": "query_direct"}, {"query_memory": "fusion_visual_slice"},
+    {"pressure_pair_route": "all"}, {"supervised_pressure_route": "all"},
+    {"mv_pose_weight": 1.}, {"effective_pressure_pair_peak": .1},
+    {"train_cameras": [1,2,3,4]}, {"validation_cameras": [3]},
+    {"selection_motion_weight": .5}, {"selection_pressure_weight": .5},
+    {"target_updates": 5180, "target_rgb_windows": 5180*252},
+    {"target_rgb_windows": 1}, {"effective_batch_rgb_windows": 256},
+    {"microbatch_rgb_windows": 3}, {"microbatch_rgb_windows": 8}, {"microbatch_rgb_windows": 255},
+    {"snapshot_updates": [10360,5180]}, {"snapshot_updates": [5180]},
+    {"selection_m_ref": float("nan")}, {"pressure_cell_mean": [0.]*96},
+    {"measurement_replica_id": "formal-replica"}, {"pilot_schedule_update_offset": 100},
+])
+def test_a3_rejects_scientific_contract_drift(override):
+    with pytest.raises(ValueError):
+        validate_a2_config(a3_config(**override), formal=True)
+
+
+@pytest.mark.parametrize("memory", ["fusion_tactile_slice", "fusion_all"])
+def test_a3_query_memory_masks_gradients_and_no_extra_capacity(memory):
+    torch.manual_seed(17)
+    kwargs = dict(kind="query_factorized", dim=32, nhead=4, hidden=16,
+                  dropout=0, cell_mean=[.1]*96, contact_rate=[.3,.7])
+    head = QueryPressureHead(**kwargs, memory=memory).eval()
+    reference = QueryPressureHead(**kwargs)
+    assert sum(p.numel() for p in head.parameters()) == sum(p.numel() for p in reference.parameters())
+    # Initial Q-FACT weights intentionally predict train means. Open this path
+    # before testing memory dependence; otherwise a leak test is vacuous.
+    with torch.no_grad():
+        nn.init.normal_(head.output.weight, std=.1)
+        nn.init.normal_(head.total.weight, std=.1)
+    valid = torch.tensor([[True,False,True,True], [False]*4])
+    time = torch.arange(4, dtype=torch.float64)[None].expand(2,-1)/40
+    fused = torch.randn(2,8,32, requires_grad=True)
+    seen = []
+    hook = head.attention.register_forward_pre_hook(
+        lambda module,args,kwargs: seen.append((args[1].shape[1],kwargs["key_padding_mask"].clone())),
+        with_kwargs=True)
+    original = head(fused, valid, time)["pressure_hat"]
+    hook.remove()
+    mask = torch.cat([valid[:1],valid[:1]],1) if memory == "fusion_all" else valid[:1]
+    assert seen[0][0] == (8 if memory == "fusion_all" else 4)
+    assert torch.equal(seen[0][1], ~mask)
+    changed = fused.detach().clone()
+    changed[:,[1,5]] = float("nan")
+    changed[1] = float("nan")
+    if memory == "fusion_tactile_slice":
+        changed[:,:4] = float("nan")
+    torch.testing.assert_close(head(changed, valid, time)["pressure_hat"], original, rtol=0, atol=0)
+    original[valid].square().sum().backward()
+    assert torch.isfinite(fused.grad).all()
+    assert torch.count_nonzero(fused.grad[1]) == 0
+    assert torch.count_nonzero(fused.grad[:,[1,5]]) == 0
+    assert fused.grad[0,4:].abs().sum() > 0
+    assert (fused.grad[0,:4].abs().sum() > 0) == (memory == "fusion_all")
+
+
+def test_a3_memory_identity_and_full_model_reload(tmp_path):
+    configs = [a3_config("R-HF-"+suffix, dropout=0) for suffix in ("T20", "VT40")]
+    models = [visual.build(c).eval() for c in configs]
+    assert models[0].structure_hash != models[1].structure_hash
+    assert sum(p.numel() for p in models[0].parameters()) == sum(p.numel() for p in models[1].parameters())
+    for model in models:
+        path = tmp_path / (model.pressure_readout.memory+".pt")
+        torch.save({"model":model.state_dict(),"config":model.effective_config},path)
+        saved = torch.load(path, weights_only=True)
+        restored = visual.build(saved["config"]).eval()
+        restored.load_state_dict(saved["model"],strict=True)
+        v = torch.randn(1,20,2051)
+        valid = torch.ones(1,20,dtype=torch.bool)
+        valid[:,3] = False
+        v[:,3] = float("nan")
+        times = torch.arange(20,dtype=torch.float64)[None]/40
+        with torch.no_grad():
+            a,b = model.forward_visual(v,valid,times),restored.forward_visual(v,valid,times)
+        for name in ("pressure_hat","pressure_total","pressure_contact_logits","x0_hat","v_hat"):
+            torch.testing.assert_close(a[name],b[name],rtol=0,atol=0)
+            assert torch.isfinite(a[name]).all()
+        wrong = "fusion_all" if model.pressure_readout.memory == "fusion_tactile_slice" else "fusion_tactile_slice"
+        with pytest.raises(ValueError,match="structure_hash"):
+            visual.build({**saved["config"],"query_memory":wrong})
+
+
+@pytest.mark.parametrize("name", ["pressure", "pressure_contact", "pressure_total", "pressure_diff"])
+def test_a3_all_gt_pressure_terms_obey_the_supervised_route(name):
+    for route in ("all","HF"):
+        model = TinyRoute(dropout=0)
+        out = model.forward_visual(torch.randn(2,5,2051),torch.ones(2,5,dtype=torch.bool),None)
+        routed_backward({name:out["pressure_hat"].square().mean()},model,
+                        {"supervised_pressure_route":route},torch.amp.GradScaler("cuda",enabled=False))
+        norms = {k:sum(float(p.grad.abs().sum()) for p in ps if p.grad is not None)
+                 for k,ps in parameter_groups(model).items()}
+        assert norms["H"] > 0 and norms["F"] > 0
+        assert (norms["R"] > 0) == (route == "all")
+        assert (norms["E_shared"] > 0) == (route == "all")

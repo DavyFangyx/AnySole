@@ -1,7 +1,9 @@
 # splits/default —— 划分、触觉质量标注与排除依据
 
-`splits.csv` 是本工作区唯一的训练/验证/测试划分文件（模型直接读取），列格式 `index,train,val,test`，
-由 `tool/build_manifest.py split` 生成。**当前文件为冻结状态：train/val/test = 104/36/36，val 与 test 同批（设计如此）。**
+`splits.csv` 是本工作区唯一的训练/验证/测试划分文件（模型直接读取），列格式 `index,train,val,test`。
+自 2026-10-23 起，当前 canonical 文件采用 AnySole 方案A第三版 split：train/val/test = **92/12/36**，共 140 个不同 session，三组两两互斥。它与 `3_Result/AnySole/A3/data/splits.csv` 字节一致，SHA-256 为 `d826dfa7b9ba73cfdcfb5f49707a1bf8b82f013a90aae8f52e771d1ce25cb7b3`。
+
+此前冻结的 split 为 104/36/36，val=test。A3 之前完成的训练和评估仍绑定旧版；历史结果不因当前 canonical 文件更新而改变。`tool/build_manifest.py split` 的旧默认行为会重新生成 val=test 划分，不能用于复现当前文件。
 
 ## 触觉质量标注（排除依据）
 
@@ -43,7 +45,7 @@
 4. A/B 级内部仍有个别 session 未入 manifest（如 S8 的 21 条 A/B 只入 9 条），系 mocap 解算失败
    （`Mocap/0808/0808smpl/fail.txt` 等）与 final_fake_marked 可用性等进一步门槛，详见 `tool/build_manifest.py`。
 
-## 生成命令（记录用；重跑会改变本文件内容，冻结期内勿执行）
+## 旧版生成命令（仅作历史记录；会生成 val=test 并覆盖当前 A3 split，勿用于复现当前文件）
 
 ```bash
 python3 AnysoleWorkspace/tool/build_manifest.py split \

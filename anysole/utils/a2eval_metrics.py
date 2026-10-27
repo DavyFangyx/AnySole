@@ -197,6 +197,9 @@ def metric(value, support, unit, *, reason=None, eligible=None):
         'reason':None if finite else (reason or 'no valid support')}
 
 
+EVENT_METRIC_VERSION='anysole.a2.events.v2-roundoff1ns'
+
+
 def match_events(predicted, truth, tolerance=.100):
     """Monotone one-to-one maximum-cardinality, minimum-total-time matching."""
     predicted, truth = np.asarray(predicted,float), np.asarray(truth,float)
@@ -207,7 +210,9 @@ def match_events(predicted, truth, tolerance=.100):
         for j in range(1,m+1):
             options = [(count[i-1,j],cost[i-1,j],1),(count[i,j-1],cost[i,j-1],2)]
             dt = abs(predicted[i-1]-truth[j-1])
-            if dt <= tolerance+1e-12:
+            # Absolute seconds-of-day lose precision when subtracted. Keep the
+            # physical100ms boundary, with only1ns numerical roundoff allowance.
+            if dt <= tolerance+1e-9:
                 options.append((count[i-1,j-1]+1,cost[i-1,j-1]-dt,3))
             number, negative, direction = max(options,key=lambda x:(x[0],x[1]))
             count[i,j],cost[i,j],move[i,j] = number,negative,direction

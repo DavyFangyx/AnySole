@@ -374,10 +374,7 @@ def build_metadata(force: bool = False) -> dict:
         if not frames:
             no_temporal_window_sessions.append(row["session_id"])
         split_tree[split][date][row["subject_id"]][row["session_id"]] = frames
-    # the frozen default split keeps val == test as identical session sets
-    # (protocol/splits/default/splits.csv); mirror test into val so the
-    # dataset's val phase addresses the same 36 sessions.
-    split_tree["val"] = split_tree["test"]
+    # Preserve the canonical split's independent train/val/test membership.
 
     FPP_ROOT.mkdir(parents=True, exist_ok=True)
     sub_info_paths = {}

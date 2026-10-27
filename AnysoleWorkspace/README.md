@@ -9,7 +9,7 @@ AnysoleWorkspace/
 │   └── calibration/ human_masks/                 # 外部只读源软链接
 ├── protocol/
 │   ├── manifests/session_manifest.{csv,jsonl}
-│   ├── splits/default/splits.csv                # 由参数生成，默认 val=test
+│   ├── splits/default/splits.csv                # 当前 canonical split：92/12/36，三组互斥
 │   ├── schemas/
 │   └── calibration/
 ├── shared/
@@ -68,7 +68,7 @@ python3 AnysoleWorkspace/tool/pressure_washer/run.py encode --force
 # 从 raw、session 索引和 PressureWasher 最终记录构建公共 manifest
 python3 AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3 --cam 1,2,3,4
 # --cam 1,2,3,4（或 all）：另写 per-camera jsonl（session_manifest_cam{N}.jsonl）
-# 生成 split，默认 val=test（当前冻结文件为 train/val/test = 104/36/36）
+# 历史生成示例：此命令生成 val=test 的旧版划分，不会复现当前 A3 92/12/36 split；勿用于覆盖当前 canonical 文件
 python3 AnysoleWorkspace/tool/build_manifest.py split \
   --manifest AnysoleWorkspace/protocol/manifests/session_manifest.jsonl \
   --test S13,S14
@@ -87,7 +87,7 @@ python3 AnysoleWorkspace/tool/workspace.py doctor
 python3 AnysoleWorkspace/tool/frame_stats.py --dates 20260804,20260807,20260808,20260810
 ```
 
-split 由 `build_manifest.py split` 生成，默认 `val=test`；manifest 只登记 session 元数据，模型直接读取 `protocol/splits/default/splits.csv`。
+当前 canonical split 于 2026-10-23 采用方案A第三版的 92/12/36 划分，train/val/test 两两互斥；模型直接读取 `protocol/splits/default/splits.csv`。`build_manifest.py split` 的历史默认行为是 `val=test`，重跑会覆盖当前划分，除非明确要恢复旧协议，否则不要执行。
 触觉质量标注（A/B/C/D）登记在 manifest 的 `pressure_quality_class` / `pressure_quality_reason` 两列，作为排除依据
 （C/D 一律不进入管线、S9 整组排除等），详见 `protocol/splits/default/README.md`。
 

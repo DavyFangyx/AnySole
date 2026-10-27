@@ -254,6 +254,75 @@ def test_finite_selection_memory_gain_and_n4_gate(monkeypatch):
         resource.suggest_next([row(1, 10), row(1, 11)])
 
 
+def test_a3_measures_beyond_flat_n2_and_selects_highest_near_peak(monkeypatch):
+    monkeypatch.setattr(resource, "validate_cohort", lambda row: row)
+    def row(n, speed):
+        return {"a2_version": "anysole.a3.v1", "capacity_max_n": 6, "stage": "single", "n": n,
+                "successful_rgb_windows_per_second": speed, "peak_gpu_bytes": n * 1024**3,
+                "gpu_total_bytes": 48 * 1024**3, "host_total_bytes": 1024**4,
+                "minimum_host_available_bytes": 900 * 1024**3, "worker_peak_rss_bytes": n * 1024**3,
+                "mean_gpu_utilization": 99}
+    reports = [row(1, 10), row(2, 10.01)]
+    assert resource.suggest_next(reports)["n"] == 3
+    reports += [row(3, 14), row(4, 15), row(5, 14.9), row(6, 14)]
+    assert resource.suggest_next(reports)["selected_n"] == 5
+    reports[-1]["capacity_max_n"] = 5
+    with pytest.raises(ValueError, match="protocol changed"):
+        resource.suggest_next(reports)
+
+
+def test_a3_requires_own_grant_and_refills_six_slots_per_card(tmp_path, monkeypatch):
+    jobs = [job(tmp_path, f"a3-{i}", "train") for i in range(36)]
+    p, r = plan(jobs, "measurement"), envelope()
+    p.update(a2_version="anysole.a3.v1", capacity_max_n=6)
+    r["profiles"]["train"]["cap"] = 6
+    g = grant(p, r)
+    with pytest.raises(ValueError, match="root-a3"):
+        ctl.validate_bundle(p, r, g)
+    g["authorized_by"] = "root-a3"
+    c = ctl.Controller(p, r, tmp_path / "a3-state", grant=g)
+    placed = []
+    def launch(j, gpu):
+        c.state["jobs"][j["id"]].update(state="running", attempts=[{"gpu": gpu, "pid": -1,
+            "starttime": "fixture", "directory": str(tmp_path), "started_unix": time.time()}])
+        placed.append(gpu)
+    monkeypatch.setattr(c, "launch", launch)
+    monkeypatch.setattr(c, "reconcile", lambda: None)
+    c.tick(host=machine(), devices=devices())
+    assert sorted(placed.count(g) for g in range(7)) == [5] * 6 + [6]
+    assert c.state["a2_version"] == "anysole.a3.v1" and c.state["capacity_max_n"] == 6
+
+
+def test_a3_resource_uses_configured_rgb_budget_and_rejects_legacy_receipt(tmp_path):
+    config, attempt, run, smoke, checkpoint = [tmp_path / name for name in ("config.json", "attempt.json", "run.json", "smoke.json", "last.pt")]
+    ctl.atomic_json(config, {"a2_version": "anysole.a3.v1", "effective_batch_rgb_windows": 252})
+    ctl.atomic_json(attempt, {"schema": "anysole.a2.attempt.v1", "success": True, "exit_code": 0, "verify_exit_code": 0})
+    ctl.atomic_json(run, {"successful_updates": 25, "rgb_windows": 6300,
+        "last_validation": {"val/pressure_cells": 100, "val/motion_frames": 20}})
+    checkpoint.write_bytes(b"fixture, not an actual training checkpoint")
+    numeric = {"checkpoint_reloaded": True, "state_complete": True, "full_validation": True,
+        "maximum_effective_batch": True, "validated_motion_frames": 20, "validated_pressure_cells": 100,
+        "minimum_actual_batch_rgb": 252, "maximum_actual_batch_rgb": 252, "checkpoint_sha256": ctl.file_hash(checkpoint),
+        "warmup_updates": 5, "timed_updates": 20, "timed_seconds": 1}
+    ctl.atomic_json(smoke, numeric)
+    report = {"schema": resource.COHORT_SCHEMA, "purpose": "measurement", "a2_version": "anysole.a3.v1",
+        "capacity_max_n": 6, "stage": "single", "n": 1, "wall_seconds": 1,
+        "peak_gpu_bytes": 1024**3, "gpu_total_bytes": 48 * 1024**3, "host_total_bytes": 1024**4,
+        "minimum_host_available_bytes": 900 * 1024**3, "disk_min_free_bytes": 100 * 1024**3,
+        "expected_worker_count": 1, "source_files": {str(Path(__file__).resolve()): ctl.file_hash(__file__)},
+        "contracts": {"train": "fixture"}, "warmup_updates": 5, "timed_updates": 20,
+        "successful_rgb_windows_per_second": 5040,
+        "workers": [{"kind": "train", "gpu": 0, "attempt_result": resource.reference(attempt),
+            "config": resource.reference(config), "config_sha256": ctl.file_hash(config),
+            "run": resource.reference(run), "smoke": resource.reference(smoke), "checkpoint": resource.reference(checkpoint)}]}
+    assert resource.validate_cohort(report)
+    numeric["maximum_actual_batch_rgb"] = 256
+    ctl.atomic_json(smoke, numeric)
+    report["workers"][0]["smoke"] = resource.reference(smoke)
+    with pytest.raises(ValueError, match="batch evidence"):
+        resource.validate_cohort(report)
+
+
 def test_launch_reservation_recovery_and_dependency_failure(tmp_path, monkeypatch):
     j = job(tmp_path)
     c = ctl.Controller(plan([j]), envelope(), tmp_path / "state", fixture=True)

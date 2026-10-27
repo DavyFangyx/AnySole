@@ -167,6 +167,51 @@ def test_identity_excludes_operations_and_is_not_self_referential(tmp_path):
     assert train.visual_run_identity(cfg) != train.visual_run_identity({**cfg, 'stage': 'formal'})
 
 
+def test_motion_weighted_selection_and_resume_contract():
+    def metrics(m, p):
+        return {'val/mpjpe': m, 'val/pressure_rmse': p, 'val/motion_frames': 2,
+                'val/pressure_cells': 192, 'val/coverage_hash': 'new_val124'}
+    legacy = train.JointSelector(1., 1.)
+    motion = train.JointSelector(1., 1., motion_weight=.8, pressure_weight=.2)
+    for selector in (legacy, motion):
+        selector.consider(metrics(.2, .9), 1)
+        selector.consider(metrics(.4, .2), 2)
+    assert legacy.best_step == 2
+    assert motion.best_step == 1
+    restored = train.JointSelector(1., 1., motion_weight=.8, pressure_weight=.2)
+    restored.load_state_dict(motion.state_dict())
+    assert restored.best_step == 1
+    with pytest.raises(ValueError, match='weights changed'):
+        legacy.load_state_dict(motion.state_dict())
+    old_state = legacy.state_dict()
+    old_state.pop('motion_weight')
+    old_state.pop('pressure_weight')
+    train.JointSelector(1., 1.).load_state_dict(old_state)
+
+
+def test_offline_wandb_uses_configured_project_without_auth_probe(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    captured = {}
+    run = SimpleNamespace(id='a3_offline', dir=str(tmp_path/'wandb/offline-run/files'),
+                          define_metric=lambda *a, **k: None, finish=lambda: None)
+    def initialize(**kwargs):
+        captured.update(kwargs)
+        return run
+    def auth_forbidden(*a, **k):
+        raise AssertionError('offline logging must not probe online authentication')
+    monkeypatch.setitem(sys.modules, 'wandb', SimpleNamespace(
+        Api=auth_forbidden, init=initialize, Settings=lambda **kw: kw))
+    logger = train.VisualLogger(tmp_path, config(tmp_path, wandb_mode='offline',
+        wandb_project='Anysole-A3', wandb_entity='foundary-f-beijing-institute-of-technology',
+        wandb_shared_dir=str(tmp_path/'shared')))
+    assert captured['project'] == 'Anysole-A3'
+    assert captured['entity'] == 'foundary-f-beijing-institute-of-technology'
+    assert captured['mode'] == 'offline'
+    assert logger.state_dict()['offline_dir'].endswith('offline-run')
+    logger.close()
+
+
 def test_group_budget_variable_c_resume_and_no_model_rng():
     sampler = train.GroupBudgetSampler([4, 2, 3, 1], ['a', 'b', 'c', 'd'], 3)
     before = torch.get_rng_state()
@@ -302,6 +347,39 @@ def test_variable_c_controller_accumulation_matches_merged_parameters(tmp_path):
     assert results[0]['counts'] == results[1]['counts']
     for left, right in zip(a.parameters(), b.parameters()):
         torch.testing.assert_close(left, right, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize('run', ['P-ALL-T20', 'R-HF-VT40'])
+@pytest.mark.parametrize('seed', [1, 2, 3])
+def test_a3_formal_mechanisms_admit_all_registered_seeds(tmp_path, run, seed):
+    from anysole.utils.a2_config import A3_RUNS
+    experiment, head, pose, pressure, pair_route, sup_route = A3_RUNS[run]
+    cfg = config(tmp_path, stage='formal', a2_version='anysole.a3.v1', a2_run_id=run,
+        seed=seed, a2_head_seed=seed, experiment=experiment, pressure_head=head,
+        lambda_mv=.2, mv_pose_weight=1. if pose else 0., mv_pressure_weight=1. if pressure else 0.,
+        effective_pose_pair_peak=pose, effective_pressure_pair_peak=pressure,
+        pressure_pair_route=pair_route, supervised_pressure_route=sup_route,
+        query_memory='fusion_tactile_slice' if run.endswith('T20') else 'fusion_all',
+        budget_mode='a3_extended', target_updates=10360, target_rgb_windows=10360*252,
+        effective_batch_rgb_windows=252, microbatch_rgb_windows=12,
+        train_cameras=[1,2,4], validation_cameras=[1,2,4],
+        selection_motion_weight=.8, selection_pressure_weight=.2,
+        n_train_group_windows=100, n_train_rgb_windows=300, train_sample_keys_hash='0'*64,
+        plan_frozen=True, resource_frozen=True, resource_version='synthetic_fixture',
+        runs_per_gpu=2, selection_coverage_hash='0'*64, save_initial_checkpoint=True,
+        snapshot_updates=[5180,10360], lambda_contact=.01,
+        pressure_cell_mean=[.1]*96, pressure_contact_rate=[.8]*2,
+        pressure_contact_threshold=[.5]*2, pressure_contact_pos_weight=[.25]*2,
+        pressure_train_statistics_hash='0'*64, lambda_sigma=.01, lambda_assign=.05)
+    for name in ('manifest_hash','split_hash','stats_hash','frontend_hash','frontend_runtime_hash',
+                 'source_hash','plan_hash','cache_index_hash','stats_file_hash',
+                 'hrnet_checkpoint_hash','detector_checkpoint_hash','smpl_runtime_model_hash'):
+        cfg[name]='0'*64
+    cfg=train.get_builder('visual').effective_config(cfg)
+    validate_view_config(cfg,formal=True)
+    train._validate_visual_experiment(cfg)
+    with pytest.raises(ValueError,match='seed'):
+        validate_view_config({**cfg,'seed':4,'a2_head_seed':4},formal=True)
 
 
 def test_lambda_zero_shuffle_does_not_call_shuffle_rng(tmp_path, monkeypatch):

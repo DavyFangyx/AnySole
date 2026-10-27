@@ -126,10 +126,13 @@ def test_split_sessions() -> None:
         print(f"  info {variant}: canonical counts train/val/test = "
               f"{len(splits['train'])}/{len(splits['val'])}/{len(splits['test'])}")
         print(f"  info {variant}: empty_or_skipped = {payload['empty_or_skipped']}")
-    # the task book's 92/12/36 figure predates the 2026-09-27 19:58 split
-    # regeneration; the frozen file is authoritative (104/36/36).
-    if {len(splits[k]) for k in splits} == {92, 12, 36}:
-        raise AssertionError("unexpected: split matches the stale 92/12/36 book figure")
+    # Current canonical split adopted from A3 on 2026-10-23.
+    expected = {"train": 92, "val": 12, "test": 36}
+    actual = {key: len(splits[key]) for key in expected}
+    if actual != expected:
+        raise AssertionError(f"unexpected canonical split sizes: {actual}")
+    if set(splits["val"]) & set(splits["test"]):
+        raise AssertionError("canonical val and test sessions must be disjoint")
 
 
 def test_normalizer_provenance() -> None:
