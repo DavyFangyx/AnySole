@@ -83,7 +83,9 @@ class QueryPressureHead(nn.Module):
         h = fused.new_zeros(n, t, 2, self.foot_embedding.shape[-1])
         if bool(rows.any()):
             time = relative_time_pe(timestamps[rows], h.shape[-1], 40., fused.dtype)
-            query = time[:, :, None, :] + self.foot_embedding[None, None]
+            # Teacher fusion can be BF16 under autocast. Keep query residuals
+            # in the memory dtype so the indexed h assignment below is legal.
+            query = time[:, :, None, :] + self.foot_embedding.to(dtype=fused.dtype)[None, None]
             query = query.reshape(-1, 2*t, h.shape[-1])
             mask = frame_valid[rows]
             memory = fused[rows]

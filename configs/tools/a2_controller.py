@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 
-WORKSPACE = Path("/private/Tactile")
+WORKSPACE = Path(__file__).resolve().parents[3]
 SCHEMA = "anysole.a2.plan.v1"
 RESOURCE_SCHEMA = "anysole.a2.resource.v1"
 QUEUE_SCHEMA = "anysole.a2.queue.v1"
@@ -151,6 +151,7 @@ def validate_job(job):
 
 
 def validate_bundle(plan, resource, grant=None, *, fixture=False):
+    b1 = plan.get("b1_version") == "anysole.b1.v1"
     if plan.get("schema") != SCHEMA or plan.get("a2_version") not in ("anysole.a2.v1", "anysole.a3.v1"):
         raise ValueError("explicit A2/A3 plan schema required")
     if not plan.get("frozen") or resource.get("schema") != RESOURCE_SCHEMA:
@@ -180,6 +181,55 @@ def validate_bundle(plan, resource, grant=None, *, fixture=False):
     if resource.get("gpu_reserve_bytes", 0) < 2 * 1024**3:
         raise ValueError("GPU reserve must be at least 2 GiB")
     jobs = plan.get("jobs", [])
+    if b1 and plan["purpose"] == "formal":
+        from configs.tools.b1_train import B1_RUNS
+        expected = {(run, seed) for seed in (1, 2, 3) for run in B1_RUNS}
+        if {(j.get("b1_run_id"), j.get("seed")) for j in jobs} != expected or len(jobs) != 27:
+            raise ValueError("B1 formal DAG requires exactly nine nodes times three seeds")
+        if plan.get("config_plan_hash") != b1_plan_config_hash(plan):
+            raise ValueError("B1 stable config/plan identity mismatch")
+        if plan.get("resource_sha256") != digest(resource):
+            raise ValueError("B1 plan must bind its selected measured resource envelope")
+        b1_jobs = {job["id"]: job for job in jobs}
+        for job in jobs:
+            run, seed = job["b1_run_id"], job["seed"]
+            deps = set() if run == "B0" else {f"B0-s{seed}"}
+            if run.startswith("B-"):
+                deps.add(f"Teacher-s{seed}")
+                gate = job.get("quality_gate", {})
+                required = {"pose_min_gain": .005, "pressure_min_gain": .005,
+                            "tail_max_relative_degradation": .02, "contact_max_absolute_degradation": .02,
+                            "require_pressure": run != "B-Pose"}
+                if any(gate.get(k) != v for k, v in required.items()):
+                    raise ValueError("B1 quality gate contract must match predeclared margins")
+                if (inside(gate["baseline_run"]) != inside(b1_jobs[f"B0-s{seed}"]["output_dir"]) or
+                        inside(gate["teacher_run"]) != inside(b1_jobs[f"Teacher-s{seed}"]["output_dir"])):
+                    raise ValueError("B1 quality gate parents do not match the same-seed DAG parents")
+            if (job["id"] != f"{run}-s{seed}" or set(job.get("dependencies", [])) != deps or
+                    job.get("target_updates") != (20720 if run in ("B0", "Teacher") else 10360)):
+                raise ValueError("B1 DAG node/dependency/budget mismatch")
+            import yaml
+            config = yaml.safe_load(inside(job["config_path"]).read_text())
+            profile = resource["profiles"][job["load_class"]]
+            if (config.get("source_hash") != profile.get("source_hash") or
+                    config.get("microbatch_rgb_windows") != profile.get("microbatch_rgb_windows") or
+                    config.get("cpu_threads") != profile.get("cpu_threads") or
+                    config.get("plan_hash") != plan["config_plan_hash"] or "measurement_replica_id" in config):
+                raise ValueError("B1 formal config must match measured source/microbatch/CPU and stable plan identity")
+            ref = config.get("selection_reference", {})
+            if ref.get("successful_update") != 25 or ref.get("seed") != 1 or ref.get("split") != "val":
+                raise ValueError("B1 formal selection needs an explicit seed1 B0 new-val pilot25 reference")
+            for key in ("run_json", "config_path", "benchmark_path"):
+                hash_key = "run_json_sha256" if key == "run_json" else "config_sha256" if key == "config_path" else "benchmark_sha256"
+                if job.get("inputs", {}).get(ref.get(key)) != ref.get(hash_key):
+                    raise ValueError("B1 selected reference files must be frozen job inputs")
+            reference_run = read_json(inside(ref["run_json"]))
+            reference_metrics = reference_run.get("last_validation") or {}
+            if (config.get("selection_coverage_hash") != reference_metrics.get("val/coverage_hash") or
+                    config.get("selection_m_ref") != max(reference_metrics.get("val/mpjpe", 0), 1.e-8) or
+                    config.get("selection_p_ref") != max(reference_metrics.get("val/pressure_rmse", 0), 1.e-8) or
+                    ref.get("source_hash") != config.get("source_hash")):
+                raise ValueError("B1 selection values differ from the frozen pilot25 new-val measurements")
     if not jobs or len({j["id"] for j in jobs}) != len(jobs):
         raise ValueError("nonempty unique jobs required")
     outputs = [str(inside(j["output_dir"])) for j in jobs]
@@ -226,7 +276,7 @@ def validate_bundle(plan, resource, grant=None, *, fixture=False):
         if plan["purpose"] != "fixture" or any(j["kind"] != "cpu" for j in jobs):
             raise ValueError("fixtures may run CPU jobs only")
     else:
-        owner = "root-a3" if plan["a2_version"] == "anysole.a3.v1" else "root-a2"
+        owner = "root-anysole-b1" if b1 else "root-a3" if plan["a2_version"] == "anysole.a3.v1" else "root-a2"
         if not grant or grant.get("schema") != "anysole.a2.controller-grant.v1" or grant.get("authorized_by") != owner:
             raise ValueError(f"specific {owner} controller grant required")
         if grant.get("plan_sha256") != digest(plan) or grant.get("resource_sha256") != digest(resource):
@@ -238,15 +288,40 @@ def validate_bundle(plan, resource, grant=None, *, fixture=False):
         if any(j["kind"] != "cpu" for j in jobs) and grant.get("allow_cuda") is not True:
             raise ValueError("CUDA not granted")
         if resource.get("frozen"):
-            from configs.tools.a2_resource import verify_frozen_resource
-            verify_frozen_resource(resource)
+            if b1:
+                from configs.tools.b1_train import verify_resource
+                verify_resource(resource)
+            else:
+                from configs.tools.a2_resource import verify_frozen_resource
+                verify_frozen_resource(resource)
 
 
 def host_snapshot(root):
     import psutil
     mem, swap, disk = psutil.virtual_memory(), psutil.swap_memory(), shutil.disk_usage(root)
-    return {"total": mem.total, "available": mem.available, "swap_used": swap.used,
-            "disk_free": disk.free, "cpu_count": os.cpu_count() or 1,
+    visible = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+    quota = None
+    try:
+        maximum, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if maximum != "max":
+            quota = int(maximum)/int(period)
+    except (OSError, ValueError, ZeroDivisionError):
+        pass
+    capacity = min(visible, quota) if quota is not None else visible
+    total, available, memory_limit = mem.total, mem.available, None
+    try:
+        maximum = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+        if maximum != "max":
+            memory_limit = int(maximum)
+            current = int(Path("/sys/fs/cgroup/memory.current").read_text())
+            total = min(total, memory_limit)
+            available = min(available, max(0, memory_limit-current))
+    except (OSError, ValueError):
+        pass
+    return {"total": total, "available": available, "swap_used": swap.used,
+            "host_physical_memory_bytes": mem.total, "cgroup_memory_limit_bytes": memory_limit,
+            "disk_free": disk.free, "cpu_count": max(1, int(capacity)),
+            "cpu_visible_count": visible, "cpu_quota_cores": quota,
             "load1": os.getloadavg()[0], "iowait_percent": getattr(psutil.cpu_times_percent(), "iowait", 0)}
 
 
@@ -276,12 +351,78 @@ def ready_jobs(plan, state):
     rows = []
     for position, job in enumerate(plan["jobs"]):
         record = state["jobs"][job["id"]]
-        if record["state"] == "pending" and all(state["jobs"][d]["state"] == "completed" for d in job.get("dependencies", [])):
+        if (record["state"] == "pending" and
+                (not job.get("quality_gate") or record.get("quality_gate", {}).get("passed") is True) and
+                all(state["jobs"][d]["state"] == "completed" for d in job.get("dependencies", []))):
             # The longest mandatory run starts first; bounded aging preserves fairness.
             rows.append((0 if job.get("a2_run_id") == "B-CAM3" else 1,
                          0 if job["kind"] == "train" else 1,
                          -int(job.get("priority", 0)), -int(job.get("estimated_seconds", 0)), position, job))
     return [r[-1] for r in sorted(rows, key=lambda row: row[:-1])]
+
+
+def b1_plan_config_hash(plan):
+    """Scientific plan binding with config serialization digests excluded.
+
+    The controller grant separately binds digest(the complete final plan).
+    Config YAML embeds this stable value, avoiding a hash self-reference.
+    """
+    value = {k: v for k, v in plan.items() if k != "config_plan_hash"}
+    value["jobs"] = [{k: v for k, v in job.items() if k != "config_sha256"} for job in plan["jobs"]]
+    return digest(value)
+
+
+def b1_quality_gate(contract):
+    """Read-only matched new-val gate, explicitly preserving negative results."""
+    roots = {name: inside(contract[name+"_run"]) for name in ("baseline", "teacher")}
+    runs = {name: read_json(path / "run.json") for name, path in roots.items()}
+    hashes, metrics = {}, {}
+    for name, run in runs.items():
+        if run.get("state") != "completed" or run.get("formal_complete") is not True:
+            raise ValueError("B1 teacher gate requires completed formal parents")
+        path = roots[name] / "best.pt"
+        hashes[name] = file_hash(path)
+        if hashes[name] != run.get("best_checkpoint_hash"):
+            raise ValueError("B1 quality gate checkpoint publication mismatch")
+        metrics[name] = run.get("best_validation") or {}
+    a, b = metrics["baseline"], metrics["teacher"]
+    coverage = a.get("val/gate_coverage_hash")
+    if not coverage or coverage != b.get("val/gate_coverage_hash"):
+        raise ValueError("B1 gate requires exact same >=2-view physical-frame support")
+    key = "val/gate/pose_local23_count"
+    if type(a.get(key)) is not int or a[key] <= 0 or a[key] != b.get(key):
+        raise ValueError("B1 quality gate support/count mismatch: pose_local23")
+    def metric(values, key):
+        value = values.get("val/gate/"+key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError("B1 gate missing/nonfinite "+key)
+        return value
+    pose_base, pose_teacher = metric(a, "pose_local23"), metric(b, "pose_local23")
+    checks = {"pose_gain": pose_base > 0 and pose_teacher <= pose_base*(1-contract["pose_min_gain"])}
+    pressure_error = None
+    try:
+        for name in ("pressure_rmse", "total_rmse", "active_rmse", "highload_rmse", "peak_mae"):
+            key = "val/gate/"+name+"_count"
+            if type(a.get(key)) is not int or a[key] <= 0 or a[key] != b.get(key):
+                raise ValueError("B1 quality gate support/count mismatch: "+name)
+        pressure_base, pressure_teacher = metric(a, "pressure_rmse"), metric(b, "pressure_rmse")
+        checks["pressure_gain"] = pressure_base > 0 and pressure_teacher <= pressure_base*(1-contract["pressure_min_gain"])
+        for key in ("total_rmse", "active_rmse", "highload_rmse", "peak_mae"):
+            checks[key] = metric(b, key) <= metric(a, key)*(1+contract["tail_max_relative_degradation"])
+        checks["contact_f1"] = metric(b, "contact_f1") >= metric(a, "contact_f1")-contract["contact_max_absolute_degradation"]
+    except ValueError as exc:
+        pressure_error = str(exc)
+        checks["pressure_evidence_complete"] = False
+    pose = checks["pose_gain"]
+    pressure = all(checks[key] for key in checks if key != "pose_gain")
+    passed = pose and (pressure or not contract["require_pressure"])
+    return {"schema": "anysole.b1.teacher-quality.v1", "passed": passed, "pose_eligible": pose,
+            "pressure_eligible": pressure, "checks": checks, "contract": contract,
+            "checkpoint_sha256": hashes, "coverage_sha256": coverage,
+            "baseline_metrics": a, "teacher_metrics": b,
+            "pressure_evidence_error": pressure_error,
+            "reason": None if passed else "teacher_pose_advantage_absent" if not pose else "teacher_pressure_quality_gate_failed",
+            "interpretation": "predeclared pragmatic margin; not statistical proof", "evaluated_unix": time.time()}
 
 
 def admission(job, gpu, active, resource, host, devices, *, owned_pids=(), cap_overrides=None):
@@ -426,6 +567,26 @@ class Controller:
     def effective_plan(self):
         return {**self.plan, "jobs": self.all_jobs()}
 
+    def evaluate_quality_gates(self):
+        for job in self.all_jobs():
+            record = self.state["jobs"][job["id"]]
+            contract = job.get("quality_gate")
+            if not contract or record["state"] != "pending" or record.get("quality_gate"):
+                continue
+            if not all(self.state["jobs"][key]["state"] == "completed" for key in job.get("dependencies", [])):
+                continue
+            try:
+                receipt = b1_quality_gate(contract)
+            except (OSError, ValueError, KeyError) as exc:
+                receipt = {"schema": "anysole.b1.teacher-quality.v1", "passed": False,
+                           "reason": "quality_gate_evidence_error: "+str(exc), "evaluated_unix": time.time()}
+            atomic_json(self.root / "quality_gates" / (job["id"]+".json"), receipt)
+            record["quality_gate"] = receipt
+            if receipt["passed"] is not True:
+                record.update(state="blocked", scientific_ineligible=True, reason=receipt["reason"])
+            self.state["events"].append({"event": "scientific_quality_gate", "job_id": job["id"],
+                                         "passed": receipt["passed"], "reason": receipt["reason"], "unix_time": time.time()})
+
     def publish_checkpoints(self):
         for parent in self.plan["jobs"]:
             if parent["kind"] != "train" or self.state["jobs"][parent["id"]]["state"] not in ("running", "completed"):
@@ -502,7 +663,8 @@ class Controller:
         attempt_dir = self.root / "attempts" / job["id"] / str(number)
         attempt_dir.mkdir(parents=True, exist_ok=False)
         spec = {"schema": "anysole.a2.lease.v1", "job": job, "gpu": gpu, "attempt": number, "directory": str(attempt_dir),
-                "plan_sha256": digest(self.plan), "resource_sha256": digest(self.resource)}
+                "plan_sha256": digest(self.plan), "resource_sha256": digest(self.resource),
+                "config_plan_hash": self.plan.get("config_plan_hash")}
         if number:
             if not job.get("resume_argv"):
                 raise ValueError("recovery requires explicit unchanged-budget resume_argv")
@@ -515,6 +677,9 @@ class Controller:
         record["state"] = "launching"
         self.save()  # Reservation survives a controller crash during Popen/bind.
         env = dict(os.environ, TMPDIR=str(attempt_dir / "tmp"), PYTHONDONTWRITEBYTECODE="1")
+        threads = str(self.resource["profiles"][job["load_class"]]["cpu_threads"])
+        env.update(OMP_NUM_THREADS=threads, MKL_NUM_THREADS=threads, OPENBLAS_NUM_THREADS=threads,
+                   NUMEXPR_NUM_THREADS=threads)
         Path(env["TMPDIR"]).mkdir()
         env["CUDA_VISIBLE_DEVICES"] = "" if gpu is None else str(gpu)
         env["A2_RECOVERY_NOTE"] = spec.get("recovery_note", "")
@@ -602,6 +767,7 @@ class Controller:
 
     def tick(self, *, host=None, devices=None):
         self.reconcile()
+        self.evaluate_quality_gates()
         self.publish_checkpoints()
         host = host or host_snapshot(self.root)
         host["swap_growth_bytes"] = max(0, host["swap_used"] - self.last_swap) if self.last_swap is not None else 0

@@ -1002,7 +1002,7 @@ def aggregate_visual_windows(windows):
     """
     groups = {}
     truth_fields = ("motion_valid", "pressure_valid", "gt_joints", "gt_pressure",
-                    "gt_pose6d", "gt_root", "gt_betas")
+                    "gt_pose6d", "gt_root", "gt_betas", "teacher_eligible")
     for window in windows:
         key = (str(window["recording_id"]), int(window["camera_id"]))
         group = groups.setdefault(key, {"rows": {}, "edges": {}, "label_edges": {},
@@ -1062,6 +1062,9 @@ def aggregate_visual_windows(windows):
                   "rotation": np.full((len(ids),24,3,3), np.nan),
                   "pressure": np.full((len(ids),96), np.nan), "velocity": np.full((len(ids),3), np.nan)}
         for name in ("source_frame_id", "source_time_s", "reuse", "time_residual_ms", *truth_fields):
+            if name == "teacher_eligible" and any(name in r for r in rows):
+                series[name] = np.asarray([r.get(name, False) for r in rows], bool)
+                continue
             if all(name in r for r in rows):
                 series[name] = np.stack([r[name] for r in rows])
         if "gt_betas" in series:
@@ -1191,7 +1194,19 @@ def collect_visual_windows(model, dataset, device, *, cameras=(1,2,3,4), recordi
                 predictions = None
                 if len(active):
                     g,c = active.unbind(1)
-                    predictions = model.forward_visual(visual["V_feat"][g,c],visual["view_valid"][g,c],visual["target_time_s"][g])
+                    b1 = getattr(model, "effective_config", {}).get("b1_version") is not None
+                    teacher = b1 and getattr(model, "effective_config", {}).get("b1_role") == "teacher"
+                    if teacher:
+                        from anysole.utils.b1_training import predictions_to_world
+                        fused = model.forward_multiview(visual["V_feat"], visual["view_valid"],
+                            visual["target_time_s"], visual["camera_geometry"])
+                        world = predictions_to_world(fused, visual["reference_R_cw"])
+                        predictions = {key: world[key][g] for key in ("x0_hat", "pressure_hat", "v_hat")}
+                    else:
+                        predictions = model.forward_visual(visual["V_feat"][g,c],visual["view_valid"][g,c],visual["target_time_s"][g])
+                        if b1:
+                            from anysole.utils.b1_training import predictions_to_world
+                            predictions = predictions_to_world(predictions, visual["camera_R_cw"][g,c])
                     rotation = _array(rot6d_to_rotmat(predictions["x0_hat"].float().reshape(len(active),-1,24,6)))
                     flat_index = {int(slot):flat for flat,(_,slot) in enumerate(active.tolist())}
                 else:
@@ -1213,6 +1228,8 @@ def collect_visual_windows(model, dataset, device, *, cameras=(1,2,3,4), recordi
                     for name in ("source_frame_id","source_time_s","reuse","time_residual_ms"):
                         if name in meta:
                             window[name] = _array(meta[name][0,c])
+                    if getattr(model, "effective_config", {}).get("b1_version") is not None:
+                        window["teacher_eligible"] = _array(visual["view_valid"][0].sum(0) >= 2)
                     flat = flat_index.get(c)
                     if flat is None:
                         window.update(rotation=np.zeros((length,24,3,3)),pressure=np.zeros((length,96)),velocity=np.zeros((length,3)))
@@ -1266,7 +1283,11 @@ def evaluate_visual_dataset(model,dataset,config,device,*,offsets=None):
     if not any(np.asarray(w["valid"]).any() for w in windows):
         raise ValueError("empty validation outputs")
     offsets = offsets if offsets is not None else beta_zero_visual_offsets(config["smpl_model_path"])
-    result = visual_selection_metrics(aggregate_visual_windows(windows), offsets, truth)
+    series = aggregate_visual_windows(windows)
+    result = visual_selection_metrics(series, offsets, truth)
+    if config.get("b1_version") is not None:
+        from anysole.utils.b1_training import validation_diagnostics
+        result.update(validation_diagnostics(series, config))
     if not result["val/motion_frames"] or not result["val/pressure_cells"]:
         raise ValueError("validation has no common motion/pressure supervision")
     return result,plot

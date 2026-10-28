@@ -5,6 +5,9 @@ import math
 
 A2_VERSION = "anysole.a2.v1"
 A3_VERSION = "anysole.a3.v1"
+B1_VERSION = "anysole.b1.v1"
+B1_RUNS = ("B0", "Teacher", "B0-Continue", "A-Pressure", "B-Pose",
+           "B-Pressure-HF", "B-Pressure-ALL", "B-Load-HF", "B-Load-ALL")
 A2_HEADS = ("time_pe", "capacity_time_pe", "query_direct", "query_nonnegative", "query_factorized")
 # run: (base experiment, head, effective pose peak, pressure peak, pair route, supervised route)
 A2_RUNS = {
@@ -74,6 +77,9 @@ def _finite_array(config, key, length, *, positive=False, probability=False):
 
 
 def validate_a2_config(config, *, formal=False):
+    if config.get("b1_version") is not None:
+        validate_b1_config(config, formal=formal)
+        return
     if not is_a2(config):
         return
     a3 = config["a2_version"] == A3_VERSION
@@ -201,3 +207,100 @@ def validate_a2_config(config, *, formal=False):
             raise ValueError("A2 preserves frozen historical joint selection references")
         if config.get("reference_epochs") != 740 or config.get("n_cam3_train_windows") != 1765:
             raise ValueError("A2 reference budget requires audited 1765 cam3 windows/740 epochs")
+
+
+def validate_b1_config(config, *, formal=False):
+    """Separate B1 scientific identity; A3 is reused only for architecture."""
+    if config.get("b1_version") != B1_VERSION or config.get("a2_version") != A3_VERSION:
+        raise ValueError("B1 requires explicit B1 and reused A3 architecture versions")
+    if config.get("a2_run_id") is not None:
+        raise ValueError("B1 cannot impersonate an A3 run ID")
+    run = config.get("b1_run_id")
+    if run not in B1_RUNS or config.get("b1_role") != (
+            "teacher" if run == "Teacher" else "baseline" if run == "B0" else "student"):
+        raise ValueError("B1 run/role mismatch")
+    fixed = {
+        "schema_version": "view_consistency.v1", "protocol": "anysole.b.cam3_holdout.v1",
+        "model_name": "visual", "visual_structure_version": "visual_v1", "strict_visual": True,
+        "config_probs": [0., 1., 0.], "pressure_head": "query_factorized",
+        "query_memory": "fusion_tactile_slice", "query_layers": 1, "query_heads": 8,
+        "query_hidden": 128, "d_model": 256, "tw": 20, "window_length": 20,
+        "pressure_time_pe": "before_fusion", "time_pe_scale": 40.,
+        "train_cameras": [1, 2, 4], "validation_cameras": [1, 2, 4],
+        "teacher_cameras": [1, 2, 4], "teacher_reference_camera": 1,
+        "student_output_frame": "camera_relative_origin", "teacher_output_frame": "camera1_relative_origin",
+        "supervised_pressure_route": "all", "teacher_supervised_pressure_route": "all",
+        "pressure_pair_route": "HF", "budget_mode": "b1", "pair_shuffle": False,
+        "mv_pose_weight": 0., "mv_pressure_weight": 1.,
+        "selection_motion_weight": .8, "selection_pressure_weight": .2,
+        "selection_rule": "pareto_weighted", "selection_tie_break": ["motion", "pressure", "earlier_successful_update"],
+        "generate_contact_cache": False, "horizontal_flip": False, "time_stretch": False,
+        "mix_occlusion_cache": False, "num_workers": 0, "hrnet_frozen": True,
+        "lambda_pose": 3., "lambda_traj": 1., "lambda_trec": .1, "lambda_contact": .01,
+        "lr": 1e-4, "lr_schedule": "constant", "kd_ramp_frac": .1,
+        "wandb_mode": "offline", "wandb_entity": "foundary-f-beijing-institute-of-technology",
+        "wandb_project": "Anysole-B1", "save_initial_checkpoint": True,
+    }
+    for key, expected in fixed.items():
+        if config.get(key) != expected:
+            raise ValueError(f"B1 requires {key}={expected!r}")
+    if type(config.get("seed")) is not int or config["seed"] not in (1, 2, 3):
+        raise ValueError("B1 requires seed1/2/3")
+    if config.get("a2_head_seed") != config["seed"] or config.get("stage") not in ("pilot", "formal"):
+        raise ValueError("B1 head seed/stage mismatch")
+    if config.get("experiment") != ("press_pair" if run == "A-Pressure" else "base_pool"):
+        raise ValueError("B1 experiment adapter mismatch")
+    if float(config.get("lambda_mv", -1)) != (.2 if run == "A-Pressure" else 0.):
+        raise ValueError("only A-Pressure enables B1 pressure pair=.2")
+    kd = run.startswith("B-")
+    expected = {"kd_pose_local23": .2 if kd else 0., "kd_pressure": .02 if run.startswith("B-Pressure-") else 0.,
+                "kd_total": .02 if run.startswith("B-Load-") else 0.,
+                "kd_allocation": .01 if run.startswith("B-Load-") else 0.,
+                "kd_contact": .005 if run.startswith("B-Load-") else 0.}
+    for key, value in expected.items():
+        if float(config.get(key, -1)) != value:
+            raise ValueError(f"B1 {run} requires {key}={value}")
+    route = "all" if run.endswith("-ALL") else "HF"
+    if config.get("pressure_kd_route") != route or config.get("kd_quality_mode") != "valid_only":
+        raise ValueError("B1 pressure KD route/quality mode mismatch")
+    for key in ("kd_root", "kd_velocity", "kd_body_latent", "kd_load_latent"):
+        if float(config.get(key, 0)) != 0:
+            raise ValueError("B1 does not implement trajectory or latent KD")
+    for key, length in (("pressure_cell_mean", 96), ("pressure_contact_threshold", 2),
+                        ("pressure_contact_pos_weight", 2), ("pressure_log_total_scale", 2)):
+        _finite_array(config, key, length, positive=True)
+    _finite_array(config, "pressure_contact_rate", 2, probability=True)
+    if not config.get("pressure_train_statistics_hash"):
+        raise ValueError("B1 requires new train-only pressure statistics")
+    for key in ("target_updates", "effective_batch_rgb_windows", "microbatch_rgb_windows",
+                "validation_every_updates", "checkpoint_every_updates"):
+        if type(config.get(key)) is not int or config[key] <= 0:
+            raise ValueError(f"B1 requires positive integer {key}")
+    batch, micro = config["effective_batch_rgb_windows"], config["microbatch_rgb_windows"]
+    if batch != 252 or micro < 3 or micro > batch or micro % 3:
+        raise ValueError("B1 uses RGB252 and complete-group microbatches divisible by3")
+    if config.get("target_rgb_windows") != config["target_updates"] * batch:
+        raise ValueError("B1 nominal update budget mismatch")
+    if config.get("b1_role") == "teacher" and config.get("teacher_effective_batch_groups") != 84:
+        raise ValueError("B1 teacher uses84 physical groups/update and counts actual RGB views")
+    if formal:
+        if config["target_updates"] != (20720 if run in ("B0", "Teacher") else 10360):
+            raise ValueError("B1 formal stage budget mismatch")
+        if config.get("plan_frozen") is not True or config.get("resource_frozen") is not True:
+            raise ValueError("B1 formal plan/resources must be frozen")
+        for key in ("manifest_hash", "split_hash", "stats_hash", "stats_file_hash", "cache_index_hash",
+                    "frontend_hash", "frontend_runtime_hash", "source_hash", "structure_hash", "plan_hash",
+                    "selection_coverage_hash", "train_sample_keys_hash", "pressure_train_statistics_hash"):
+            value = config.get(key)
+            if not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+                raise ValueError(f"B1 unresolved or invalid {key}")
+        for key in ("selection_m_ref", "selection_p_ref"):
+            if not isinstance(config.get(key), (float, int)) or not 0 < config[key] < math.inf:
+                raise ValueError("B1 needs new-val selection references")
+        for key in ("max_steps", "limit_sessions", "max_batches", "smoke_steps", "stop_after_updates", "pilot_train_sample_keys"):
+            if config.get(key) is not None:
+                raise ValueError("B1 formal cannot truncate training")
+        if run != "B0" and not config.get("baseline_checkpoint_hash"):
+            raise ValueError("B1 continuation requires same-seed B0 checkpoint")
+        if kd and not config.get("teacher_checkpoint_hash"):
+            raise ValueError("B1 KD requires a frozen teacher checkpoint")

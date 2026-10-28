@@ -417,6 +417,10 @@ def validate_view_config(config: dict, *, formal: bool = False) -> None:
     P1 permits unresolved measured values in the template. P2's formal entry
     must call this with ``formal=True`` after the plan has been frozen.
     """
+    if config.get("b1_version") is not None:
+        from anysole.utils.a2_config import validate_b1_config
+        validate_b1_config(config, formal=formal)
+        return
     if config.get("schema_version") != VIEW_SCHEMA_VERSION:
         raise ValueError("unsupported view-consistency config schema")
     if config.get("model_name") != "visual":

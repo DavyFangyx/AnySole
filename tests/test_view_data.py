@@ -436,3 +436,118 @@ def test_single_writer_default_index_remains_compatible(tmp_path,monkeypatch):
     digest=_hash(first['index'])
     second=frontend.extract_grouped(config,device=torch.device('cpu'),batch_size=8)
     assert _hash(second['index'])==digest and json.loads((tmp_path/'state.json').read_text())['attempt_sources']==0
+
+
+def _b1_imported(tmp_path, monkeypatch):
+    root, manifest, _ = _imported(tmp_path)
+    split = tmp_path / 'splits.csv'
+    split.write_text('train,val,test\nS5011,S13011,\n')
+    from scipy.spatial.transform import Rotation
+    a = Rotation.from_euler('y', 90, degrees=True).as_matrix()
+    cameras = {f'cam{c}': {'R': Rotation.from_euler('y', angle, degrees=True).as_matrix().tolist(),
+                't': [float(c * 10), 5., 400.], 'K': [[1000., 0., 800.], [0., 1000., 600.], [0., 0., 1.]]}
+               for c, angle in ((1, 0), (2, -90), (4, 30))}
+    calibration = {'pixel_coordinates': 'raw_distorted', 'image_size_px': [1600, 1200],
+                   'cameras': cameras, 'mocap_raw_to_checkerboard_world':
+                   {'input_scale': .1, 'R': a.tolist(), 't': [10., 20., 30.]}}
+    (root / '20260101/20260101.json').write_text(json.dumps(calibration))
+    metadata = tmp_path / 'pressure'
+    alignment = json.loads((metadata / 'alignment_audit.json').read_text())
+    for recording in alignment:
+        for camera in recording['cameras']:
+            camera['pressure_epoch_wall_s'] = 9999.99
+    (metadata / 'alignment_audit.json').write_text(json.dumps(alignment))
+    original = adapter.read_rgb_sources
+    accessed = []
+    def allowed_sources(directory, camera):
+        assert camera in (1, 2, 4)
+        accessed.append(camera)
+        return original(directory, camera)
+    monkeypatch.setattr(adapter, 'read_rgb_sources', allowed_sources)
+    config = {'b1_version': 'anysole.b1.v1', 'dataset_root': str(root), 'split_csv': str(split),
+              'pressure_metadata_root': str(metadata), 'clock_anchor_camera': 1}
+    meta = adapter.build_grouped_manifest(config, manifest, overwrite=True)
+    return root, manifest, meta, config, calibration, accessed
+
+
+def test_b1_manifest_filters_cam3_before_io_and_enforces_disjoint_roles(tmp_path, monkeypatch):
+    root, manifest, meta, config, _, accessed = _b1_imported(tmp_path, monkeypatch)
+    records, _ = adapter.load_grouped_manifest(manifest)
+    assert accessed == [1, 2, 4] * 2
+    assert meta['original_split_counts'] == {'train': 1, 'val': 1, 'test': 0}
+    assert all(len(r['split_roles']) == 1 and r['eligible'] for r in records)
+    assert all(r['clock_mapping']['anchor_camera'] == 1 for r in records)
+    assert all(not r['clock_mapping']['cam3_image_or_feature_access'] for r in records)
+    assert all([v['camera_id'] for v in r['views']] == [1, 2, 4] for r in records)
+    assert adapter.grouped_window_inventory(manifest)['splits']['train']['cam3_windows'] == 0
+    (tmp_path / 'splits.csv').write_text('train,val,test\nS5011,S13011,S13011\n')
+    with pytest.raises(ValueError, match='disjoint'):
+        adapter.build_grouped_manifest(config, root / 'bad.jsonl')
+
+
+def test_b1_composed_calibration_roundtrip_and_static_camera_collation(tmp_path, monkeypatch):
+    root, manifest, meta, _, cal, _ = _b1_imported(tmp_path, monkeypatch)
+    from anysole.utils.geometry import calibrated_camera_geometry_np
+    from anysole.data.rgb_smpl.coordinates import gt_smpl_to_checkerboard, checkerboard_to_camera
+    geometry = calibrated_camera_geometry_np(cal)
+    points = np.asarray([[.1, .2, .3], [-.4, 1., 2.]])
+    for i, camera in enumerate((1, 2, 4)):
+        rotation, translation = geometry['camera_R_cw'][i], geometry['camera_t_cw_m'][i]
+        actual = points @ rotation.T + translation
+        expected = checkerboard_to_camera(gt_smpl_to_checkerboard(points, cal), cal['cameras'][f'cam{camera}'])
+        np.testing.assert_allclose(actual, expected, atol=5e-7)
+        np.testing.assert_allclose((actual - translation) @ rotation, points, atol=5e-7)
+    np.testing.assert_allclose(geometry['camera_geometry'][0, :9].reshape(3, 3), np.eye(3), atol=1e-7)
+    np.testing.assert_allclose(geometry['camera_geometry'][0, 9:12], 0, atol=1e-7)
+    cache = _cache(tmp_path, manifest, cameras=(1, 2, 4))
+    index = json.loads((cache / 'index.json').read_text())
+    index.update(manifest_sha256=meta['manifest_sha256'], complete=True)
+    (cache / 'index.json').write_text(json.dumps(index))
+    monkeypatch.setattr('anysole.data.smpl_io._rest_joints', _rest)
+    one = GroupedViewDataset(manifest, root, cache, tmp_path/'unused.pkl', cameras=(1,))[0]
+    all_views = GroupedViewDataset(manifest, root, cache, tmp_path/'unused.pkl', cameras=(1,2,4))[0]
+    batch = grouped_collate([one, all_views])
+    assert batch['visual']['camera_R_cw'].shape == (2,3,3,3)
+    assert batch['visual']['camera_geometry'].shape == (2,3,16)
+    assert batch['visual']['reference_R_cw'].shape == (2,3,3)
+    # Group truth stays in world coordinates; root rotation is still identity.
+    np.testing.assert_array_equal(one['labels']['pose6d'][0,:6], [1,0,0,0,1,0])
+    torch.testing.assert_close(one['labels']['pressure'], all_views['labels']['pressure'])
+    with pytest.raises(ValueError, match='cam3'):
+        GroupedViewDataset(manifest, root, cache, tmp_path/'unused.pkl', cameras=(3,))
+    cal['cameras']['cam1']['R'] = np.diag([-1.,1.,1.]).tolist()
+    with pytest.raises(ValueError, match='right-handed'):
+        calibrated_camera_geometry_np(cal)
+
+
+def test_b1_statistics_fit_camera_root_and_train_only_pressure(tmp_path, monkeypatch):
+    root, manifest, _, _, calibration, _ = _b1_imported(tmp_path, monkeypatch)
+    records, meta = adapter.load_grouped_manifest(manifest)
+    record = next(r for r in records if r['split_roles'] == ['train'])
+    path = root / record['pressure']['path']
+    with np.load(path, allow_pickle=False) as archive:
+        arrays = {key: archive[key] for key in archive.files}
+    for key in ('left48', 'right48'):
+        arrays[key] = np.zeros((30, 48), np.float32)
+        arrays[key][15:] = 1023.
+    np.savez(path, **arrays)
+    record['pressure']['sha256'] = _hash(path)
+    manifest.write_text(''.join(json.dumps(r) + '\n' for r in records))
+    meta['manifest_sha256'] = _hash(manifest)
+    manifest.with_suffix('.meta.json').write_text(json.dumps(meta))
+    model = tmp_path / 'model.pkl'
+    model.write_bytes(b'explicit model fixture')
+    monkeypatch.setattr('anysole.data.smpl_io._rest_joints', _rest)
+    first = adapter.fit_grouped_stats(manifest, root, model)
+    from anysole.utils.geometry import calibrated_camera_geometry_np, rotmat_to_6d_np
+    rotations = calibrated_camera_geometry_np(calibration)['camera_R_cw']
+    np.testing.assert_allclose(first['pose_mean'][:6], rotmat_to_6d_np(rotations).mean(0), atol=1e-7)
+    assert first['pose_count'] == 90 and first['velocity_count'] == 87
+    assert first['statistics_cameras'] == [1, 2, 4]
+    pressure = first['pressure_train_statistics']
+    assert pressure['recordings'] == ['20260101/S5011']
+    assert all(0 < p < 1 for p in pressure['contact_rate'])
+    assert all(p > 0 for p in pressure['pressure_log_total_scale'])
+    (root / '20260101/Mocap/S13011/motion_neutral_smpl.npz').write_bytes(b'heldout unavailable')
+    (root / '20260101/Tactile/S13011/pressure_48.npz').write_bytes(b'heldout unavailable')
+    assert adapter.fit_grouped_stats(manifest, root, model) == first

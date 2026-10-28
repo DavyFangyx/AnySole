@@ -43,6 +43,9 @@ def record_exposure(state, selected, dataset, keys):
 
 
 def validate_exposure(state, config, *, terminal=False, keys=None, weights=None):
+    if config.get("b1_version") is not None:
+        from anysole.utils.b1_training import validate_exposure as validate_b1_exposure
+        return validate_b1_exposure(state, config, terminal=terminal, keys=keys, weights=weights)
     ledger = state.get("exposure_ledger", {})
     if sum(ledger.get("per_camera", {}).values()) != state["rgb_windows"] or sum(ledger.get("per_key", {}).values()) != state["physical_group_windows"]:
         raise ValueError("checkpoint exposure ledger disagrees with successful budget")

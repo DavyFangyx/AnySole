@@ -190,6 +190,17 @@ class AnySoleModelV2(nn.Module):
         The only cross-view interaction belongs in the output loss, never in
         this function. Invalid RGB is removed before any learned operation.
         """
+        encoded = self.encode_visual(V_feat, frame_valid, timestamps)
+        return self.decode_memory(encoded["F"], frame_valid, timestamps,
+                                  v_tok=encoded["v_tok"], t_tok=encoded["t_tok"])
+
+    def encode_visual(self, V_feat, frame_valid, timestamps):
+        """Return a single view's ordered V/Q memory without running heads.
+
+        This is exactly the encoder/fusion portion of ``forward_visual``.
+        Teacher callers flatten and filter empty views before calling it;
+        there is no camera or supervision input to this shared encoder.
+        """
         if self.v_input != "hrnet" or self.f2_repr or self.tactile_direct or self.residual_t:
             raise ValueError("strict visual forward requires the non-F2 HRNet regression model")
         if (V_feat.ndim != 3 or V_feat.shape[1:] != (self.tw, V_FEAT_DIM)
@@ -224,6 +235,26 @@ class AnySoleModelV2(nn.Module):
         padding = memory_padding_mask if bool(memory_padding_mask.any()) else None
         fused = self.fusion(v_tok, t_tok, memory_padding_mask=padding)
         fused = torch.where(memory_padding_mask.unsqueeze(-1), torch.zeros_like(fused), fused)
+        return {"F": fused, "v_tok": v_tok, "t_tok": t_tok,
+                "frame_valid": frame_valid, "memory_padding_mask": memory_padding_mask}
+
+    def decode_memory(self, F, frame_valid, timestamps, v_tok=None, t_tok=None):
+        """Decode ordered ``[V-source T, Q-source T]`` memory once per row.
+
+        Every row must contain a valid frame. Teachers filter empty groups
+        rather than introducing a biased dummy key into an attention layer.
+        """
+        if F.ndim != 3 or F.shape[1:] != (2 * self.tw, self.d):
+            raise ValueError("F must be [N,2*T,d] ordered visual/query memory")
+        if frame_valid.shape != (F.shape[0], self.tw) or frame_valid.dtype != torch.bool:
+            raise ValueError("frame_valid must be bool [N,T]")
+        if not F.shape[0] or not bool(frame_valid.any(-1).all()):
+            raise ValueError("filter empty/all-invalid rows before decode_memory")
+        if timestamps.shape != frame_valid.shape:
+            raise ValueError("timestamps must be [N,T]")
+        fused = F
+        memory_padding_mask = torch.cat([~frame_valid, ~frame_valid], dim=1)
+        padding = memory_padding_mask if bool(memory_padding_mask.any()) else None
         x0_hat = self.pose_head(F=fused, frame_valid=frame_valid,
                                  memory_padding_mask=padding)
         v_hat, trans_hat = self.traj_head(fused, frame_valid=frame_valid, timestamps=timestamps)

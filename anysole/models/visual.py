@@ -28,6 +28,16 @@ def effective_config(config: dict) -> dict:
     state. Operational fields do not affect this architecture-only hash.
     """
     a2 = is_a2(config)
+    b1 = config.get("b1_version") is not None
+    if b1 and config["b1_version"] != "anysole.b1.v1":
+        raise ValueError("unsupported b1_version")
+    if not b1 and "b1_role" in config:
+        raise ValueError("b1_role requires explicit b1_version")
+    if b1 and (config.get("b1_role") not in ("baseline", "teacher", "student")
+               or config.get("a2_version") != A3_VERSION
+               or config.get("pressure_head") != "query_factorized"
+               or config.get("query_memory") != "fusion_tactile_slice"):
+        raise ValueError("B1 requires an explicit role and the A3 T20 Q-FACT architecture")
     if config.get("a2_version") == A3_VERSION and config.get("pressure_head") != "query_factorized":
         raise ValueError("A3 requires Q-FACT")
     if config.get("pressure_head") not in (("legacy", "time_pe") if not a2 else A2_HEADS):
@@ -58,6 +68,18 @@ def effective_config(config: dict) -> dict:
                             output_foot_bias=config["pressure_head"] in ("query_nonnegative", "query_factorized"))
     if not 0.0 <= architecture["dropout"] < 1.0:
         raise ValueError("dropout must be in [0,1)")
+    if b1:
+        architecture.update(b1_version=config["b1_version"], b1_role=config["b1_role"])
+        if config["b1_role"] == "teacher":
+            frozen = {"teacher_reference_camera": 1, "teacher_cross_view_layers": 1,
+                      "teacher_refinement_layers": 1, "teacher_geometry_dim": 16}
+            for key, expected in frozen.items():
+                if config.get(key, expected) != expected:
+                    raise ValueError("B1 teacher requires %s=%r" % (key, expected))
+            view_dropout = config.get("teacher_view_dropout", {"three_view_probability": .7, "min_views": 2})
+            if view_dropout != {"three_view_probability": .7, "min_views": 2}:
+                raise ValueError("B1 teacher view dropout is frozen at 70% three / 30% two")
+            architecture.update(**frozen, teacher_view_dropout=dict(view_dropout))
     digest = hashlib.sha256(json.dumps(architecture, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if config.get("structure_hash") not in (None, digest):
         raise ValueError("visual structure_hash does not match checkpoint architecture")
@@ -70,12 +92,18 @@ def build(config: dict, part_joints=None):
     if part_joints is not None:
         raise ValueError("visual uses the fixed nine-part soft assignment")
     effective = effective_config(config)
-    model = AnySoleModelV2(
+    model_class = AnySoleModelV2
+    extra = {}
+    if effective.get("b1_version") and effective.get("b1_role") == "teacher":
+        from anysole.models.multiview_teacher import AnySoleMultiviewTeacher
+        model_class = AnySoleMultiviewTeacher
+        extra["three_view_probability"] = effective["teacher_view_dropout"]["three_view_probability"]
+    model = model_class(
         d=effective["d_model"], tw=effective["tw"], nhead=effective["nhead"],
         dropout=effective["dropout"],
         pose_layers=effective["pose_layers"], pressure_head="time_pe" if effective["pressure_head"] in A2_HEADS else effective["pressure_head"],
         pressure_time_pe=effective["pressure_time_pe"], time_pe_scale=effective["time_pe_scale"],
-        **STRUCTURE,
+        **STRUCTURE, **extra,
     )
     if effective["pressure_head"] not in ("legacy", "time_pe"):
         import torch.nn as nn

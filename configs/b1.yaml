@@ -1,0 +1,35 @@
+# B1 entry. `python -m configs.tools.b1_train prepare --output ...` resolves
+# workspace-relative paths and train-only statistics; no historical hashes.
+b1_version: anysole.b1.v1
+protocol: anysole.b.cam3_holdout.v1
+base_source_commit: d9b89a5eca738855ec937a565ef9fee71454918a
+dataset_root: 1_Dataset
+manifest_path: 1_Dataset/anysole_manifest.jsonl
+split_csv: tmp/splits.csv
+feature_cache_root: AnySole/AnysoleWorkspace/model_inputs/hrnet
+stats_path: AnySole/AnysoleWorkspace/model_inputs/stats/b1_stats.json
+smpl_model_path: models/smpl/SMPL_NEUTRAL.pkl
+train_cameras: [1, 2, 4]
+validation_cameras: [1, 2, 4]
+teacher_cameras: [1, 2, 4]
+student_output_frame: camera_relative_origin
+teacher_output_frame: camera1_relative_origin
+teacher_reference_camera: 1
+train_stride: 20
+tw: 20
+window_length: 20
+pressure_head: query_factorized
+query_memory: fusion_tactile_slice
+effective_batch_rgb_windows: 252
+microbatch_rgb_windows: 84
+cpu_threads: 1
+selection_m_ref: null
+selection_p_ref: null
+selection_coverage_hash: null
+selection_motion_weight: 0.8
+selection_pressure_weight: 0.2
+validation_every_updates: 200
+checkpoint_every_updates: 200
+wandb_mode: offline
+wandb_entity: foundary-f-beijing-institute-of-technology
+wandb_project: Anysole-B1

@@ -30,6 +30,8 @@ def parameter_groups(model):
 
 
 def loss_route(name, config):
+    if name in ("kd_pressure", "kd_total", "kd_allocation", "kd_contact"):
+        return config.get("pressure_kd_route", "HF")
     if name == "pressure_pair":
         return config.get("pressure_pair_route", "all")
     if name in ("pressure", "pressure_total", "pressure_diff", "pressure_contact"):

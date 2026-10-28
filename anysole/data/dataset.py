@@ -527,6 +527,9 @@ class GroupedViewDataset(Dataset):
         self.split = split
         self.manifest_path = Path(manifest)
         all_records, self.manifest_meta = load_grouped_manifest(self.manifest_path)
+        self.b1 = self.manifest_meta.get("protocol", {}).get("b1_version") == "anysole.b1.v1"
+        if self.b1 and set(cameras) - {1, 2, 4}:
+            raise ValueError("B1 cam3 inputs are deferred until the frozen final-test preparation")
         self.records = [r for r in all_records if r["eligible"] and split in r["split_roles"]]
         self.dataset_root, self.cache_root = Path(dataset_root), Path(feature_cache_root)
         self.smpl_model_path = Path(smpl_model_path)
@@ -537,7 +540,10 @@ class GroupedViewDataset(Dataset):
         self.cache_index = json.loads(index_path.read_text())
         if self.cache_index.get("schema_version") != VIEW_CACHE_SCHEMA:
             raise ValueError("visual cache index schema mismatch")
-        self._features, self._labels = {}, {}
+        if self.b1 and (self.cache_index.get("manifest_sha256") != self.manifest_meta["manifest_sha256"] or
+                        not self.cache_index.get("complete")):
+            raise ValueError("B1 visual cache index is incomplete or bound to another manifest")
+        self._features, self._labels, self._camera_geometry = {}, {}, {}
         self.windows = []
         self.coverage = {"candidate_windows":0,"kept_windows":0,"zero_supervision_windows":0,
                          "no_valid_rgb_windows":0,
@@ -615,6 +621,18 @@ class GroupedViewDataset(Dataset):
         record = self.records[ri]
         if ri not in self._labels:
             self._labels[ri] = load_grouped_labels(record,self.dataset_root,self.smpl_model_path)
+        camera_tensors = {}
+        if self.b1:
+            from anysole.data.workspace_adapter import sha256_file
+            from anysole.utils.geometry import calibrated_camera_geometry_np
+            if ri not in self._camera_geometry:
+                path = self.dataset_root / record["calibration"]["path"]
+                if sha256_file(path) != record["calibration"]["sha256"]:
+                    raise ValueError(f"calibration changed for {record['recording_id']}")
+                self._camera_geometry[ri] = json.loads(path.read_text())
+            geometry = calibrated_camera_geometry_np(self._camera_geometry[ri], cameras)
+            camera_tensors = {key: torch.from_numpy(geometry[key]) for key in
+                              ("camera_R_cw", "camera_geometry", "reference_R_cw")}
         labels = self._labels[ri]
         t,c = end-start,len(cameras)
         views = [next(v for v in record["views"] if v["camera_id"]==cam) for cam in cameras]
@@ -641,7 +659,7 @@ class GroupedViewDataset(Dataset):
         velocity_valid = np.r_[False,np.asarray(record["motion_edges"],bool)][start:end]
         times = np.asarray(record["target_time_s"][start:end],np.float64)
         return {"visual":{"V_feat":tensor(np.stack(features)),"view_valid":tensor(np.stack(valid)),
-                           "view_edges":tensor(np.stack(edges)),"target_time_s":tensor(times)},
+                           "view_edges":tensor(np.stack(edges)),"target_time_s":tensor(times), **camera_tensors},
                 "labels":item_labels,
                 "masks":{"motion_valid":tensor(mv),
                          "pressure_valid":tensor(np.repeat(np.asarray(record["pressure"]["foot_valid"][start:end],bool),48,axis=1)),
@@ -666,6 +684,7 @@ def grouped_collate(items: list[dict]) -> dict:
     view_keys={"V_feat","view_valid","view_edges","source_frame_id","source_time_s","source_feature_row","reuse","padding","time_residual_ms"}
     edge_keys={"view_edges","motion_edges","pressure_edges"}
     static_labels={"offsets","parents","betas"}
+    static_view_keys={"camera_R_cw", "camera_geometry"}
     for section in result:
         for key in items[0][section]:
             values=[x[section][key] for x in items]
@@ -674,11 +693,13 @@ def grouped_collate(items: list[dict]) -> dict:
                 continue
             padded=[]
             for value in values:
-                if key in static_labels and section=="labels":
+                if (key in static_labels and section=="labels") or key=="reference_R_cw":
                     padded.append(value)
                     continue
                 shape=list(value.shape)
                 if key=="camera_id":
+                    shape[0]=max_c
+                elif key in static_view_keys:
                     shape[0]=max_c
                 elif key in view_keys:
                     shape[0],shape[1]=max_c,max_t-1 if key in edge_keys else max_t

@@ -15,9 +15,10 @@ if str(Path(__file__).resolve().parents[2]) not in sys.path:
 from configs.tools.a2_controller import atomic_json, file_hash, inside, read_json, require_worker_lease
 
 
-def reload_smoke(root):
+def reload_smoke(root, *, leased=True):
     """Restore every trainer state through its production loader, on leased CUDA."""
-    require_worker_lease(kind="train")
+    if leased:
+        require_worker_lease(kind="train")
     import torch
     from anysole import train
     from anysole.data.dataset import GroupedViewDataset
@@ -33,7 +34,10 @@ def reload_smoke(root):
         window_length=int(config["window_length"]), stride=int(config["train_stride"]), cameras=cameras,
         split="train", cover_tail=False)
     train.restrict_pilot_windows(dataset, config)
-    sampler = train.GroupBudgetSampler([len(w[3]) for w in dataset.windows],
+    teacher = config.get("b1_role") == "teacher"
+    if teacher:
+        dataset.windows = [w for w in dataset.windows if len(w[3]) >= 2]
+    sampler = train.GroupBudgetSampler([3 if teacher else len(w[3]) for w in dataset.windows],
         [dataset.sample_key(i) for i in range(len(dataset))], int(config["seed"]))
     model = train.get_builder("visual").build(config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))

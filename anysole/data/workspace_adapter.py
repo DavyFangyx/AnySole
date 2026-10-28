@@ -321,6 +321,13 @@ def build_grouped_manifest(config: dict, output: Path, *, overwrite: bool = Fals
         split_rows = list(csv.DictReader(handle))
     splits = {role: {r[role].strip() for r in split_rows if r.get(role, "").strip()}
               for role in ("train", "val", "test")}
+    b1 = config.get("b1_version") == "anysole.b1.v1"
+    if b1:
+        for role, members in splits.items():
+            if sum(bool(r.get(role, "").strip()) for r in split_rows) != len(members):
+                raise ValueError(f"duplicate B1 {role} recording")
+        if any(splits[a] & splits[b] for a, b in (("train", "val"), ("train", "test"), ("val", "test"))):
+            raise ValueError("B1 recording splits must be disjoint")
     if splits["train"] & (splits["val"] | splits["test"]):
         raise ValueError("historical train overlaps heldout")
     metadata_root = Path(config["pressure_metadata_root"])
@@ -338,7 +345,12 @@ def build_grouped_manifest(config: dict, output: Path, *, overwrite: bool = Fals
     tol = float(config.get("rgb_tolerance_ms", 25))
     source_gap = float(config.get("source_gap_ms", 50)) / 1000
     motion_gap = float(config.get("motion_gap_s", 1.5 / 120))
-    anchor_cam = int(config.get("clock_anchor_camera", 3))
+    anchor_cam = int(config.get("clock_anchor_camera", 1 if b1 else 3))
+    cameras = tuple(int(c) for c in config.get("manifest_cameras", (1, 2, 4) if b1 else (1, 2, 3, 4)))
+    if not cameras or len(cameras) != len(set(cameras)) or set(cameras) - {1, 2, 3, 4}:
+        raise ValueError("invalid manifest cameras")
+    if b1 and (anchor_cam != 1 or set(cameras) != {1, 2, 4}):
+        raise ValueError("B1 preparation requires cam1 clock and only cameras 1,2,4")
     records, exclusions, train_residuals = [], [], []
     all_ids = set.union(*splits.values())
     for session in sorted(sessions, key=lambda r: (r["date"], r["session"])):
@@ -381,7 +393,8 @@ def build_grouped_manifest(config: dict, output: Path, *, overwrite: bool = Fals
         if unit == "normalized_sensor_reading" and np.any((pressure[cell_mask] < 0) | (pressure[cell_mask] > 1)):
             raise ValueError(f"normalized pressure lies outside [0,1]: {skey}")
         target = float(pa["first_frame_wall_s"]) + fid / float(pa["fps"])
-        sources = {c: read_rgb_sources(rgb_root / f"camera_{c}", c) for c in (1, 2, 3, 4)}
+        # Filter before directory access: a B1 preparation never even lists cam3.
+        sources = {c: read_rgb_sources(rgb_root / f"camera_{c}", c) for c in cameras}
         csv_path = root / date / "RGB_MoCap_time_alignment" / f"{sid}.csv"
         with csv_path.open(encoding="utf-8-sig", newline="") as handle:
             anchors = list(csv.DictReader(handle))
@@ -437,6 +450,42 @@ def build_grouped_manifest(config: dict, output: Path, *, overwrite: bool = Fals
             reason.append("no_valid_rgb")
         calibration = root / date / f"{date}.json"
         cal = json.loads(calibration.read_text())
+        camera_contract = {}
+        clock_verification = {}
+        if b1:
+            from anysole.utils.geometry import calibrated_camera_geometry_np
+            calibrated_camera_geometry_np(cal, cameras)
+            # Canonical pressure labels retain their original selected grid;
+            # its absolute hardware clock is independently shared with cam1.
+            cam1_pressure = next(c for c in align[skey]["cameras"] if c["camera"] == "cam1")
+            epoch = pa.get("pressure_epoch_wall_s")
+            cam1_epoch = cam1_pressure.get("pressure_epoch_wall_s")
+            if not (epoch is not None and cam1_epoch is not None and
+                    np.isfinite([float(epoch), float(cam1_epoch)]).all() and
+                    np.isclose(float(epoch), float(cam1_epoch), rtol=0, atol=1e-7)):
+                reason.append("unverified_pressure_cam1_shared_clock")
+            visual_span = float(marks["end"]["视觉时间(s)"]) - float(marks["start"]["视觉时间(s)"])
+            clock_verification = {
+                "basis": "cam1_jpeg_absolute_wall_endpoints_to_mocap_csv",
+                "cam1_source_index_sha256": semantic_hash(sources[1]),
+                "cam1_pressure_epoch_wall_s": cam1_epoch,
+                "pressure_epoch_wall_s": epoch,
+                "csv_visual_span_residual_ms": ((w1 - w0) - visual_span) * 1000,
+                "cam1_start_vs_acquisition_csv_residual_ms":
+                    (w0 - float(cam1_pressure["first_frame_wall_s"]) -
+                     float(marks["start"]["视觉时间(s)"])) * 1000,
+                "inherited_pressure_grid": True,
+                "inherited_pressure_selected_camera": camera,
+                "cam3_image_or_feature_access": False,
+                "raw_pressure_csv_available": False,
+            }
+            camera_contract = {"b1_version": "anysole.b1.v1",
+                "camera_frame": "camera_relative_origin", "teacher_frame": "camera1_relative_origin",
+                "R_cw": "R_camera_checkerboard @ R_checkerboard_mocap",
+                "translation_m": "(R_camera_checkerboard @ t_checkerboard_mocap_cm + t_camera_cm)/100",
+                "geometry_layout": "relative_R_rowmajor9,reference_camera_center_m3,fx/W,fy/H,cx/W,cy/H",
+                "geometry_center_scale_m": 1.0, "reference_camera": 1,
+                "deferred_final_test_cameras": [3]}
         subject = session["subject"]
         records.append({"schema_version": VIEW_SCHEMA, "recording_id": f"{date}/{sid}",
             "date": date, "session_id": sid, "subject": subject, "action": sid[len(subject):-1],
@@ -454,9 +503,9 @@ def build_grouped_manifest(config: dict, output: Path, *, overwrite: bool = Fals
                 "alpha": brackets.alpha.tolist(), "valid": mv.tolist(), "source_gap_s": motion_gap},
             "clock_mapping": {"path": str(csv_path.relative_to(root)), "sha256": sha256_file(csv_path),
                 "anchor_camera": anchor_cam, "wall_start_s": w0, "wall_end_s": w1,
-                "mocap_start_s": m0, "mocap_end_s": m1, "slope": slope},
+                "mocap_start_s": m0, "mocap_end_s": m1, "slope": slope, **clock_verification},
             "calibration": {"path": str(calibration.relative_to(root)), "sha256": sha256_file(calibration),
-                            "pixel_coordinates": cal["pixel_coordinates"]},
+                            "pixel_coordinates": cal["pixel_coordinates"], **camera_contract},
             "views": views, "motion_edges": motion_edges.tolist(), "pressure_foot_edges": pressure_edges.tolist()})
     # Detect old members omitted from metadata rather than silently losing them.
     represented = {r["session_id"] for r in records + exclusions}
@@ -466,6 +515,8 @@ def build_grouped_manifest(config: dict, output: Path, *, overwrite: bool = Fals
     payload = "".join(json.dumps(r, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n" for r in records)
     manifest_hash = hashlib.sha256(payload.encode()).hexdigest()
     values = np.asarray(train_residuals)
+    if not len(values):
+        raise ValueError("no eligible train RGB clock residuals")
     meta = {"schema_version": VIEW_SCHEMA, "manifest_sha256": manifest_hash, "frozen":False,
             "producer_sha256":sha256_file(Path(__file__)),
             "split_path": str(split_path.resolve()), "split_sha256": sha256_file(split_path),
@@ -475,6 +526,9 @@ def build_grouped_manifest(config: dict, output: Path, *, overwrite: bool = Fals
             "val_test_identical": splits["val"] == splits["test"], "missing_modalities": exclusions,
             "invalid_recordings": [{"recording_id": r["recording_id"], "reasons": r["exclusion_reasons"]} for r in records if not r["eligible"]],
             "protocol": {"rgb_method": method, "clock_anchor_camera": anchor_cam,
+                         **({"b1_version": "anysole.b1.v1", "indexed_cameras": list(cameras),
+                             "cam3_index_deferred_until_final_test": True,
+                             "clock_basis": "verified_cam1_endpoints_with_inherited_absolute_pressure_grid"} if b1 else {}),
                          "rgb_tolerance_ms": tol, "source_gap_ms": source_gap*1000, "motion_gap_s": motion_gap,
                          "timestamp_tie": "smallest_numeric_frame_id; nearest_tie_earlier_time",
                          "pressure_time": "stored_selected_camera_40Hz_grid", "target_time_domain": "date_seconds_of_day",
@@ -541,18 +595,44 @@ def load_grouped_labels(record: dict, dataset_root: Path, smpl_model_path: Path)
 
 def fit_grouped_stats(manifest: Path, dataset_root: Path, smpl_model_path: Path,
                       output: Path | None = None) -> dict:
-    """Unique old-train physical frames, independent of view/window multiplicity."""
+    """Train-only moments, with B1 root/velocity in allowed camera frames."""
     records, meta = load_grouped_manifest(manifest)
+    b1 = meta.get("protocol", {}).get("b1_version") == "anysole.b1.v1"
     moments = {key: [None, None, 0] for key in ("pose", "velocity")}
-    recording_ids = []
+    recording_ids, pressure_feet, pressure_support = [], [[], []], []
     for record in records:
         if not record["eligible"] or "train" not in record["split_roles"]:
             continue
         labels = load_grouped_labels(record, dataset_root, smpl_model_path)
-        any_view = np.asarray([v["view_valid"] for v in record["views"]],bool).any(axis=0)
+        selected_views = [v for v in record["views"] if not b1 or v["camera_id"] in (1, 2, 4)]
+        any_view = np.asarray([v["view_valid"] for v in selected_views],bool).any(axis=0)
         pm = np.asarray(record["motion"]["valid"],bool) & any_view
         vm = np.r_[False,np.asarray(record["motion_edges"],bool)] & any_view
-        for name, values, mask in (("pose",labels["pose6d"],pm),("velocity",labels["velocity"],vm)):
+        samples = [(labels["pose6d"], labels["velocity"], pm, vm)]
+        if b1:
+            from anysole.utils.geometry import calibrated_camera_geometry_np, rot6d_to_rotmat_np, rotmat_to_6d_np
+            path = Path(dataset_root) / record["calibration"]["path"]
+            if sha256_file(path) != record["calibration"]["sha256"]:
+                raise ValueError("train calibration source changed")
+            rotations = calibrated_camera_geometry_np(json.loads(path.read_text()),
+                [v["camera_id"] for v in selected_views])["camera_R_cw"].astype(np.float64)
+            samples = []
+            root_rotation = rot6d_to_rotmat_np(labels["pose6d"][:, :6])
+            for rotation, view in zip(rotations, selected_views):
+                pose = labels["pose6d"].copy()
+                pose[:, :6] = rotmat_to_6d_np(np.einsum("ij,tjk->tik", rotation, root_rotation))
+                velocity = np.einsum("ij,tj->ti", rotation, labels["velocity"])
+                seen = np.asarray(view["view_valid"], bool)
+                samples.append((pose, velocity, pm & seen, vm & seen))
+            foot_mask = np.asarray(record["pressure"]["foot_valid"], bool) & any_view[:, None]
+            totals = labels["pressure"].reshape(-1, 2, 48).sum(-1).astype(np.float64)
+            for foot in range(2):
+                pressure_feet[foot].append(totals[foot_mask[:, foot], foot])
+            pressure_support.append({"recording_id": record["recording_id"],
+                                     "pressure_sha256": record["pressure"]["sha256"],
+                                     "foot_mask_sha256": hashlib.sha256(foot_mask.tobytes()).hexdigest()})
+        for name, values, mask in ((name, values, mask) for pose, vel, pmask, vmask in samples
+                                  for name, values, mask in (("pose", pose, pmask), ("velocity", vel, vmask))):
             values = values[mask].astype(np.float64)
             total, squares, count = moments[name]
             moments[name] = [values.sum(axis=0) if total is None else total+values.sum(axis=0),
@@ -563,6 +643,28 @@ def fit_grouped_stats(manifest: Path, dataset_root: Path, smpl_model_path: Path,
               "split_sha256":meta["split_sha256"], "smpl_model_sha256":sha256_file(smpl_model_path),
               "recordings":recording_ids, "frame_weighting":"unique_physical_target_frame",
               "pressure_normalizer":"clip_0_1023_div_1023"}
+    if b1:
+        from anysole.utils.a2eval_metrics import fit_train_thresholds, finalize_thresholds
+        totals = [np.concatenate(values) for values in pressure_feet]
+        threshold = [max(float(np.quantile(values, .2, method="linear")), 1e-6) for values in totals]
+        result.update({"b1_version": "anysole.b1.v1", "coordinate_frame": "camera_relative_origin",
+                       "statistics_cameras": [1, 2, 4],
+                       "frame_weighting": "unique_physical_target_camera_frame; no_window_repetition",
+                       "pressure_frame_weighting": "unique_physical_target_frame_with_any_allowed_RGB",
+                       "pressure_eval": {"policy_version": "anysole.b1.pressure-eval.q10-q20.v1",
+                           "fit_split": "train", "fitted_from_train_sha256": semantic_hash(pressure_support),
+                           "manifest_sha256": meta["manifest_sha256"], "split_sha256": meta["split_sha256"],
+                           "contact_threshold_normalized": threshold,
+                           "low_load_threshold_normalized": [float(np.quantile(v, .1, method="linear")) for v in totals],
+                           "fit_algorithm": "per-foot train sum48 NumPy linear Q0.10/Q0.20; contact floor1e-6",
+                           "physical_foot_ground_contact": False,
+                           "contact_definition": "sum48 > train Q0.20; engineering pressure activation",
+                           "threshold_units": "unweighted sum48 normalized sensor reading",
+                           "sensor_geometry_status": "N/A; trusted numeric sensor coordinates unavailable"}})
+        pressure_stats = fit_train_thresholds(records, dataset_root, result)
+        pressure_stats["pressure_log_total_scale"] = [max(float(np.std(np.log1p(v / 48.0))), 1e-3) for v in totals]
+        pressure_stats["science_config"]["pressure_log_total_scale"] = pressure_stats["pressure_log_total_scale"]
+        result["pressure_train_statistics"] = finalize_thresholds(pressure_stats)
     for name,(total,squares,count) in moments.items():
         if not count:
             raise ValueError(f"no valid old-train {name} statistics")
@@ -579,16 +681,20 @@ def fit_grouped_stats(manifest: Path, dataset_root: Path, smpl_model_path: Path,
     return result
 
 
-def grouped_window_inventory(manifest: Path, *, window_length: int = 20, stride: int = 20) -> dict:
+def grouped_window_inventory(manifest: Path, *, window_length: int = 20, stride: int = 20,
+                             cameras: tuple[int, ...] | None = None) -> dict:
     """Pre-frontend coverage; a detector failure may only reduce these counts."""
     records,meta=load_grouped_manifest(manifest)
+    if cameras is None:
+        cameras = tuple(meta.get("protocol", {}).get("indexed_cameras", (1, 2, 3, 4)))
     result={role:{"recordings":0,"group_windows":0,"cam3_windows":0,"rgb_windows":0,
                   "zero_supervision_windows":0,"tail_rows":0,"views_per_window":{}}
             for role in ("train","val","test")}
     for record in records:
         if not record["eligible"]:continue
         n=len(record["target_frame_id"])
-        views=[np.asarray(v["view_valid"],bool) for v in record["views"]]
+        selected_views = [v for v in record["views"] if v["camera_id"] in cameras]
+        views=[np.asarray(v["view_valid"],bool) for v in selected_views]
         supervised=(np.asarray(record["motion"]["valid"],bool)|np.asarray(record["pressure"]["foot_valid"],bool).any(axis=1))
         for role in record["split_roles"]:
             count=result[role];count["recordings"]+=1
@@ -602,8 +708,10 @@ def grouped_window_inventory(manifest: Path, *, window_length: int = 20, stride:
                     c=sum(active);count["group_windows"]+=1;count["rgb_windows"]+=int(c)
                     count["views_per_window"][str(int(c))]=count["views_per_window"].get(str(int(c)),0)+1
                 else:count["zero_supervision_windows"]+=1
-                count["cam3_windows"]+=int(has_truth[2])
+                count["cam3_windows"] += sum(int(keep) for keep, view in zip(has_truth, selected_views)
+                                              if view["camera_id"] == 3)
     return {"manifest_sha256":meta["manifest_sha256"],"window_length":window_length,"stride":stride,
+            "cameras": list(cameras),
             "train_tail_policy":"drop_incomplete; no_time_compression", "frontend_checked":False,"splits":result}
 
 

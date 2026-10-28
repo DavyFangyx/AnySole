@@ -16,6 +16,55 @@ from anysole.types import FPS, N_JOINTS
 FORWARD_AXIS = np.array([0.0, 0.0, 1.0], dtype=np.float64)
 
 
+def calibrated_camera_geometry_np(calibration: dict, cameras=(1, 2, 4), *,
+                                  reference_camera: int = 1) -> dict:
+    """Compose date calibration from SMPL-world metres into camera metres.
+
+    The archive's normalized mocap axes are the input axes of the recorded
+    mocap-to-checkerboard transform. Its 0.1 scale consumes millimetres and
+    produces centimetres; both recorded translations are centimetres. Thus
+    ``X_c = (B @ A) @ X_w + (B @ b + d) / 100`` for SMPL metres.
+    Geometry is relative rotation9, reference-frame camera centre in metres3,
+    and normalized intrinsic4. One metre is a fixed physical scale, never a
+    statistic fitted to validation or test cameras.
+    """
+    transform = calibration["mocap_raw_to_checkerboard_world"]
+    if not np.isclose(float(transform["input_scale"]), 0.1, rtol=0, atol=1e-12):
+        raise ValueError("unsupported mocap/checkerboard calibration units")
+    a = np.asarray(transform["R"], dtype=np.float64)
+    b = np.asarray(transform["t"], dtype=np.float64)
+    width, height = np.asarray(calibration["image_size_px"], dtype=np.float64)
+    if width <= 0 or height <= 0 or not np.isfinite([width, height]).all():
+        raise ValueError("invalid calibration image dimensions")
+    needed = tuple(dict.fromkeys((int(reference_camera), *map(int, cameras))))
+    matrices = {}
+    for camera in needed:
+        value = calibration["cameras"][f"cam{camera}"]
+        rotation = np.asarray(value["R"], dtype=np.float64) @ a
+        translation = (np.asarray(value["R"], dtype=np.float64) @ b +
+                       np.asarray(value["t"], dtype=np.float64)) / 100.0
+        intrinsic = np.asarray(value["K"], dtype=np.float64)
+        if (rotation.shape != (3, 3) or translation.shape != (3,) or
+                intrinsic.shape != (3, 3) or not np.isfinite(rotation).all() or
+                not np.isfinite(translation).all() or not np.isfinite(intrinsic).all() or
+                not np.allclose(rotation.T @ rotation, np.eye(3), rtol=0, atol=2e-6) or
+                not np.isclose(np.linalg.det(rotation), 1.0, rtol=0, atol=2e-6)):
+            raise ValueError(f"invalid right-handed camera calibration: cam{camera}")
+        matrices[camera] = (rotation, translation, -rotation.T @ translation, intrinsic)
+    reference_r, _, reference_center, _ = matrices[int(reference_camera)]
+    geometry = []
+    for camera in cameras:
+        rotation, _, center, intrinsic = matrices[int(camera)]
+        geometry.append(np.r_[(rotation @ reference_r.T).reshape(9),
+                              reference_r @ (center - reference_center),
+                              intrinsic[0, 0] / width, intrinsic[1, 1] / height,
+                              intrinsic[0, 2] / width, intrinsic[1, 2] / height])
+    return {"camera_R_cw": np.stack([matrices[int(c)][0] for c in cameras]).astype(np.float32),
+            "camera_t_cw_m": np.stack([matrices[int(c)][1] for c in cameras]).astype(np.float32),
+            "camera_geometry": np.stack(geometry).astype(np.float32),
+            "reference_R_cw": reference_r.astype(np.float32)}
+
+
 def rotmat_to_6d_np(rotmats: np.ndarray) -> np.ndarray:
     cols = np.concatenate([rotmats[..., :, 0], rotmats[..., :, 1]], axis=-1)
     return cols.astype(np.float32)
