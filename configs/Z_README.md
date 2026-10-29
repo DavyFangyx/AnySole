@@ -44,8 +44,8 @@ skip 两级（2026-10-26 用户裁定「conf 与结果一一对应」）：
   当前默认训练线的 `_s2/_s3`）
 - `--ckpt last/best`：ckpt 口径（测试层；best 映射到 `*_evalbest*` 条目——
   已注册 Cv1–7 的 `_evalbest` / `_evalbest_occ{010-050}`）
-- `--wandb` / `--checkpoint-all`：**只对训练层生效**（训练期专用开关；
-  测试层 conf 全部 eval-only，写了也不生效）
+- `--wandb` / `--checkpoint-all`：**只对训练层生效、默认 false**（训练期
+  专用开关，不写即关；测试层 conf 全部 eval-only，写了也不生效）
 - `--force`：绕过生成期 skip 并写 `FORCE=true`；`--dry-run`：只打印将写入的 conf
 
 conf 通用键（生成器写入；实验级默认在 `common.py` 的 `EXPERIMENTS` 表）：
@@ -87,11 +87,13 @@ conf 通用键（生成器写入；实验级默认在 `common.py` 的 `EXPERIMEN
 cd /data/fangyuxuan/projects/gait
 # ---- 训练层：模型训练（train + val）→ ckpt ----
 
-# 全量套餐：当前默认七个 U（statefix_smpl24 线；不默认训专家）
-python configs/z_gen/gen_full_package.py --concat-method f6_soft --seed 1 --wandb true --checkpoint-all true
+# 全量套餐：当前默认七个 U（--wandb/--checkpoint-all 默认 false，不写即关）
+python configs/z_gen/gen_full_package.py --concat-method f6_soft --seed 1
 
-# 仅 U（多种子示例：seed 1,2,3）
-python configs/z_gen/gen_u_only.py --models V7_Cv5 --concat-method f6_soft --seed 1,2,3 --wandb true --checkpoint-all true
+# 仅 U
+python configs/z_gen/gen_u_only.py --models V7_Cv5 --concat-method f6_soft --seed 1,2,3
+# --wandb true --checkpoint-all true
+# 多种子示例：--seed 1,2,3
 
 # ---- 测试层：用 ckpt 在 test 上验证评估（eval-only）----
 
@@ -166,7 +168,7 @@ E2 清晰档与 E5 四遮挡档合起来覆盖五档条件。只预览不入队�
 - 评估口径：`eval_splits=["val","test"]` 显式声明——「val 先评、test 后跑」只用于
   选点前筛查，正式统计两 split 齐出
 - 专家：S_V/S_T 固定各自 ckpt_last，不参与 U 的选点
-- conf 参数：`WANDB=true`、`CHECKPOINT_ALL=true`（训练层）
+- conf 参数：`WANDB`、`CHECKPOINT_ALL` 默认 false（训练层需要时显式 true）
 
 > 历史条目（wo05 / tw_scan 等波次实验、v7_first_round 候选线、第二轮评估线）
 > 保留在注册表中供复现直发（`gen.py <条目>`），不入上文入口清单。

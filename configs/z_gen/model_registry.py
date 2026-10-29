@@ -955,6 +955,17 @@ for _occ in ("010",):
     }
 
 # 5-fold occ010 档（2026-10-23 裁定「加」）：同 occ050 结构。
+MODELS["V5_Av1_cam3_offfix_tphys"] = {
+    **MODELS["V5_Av1_cam3_v3off"], "label": "V5-1-cam3-offfix-tphys",
+    "name": "V5_Av1_cam3_offfix_tphys",
+    "train_args": {**MODELS["V5_Av1_cam3_v3off"]["train_args"], "t_phys_v2": True}}
+MODELS["V5_Av1_cam3_offfix_d8"] = {
+    **MODELS["V5_Av1_cam3_v3off"], "label": "V5-1-cam3-offfix-d8",
+    "name": "V5_Av1_cam3_offfix_d8",
+    "train_args": {**MODELS["V5_Av1_cam3_v3off"]["train_args"],
+                   "d8_heads": True, "lambda_tcop": 0.1,
+                   "lambda_strike": 0.1, "lambda_gtcop": 0.1}}
+
 _TW_VALUES = (5, 10, 15)
 
 
@@ -1077,6 +1088,38 @@ for _suf in ("", "_drop", "_vonly", "_tonly"):
         **_b, "label": "V4-1-wo05" + _suf.replace("_", "-"),
         "name": "V4_Av1_wo05" + _suf, "config": _WO05_CONFIG,
         "train_args": {**_b["train_args"], "carrier_from": _WO05_E1_CKPT}}
+# wo05 E5 遮挡交叉评估（2026-10-24）：eval-only 条目——复用各家族 _drop 统一
+# 模型的 ckpt（name 保持 _drop 基名；which=best → ckpt_best，对齐 E5 口径与
+# canonical occ json 的 checkpoint 字段），数据根 = v1_cam3_occ{N}_wo05.yaml
+# （显式 config 键）。零重训；入队闸门 = 对应家族 _drop conf 进 done/
+# （configs/z_gen/gen.py wo05 --wave 3 按家族把控）。
+for _f in ("V3_Ev1", "V4_Av1", "V5_Av4"):
+    for _occ in ("010", "020", "030", "050"):
+        _eval_id = f"{_f}_wo05_drop_evalocc{_occ}"
+        _src = MODELS[f"{_f}_wo05_drop"]
+        MODELS[_eval_id] = {
+            **_src,
+            "label": f"{_src['label']}-evalocc{_occ}",
+            "train": False,
+            "which": "best",
+            "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml",
+        }
+
+
+# ckpt_last 重读（2026-10-24，用户裁定）：选择假象检查——V4_Av1_wo05_drop 的
+# ckpt_best 是 T 死的（val/tau0 VT 选择器在 T 的 val 边际为负时选走 T），
+# ckpt_last 门控活着（cam3 面板已有）；E5 的 occ 四档与 cam3 用 ckpt_last
+
+for _occ in ("010", "020", "030", "050"):
+    _src = MODELS["V4_Av1_wo05_drop"]
+    _rid = "V4_Av1_wo05_drop_last_evalocc" + _occ
+    MODELS[_rid] = {
+        **_src, "label": _src["label"] + "-last-evalocc" + _occ,
+        "train": False, "which": "last",
+        "config": "anysole/configs/v1_cam3_occ%s_wo05.yaml" % _occ}
+MODELS["V4_Av1_wo05_drop_last_evalcam3"] = {
+    **MODELS["V4_Av1_wo05_drop"], "label": "V4-1-wo05-drop-last-evalcam3",
+    "train": False, "which": "last", "config": _WO05_CONFIG}
 MODELS["V4_Av1_wo05_drop_last_evalcam3"] = {
     **MODELS["V4_Av1_wo05_drop"], "label": "V4-1-wo05-drop-last-evalcam3",
     "train": False, "which": "last", "config": _WO05_CONFIG}
@@ -1236,51 +1279,6 @@ for _suffix, _contact in _SMPL24_PACKAGES.items():
 
 # ---- 种子派生条目（2026-10-29 用户裁定 --seed 1,2,3 多种子；方案 A = cell id 带 _sN）----
 # seed 为 spec 顶层键（train 命令 --seed N，variant 串 sdN → ckpt 目录自动分家）。
-_SEED_BASES = ["V7_Cv%d_statefix_smpl24" % i for i in range(1, 8)]
-for _base in _SEED_BASES:
-    for _n in (2, 3):
-        MODELS["%s_s%d" % (_base, _n)] = {
-            **MODELS[_base],
-            "label": "%s-s%d" % (MODELS[_base]["label"], _n),
-            "name": MODELS[_base]["name"], "seed": _n}
-        # 统计评估 cell 派生（读 seed N 的 ckpt：name=基名、seed=_n，
-        # variant 串 sdN 自动分家；cam3 + occ 四档）
-        MODELS["%s_s%d_statistics" % (_base, _n)] = {
-            **MODELS["%s_statistics" % _base],
-            "label": "%s-s%d-statistics" % (MODELS[_base]["label"], _n),
-            "name": MODELS[_base]["name"], "seed": _n}
-        for _occ in ("010", "020", "030", "050"):
-            MODELS["%s_s%d_evalocc%s" % (_base, _n, _occ)] = {
-                **MODELS["%s_evalocc%s" % (_base, _occ)],
-                "label": "%s-s%d-evalocc%s" % (MODELS[_base]["label"], _n, _occ),
-                "name": MODELS[_base]["name"], "seed": _n}
-
-
-# ---- best 口径评估条目（2026-10-29 用户裁定 --ckpt last/best；Cv1–7）----
-# eval-only：which=best、name=基名；cam3 + occ 四档。
-_CKPT_BASES = ["V7_Cv%d_statefix_smpl24" % i for i in range(1, 8)]
-for _base in _CKPT_BASES:
-    MODELS["%s_evalbest" % _base] = {
-        **MODELS[_base], "label": MODELS[_base]["label"] + "-evalbest",
-        "name": MODELS[_base]["name"], "train": False, "which": "best"}
-    for _occ in ("010", "020", "030", "050"):
-        MODELS["%s_evalbest_occ%s" % (_base, _occ)] = {
-            **MODELS[_base], "label": "%s-evalbest-occ%s" % (MODELS[_base]["label"], _occ),
-            "name": MODELS[_base]["name"], "train": False, "which": "best",
-            "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
-    # 种子派生（--ckpt best × --seed N）
-    for _n in (2, 3):
-        MODELS["%s_s%d_evalbest" % (_base, _n)] = {
-            **MODELS["%s_evalbest" % _base],
-            "label": "%s-s%d-evalbest" % (MODELS[_base]["label"], _n),
-            "name": MODELS[_base]["name"], "seed": _n}
-        for _occ in ("010", "020", "030", "050"):
-            MODELS["%s_s%d_evalbest_occ%s" % (_base, _n, _occ)] = {
-                **MODELS["%s_evalbest_occ%s" % (_base, _occ)],
-                "label": "%s-s%d-evalbest-occ%s" % (MODELS[_base]["label"], _n, _occ),
-                "name": MODELS[_base]["name"], "seed": _n}
-
-
 # ---- 后缀清理（2026-10-29 用户裁定）：当前默认线占短名 V7_CvN ----
 # 数据包/来源差异不进模型名（方案 §6 版本登记只有 V7_CvN）：
 #   V7_CvN_statefix_smpl24 → V7_CvN（当前默认）
@@ -1306,3 +1304,104 @@ def _apply_suffix_cleanup() -> None:
 
 
 _apply_suffix_cleanup()
+
+
+_SEED_BASES = ["V7_Cv%d" % i for i in range(1, 8)] + ["V7_Cv%d_tafix" % i for i in range(1, 8)]
+for _base in _SEED_BASES:
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d" % (_base, _n)] = {
+            **MODELS[_base],
+            "label": "%s-s%d" % (MODELS[_base]["label"], _n),
+            "name": MODELS[_base]["name"], "seed": _n}
+        # 统计评估 cell 派生（读 seed N 的 ckpt：name=基名、seed=_n，
+        # variant 串 sdN 自动分家；cam3 + occ 四档）
+        MODELS["%s_s%d_statistics" % (_base, _n)] = {
+            **MODELS["%s_statistics" % _base],
+            "label": "%s-s%d-statistics" % (MODELS[_base]["label"], _n),
+            "name": MODELS[_base]["name"], "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_base, _n, _occ)] = {
+                **MODELS["%s_evalocc%s" % (_base, _occ)],
+                "label": "%s-s%d-evalocc%s" % (MODELS[_base]["label"], _n, _occ),
+                "name": MODELS[_base]["name"], "seed": _n}
+
+
+# ---- best 口径评估条目（2026-10-29 用户裁定 --ckpt last/best；Cv1–7）----
+# eval-only：which=best、name=基名；cam3 + occ 四档。
+_CKPT_BASES = ["V7_Cv%d" % i for i in range(1, 8)]
+for _base in _CKPT_BASES:
+    MODELS["%s_evalbest" % _base] = {
+        **MODELS[_base], "label": MODELS[_base]["label"] + "-evalbest",
+        "name": MODELS[_base]["name"], "train": False, "which": "best"}
+    for _occ in ("010", "020", "030", "050"):
+        MODELS["%s_evalbest_occ%s" % (_base, _occ)] = {
+            **MODELS[_base], "label": "%s-evalbest-occ%s" % (MODELS[_base]["label"], _occ),
+            "name": MODELS[_base]["name"], "train": False, "which": "best",
+            "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+    # 种子派生（--ckpt best × --seed N）
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d_evalbest" % (_base, _n)] = {
+            **MODELS["%s_evalbest" % _base],
+            "label": "%s-s%d-evalbest" % (MODELS[_base]["label"], _n),
+            "name": MODELS[_base]["name"], "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalbest_occ%s" % (_base, _n, _occ)] = {
+                **MODELS["%s_evalbest_occ%s" % (_base, _occ)],
+                "label": "%s-s%d-evalbest-occ%s" % (MODELS[_base]["label"], _n, _occ),
+                "name": MODELS[_base]["name"], "seed": _n}
+
+# ---- 历史遗留清理（2026-10-29 用户裁定：不用了的分支删除，不重建）----
+# wo05 实验轴（旧 splits 已废弃）、T 增强三组、_f6 旧标签线、
+# _tafix_bvh23/_statefix_bvh23 旧 BVH 修正线。
+def _drop_legacy_entries() -> None:
+    drop = set()
+    for _key in MODELS:
+        if ("_wo05" in _key or "wo05" in _key or "offfix" in _key
+                or "_f6" in _key or "_tafix_bvh23" in _key
+                or "_statefix_bvh23" in _key):
+            drop.add(_key)
+    for _key in sorted(drop):
+        MODELS.pop(_key, None)
+    print("dropped legacy entries:", len(drop))
+
+
+_drop_legacy_entries()
+
+# ---- 调参格（2026-10-29 重建于当前线）：V7_Cv1 × lr × λ_contact × schedule ----
+for _lrk in ("5e-05", "0.0001", "0.0002"):
+    for _lck in ("0.1", "0.3", "1"):
+        for _csk in ("const", "cos"):
+            _tid = "V7_Cv1_lr%s_lc%s_%s" % (_lrk, _lck, _csk)
+            MODELS[_tid] = {
+                **MODELS["V7_Cv1"], "label": _tid.replace("_", "-"),
+                "name": _tid,
+                "train_args": {**MODELS["V7_Cv1"]["train_args"],
+                               "lr": float(_lrk), "lambda_contact": float(_lck),
+                               "lr_schedule": _csk}}
+
+# ---- 第二轮清理（2026-10-29 用户裁定「一并清」）：白名单保留当前线 ----
+# 保留 = V7_Cv1..7 短名/tafix 参照线 × seed{1,2,3} × 统计/遮挡/best 派生
+# + 调参 18 格；其余全部删除（V7_Av1/Bv1 候选、V3/V4/V5/F 旧家族、
+# tw/λ/e1 等历史线）。
+def _drop_all_but_current() -> None:
+    keep = set()
+    for _i in range(1, 8):
+        for _base in ("V7_Cv%d" % _i, "V7_Cv%d_tafix" % _i):
+            for _sd in ("", "_s1", "_s2", "_s3"):
+                keep.add(_base + _sd)
+                keep.add(_base + _sd + "_statistics")
+                keep.add(_base + _sd + "_evalbest")
+                for _o in ("010", "020", "030", "050"):
+                    keep.add(_base + _sd + "_evalocc" + _o)
+                    keep.add(_base + _sd + "_evalbest_occ" + _o)
+    for _lr in ("5e-05", "0.0001", "0.0002"):
+        for _lc in ("0.1", "0.3", "1"):
+            for _cs in ("const", "cos"):
+                keep.add("V7_Cv1_lr%s_lc%s_%s" % (_lr, _lc, _cs))
+    drop = [k for k in MODELS if k not in keep]
+    for k in drop:
+        MODELS.pop(k, None)
+    print("dropped second-round entries:", len(drop), "| kept:", len(MODELS))
+
+
+_drop_all_but_current()

@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
-"""E1 current-source unified V/T/VT panel; no default expert training.
+"""E1 专家对比生成器（测试层）：默认 Cv5 last 的 V/T/VT 面板。
 
-Default evaluates the same Cv5 last checkpoint on validation data.
-Historical expert identifiers are supported only when explicitly supplied.
+用法：
+  python configs/z_gen/configs/z_gen/gen_e1.py [--models a,b] [--concat-method f6_soft] [--seed 1,2,3] [--force] [--dry-run]
 """
-
-# Default entries now use *_statefix and validation only. Old IDs remain explicit historical options.
 from __future__ import annotations
 
 import argparse
 
-from common import (parse_seeds, seed_models,
-add_gen_args, concat_models, emit_subset, parse_bool)
+from common import (add_gen_args, concat_models, emit_subset, parse_bool,
+                    parse_seeds, seed_models)
 
 DEFAULT_MODELS = ["V7_Cv5_statistics"]
 
@@ -30,11 +28,6 @@ def main() -> int:
     wandb = parse_bool(args.wandb, "--wandb")
     checkpoint_all = parse_bool(args.checkpoint_all, "--checkpoint-all")
     total = emit_subset("v7_eval_clean", models, wandb=wandb, checkpoint_all=checkpoint_all,
-                        force=args.force, dry_run=args.dry_run)
-    total += emit_subset("v7_state_corrected_train", models, wandb=wandb,
-                         checkpoint_all=checkpoint_all, force=args.force, dry_run=args.dry_run)
-    total += emit_subset("v7_cv5_experts", models,
-                        wandb=wandb, checkpoint_all=checkpoint_all,
                         force=args.force, dry_run=args.dry_run)
     print("generated %d queue task(s)%s" % (total, " (dry-run)" if args.dry_run else ""))
     return 0

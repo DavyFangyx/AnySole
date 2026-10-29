@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
-"""默认采用 * 新动作来源条目，仅验证集评估；旧 ID 仍可显式指定用于历史复现。
-
-仅 U 训练套餐生成器（2026-10-26 用户裁定：训练套餐与实验解耦）。
-
-训练内容：只训 U（统一模型，[0.5,0.25,0.25]），结构筛选阶段用——
-E1 的专家行与 E2/E5 的对照评估不在此列。
-
-DEFAULT_MODELS = ['V7_Cv5']
-
-底层条目：v7_variants_clean（--models 限定 U）。
+"""仅 U 训练套餐生成器（训练层）。
 
 用法：
-  python configs/z_gen/gen_u_only.py
-  python configs/z_gen/gen_u_only.py --models V7_Cv5
+  python configs/z_gen/configs/z_gen/gen_u_only.py [--models a,b] [--concat-method f6_soft] [--seed 1,2,3] [--force] [--dry-run]
 """
-
-# Default entries now use * and validation only. Old IDs remain explicit historical options.
 from __future__ import annotations
 
 import argparse
@@ -40,11 +28,6 @@ def main() -> int:
     wandb = parse_bool(args.wandb, "--wandb")
     checkpoint_all = parse_bool(args.checkpoint_all, "--checkpoint-all")
     total = emit_subset("v7_train", models, wandb=wandb, checkpoint_all=checkpoint_all,
-                        force=args.force, dry_run=args.dry_run)
-    total += emit_subset("v7_state_corrected_train", models, wandb=wandb,
-                         checkpoint_all=checkpoint_all, force=args.force, dry_run=args.dry_run)
-    total += emit_subset("v7_variants_clean", models,
-                        wandb=wandb, checkpoint_all=checkpoint_all,
                         force=args.force, dry_run=args.dry_run)
     print("generated %d queue task(s)%s" % (total, " (dry-run)" if args.dry_run else ""))
     return 0
