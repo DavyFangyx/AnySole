@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -43,9 +44,10 @@ def split_ids(value: str) -> set[str]:
     return {item.strip() for item in str(value or "").split(",") if item.strip()}
 
 
-def rows() -> dict[str, dict]:
+def rows(cam: int = 3) -> dict[str, dict]:
+    manifest = MANIFEST if cam == 3 else WORKSPACE / "protocol/manifests" / f"session_manifest_cam{cam}.jsonl"
     result = {}
-    with MANIFEST.open(encoding="utf-8") as handle:
+    with manifest.open(encoding="utf-8") as handle:
         for line in handle:
             if line.strip():
                 row = json.loads(line)
@@ -115,6 +117,7 @@ def write_archive(path: Path, joints: np.ndarray, valid: np.ndarray,
                   source: str, session: str, frame_indices: np.ndarray | None = None,
                   vertices: np.ndarray | None = None,
                   poses: np.ndarray | None = None,
+                  joint_rotations: np.ndarray | None = None,
                   source_type: str = "model_prediction",
                   extra_meta: dict | None = None) -> None:
     joints = np.asarray(joints, dtype=np.float32)
@@ -146,6 +149,14 @@ def write_archive(path: Path, joints: np.ndarray, valid: np.ndarray,
         payload["vertices_world"] = np.asarray(vertices, dtype=np.float32)
     if poses is not None:
         payload["poses"] = np.asarray(poses, dtype=np.float32).reshape(len(joints), 72)
+    if joint_rotations is not None:
+        # 决策 11（2026-10-29）：视觉基线导出全局旋转矩阵 (T,24,3,3)，与 GT
+        # poses 同基（mocap y-up world，根通道为全局朝向）；motion_io.load_rotations
+        # 直读此键，root_orientation/mpjae 按能力门控评出。
+        rotations = np.asarray(joint_rotations, dtype=np.float32)
+        if rotations.ndim != 4 or rotations.shape[1:] != (24, 3, 3) or rotations.shape[0] != len(joints):
+            raise ValueError(f"joint_rotations must be (T,24,3,3), got {rotations.shape}")
+        payload["joint_rotations"] = rotations
     np.savez_compressed(path, **payload)
     print(f"wrote {path}  joints={joints.shape} valid={int(valid.sum())}")
 
@@ -395,20 +406,44 @@ def split_sessions(split: str) -> list[str]:
     return sorted(set(values))
 
 
+def export_visual(row: dict, args: argparse.Namespace, model: str, output: Path) -> None:
+    # 决策 11（2026-10-29）：WHAM/SAM3DB/GVHMR 从传输包已保存预测导出
+    # （零权重零 GPU）；链 = 包 unit -> 正典 40Hz 网格 -> mocap y-up 世界 ->
+    # 协议 FK。真实导出逻辑在 adapters/visual_baselines/（不 import 包内源码）。
+    module = {"wham": "export_wham", "sam3db": "export_sam3db", "gvhmr": "export_gvhmr"}[model]
+    exporter = importlib.import_module(f"AnysoleWorkspace.tool.adapters.visual_baselines.{module}")
+    payload = exporter.export_session(row, args)
+    write_archive(output, payload["joints"], valid_frames(row, len(payload["valid"])) & payload["valid"],
+                  payload["source"], row["session_id"],
+                  vertices=payload["vertices"], poses=payload["poses"],
+                  joint_rotations=payload["joint_rotations"],
+                  source_type="model_prediction",
+                  extra_meta=payload["extra_meta"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=("motionpro", "pressure_toolkit", "vp_mocap", "fpp_v2t", "all"), default="all")
+    parser.add_argument("--model", choices=("motionpro", "pressure_toolkit", "vp_mocap", "fpp_v2t",
+                                            "wham", "sam3db", "gvhmr", "all"), default="all")
     parser.add_argument("--split", choices=("train", "val", "test", "all"), default="all")
     parser.add_argument("--session", default="", help="comma-separated session IDs")
     # 评估整改任务 02：pressure 输入默认读 workspace fitting 根；
     # 迁移期旧树可通过 --pressure-root results://baselines/pressure_toolkit 显式传入。
     parser.add_argument("--pressure-root", default="work://pressure_toolkit/fitting")
     parser.add_argument("--female", "--famale", dest="female", default="S14")
+    # 决策 11（2026-10-29）：视觉基线导出参数（包根 / 相机 / 变体目录）。
+    parser.add_argument("--package-root", default=str(ROOT / "Vision_Baseline" / "visual_baselines"),
+                        help="restored visual_baselines package root")
+    parser.add_argument("--cam", type=int, choices=(1, 2, 3, 4), default=3,
+                        help="camera manifest to export (cam3 = main manifest)")
+    parser.add_argument("--variant", default="package_export",
+                        help="prediction variant subdir (visual baselines only)")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
-    manifest = rows()
+    manifest = rows(args.cam)
     selected = choose_sessions(args, manifest)
-    models = ("motionpro", "pressure_toolkit", "vp_mocap", "fpp_v2t") if args.model == "all" else (args.model,)
+    models = ("motionpro", "pressure_toolkit", "vp_mocap", "fpp_v2t",
+              "wham", "sam3db", "gvhmr") if args.model == "all" else (args.model,)
     for model in models:
         for session in selected:
             if session not in manifest:
@@ -426,7 +461,18 @@ def main() -> None:
                 "motionpro": "baselines/MotionPRO",
                 "pressure_toolkit": "baselines/pressure_toolkit",
                 "vp_mocap": "baselines/VP-MoCap",
+                "wham": "baselines/WHAM",
+                "sam3db": "baselines/SAM3DB",
+                "gvhmr": "baselines/GVHMR",
             }[model]
+            if model in ("wham", "sam3db", "gvhmr"):
+                # 决策 11：视觉基线按 variant 子目录落盘，注明"来自传输包预测"的 provenance。
+                output = RESULTS / model_dir / "predictions" / args.variant / "eval_motion" / f"{session}.npz"
+                if output.is_file() and not args.force:
+                    print(f"skip existing {output}")
+                    continue
+                export_visual(manifest[session], args, model, output)
+                continue
             output = RESULTS / model_dir / "predictions" / "eval_motion" / f"{session}.npz"
             if output.is_file() and not args.force:
                 print(f"skip existing {output}")

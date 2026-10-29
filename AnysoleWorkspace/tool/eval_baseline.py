@@ -12,6 +12,7 @@ Per model:
   vp_mocap        run_full_mmvp (mmvp env) -> export_baseline_motion vp_mocap.
   pressure_toolkit  run_full_mmvp init_shape+fit (mmvp env) -> export_pressure.
   fpp_v2t         infer_smplcont (touch_gait) -> canonical export_v2t.
+  wham/sam3db/gvhmr  package-saved predictions -> export_baseline_motion (no native run).
 
 Examples:
   python AnysoleWorkspace/tool/eval_baseline.py --model vp_mocap --split test --gpu 1
@@ -98,20 +99,43 @@ def eval_fpp_v2t(args: argparse.Namespace) -> None:
          "--sessions", ",".join(exportable), "--force"], cwd=ROOT)
 
 
+def eval_visual(args: argparse.Namespace) -> None:
+    # 决策 11（2026-10-29）：WHAM/SAM3DB/GVHMR 预测来自传输包已保存结果，
+    # 无 native 运行步骤；一体入口 = 导出统一契约 + 覆盖校验。
+    exportable = split_sessions(args.split)
+    command = [TOUCH_GAIT, str(WORKSPACE / "tool/export_baseline_motion.py"),
+               "--model", args.model, "--split", args.split, "--cam", str(args.cam),
+               "--force"]
+    run(command, cwd=ROOT)
+    root = ROOT / "results" / "baselines" / {"wham": "WHAM", "sam3db": "SAM3DB",
+                                             "gvhmr": "GVHMR"}[args.model] / "predictions" \
+        / args.variant / "eval_motion"
+    missing = [s for s in exportable if not (root / f"{s}.npz").is_file()]
+    if missing:
+        raise SystemExit(f"{args.model} eval_motion missing {len(missing)}: {missing[:10]}")
+    print(f"{args.model} eval_motion verified: {len(exportable)} sessions")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required=True,
-                        choices=("motionpro", "vp_mocap", "pressure_toolkit", "fpp_v2t"))
+                        choices=("motionpro", "vp_mocap", "pressure_toolkit", "fpp_v2t",
+                                 "wham", "sam3db", "gvhmr"))
     parser.add_argument("--split", choices=("train", "val", "test", "all"), default="test")
     parser.add_argument("--gpu", type=int, default=0, help="physical GPU id (mmvp models)")
     parser.add_argument("--per-gpu", type=int, default=8, help="pressure_toolkit slots per GPU")
     parser.add_argument("--male", default=MALES)
     parser.add_argument("--female", default=FEMALES)
+    parser.add_argument("--cam", type=int, choices=(1, 2, 3, 4), default=3,
+                        help="camera manifest (visual baselines)")
+    parser.add_argument("--variant", default="package_export",
+                        help="prediction variant subdir (visual baselines)")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     {"motionpro": eval_motionpro, "vp_mocap": eval_vp_mocap,
-     "pressure_toolkit": eval_pressure_toolkit, "fpp_v2t": eval_fpp_v2t}[args.model](args)
+     "pressure_toolkit": eval_pressure_toolkit, "fpp_v2t": eval_fpp_v2t,
+     "wham": eval_visual, "sam3db": eval_visual, "gvhmr": eval_visual}[args.model](args)
     return 0
 
 
