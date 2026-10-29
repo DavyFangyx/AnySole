@@ -450,6 +450,7 @@ def main() -> None:
     selected = choose_sessions(args, manifest)
     models = ("motionpro", "pressure_toolkit", "vp_mocap", "fpp_v2t",
               "wham", "sam3db", "gvhmr") if args.model == "all" else (args.model,)
+    failures: list[tuple[str, str, str]] = []
     for model in models:
         for session in selected:
             if session not in manifest:
@@ -473,11 +474,17 @@ def main() -> None:
             }[model]
             if model in ("wham", "sam3db", "gvhmr"):
                 # 决策 11：视觉基线按 variant 子目录落盘，注明"来自传输包预测"的 provenance。
+                # 单会话失败不中断全量：逐会话记录，末尾汇总（与验证门禁同原则——
+                # 失败可查、不静默跳过）。
                 output = RESULTS / model_dir / "predictions" / args.variant / "eval_motion" / f"{session}.npz"
                 if output.is_file() and not args.force:
                     print(f"skip existing {output}")
                     continue
-                export_visual(manifest[session], args, model, output)
+                try:
+                    export_visual(manifest[session], args, model, output)
+                except Exception as exc:  # noqa: BLE001 — per-session resilience, reported at the end
+                    print(f"FAIL {model} {session}: {type(exc).__name__}: {exc}")
+                    failures.append((model, session, f"{type(exc).__name__}: {exc}"))
                 continue
             output = RESULTS / model_dir / "predictions" / "eval_motion" / f"{session}.npz"
             if output.is_file() and not args.force:
@@ -495,6 +502,10 @@ def main() -> None:
                 export_pressure(manifest[session], args, output)
             else:
                 export_vp_mocap(manifest[session], args, output)
+    if failures:
+        for model, session, error in failures:
+            print(f"FAILED {model} {session}: {error}")
+        raise SystemExit(f"{len(failures)} session export(s) failed")
 
 
 if __name__ == "__main__":
