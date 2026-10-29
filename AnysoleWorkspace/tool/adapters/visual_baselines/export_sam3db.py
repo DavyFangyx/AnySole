@@ -33,8 +33,12 @@ def export_session(row: dict, args) -> dict:
     raw = _io.load_sam(result, unit)
     native_poses = np.zeros((unit.frame_numbers.size, 72), dtype=np.float32)
     native_poses[:, :3], native_poses[:, 3:66] = raw["global_orient"], raw["body_pose"]
+    calibration, calib_path, calib_sha = common.load_calibration(date)
+    camera = calibration["cameras"][f"cam{unit.camera_index}"]
     visual = common.canonical_grid(row, cam)
-    epoch, epoch_stats = common.align_unit_to_canonical(unit, visual)
+    # Wall-clock epoch from the recording meta.json (no shift search, archive 11).
+    recording_start = common.recording_start_day_s(row)
+    epoch, epoch_stats = common.anchor_unit_to_canonical(unit, visual, recording_start)
     # Interpolate the similarity parameters BEFORE the forward so the surface
     # and the parameters stay on the same path (decision archive 11, W2).
     similarity_rotvec = Rotation.from_matrix(raw["similarity_rotation"]).as_rotvec()

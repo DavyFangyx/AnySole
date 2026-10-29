@@ -86,52 +86,58 @@ def _unit(frame_numbers, times):
                 physical_times=np.asarray(times, dtype=np.float64))
 
 
-def test_align_unit_one_based_frame_mapping():
-    # Package frames are 1-based (frame1_...), canonical frame_id is 0-based:
-    # unit frame min+k maps to canonical frame k.
+def test_anchor_unit_wall_clock_no_gap():
+    # Unit = canonical grid minus one tail frame, stamps sharing the
+    # recording wall clock: the anchor returns the recording start verbatim.
     rng = np.random.default_rng(7)
     epoch = 75313.98
-    unit = _unit(np.arange(1, 325), epoch + _monotone_stamps(324, rng, step_jitter=0.0008))
     visual = np.arange(325) / 40.0
-    offset, stats = common.align_unit_to_canonical(unit, visual)
-    assert abs(offset - epoch) < 0.02
-    assert stats["mad_s"] < 0.02
+    stamps = epoch + _monotone_stamps(324, rng, step_jitter=0.0008)
+    unit = _unit(np.arange(1, 325), stamps)
+    offset, stats = common.anchor_unit_to_canonical(unit, visual, epoch)
+    assert offset == epoch
+    assert stats["mad_s"] < 0.05
     assert stats["bracket_coverage"] > 0.97
-    assert stats["residual_ramp_s"] < 0.1
+    assert stats["span_mismatch_s"] < 0.1
 
 
-def test_align_unit_zero_based_frames_and_tail():
-    # K uncertainty = drift median (~10 ms on a 324-frame random walk); the
-    # bound below one canonical frame keeps the placement sub-frame.
+def test_anchor_unit_head_gap_beyond_tolerance():
+    # S13021 shape: the unit starts two canonical frames into the grid; the
+    # head frame beyond the NN tolerance turns invalid, everything else
+    # brackets normally — no heuristic, no shift search.
     rng = np.random.default_rng(11)
     epoch = 5000.0
-    unit = _unit(np.arange(0, 324), epoch + _monotone_stamps(324, rng, step_jitter=0.0008))
     visual = np.arange(325) / 40.0
-    offset, stats = common.align_unit_to_canonical(unit, visual)
-    assert abs(offset - epoch) < 0.03
-    assert stats["frame_origin"] == 0
+    stamps = epoch + visual[2:325] + rng.normal(scale=0.0005, size=323)
+    unit = _unit(np.arange(1, 324), stamps)
+    offset, stats = common.anchor_unit_to_canonical(unit, visual, epoch)
+    assert offset == epoch
     assert stats["bracket_coverage"] > 0.97
+    # The resample marks the far head frame invalid.
+    _, valid, resample_stats = common.resample_on_canonical(
+        {"scale": np.ones((323, 1))}, stamps, visual, epoch)
+    assert valid.sum() == 324
+    assert resample_stats["invalid_target_frames"] == 1
 
 
-def test_align_unit_rejects_frame_rate_ramp():
-    # 30 fps stamps on a 1-based frame list: the residual ramp gate fires.
-    rng = np.random.default_rng(13)
+def test_anchor_unit_rejects_frame_rate_span():
+    # 30 fps stamps: the span gate fires (seconds-level mismatch).
     unit = _unit(np.arange(1, 241), 8000.0 + np.arange(240) / 30.0)
     visual = np.arange(325) / 40.0
     try:
-        common.align_unit_to_canonical(unit, visual)
+        common.anchor_unit_to_canonical(unit, visual, 8000.0)
     except ValueError as exc:
         assert "alignment failed gates" in str(exc)
     else:
-        raise AssertionError("frame-rate ramp must fail the gates")
+        raise AssertionError("frame-rate span must fail the gates")
 
 
-def test_align_unit_rejects_short_coverage():
+def test_anchor_unit_rejects_short_coverage():
     rng = np.random.default_rng(17)
     unit = _unit(np.arange(1, 101), 9000.0 + _monotone_stamps(100, rng, step_jitter=0.0008))
     visual = np.arange(325) / 40.0
     try:
-        common.align_unit_to_canonical(unit, visual)
+        common.anchor_unit_to_canonical(unit, visual, 9000.0)
     except ValueError as exc:
         assert "alignment failed gates" in str(exc)
     else:
@@ -196,3 +202,22 @@ def test_write_archive_rejects_bad_rotation_shape():
             assert "joint_rotations" in str(exc)
         else:
             raise AssertionError("malformed joint_rotations must be rejected")
+
+def test_resample_and_align_duplicate_stamps():
+    # Real units carry duplicate stamps (S13011: 16 zero-dt pairs of 324;
+    # S13021: 24); the strictly-increasing repair must keep bracket_times
+    # well-defined and the resample must stay finite and fully valid.
+    rng = np.random.default_rng(23)
+    epoch = 7000.0
+    stamps = epoch + _monotone_stamps(324, rng, step_jitter=0.0005)
+    for index in (7, 40, 111, 230):
+        stamps[index] = stamps[index - 1]  # inject duplicate pairs
+    assert (np.diff(stamps) == 0).any()  # duplicates really present
+    repaired = common.strictly_increasing(stamps)
+    assert np.all(np.diff(repaired) > 0)
+    visual = np.arange(325) / 40.0
+    resampled, valid, stats = common.resample_on_canonical(
+        {"scale": np.ones((324, 1))}, stamps, visual, epoch)
+    assert valid.sum() == 325
+    assert np.isfinite(resampled["scale"]).all()
+

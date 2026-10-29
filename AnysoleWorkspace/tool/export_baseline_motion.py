@@ -413,9 +413,13 @@ def export_visual(row: dict, args: argparse.Namespace, model: str, output: Path)
     module = {"wham": "export_wham", "sam3db": "export_sam3db", "gvhmr": "export_gvhmr"}[model]
     exporter = importlib.import_module(f"AnysoleWorkspace.tool.adapters.visual_baselines.{module}")
     payload = exporter.export_session(row, args)
-    write_archive(output, payload["joints"], valid_frames(row, len(payload["valid"])) & payload["valid"],
+    # 适配器返回 mocap y-up world；统一契约是 world z-up display（与其他导出器
+    # 同一约定：poses/joint_rotations 保持 y-up，与 GT poses 同基）。
+    write_archive(output, smpl_yup_to_display(payload["joints"]),
+                  valid_frames(row, len(payload["valid"])) & payload["valid"],
                   payload["source"], row["session_id"],
-                  vertices=payload["vertices"], poses=payload["poses"],
+                  vertices=smpl_yup_to_display(payload["vertices"]),
+                  poses=payload["poses"],
                   joint_rotations=payload["joint_rotations"],
                   source_type="model_prediction",
                   extra_meta=payload["extra_meta"])

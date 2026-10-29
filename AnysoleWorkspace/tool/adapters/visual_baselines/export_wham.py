@@ -30,9 +30,13 @@ def export_session(row: dict, args) -> dict:
     unit = common.unit_object(entry)
     result = package / "reference_results" / "3_Result" / f"{BASELINE}_baseline" / unit.short_id / "result.pkl"
     raw = _io.load_wham(result, unit)
+    calibration, calib_path, calib_sha = common.load_calibration(date)
+    camera = calibration["cameras"][f"cam{unit.camera_index}"]
     visual = common.canonical_grid(row, cam)
-    epoch, epoch_stats = common.align_unit_to_canonical(unit, visual)
-    # Native forward + replay gate first (eval_rgb_smpl.py:96-101 same criterion).
+    # Wall-clock epoch from the recording meta.json (no shift search, archive 11).
+    recording_start = common.recording_start_day_s(row)
+    epoch, epoch_stats = common.anchor_unit_to_canonical(unit, visual, recording_start)
+    # Native forward + replay gate (eval_rgb_smpl.py:96-101 same criterion).
     verts_native, _ = common.smpl_forward(raw["pose"], raw["betas"], raw["trans"])
     replay = float(np.sqrt(np.mean((verts_native - raw["verts"]) ** 2)) * 1000)
     if not np.isfinite(replay) or replay > 0.2:

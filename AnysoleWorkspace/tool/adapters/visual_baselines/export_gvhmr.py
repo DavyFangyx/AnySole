@@ -36,13 +36,17 @@ def export_session(row: dict, args) -> dict:
         raise ValueError(f"{session}: GVHMR source frame mismatch")
     if not np.array_equal(raw["physical_times_s"], unit.physical_times):
         raise ValueError(f"{session}: GVHMR timestamp mismatch")
-    # Native forward + replay gate first (eval_rgb_smpl.py:124-127 same criterion).
+    calibration, calib_path, calib_sha = common.load_calibration(date)
+    camera = calibration["cameras"][f"cam{unit.camera_index}"]
+    visual = common.canonical_grid(row, cam)
+    # Wall-clock epoch from the recording meta.json (no shift search, archive 11).
+    recording_start = common.recording_start_day_s(row)
+    epoch, epoch_stats = common.anchor_unit_to_canonical(unit, visual, recording_start)
+    # Native forward + replay gate (eval_rgb_smpl.py:124-127 same criterion).
     _, joints_native = common.smpl_forward(raw["pose"], raw["betas"], raw["trans"])
     replay = float(np.sqrt(np.mean((joints_native - raw["joints_camera"]) ** 2)) * 1000)
     if not np.isfinite(replay) or replay > 0.001:
         raise ValueError(f"{session}: GVHMR joint replay RMS {replay} mm")
-    visual = common.canonical_grid(row, cam)
-    epoch, epoch_stats = common.align_unit_to_canonical(unit, visual)
     resampled, resample_valid, resample_stats = common.resample_on_canonical(
         {"pose": raw["pose"].reshape(raw["pose"].shape[0], 24, 3),
          "betas": raw["betas"], "trans": raw["trans"]},

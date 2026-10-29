@@ -41,13 +41,13 @@ FACTS = WORKSPACE / "shared" / "facts" / "sessions"
 SMPL_MODEL = WORKSPACE / "assets/third_party" / "smpl" / "SMPL_NEUTRAL.pkl"
 CALIBRATION_ALT = Path("/data/lizhe/projects/Tactile/4_Dataset/config/calibration")
 
-MAD_LIMIT_S = 0.02
 COVERAGE_LIMIT = 0.97
 TAIL_TOLERANCE_S = 0.04
-# Linear residual ramp over the mapped span: real clock drift stays under
-# ~50 ms (S13011 max residual 33 ms); a frame-rate mismatch (30 fps CFR)
-# produces seconds-level ramps.  The gate sits in the empty middle.
-EPOCH_RAMP_LIMIT_S = 0.1
+# Real units drift up to ~60 ms at the head (S13011) with occasional
+# duplicate stamps; a frame-rate mismatch (30 fps CFR) shows up as a
+# seconds-level span difference.  The gates sit in the empty middle.
+MAD_LIMIT_S = 0.05
+SPAN_LIMIT_S = 0.1
 
 
 def sha256(path: str | Path) -> str:
@@ -115,39 +115,70 @@ def canonical_grid(row: dict, cam: int) -> np.ndarray:
     return times
 
 
-def align_unit_to_canonical(unit, visual_times: np.ndarray) -> tuple[float, dict]:
-    """Pin unit frames onto the canonical grid via the unit's frame numbers.
+def strictly_increasing(times: np.ndarray) -> np.ndarray:
+    """Make a series strictly increasing; ms-rounded JPEG stamps can repeat.
 
-    Timestamps alone cannot decide frame parity (a one-frame slip is absorbed
-    into the epoch constant), so the mapping uses the package frame numbers
-    directly: the package names frames 1-based (``frame1_...``) while the
-    canonical ``frame_id`` is 0-based, i.e. unit frame ``min+k`` maps to
-    canonical frame ``k``.  The epoch is the median stamp-grid residual over
-    that fixed mapping; a linear ramp in the residuals (frame-rate mismatch)
-    or MAD/coverage beyond the gates fails loudly (decision archive 11, risk 7).
+    Real units carry duplicate timestamps (S13011: 16 zero-dt pairs of 324).
+    Each non-positive step shifts that sample and everything after it by a
+    cumulative microsecond epsilon, preserving the wall-clock ordering while
+    keeping ``bracket_times`` (strictly increasing source) well-defined.
     """
-    times = _alignment.unwrap_seconds_of_day(unit.physical_times)
+    source = np.asarray(times, dtype=np.float64)
+    if source.ndim != 1 or source.size == 0:
+        raise ValueError("times must be a non-empty vector")
+    adjust = np.zeros(source.size, dtype=np.float64)
+    adjust[1:] = np.cumsum(np.diff(source) <= 0.0) * 1e-6
+    return source + adjust
+
+
+def recording_start_day_s(row: dict) -> float:
+    """Wall-clock seconds-of-day of the recording start (meta.started_at_iso).
+
+    Both the unit stamps and the canonical visual grid are anchored to this
+    wall clock: grid[i] = started + visual_start_s + i/40, unit stamps are
+    absolute seconds-of-day.  Anchoring the epoch here removes every
+    frame-parity ambiguity (archive 11, risk 7) — no shift search.
+    """
+    recording = resolve_uri(row["video_path"], must_exist=True)
+    meta = json.loads((recording / "meta.json").read_text(encoding="utf-8"))
+    iso = meta.get("started_at_iso")
+    if not iso:
+        raise ValueError(f"{row['session_id']}: meta.json has no started_at_iso")
+    from datetime import datetime
+    value = datetime.fromisoformat(str(iso))
+    return value.hour * 3600.0 + value.minute * 60.0 + value.second + value.microsecond / 1e6
+
+
+def anchor_unit_to_canonical(unit, visual_times: np.ndarray,
+                             recording_start: float) -> tuple[float, dict]:
+    """Epoch = the recording's wall-clock start; validate the unit against it.
+
+    The unit stamps and the canonical grid share the recording wall clock, so
+    no frame-number or median heuristic enters the placement: source times are
+    ``stamp - recording_start`` bracketed directly onto the grid.  The gates
+    (MAD / coverage / span rate) fail loudly on genuine misalignment
+    (decision archive 11, risk 7).
+    """
+    times = strictly_increasing(_alignment.unwrap_seconds_of_day(unit.physical_times))
     visual = np.asarray(visual_times, dtype=np.float64)
-    origin = int(unit.frame_numbers.min())
-    indices = unit.frame_numbers - origin
-    if indices.size != times.size or np.any(np.diff(indices) != 1) \
-            or indices[0] < 0 or indices[-1] >= visual.size:
-        raise ValueError(f"{unit.unit_id}: frame numbers do not map contiguously "
-                         f"onto the canonical grid (origin {origin}, "
-                         f"range {indices[0]}..{indices[-1]} of {visual.size})")
-    residual = times - visual[indices]
-    offset = float(np.median(residual))
-    mad = float(np.median(np.abs(residual - offset)))
-    ramp = float(np.abs(np.polyfit(indices, residual, 1)[0]) * (indices[-1] - indices[0]))
-    brackets = _alignment.bracket_times(times - offset, visual)
+    if np.any(np.diff(unit.frame_numbers) < 1):
+        raise ValueError(f"{unit.unit_id}: frame numbers must be increasing")
+    rel = times - recording_start
+    brackets = _alignment.bracket_times(rel, visual)
+    upper = np.clip(brackets.upper, 0, rel.size - 1)
+    lower = np.clip(brackets.lower, 0, rel.size - 1)
+    nearest = np.where(np.abs(visual - rel[upper]) <= np.abs(visual - rel[lower]),
+                       upper, lower)
+    residual = np.abs(rel[nearest] - visual)
+    mad = float(np.median(residual[brackets.valid]))
     coverage = float(brackets.valid.mean())
-    stats = {"epoch_offset_s": offset, "frame_origin": origin,
-             "mapped_frames": int(indices.size), "mad_s": mad,
-             "residual_ramp_s": ramp, "bracket_coverage": coverage,
-             "max_residual_s": float(np.max(np.abs(residual - offset)))}
-    if mad > MAD_LIMIT_S or coverage < COVERAGE_LIMIT or ramp > EPOCH_RAMP_LIMIT_S:
+    span_rate = float(abs((rel[-1] - rel[0]) - (visual[-1] - visual[0])))
+    stats = {"recording_start_day_s": recording_start, "bracket_coverage": coverage,
+             "mad_s": mad, "span_mismatch_s": span_rate,
+             "max_residual_s": float(np.max(residual[brackets.valid])) if brackets.valid.any() else 0.0}
+    if mad > MAD_LIMIT_S or coverage < COVERAGE_LIMIT or span_rate > SPAN_LIMIT_S:
         raise ValueError(f"visual epoch alignment failed gates: {stats}")
-    return offset, stats
+    return recording_start, stats
 
 
 def resample_on_canonical(spec: dict[str, np.ndarray], unit_times: np.ndarray,
@@ -160,7 +191,7 @@ def resample_on_canonical(spec: dict[str, np.ndarray], unit_times: np.ndarray,
     linear.  Target frames beyond the source span get a nearest-neighbour fill
     within ``TAIL_TOLERANCE_S`` and are counted; the rest stay invalid.
     """
-    source = _alignment.unwrap_seconds_of_day(unit_times) - epoch
+    source = strictly_increasing(_alignment.unwrap_seconds_of_day(unit_times) - epoch)
     target = np.asarray(visual_times, dtype=np.float64)
     brackets = _alignment.bracket_times(source, target)
     valid = brackets.valid.copy()
@@ -261,7 +292,7 @@ def export_meta(unit, result_path: Path, calibration: dict, calib_path: str, cal
         "calibration_sha256": calib_sha,
         "package_unit_id": unit.unit_id,
         "package_result_sha256": sha256(result_path),
-        "time_resample": f"epoch_s={epoch_stats['epoch_offset_s']:.6f};"
+        "time_resample": f"recording_start_s={epoch_stats['recording_start_day_s']:.6f};"
                          f"mad_s={epoch_stats['mad_s']:.6f};"
                          f"coverage={epoch_stats['bracket_coverage']:.6f};"
                          f"tail_nn={resample_stats['tail_nn_filled']};"
