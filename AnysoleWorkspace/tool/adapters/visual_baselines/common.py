@@ -182,14 +182,17 @@ def anchor_unit_to_canonical(unit, visual_times: np.ndarray,
 
 
 def resample_on_canonical(spec: dict[str, np.ndarray], unit_times: np.ndarray,
-                          visual_times: np.ndarray, epoch: float) -> tuple[dict[str, np.ndarray],
+                          visual_times: np.ndarray, epoch: float,
+                          slerp_fields: set[str] | frozenset[str]) -> tuple[dict[str, np.ndarray],
                                                                            np.ndarray, dict]:
     """Resample native-rate fields onto the canonical grid.
 
-    ``spec`` maps field name -> native array; a trailing axis of size 3 is
-    treated as SO(3) (slerp via ``interpolate_axis_angle``), everything else
-    linear.  Target frames beyond the source span get a nearest-neighbour fill
-    within ``TAIL_TOLERANCE_S`` and are counted; the rest stay invalid.
+    ``spec`` maps field name -> native array.  Only fields named in
+    ``slerp_fields`` are interpolated on SO(3); everything else is linear —
+    translations and scales end in 3 too, so the mode must be explicit
+    (2026-10-29 regression: trans vectors slerped as rotations).  Target
+    frames beyond the source span get a nearest-neighbour fill within
+    ``TAIL_TOLERANCE_S`` and are counted; the rest stay invalid.
     """
     source = strictly_increasing(_alignment.unwrap_seconds_of_day(unit_times) - epoch)
     target = np.asarray(visual_times, dtype=np.float64)
@@ -201,6 +204,9 @@ def resample_on_canonical(spec: dict[str, np.ndarray], unit_times: np.ndarray,
     frames = next(iter(count.values())).shape[0]
     if any(value.shape[0] != frames for value in count.values()):
         raise ValueError("resample spec fields must share the native frame count")
+    unknown = set(slerp_fields) - set(count)
+    if unknown:
+        raise ValueError(f"slerp_fields not in spec: {sorted(unknown)}")
     # Tail fill: targets beyond the last source sample (and before the first),
     # nearest neighbour within tolerance.
     tail_count = 0
@@ -220,7 +226,7 @@ def resample_on_canonical(spec: dict[str, np.ndarray], unit_times: np.ndarray,
             subset = _alignment.bracket_times(source, target[interior])
             if not subset.valid.all():
                 raise ValueError(f"{name}: interior bracket set invalid")
-            if values.shape[-1] == 3:
+            if name in slerp_fields:
                 result[interior] = _alignment.interpolate_axis_angle(values, subset)
             else:
                 result[interior] = _alignment.interpolate_linear(values, subset)

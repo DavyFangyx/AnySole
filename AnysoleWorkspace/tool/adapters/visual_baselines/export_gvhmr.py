@@ -50,13 +50,11 @@ def export_session(row: dict, args) -> dict:
     resampled, resample_valid, resample_stats = common.resample_on_canonical(
         {"pose": raw["pose"].reshape(raw["pose"].shape[0], 24, 3),
          "betas": raw["betas"], "trans": raw["trans"]},
-        unit.physical_times, visual, epoch)
+        unit.physical_times, visual, epoch, {"pose"})
     poses = resampled["pose"].reshape(visual.size, 72).astype(np.float32)
     betas = resampled["betas"]
     trans = resampled["trans"]
     verts, _ = common.smpl_forward(poses, betas, trans)
-    calibration, calib_path, calib_sha = common.load_calibration(date)
-    camera = calibration["cameras"][f"cam{unit.camera_index}"]
     vertices_world = common.camera_chain(verts, camera, calibration)
     transl_world = common.camera_chain(trans, camera, calibration)
     rotations = Rotation.from_rotvec(poses.reshape(-1, 3)).as_matrix().reshape(

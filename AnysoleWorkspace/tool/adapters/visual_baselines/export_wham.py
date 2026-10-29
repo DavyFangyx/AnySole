@@ -44,7 +44,7 @@ def export_session(row: dict, args) -> dict:
     resampled, resample_valid, resample_stats = common.resample_on_canonical(
         {"pose": raw["pose"].reshape(raw["pose"].shape[0], 24, 3),
          "trans": raw["trans"], "betas": raw["betas"]},
-        unit.physical_times, visual, epoch)
+        unit.physical_times, visual, epoch, {"pose"})
     poses = resampled["pose"].reshape(visual.size, 72).astype(np.float32)
     trans = resampled["trans"]
     betas = resampled["betas"]

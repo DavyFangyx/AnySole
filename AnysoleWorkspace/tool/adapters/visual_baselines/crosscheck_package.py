@@ -35,7 +35,7 @@ RHO_LIMIT = 0.9
 def project_rows(model: str, split: str) -> dict[str, dict]:
     path = RESULTS / "baselines" / model / "metrics" / f"{split}_comparison.json"
     if not path.is_file():
-        raise FileNotFoundError(path)
+        return {}
     value = json.loads(path.read_text(encoding="utf-8"))
     rows = {}
     for row in value["sessions"]:
@@ -64,6 +64,9 @@ def main() -> int:
     summary = {}
     for model in BASELINES:
         mine = project_rows(model, args.split)
+        if not mine:
+            print(f"{model}: no project comparison yet; skipped")
+            continue
         reference = package_rows(args.package_root, model)
         shared = sorted(set(mine) & set(reference))
         summary[model] = {"n_sessions": len(mine), "shared_sessions": len(shared)}

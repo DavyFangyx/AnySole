@@ -49,7 +49,7 @@ def export_session(row: dict, args) -> dict:
          "similarity_scale": raw["similarity_scale"],
          "similarity_translation": raw["similarity_translation"],
          "camera_translation": raw["camera_translation"]},
-        unit.physical_times, visual, epoch)
+        unit.physical_times, visual, epoch, {"pose", "similarity_rotation"})
     poses = resampled["pose"].reshape(visual.size, 72).astype(np.float32)
     betas = resampled["betas"]
     vertices, joints = common.smpl_forward(poses, betas)
@@ -59,8 +59,6 @@ def export_session(row: dict, args) -> dict:
     # eval_rgb_smpl.py:112-113 row-vector similarity application, kept verbatim.
     vertices = scale[:, None, None] * np.einsum("tvi,tij->tvj", vertices, rotation) + translation[:, None]
     joints = scale[:, None, None] * np.einsum("tji,tik->tjk", joints, rotation) + translation[:, None]
-    calibration, calib_path, calib_sha = common.load_calibration(date)
-    camera = calibration["cameras"][f"cam{unit.camera_index}"]
     vertices_world = common.camera_chain(vertices, camera, calibration)
     joints_world = common.camera_chain(joints, camera, calibration)
     rotations = Rotation.from_rotvec(poses.reshape(-1, 3)).as_matrix().reshape(

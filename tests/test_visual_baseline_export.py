@@ -115,7 +115,7 @@ def test_anchor_unit_head_gap_beyond_tolerance():
     assert stats["bracket_coverage"] > 0.97
     # The resample marks the far head frame invalid.
     _, valid, resample_stats = common.resample_on_canonical(
-        {"scale": np.ones((323, 1))}, stamps, visual, epoch)
+        {"scale": np.ones((323, 1))}, stamps, visual, epoch, set())
     assert valid.sum() == 324
     assert resample_stats["invalid_target_frames"] == 1
 
@@ -153,7 +153,7 @@ def test_resample_slerp_linear_and_tail_fill():
     axes = Rotation.random(frames * 6, random_state=rng).as_rotvec().reshape(frames, 6, 3)
     scales = rng.normal(size=(frames, 1))
     resampled, valid, stats = common.resample_on_canonical(
-        {"rot": axes, "scale": scales}, native_times, visual, epoch)
+        {"rot": axes, "scale": scales}, native_times, visual, epoch, {"rot"})
     assert resampled["rot"].shape == (120, 6, 3)
     assert resampled["scale"].shape == (120, 1)
     assert stats["tail_nn_filled"] > 0  # 120 targets beyond 90 native frames at 30 fps
@@ -167,7 +167,7 @@ def test_resample_tail_beyond_tolerance_stays_invalid():
     native_times = epoch + np.arange(frames) / 30.0
     visual = np.arange(60) / 40.0 + 20.0  # far beyond the source span
     _, valid, stats = common.resample_on_canonical(
-        {"scale": np.ones((frames, 1))}, native_times, visual, epoch)
+        {"scale": np.ones((frames, 1))}, native_times, visual, epoch, set())
     assert stats["tail_nn_filled"] == 0
     assert not valid.all()
     assert stats["invalid_target_frames"] == 60
@@ -217,7 +217,24 @@ def test_resample_and_align_duplicate_stamps():
     assert np.all(np.diff(repaired) > 0)
     visual = np.arange(325) / 40.0
     resampled, valid, stats = common.resample_on_canonical(
-        {"scale": np.ones((324, 1))}, stamps, visual, epoch)
+        {"scale": np.ones((324, 1))}, stamps, visual, epoch, set())
     assert valid.sum() == 325
     assert np.isfinite(resampled["scale"]).all()
 
+def test_resample_translation_is_linear_not_slerp():
+    # Regression 2026-10-29: (F,3) translations were slerped as rotations
+    # because the trailing-3 shape heuristic cannot tell the two apart.
+    rng = np.random.default_rng(31)
+    frames = 60
+    epoch = 100.0
+    native_times = epoch + np.arange(frames) / 30.0
+    visual = np.arange(75) / 40.0
+    trans = rng.normal(size=(frames, 3))
+    resampled, valid, _ = common.resample_on_canonical(
+        {"trans": trans}, native_times, visual, epoch, set())
+    # visual[2] = 0.05 brackets native 0.0333 and 0.0667 at alpha 0.5.
+    expected = (trans[1] + trans[2]) / 2.0
+    assert np.allclose(resampled["trans"][2], expected, atol=1e-9)
+    slerped = common.resample_on_canonical(
+        {"trans": trans}, native_times, visual, epoch, {"trans"})[0]["trans"][2]
+    assert not np.allclose(slerped, expected, atol=1e-6)  # slerp differs on noise
