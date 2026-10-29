@@ -438,6 +438,8 @@ def main() -> None:
                         help="camera manifest to export (cam3 = main manifest)")
     parser.add_argument("--variant", default="package_export",
                         help="prediction variant subdir (visual baselines only)")
+    parser.add_argument("--unit-manifest", default="",
+                        help="override path to the package per-unit manifest.jsonl (visual baselines)")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     manifest = rows(args.cam)

@@ -25,7 +25,8 @@ def export_session(row: dict, args) -> dict:
     cam = int(args.cam)
     date, subject = common.session_parts(row)
     package = Path(args.package_root)
-    entry = common.load_unit(package, BASELINE, date, session, cam)
+    entry = common.load_unit(package, BASELINE, date, session, cam,
+                                  manifest_override=getattr(args, 'unit_manifest', None) or None)
     unit = common.unit_object(entry)
     result = package / "reference_results" / "3_Result" / f"{BASELINE}_baseline" / unit.short_id / "result.pkl"
     raw = _io.load_wham(result, unit)

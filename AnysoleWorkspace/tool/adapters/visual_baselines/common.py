@@ -77,9 +77,16 @@ def load_calibration(date: str) -> tuple[dict, str, str]:
         f"calibration for {date} not found under {candidates[0]} or {candidates[1]}")
 
 
-def load_unit(package_root: str | Path, baseline: str, date: str, session: str, cam: int) -> dict:
-    """Read the package unit manifest entry for one method-camera unit."""
-    manifest = Path(package_root) / "reference_results" / "3_Result" / f"{baseline}_baseline" / ".run" / "manifest.jsonl"
+def load_unit(package_root: str | Path, baseline: str, date: str, session: str, cam: int,
+              manifest_override: str | Path | None = None) -> dict:
+    """Read the package unit manifest entry for one method-camera unit.
+
+    ``manifest_override`` names the shared per-unit manifest.jsonl (the
+    package keeps one master copy under SAM3DB_baseline/.run/) so exports can
+    run while other baseline record archives are still restoring.
+    """
+    manifest = Path(manifest_override) if manifest_override else (
+        Path(package_root) / "reference_results" / "3_Result" / f"{baseline}_baseline" / ".run" / "manifest.jsonl")
     unit_id = f"{date}/method_1_offset/{session}/camera_{cam}"
     with manifest.open(encoding="utf-8") as handle:
         for line in handle:

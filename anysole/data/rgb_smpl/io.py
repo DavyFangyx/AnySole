@@ -70,7 +70,8 @@ def _unit_from_json(value: dict[str, Any]) -> Unit:
     if numbers.size != int(value["frame_count"]) or np.any(np.diff(numbers) <= 0):
         raise ValueError(f"invalid frame inventory: {value['unit_id']}")
     camera = str(value["camera"])
-    camera_index = int(camera.removeprefix("camera_"))
+    # 3.8-compatible strip (touch_gait runs Python 3.8; decision archive 11).
+    camera_index = int(camera[len("camera_"):] if camera.startswith("camera_") else camera)
     return Unit(
         unit_id=str(value["unit_id"]),
         date=str(value["date"]),
