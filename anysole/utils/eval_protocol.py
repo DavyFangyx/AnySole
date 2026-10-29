@@ -425,11 +425,15 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
         accum.add_scalar("foot_sliding_vertex_mm", foot_vert_value, foot_vert_count)
 
     # ---- anatomical hierarchy diagnostics (JOINT_HIERARCHY single source) ----
-    err = torch.linalg.vector_norm(pred_kp - kp_gt, dim=-1)  # (T, 24)
+    # Local parts use the same pelvis definition as overall MPJPE. Preserve
+    # world-coordinate part errors under an explicit GlobalMPJPE prefix.
+    local_err = torch.as_tensor(np.linalg.norm(pred_aligned - gt_aligned, axis=-1), device=pred_kp.device)
+    world_err = torch.linalg.vector_norm(pred_kp - kp_gt, dim=-1)
     for name, joints in JOINT_HIERARCHY.items():
         if name == "overall":
             continue
-        accum.add("MPJPE_%s" % name, err[:, joints].mean(dim=-1), 1000.0)
+        accum.add("MPJPE_%s" % name, local_err[:, joints].mean(dim=-1), 1000.0)
+        accum.add("GlobalMPJPE_%s" % name, world_err[:, joints].mean(dim=-1), 1000.0)
 
     aligned = _pa_align(pred_kp, kp_gt)
     pa_err = torch.linalg.vector_norm(aligned - kp_gt, dim=-1)
@@ -544,7 +548,7 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
             accum.add("T_corr", corr[corr_valid])
 
 
-def _window_detail_rows(seq: dict, tw: int) -> dict:
+def _window_detail_rows(seq: dict, tw: int, frame_starts=None) -> dict:
     """Per-window pose errors of one session's full-sequence prediction.
 
     Windows mirror the eval loop's non-overlapping layout (stride == tw); the
@@ -555,6 +559,8 @@ def _window_detail_rows(seq: dict, tw: int) -> dict:
     snake_case, matching the formulas.
     """
     T = seq["pred_pose"].shape[0]
+    if frame_starts is not None and len(frame_starts) != (T + tw - 1) // tw:
+        raise ValueError("Window frame IDs do not match prediction windows")
     kp_gt = seq["kp_gt"]
     pred_kp = fk_pose6d(
         seq["pred_pose"][None], seq["pred_trans"][None], seq["offsets"], seq["parents"]
@@ -572,7 +578,7 @@ def _window_detail_rows(seq: dict, tw: int) -> dict:
     for start in range(0, T, tw):
         end = min(start + tw, T)
         p, g = pred_np[start:end], gt_np[start:end]
-        rows["frame_starts"].append(int(start))
+        rows["frame_starts"].append(int(start if frame_starts is None else frame_starts[start // tw]))
         rows["n_frames"].append(int(end - start))
         rows["metrics"]["pa_mpjpe_mm"].append(float(pa_mpjpe(p, g).mean()))
         p_al, _ = pelvis_align(p)
@@ -881,11 +887,12 @@ def _evaluate_config(
                 sess_metrics["contact_balanced_acc"] = 0.5 * (
                     sess_metrics["contact_recall"] + sess_metrics["air_recall"])
                 session_rows.append({
+                    "frame_ids": [int(sample["frame_start"]) + offset for sample in raw for offset in range(tw)],
                     "session_id": str(session_id),
                     "n_frames": int(seq["pred_pose"].shape[0]),
                     "metrics": sess_metrics,
                 })
-                w_rows = _window_detail_rows(seq, tw)
+                w_rows = _window_detail_rows(seq, tw, [int(sample["frame_start"]) for sample in raw])
                 window_rows["session_ids"].extend([str(session_id)] * len(w_rows["frame_starts"]))
                 window_rows["frame_starts"].extend(w_rows["frame_starts"])
                 window_rows["n_frames"].extend(w_rows["n_frames"])
@@ -1051,7 +1058,10 @@ def run_protocol(
         torch.set_rng_state(prev_cpu)
         if prev_cuda is not None:
             torch.cuda.set_rng_state_all(prev_cuda)
+    from anysole.utils.evaluation_contract import evaluation_contract
+    contract = evaluation_contract(dataset, checkpoint.get("config", {}))
     payload = {
+        "evaluation_contract": contract,
         "checkpoint": checkpoint_path,
         "modal": str(checkpoint.get("config", {}).get("modal", "anysolev1")),
         "contact_method": contact_method,
@@ -1101,7 +1111,8 @@ def run_protocol(
             "split": split,
             "tw": tw,
             "contact_method": contact_method,
-            "dump_version": 1,
+            "dump_version": 2,
+            "evaluation_contract": contract,
         }
         window_path = out_path.with_name("window_detail_%s.json" % split)
         window_path.write_text(

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""仅 U 训练套餐生成器（2026-10-26 用户裁定：训练套餐与实验解耦）。
+"""默认采用 * 新动作来源条目，仅验证集评估；旧 ID 仍可显式指定用于历史复现。
+
+仅 U 训练套餐生成器（2026-10-26 用户裁定：训练套餐与实验解耦）。
 
 训练内容：只训 U（统一模型，[0.5,0.25,0.25]），结构筛选阶段用——
 E1 的专家行与 E2/E5 的对照评估不在此列。
 
-DEFAULT_MODELS：U = V7_Cv5。换 U 时改 DEFAULT_MODELS 或用 --models 覆盖。
+DEFAULT_MODELS = ['V7_Cv5']
 
 底层条目：v7_variants_clean（--models 限定 U）。
 
@@ -13,13 +15,15 @@ DEFAULT_MODELS：U = V7_Cv5。换 U 时改 DEFAULT_MODELS 或用 --models 覆盖
   python configs/z_gen/gen_u_only.py --models V7_Cv5
 """
 
+# Default entries now use * and validation only. Old IDs remain explicit historical options.
 from __future__ import annotations
 
 import argparse
 
-from common import add_gen_args, emit_subset, parse_bool
+from common import (add_gen_args, concat_models, emit_subset, parse_bool,
+                    parse_seeds, seed_models)
 
-DEFAULT_MODELS = ["V7_Cv5"]
+DEFAULT_MODELS = ['V7_Cv5']
 
 
 def main() -> int:
@@ -29,9 +33,17 @@ def main() -> int:
     args = parser.parse_args()
     models = ([item.strip() for item in args.models.split(",") if item.strip()]
               if args.models else list(DEFAULT_MODELS))
+    models = concat_models(models, args.concat_method)
+    seeds = parse_seeds(args.seed)
+    if seeds:
+        models = seed_models(models, seeds)
     wandb = parse_bool(args.wandb, "--wandb")
     checkpoint_all = parse_bool(args.checkpoint_all, "--checkpoint-all")
-    total = emit_subset("v7_variants_clean", models,
+    total = emit_subset("v7_train", models, wandb=wandb, checkpoint_all=checkpoint_all,
+                        force=args.force, dry_run=args.dry_run)
+    total += emit_subset("v7_state_corrected_train", models, wandb=wandb,
+                         checkpoint_all=checkpoint_all, force=args.force, dry_run=args.dry_run)
+    total += emit_subset("v7_variants_clean", models,
                         wandb=wandb, checkpoint_all=checkpoint_all,
                         force=args.force, dry_run=args.dry_run)
     print("generated %d queue task(s)%s" % (total, " (dry-run)" if args.dry_run else ""))

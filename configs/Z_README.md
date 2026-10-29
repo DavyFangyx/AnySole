@@ -1,17 +1,17 @@
 # configs/ 离线实验调度说明
 
-定位：**当前有效实验的清单 + conf 队列的执行手册**。
+定位：**训练层 + 测试层的 conf 队列执行手册**（三层解耦，2026-10-28 用户裁定）。
+实验是模型通用的——模型通过 `--models` 参数传入，不是按模型编号建实验。
 
-- 实验的定义（目的/设置/判据/产物）在 `z_note/实验计划.md`（E1–E5 五个实验）；
-- 实验结果的数字与判读在 `z_note/E_Test/`（ABC对照 / C版本对照）；
-- 这里只登记「有哪些实验条目、如何生成与运行」。
+- **训练层**：模型训练（train 训练 + val 验证）→ ckpt —— `gen_full_package.py` / `gen_u_only.py`
+- **测试层**：用训练层 ckpt 在 test 上验证评估 —— `gen_e1/e2/e4/e5.py`
+- **display 层**：把 test 结果整理成表图 —— 脚本与 CLI 见 `results_display/README.md`
 
-一个 `.conf` 的粒度：一个 cell = 模型 × 条件（遮挡档 / ckpt 口径 / 训练配比），
-conf 命名 `NNNNN__<model_id>.conf`，结果目录 `results/cells/<model_id>/`——
-实验 = 这些 cell 的组合（E2 的 cell 是 E1/E5 的子集，跨实验共享同一结果
-目录，先到先评）。历史结果已全量迁至 `results/cells/`（2026-10-26，448 个
-cell）；`results/experiments/` 连同归档与重复运行隔离区已整体删除（迁移记录
-见 `results/.migration_20261026.log`）。
+实验定义在 `z_note/实验计划.md`（E1–E8）；结果在 `results_display/Etest/`（按 E1–E8 分目录）。
+
+一个 `.conf` 的粒度：一个 cell = 模型 × 条件（遮挡档 / ckpt 口径 / 训练配比）。
+conf 命名 `NNNNN__<model_id>.conf`；结果目录 `results/cells/<model_id>/`。
+实验 = cell 的组合（E2 的 cell 是 E1/E5 的子集，跨实验共享同一结果目录、先到先评）。
 
 ## 1. 队列机制（执行手册）
 
@@ -28,128 +28,145 @@ skip 两级（2026-10-26 用户裁定「conf 与结果一一对应」）：
 
 | 动作 | 命令 |
 |---|---|
-| 生成任务 | 实验级：`python configs/z_gen/gen_<实验>.py`（§3 清单）；底层条目：`python configs/z_gen/gen.py <条目>` |
+| 生成任务 | `python configs/z_gen/gen_<入口>.py`（见 §3）；底层条目 `python configs/z_gen/gen.py <条目>` |
 | 启动 worker | `CUDA_VISIBLE_DEVICES=N bash configs/bg.sh`（同卡重复执行 = 追加 worker） |
 | 队列状态 | `python configs/tools/status.py` |
 | 手动单跑 | 改 `configs/scratch.conf` 三行 → `bash configs/run.sh configs/scratch.conf`（`DRY_RUN=1` 只打印命令） |
 
-生成器两层（按实验分 gen，公共参数一致）：
+公共参数（所有 gen 脚本可用；按层生效）：
 
-- 实验级 `configs/z_gen/gen_full_package.py` / `gen_u_only.py` / `gen_e1.py` /
-  `gen_e2.py` / `gen_e5.py`——一个实验一个脚本，模型列表在脚本内
-  `DEFAULT_MODELS`（换家族时改脚本或用 `--models` 覆盖）
-- 底层条目 `configs/z_gen/gen.py <条目>`——通用入口，无参数 = 列出全部条目
-  （含模型数、wandb/checkpoint_all 默认、波次）；`--wave N` 发波次条目
-  （wo05 / tw_scan / per_action_folds，闸门不满足即退出）
-
-公共参数（两层通用）：
-
-- `--models a,b`：只发指定 cell（底层条目必须是其 `MODEL_IDS` 子集，否则报错）
-- `--wandb` / `--checkpoint-all` / `--force`：覆盖实验级默认，直写 conf
-- `--force`：绕过生成期 skip 并写 `FORCE=true`
-- `--dry-run`：只打印将写入的 conf，不落盘（生成前先看一遍）
+- `--models a,b`：**模型是参数**（实验通用）；底层条目必须是其 `MODEL_IDS` 子集，
+  否则报错——旧模型未接入实验管线时运行报错即止，不迁就
+- `--concat-method f6_soft / f6_soft_time_accel_v1 / f6_soft_time_accel_state_v2`：
+  接触标签版本（默认 `f6_soft`；后两者映射到 `*_tafix` / `*_statefix` 条目；
+  id 已带版本后缀时不叠加）
+- `--seed 1,2,3`：多种子（训练层；1=基名、≥2=追加 `_sN` 派生条目——已注册
+  当前默认训练线的 `_s2/_s3`）
+- `--ckpt last/best`：ckpt 口径（测试层；best 映射到 `*_evalbest*` 条目——
+  已注册 Cv1–7 的 `_evalbest` / `_evalbest_occ{010-050}`）
+- `--wandb` / `--checkpoint-all`：**只对训练层生效**（训练期专用开关；
+  测试层 conf 全部 eval-only，写了也不生效）
+- `--force`：绕过生成期 skip 并写 `FORCE=true`；`--dry-run`：只打印将写入的 conf
 
 conf 通用键（生成器写入；实验级默认在 `common.py` 的 `EXPERIMENTS` 表）：
 
-- `FORCE=false`：true 绕过两级 skip + ckpt 复用检查，强制重跑（含重训；复用 done/ 历史 conf 前必查）
-- `WANDB=true/false`：true 时 runner 注入 `wandb_mode=online`（实验级默认取 `EXPERIMENTS[].WANDB`）
-- `CHECKPOINT_ALL=true/false`：true=候选全留协议；false=只滚存最近过线者
+- `FORCE=false`：true 绕过两级 skip + ckpt 复用检查，强制重跑（含重训）
+- `WANDB` / `CHECKPOINT_ALL`：训练期专用（同公共参数说明）
 
-模型条目：`configs/z_gen/model_registry.py`（`MODELS` 表）；实验条目：
-`configs/z_gen/common.py`（`EXPERIMENTS` 表）；公共默认：`configs/defaults.conf`。
+注册位置：模型条目 `configs/z_gen/model_registry.py`（`MODELS` 表）；
+实验条目 `configs/z_gen/common.py`（`EXPERIMENTS` 表）；
+公共默认 `configs/defaults.conf`。条目全量清单：`python configs/z_gen/gen.py`（无参数）。
 
-## 2. 公共基础配置（V7 线）
+## 2. 公共基础配置（默认）
 
 | 配置项 | 实际值 | 说明 |
 |---|---|---|
 | 模型架构 | `anysolev2` | 注册表默认显式传入；覆盖 YAML 中的旧默认值 |
-| YAML | `anysole/configs/v1_wo05.yaml` | 数据、窗口、损失默认（wo05 划分） |
-| 划分 | `AnysoleWorkspace/protocol/splits/default/splits_wo05.csv`（yaml 内写 `protocol://splits/default/splits_wo05.csv`） | train 88 / val S12 / test S13+S14 = 36 会话 |
-| 接触标签 | `f6_soft` | 训练和评估统一使用 |
-| 相机 | `cam3` | E5 遮挡档 = cam3 + occ010/020/030/050（`v1_cam3_occ*_wo05.yaml`） |
-| 窗口长度 | `tw=20` | 每窗口 20 帧 |
-| 训练 stride | `20` | 不重叠窗口 |
-| batch size | `256` | 公共默认值 |
-| 学习率 | `1e-4` | constant schedule（tune18 扫描除外） |
-| 训练轮数 | `740` | V7 线统一（覆盖公共默认 `800`） |
+| YAML | `anysole/configs/v1.yaml`（当前默认线） | 数据、窗口、损失默认（历史 wo05 轴保持 `v1_wo05.yaml`） |
+| Splits | `AnysoleWorkspace/protocol/splits/default/splits.csv`（2026-10-29 用户裁定：当前所有模型训练评估统一 canonical） | train 92 / val S12 / test S13+S14 = 36 会话 |
+| 接触标签 | 默认 `f6_soft` | 训练评估统一；版本切换 = `--concat-method`（见 §4） |
+| 相机 | `cam3` | E5 遮挡档 = cam3 + occ010/020/030/050（`v1_cam3_occ*.yaml`） |
+| 窗口长度 / stride | `tw=20` / `20` | 每窗口 20 帧、不重叠 |
+| batch size | `256` | 公共默认 |
+| 学习率 | `1e-4` | constant schedule |
+| 训练轮数 | `740` | 覆盖公共默认 `800` |
 | train seed | `1` | 训练随机种子 |
 | dropout | `0.1` | 网络 dropout |
 | diffusion steps | `1000 / 50` | train / sample |
 | pose 表示 | `6d` | SMPL pose 6D 表示 |
 
-U 训练采样概率与损失（`v1_wo05.yaml` + V7 条目 `train_args`）：
-
-```text
-config_probs = [0.50, 0.25, 0.25]        # [VT, V-only, T-only]
-lambda_pose = 3.0    lambda_traj = 1.0
-lambda_contact = 1.0 lambda_air = 2.0    # trec/vrec = 0
-```
+| 训练条件采样概率（模态 dropout） | `config_probs = [0.50, 0.25, 0.25]` | （VT/V-only/T-only）；
+`lambda_pose 3.0 / lambda_traj 1.0 / lambda_contact 1.0 / lambda_air 2.0`（trec/vrec 0）。
 
 选点：ckpt 四阈值门（V≤40 / T≤90 / VT≤40 / ΔPA≤0.5）+ 候选池全留
-（`checkpoint_policy=multi_metric`，`CHECKPOINT_ALL` 开关）；正式口径 = ckpt_last
-（E2/E5 对照表并列 best/last 双口径）。
+（`checkpoint_policy=multi_metric`，`CHECKPOINT_ALL` 开关）；正式口径 = ckpt_last。
 
-## 3. 实验清单（2026-10-26 用户裁定）
-
-训练套餐与实验解耦：训练按需选一档；实验（E1/E2/E5）单独选择、不捆绑。
-
-### 训练套餐
-
-| 套餐 | 生成脚本 | 训练内容 | 用途 |
-|---|---|---|---|
-| 全量 | `gen_full_package.py` | U + S_V + S_T（同架构、同数据、同预算 740 epoch 单 seed） | 一次训齐，E1 随时可补 |
-| 仅 U | `gen_u_only.py` | U（统一模型，[0.5,0.25,0.25]） | 结构筛选阶段 |
-
-### 实验（单独选择）
-
-| 实验 | 生成脚本 | 前置 | 内容 |
-|---|---|---|---|
-| E1 | `gen_e1.py` | U + 专家 | U@T vs S_T@T、U@V vs S_V@V、U@VT（附录表 A 五行口径） |
-| E2 | `gen_e2.py` | U | 三块十指标 vs 外部基线（表 2） |
-| E5 | `gen_e5.py` | U | occ000/010/020/030/050 五档交叉评估，固定 ckpt_last（表 3） |
-
-### 当前实验条目（底层清单）
-
-实验条目 = `common.py` 里 `EXPERIMENTS` 表的键（`MODEL_IDS` 即生成范围），
-由 `gen.py <条目>` 生成；上面的实验/套餐脚本是这些条目的组合入口
-（模型、WANDB、checkpoint 保存方式都是参数）。
-
-| 实验条目 | 内容 |
-|---|---|
-| `v7_first_round` | 候选 A/B/C ×（cam3 / cam3_occ010）训练 |
-| `v7c_tune18` | V7_Cv1 调参 18 格：lr × λ_contact × schedule |
-| `v7_variants_precheck` | V1–V3 四格 6-epoch 端到端预检 |
-| `v7_variants_clean` | V1/V2/V3/V1_enum/Cv5 740-epoch 正式训练 |
-| `v7_variants_stats` | V1–V3 统计：cam3 test + occ 四档（eval-only） |
-| `v7_experts` | E1 专家 S_V/S_T（v7_a 骨架，与 C 非同架构，已被 Cv5 版取代） |
-| `v7_cv5_experts` | E1 专家 S_V/S_T（v7_c2 双门骨架 = U 同架构） |
-| `v7_r2_eval` | 第二轮 E2/E5：固定四门选点 + occ 四档 |
-| `v7_ckpt_caliber` | E2/E5 best/last 双口径对照 27 格（eval-only） |
-
-U = `V7_Cv5`（双门 + 枚举三条件）；S_V/S_T = `V7_Cv5_SV1` / `V7_Cv5_ST1`
-（同骨架，`config_probs` 分别为 `[0,1,0]` / `[0,0,1]`）。
-
-### 注册约定
-
-- 模型名：统一编号格式（`V7_CvN` 家族）——conf 文件、模型本体文件、result 目录、wandb tag 全链同名
-- 选点：统一 ckpt_last（epoch 740，记 sha256）；候选池 + 四阈值门 = 训练健康度诊断，不参与选点（ckpt 规则第三版）
-- 评估口径：`eval_splits=["val","test"]` 显式声明——「val 先评、test 后跑」只用于选点前筛查，正式统计必须两 split 齐出
-- conf 参数：`WANDB=true`、`CHECKPOINT_ALL=true`
-- 专家：S_V/S_T 固定各自 ckpt_last，不参与 U 的选点
-
-## 4. 运行命令
+## 3. 运行命令（训练层 + 测试层）
 
 ```bash
 cd /data/fangyuxuan/projects/gait
-# 生成（写入 configs/queue/；按需逐条执行，先 --dry-run 看一遍）
-python configs/z_gen/gen_full_package.py   # 全量套餐：U + S_V + S_T
-python configs/z_gen/gen_u_only.py         # 仅 U（结构筛选阶段）
-python configs/z_gen/gen_e1.py             # E1 专家对比（前置 U 已训）
-python configs/z_gen/gen_e2.py             # E2 主性能评估（三块十指标）
-python configs/z_gen/gen_e5.py             # E5 遮挡交叉评估（occ 五档）
-python configs/z_gen/gen.py                # 底层条目通用入口（无参数 = 列清单）
-# 启动 worker（每卡一个或多个，同卡重复执行 = 追加）
+# ---- 训练层：模型训练（train + val）→ ckpt ----
+
+# 全量套餐：当前默认七个 U（statefix_smpl24 线；不默认训专家）
+python configs/z_gen/gen_full_package.py --concat-method f6_soft --seed 1 --wandb true --checkpoint-all true
+
+# 仅 U（多种子示例：seed 1,2,3）
+python configs/z_gen/gen_u_only.py --models V7_Cv5 --concat-method f6_soft --seed 1,2,3 --wandb true --checkpoint-all true
+
+# ---- 测试层：用 ckpt 在 test 上验证评估（eval-only）----
+
+# E1 专家对比（默认 Cv5 last 的 V/T/VT 面板）
+python configs/z_gen/gen_e1.py --concat-method f6_soft --seed 1,2,3
+
+# E2 主性能评估（口径可切：--ckpt last/best）
+python configs/z_gen/gen_e2.py --models V7_Cv5_statistics --concat-method f6_soft --ckpt last --seed 1,2,3
+
+# E4 消融组
+python configs/z_gen/gen_e4.py --concat-method f6_soft --seed 1,2,3
+
+# E5 遮挡交叉评估（默认 occ 四档；口径可切：--ckpt last/best）
+python configs/z_gen/gen_e5.py --concat-method f6_soft --ckpt last --seed 1,2,3
+
+# ---- 调参（需要时用）----
+
+# lr × λ_contact × schedule 18 格
+python configs/z_gen/gen.py v7c_tune18
+
+# ---- 底层条目直发（新模型补评估等场景）----
+
+# 列全部注册条目
+python configs/z_gen/gen.py
+
+# 只发指定 cell
+python configs/z_gen/gen.py <条目> --models a,b --concat-method f6_soft
+
+# ---- 队列运维 ----
+
+# 启动 worker（每卡可多个，重复执行 = 追加）
 CUDA_VISIBLE_DEVICES=4 bash configs/bg.sh
+
 # 看队列状态
 python configs/tools/status.py
 ```
+
+## 4. 当前默认口径（2026-10-29）
+
+当前新训练采用新 SMPL24 动作来源，沿用已有压力与帧对应规则。默认接触包
+`f6_soft_time_accel_state_smpl24_v1`，条目带 ``；加速度修正版
+参照 `f6_soft_time_accel_smpl24_v1`，条目带 `_tafix_smpl24`。两套包各 140 会话。
+
+当前结构比较 = Cv1–7 七个统一模型，不默认训练 S_V/S_T：`gen_full_package.py`
+默认七个 U、`gen_u_only.py` 默认 Cv5、`gen_e1.py` 默认同一 Cv5 last 的
+V/T/VT 面板。历史专家只在显式指定历史 ID 时运行。正式比较用 last；
+`CHECKPOINT_ALL` 是候选保存开关，不能单独决定评估读 best 还是 last。
+
+接触标签版本一览（`--concat-method` 三取值 ↔ 条目后缀；smpl24 两包为当前
+默认来源，经模型 id 直选 `*` / `*_tafix_smpl24`，不走
+`--concat-method`）：
+
+| 版本 | 条目后缀 | 说明 |
+|---|---|---|
+| `f6_soft`（默认） | 无 | 主管线默认，训练评估统一 |
+| `f6_soft_time_accel_v1` | `_tafix` | 时间轴重建 + 加速度二阶差分修正（10-27） |
+| `f6_soft_time_accel_state_v2` | `_statefix` | 上者 + 缓慢抬脚状态修复（10-27 晚间） |
+| `f6_soft_time_accel_state_smpl24_v1` | `` | 当前默认（新 SMPL24 来源） |
+| `f6_soft_time_accel_smpl24_v1` | `_tafix_smpl24` | 当前参照（新来源加速度修正） |
+
+旧 `f6_soft`、`*_tafix`、`*_statefix` 条目保留原义；旧修正版包绑定旧 BVH，
+不能配新动作来源使用，旧 ckpt 也不得当作新来源训练结果。新结果按接触版本
+隔离目录。新包注册后的入口先只评验证集，测试集只做 Dataset 读取验收；
+E2 清晰档与 E5 四遮挡档合起来覆盖五档条件。只预览不入队：各 gen 入口
+`--dry-run`；去掉 `--dry-run` 才入队。
+
+## 5. 注册约定
+
+- 命名：conf 文件、模型本体文件、result 目录、wandb tag 全链同名（当前主线
+  `V7_CvN` 家族；旧模型（V3_Bv1 等）仍在注册表，走 `gen.py` 直发）
+- 选点：统一 ckpt_last（epoch 740，记 sha256）；候选池 + 四阈值门 = 训练健康度诊断
+- 评估口径：`eval_splits=["val","test"]` 显式声明——「val 先评、test 后跑」只用于
+  选点前筛查，正式统计两 split 齐出
+- 专家：S_V/S_T 固定各自 ckpt_last，不参与 U 的选点
+- conf 参数：`WANDB=true`、`CHECKPOINT_ALL=true`（训练层）
+
+> 历史条目（wo05 / tw_scan 等波次实验、v7_first_round 候选线、第二轮评估线）
+> 保留在注册表中供复现直发（`gen.py <条目>`），不入上文入口清单。

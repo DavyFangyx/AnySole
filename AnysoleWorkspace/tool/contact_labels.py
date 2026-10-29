@@ -219,7 +219,8 @@ def foot_signal(ctx: dict, side: str) -> tuple[np.ndarray, np.ndarray]:
     names, pts, floor = ctx["names"], ctx["pts"], ctx["floor"]
     idx = [
         i for i, nm in enumerate(names)
-        if nm.lower().startswith(f"{side}foot") or nm.lower().startswith(f"{side}toe")
+        if (key := nm.lower().replace("_", "")).startswith(f"{side}foot")
+        or key.startswith(f"{side}toe") or key == f"{side}ankle"
     ]
     if not idx:
         raise ValueError(f"No {side} foot joints matched by name; names={names}")
@@ -398,7 +399,8 @@ def _f6_signals(ctx: dict, side: str) -> dict:
     names, pts = ctx["names"], ctx["pts"]
     idx = [
         i for i, nm in enumerate(names)
-        if nm.lower().startswith(f"{side}foot") or nm.lower().startswith(f"{side}toe")
+        if (key := nm.lower().replace("_", "")).startswith(f"{side}foot")
+        or key.startswith(f"{side}toe") or key == f"{side}ankle"
     ]
     fp = median_filter(pts[:, idx, :], size=(3, 1, 1))
     p = fp.mean(axis=1)

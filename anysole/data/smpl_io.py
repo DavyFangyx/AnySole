@@ -223,8 +223,14 @@ def load_smpl(path: Path, query_t: Optional[np.ndarray] = None) -> dict:
             atol=1e-8,
         ):
             raise ValueError(f"{path}: poses body does not match pose_body")
+    query_valid = np.ones(len(src_t), dtype=bool)
     if query_t is not None:
         q = np.asarray(query_t, dtype=np.float64).reshape(-1)
+        if not np.isfinite(q).all():
+            raise ValueError("SMPL query times must be finite")
+        # Clipping is retained for explicit legacy reproduction. The dataset
+        # uses this support mask to exclude unsupported supervision windows.
+        query_valid = (q >= src_t[0] - 1e-9) & (q <= src_t[-1] + 1e-9)
         clipped = np.clip(q, src_t[0], src_t[-1])
         if len(src_t) == 1:
             poses = np.repeat(poses[:1], len(q), axis=0)
@@ -250,6 +256,8 @@ def load_smpl(path: Path, query_t: Optional[np.ndarray] = None) -> dict:
     # dependent offset must be added without R_root.
     pelvis_world = model_trans + rest_joints[0]
     return {
+        "query_valid": query_valid,
+        "source_time_range_s": (float(src_t[0]), float(src_t[-1])),
         "poses_aa": poses.reshape(len(poses), N_JOINTS * 3).astype(np.float32),
         "pose_6d": _rotmat_to_6d_np(rotmats).reshape(len(poses), N_JOINTS * 6),
         "trans_m": pelvis_world.astype(np.float32),

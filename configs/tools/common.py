@@ -97,6 +97,7 @@ TRAIN_ARG_FLAG_MAP = {
     # checkpoint_all（2026-10-26 裁定）：true=全留协议；false（默认）=
     # 只滚存最近一个过线者。仅 multi_metric 下生效。
     "checkpoint_all": "--checkpoint-all",
+    "smpl_support_policy": "--smpl-support-policy",
     # wandb（2026-10-25）：在线实验日志（mode/entity/project/tag/评估间隔）。
     "wandb_mode": "--wandb_mode",
     "wandb_project": "--wandb_project",

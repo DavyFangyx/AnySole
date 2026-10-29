@@ -8,6 +8,14 @@ pressure 不再由本脚本建农场：触觉正典 = AnysoleWorkspace/hf-raw/pr
 （tactile_v3 清洗产物，见 build_shared.py）。标定正典 = protocol/calibration/，
 human_masks 入口 = assets/upstream/，均不在本脚本范围。
 
+Upstream sources (2026-10-24 job onwards):
+
+* bvh: every ``bvh_path`` URI of the session manifest is linked (same link
+  name, e.g. ``<sid>/<sid>_Skeleton1.bvh``) onto the per-subject BVH24 export
+  ``Mocap/<mmdd>/<mmdd>smpl_new/mocap_ori_c3d/<sid>/motion_smpl24_blender_world_m.bvh``;
+* smpl: ``Mocap/<mmdd>/<mmdd>smpl_new/mocap_ori_c3d/<sid>/`` (npz + the four
+  validation/conversion jsons), replacing the previous ``<mmdd>smpl`` job.
+
 Glob-safety: every level that is hit by a recursive ``**`` glob (AnysoleWorkspace/hf-raw/smpl
 by ``build_raw_index.py``) is a real directory here; symlinks are only leaves
 (files) or camera directories under AnysoleWorkspace/hf-raw/rgb (never ``**``-traversed).
@@ -49,6 +57,29 @@ def collect(dates: tuple[str, ...], cams: tuple[str, ...]) -> dict[str, list[tup
     def add(entry: str, rel_link: Path, target: Path) -> None:
         items[entry].append((rel_link, target))
 
+    # bvh: manifest-driven, independent of the date filter.  Every
+    # ``bvh_path`` URI keeps its exact link name and points at the per-subject
+    # BVH24 export of the 2026-10-24 job.
+    manifest = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        uri = json.loads(line).get("bvh_path") or ""
+        if not uri:
+            continue
+        # raw://bvh/<yyyymmdd>/mocap_ori_bvh/<sid>/<sid>_Skeleton<N>.bvh
+        parts = uri.split("/")
+        if len(parts) != 7 or parts[2] != "bvh":
+            print(f"skip malformed bvh URI: {uri}", file=sys.stderr)
+            continue
+        date, sid, fname = parts[3], parts[5], parts[6]
+        mmdd = date[4:]
+        target = UP_MOCAP / mmdd / f"{mmdd}smpl_new" / "mocap_ori_c3d" / sid / "motion_smpl24_blender_world_m.bvh"
+        if target.is_file():
+            add("bvh", Path(date) / "mocap_ori_bvh" / sid / fname, target)
+        else:
+            print(f"skip missing BVH24 upstream: {target}", file=sys.stderr)
+
     for date in dates:
         date_dir = UP_DATA / date
         if not date_dir.is_dir():
@@ -70,27 +101,23 @@ def collect(dates: tuple[str, ...], cams: tuple[str, ...]) -> dict[str, list[tup
                         add("rgb", rel_rec / cam, cam_dir)
                     else:
                         print(f"skip missing camera {cam}: {rec}", file=sys.stderr)
-        bvh_root = date_dir / "mocap_ori_bvh"
-        if bvh_root.is_dir():
-            rel_root = Path(date) / "mocap_ori_bvh"
-            for calib in sorted(bvh_root.glob("*.bvh")):
-                add("bvh", rel_root / calib.name, calib)
-            for sid_dir in sorted(bvh_root.iterdir()):
-                if not sid_dir.is_dir():
-                    continue
-                for pattern in ("*.bvh",):
-                    for motion_file in sorted(sid_dir.glob(pattern)):
-                        add("bvh", rel_root / sid_dir.name / motion_file.name, motion_file)
         mmdd = date[4:]
-        smpl_root = UP_MOCAP / mmdd / f"{mmdd}smpl" / "mocap_ori_c3d"
+        smpl_root = UP_MOCAP / mmdd / f"{mmdd}smpl_new" / "mocap_ori_c3d"
         if smpl_root.is_dir():
             for sid_dir in sorted(smpl_root.iterdir()):
                 if not sid_dir.is_dir():
                     continue
-                npz = sid_dir / "motion_neutral_smpl.npz"
-                if npz.is_file():
-                    rel_link = Path(mmdd) / f"{mmdd}smpl" / "mocap_ori_c3d" / sid_dir.name / npz.name
-                    add("smpl", rel_link, npz)
+                for name in (
+                    "motion_neutral_smpl.npz",
+                    "bvh_validation.json",
+                    "conversion_manifest.json",
+                    "motion_quality.json",
+                    "smpl_validation.json",
+                ):
+                    source = sid_dir / name
+                    if source.is_file():
+                        rel_link = Path(mmdd) / f"{mmdd}smpl" / "mocap_ori_c3d" / sid_dir.name / name
+                        add("smpl", rel_link, source)
     return items
 
 

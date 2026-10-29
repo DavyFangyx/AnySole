@@ -86,6 +86,7 @@ DEFAULT_CONFIG = {
     "lr": 1.0e-4,
     "epochs": 200,
     "num_workers": 4,
+    "smpl_support_policy": "exclude",  # new runs reject unsupported SMPL targets
     "diffusion_train_steps": 1000,
     "diffusion_sample_steps": 50,
     "pose_layers": 6,
@@ -709,6 +710,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="AnySole-private contact-label scheme for contact_gt. Labels are generated "
         "under model_inputs/AnySole by anysole.data.contact_adapter.",
     )
+    parser.add_argument("--smpl-support-policy", choices=("exclude", "legacy_clip"), default=None,
+                        help="exclude unsupported SMPL target windows; legacy_clip only for historical reproduction")
     parser.add_argument("--out-dir", type=Path, default=None, help="Override checkpoint output directory.")
     parser.add_argument("--lr-schedule", choices=("constant", "cosine"), default=None,
                         help="LR schedule override: constant (E3 口径) or "
@@ -1279,6 +1282,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         value = getattr(args, key)
         if value is not None:
             config[key] = value
+    if args.smpl_support_policy is not None:
+        config["smpl_support_policy"] = args.smpl_support_policy
+    if config.get("smpl_support_policy", "exclude") not in ("exclude", "legacy_clip"):
+        raise ValueError("Invalid SMPL supervision support policy")
     if args.checkpoint_all is not None:
         config["checkpoint_all"] = bool(args.checkpoint_all)
     if config.get("checkpoint_policy", "legacy") not in ("legacy", "multi_metric"):
@@ -1453,6 +1460,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     config["motion_pose_dim"] = int(POSE_DIM)
     config["joint_protocol_checksum"] = JOINT_PROTOCOL_CHECKSUM
 
+    from anysole.data.contact_package import VERSIONED_CONTACT_METHODS, corrected_contact_provenance
+    if config["contact_method"] in VERSIONED_CONTACT_METHODS:
+        config.update(corrected_contact_provenance(config["contact_method"]))
+
     try:
         dataset = AnySoleDataset(
             mode="train",
@@ -1473,6 +1484,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             occ_mix=occ_mix_kwargs,
             t_phys_v2=bool(config.get("t_phys_v2", False)),
             d8_heads=bool(config.get("d8_heads", False)),
+            smpl_support_policy=str(config.get("smpl_support_policy", "exclude")),
         )
     except FileNotFoundError as exc:
         if "HRNet cache" in str(exc):
@@ -1496,7 +1508,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs, t_phys_v2=bool(config.get("t_phys_v2", False)), d8_heads=bool(config.get("d8_heads", False)))
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs, t_phys_v2=bool(config.get("t_phys_v2", False)), d8_heads=bool(config.get("d8_heads", False)), smpl_support_policy=str(config.get("smpl_support_policy", "exclude")))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:

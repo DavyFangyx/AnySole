@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""E2 主性能实验生成器（z_note/实验计划.md）。
+"""默认采用 * 新动作来源条目，仅验证集评估；旧 ID 仍可显式指定用于历史复现。
+
+E2 主性能实验生成器（z_note/实验计划.md）。
 
 内容：三块（V 块 / T 块 / VT 块）十指标 vs 外部基线（表 2），一个 ckpt
 在 U@V / U@T / U@VT 直接推理、零重训；口径并列 ckpt_last（表 2a）与
@@ -18,26 +20,45 @@ ckpt_best（表 2b）。
   python configs/z_gen/gen_e2.py --models V7_Cv1_sel --dry-run
 """
 
+# Default entries now use * and validation only. Old IDs remain explicit historical options.
 from __future__ import annotations
 
 import argparse
 
-from common import add_gen_args, emit_subset, parse_bool
+from common import (parse_seeds, seed_models,
+add_gen_args, ckpt_models, concat_models, emit_subset,
+                    parse_bool)
 
 # E2 读这两组评估条目的 cam3 格；occ 格是 E5 的（共用同批 conf）。
-DEFAULT_MODELS: list[str] = []
+DEFAULT_MODELS = ['V7_Cv5_statistics']
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_gen_args(parser)
+    parser.add_argument("--ckpt", choices=("last", "best"), default="last",
+                        help="ckpt 口径（best → *_evalbest* 条目）")
     args = parser.parse_args()
     models = [item.strip() for item in args.models.split(",") if item.strip()] \
         if args.models else DEFAULT_MODELS
+    if models:
+        models = concat_models(models, args.concat_method)
+    seeds = parse_seeds(args.seed)
+    if seeds:
+        models = seed_models(models, seeds)
     wandb = parse_bool(args.wandb, "--wandb")
     checkpoint_all = parse_bool(args.checkpoint_all, "--checkpoint-all")
-    total = 0
+    if args.ckpt == "best":
+        models = ckpt_models(models, "best")
+        total = emit_subset("v7_statefix_best_eval", models, wandb=wandb,
+                            checkpoint_all=checkpoint_all, force=args.force,
+                            dry_run=args.dry_run)
+    else:
+        total = emit_subset("v7_eval_clean", models, wandb=wandb, checkpoint_all=checkpoint_all,
+                            force=args.force, dry_run=args.dry_run)
+    total += emit_subset("v7_state_corrected_eval_clean", models, wandb=wandb,
+                         checkpoint_all=checkpoint_all, force=args.force, dry_run=args.dry_run)
     total += emit_subset("v7_r2_eval", models,
                          wandb=wandb, checkpoint_all=checkpoint_all,
                          force=args.force, dry_run=args.dry_run)

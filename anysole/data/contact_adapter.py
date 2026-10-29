@@ -33,8 +33,11 @@ F6_SOFT = {"contact_loaded": 0.95, "contact_unloaded": 0.70,
 
 
 def _foot_signal(ctx: dict, side: str) -> tuple[np.ndarray, np.ndarray]:
-    indices = [i for i, name in enumerate(ctx["names"])
-               if name.lower().startswith(f"{side}foot") or name.lower().startswith(f"{side}toe")]
+    indices = [
+        i for i, name in enumerate(ctx["names"])
+        if (key := name.lower().replace("_", "")).startswith(f"{side}foot")
+        or key.startswith(f"{side}toe") or key == f"{side}ankle"
+    ]
     if not indices:
         raise ValueError(f"no {side} foot joints in BVH")
     foot = ctx["pts"][:, indices, :]
@@ -119,14 +122,19 @@ def _joint(ctx: dict, mode: str) -> np.ndarray:
 
 def _f6_signals(ctx: dict, side: str) -> dict:
     indices = [i for i, name in enumerate(ctx["names"])
-               if name.lower().startswith(f"{side}foot") or name.lower().startswith(f"{side}toe")]
+               if name.lower().replace("_", "").startswith(f"{side}foot")
+               or name.lower().replace("_", "").startswith(f"{side}toe")
+               or name.lower().replace("_", "") == f"{side}ankle"]
+    if not indices:
+        raise ValueError(f"no {side} ankle/foot joints in BVH; refusing empty kinematic signals")
     filtered = median_filter(ctx["pts"][:, indices, :], size=(3, 1, 1))
     center = filtered.mean(axis=1)
     velocity = np.zeros_like(center)
     velocity[1:] = (center[1:] - center[:-1]) * FPS
     speed = np.linalg.norm(velocity, axis=1)
     acceleration_z = np.zeros(len(center), dtype=np.float64)
-    acceleration_z[2:] = (center[2:, 2] - center[:-2, 2]) / 2.0 * FPS * FPS
+    # Acceleration is a second difference, not a two-frame first difference.
+    acceleration_z[2:] = (center[2:, 2] - 2.0 * center[1:-1, 2] + center[:-2, 2]) * FPS * FPS
     height, _ = _foot_signal(ctx, side)
     return {"v": speed, "az": acceleration_z, "h": height}
 
@@ -150,11 +158,19 @@ def _f6_pressure(ctx: dict, side: str, airborne: np.ndarray) -> dict:
     return {"corrected": corrected, "loaded": _schmitt(corrected, low, 1.5 * low)}
 
 
-def _f6_machine(ctx: dict, side: str, loaded: np.ndarray) -> np.ndarray:
+def _f6_machine(ctx: dict, side: str, loaded: np.ndarray, *, enforce_airborne: bool = False) -> np.ndarray:
     signals = _f6_signals(ctx, side)
     speed, accel, height = signals["v"], signals["az"], signals["h"]
     state = np.ones(len(speed), dtype=np.int8)
+    if enforce_airborne:
+        state[:2] = np.where((height[:2] >= F6_H_HIGH) & ~loaded[:2], 0, 1)
     for index in range(2, len(speed)):
+        # A slow lift may never cross V_HI. Enforce the existing high-foot,
+        # unloaded contact veto on an inherited stance as well as re-entry.
+        # Loaded elevated support (e.g. stairs) is intentionally retained.
+        if enforce_airborne and height[index] >= F6_H_HIGH and not loaded[index]:
+            state[index] = 0
+            continue
         to_air = speed[index] > F6_V_HI and speed[index - 1] > F6_V_HI
         to_contact = ((speed[index] < F6_V_LO and speed[index - 1] < F6_V_LO and
                        abs(accel[index]) < F6_A_THR and abs(accel[index - 1]) < F6_A_THR)
@@ -170,15 +186,27 @@ def _f6_machine(ctx: dict, side: str, loaded: np.ndarray) -> np.ndarray:
     return state
 
 
-def _f6_pipeline(ctx: dict) -> tuple[np.ndarray, np.ndarray]:
+def _f6_pipeline(ctx: dict, *, enforce_airborne: bool = False) -> tuple[np.ndarray, np.ndarray]:
     states, loaded_values = [], []
+    # Height relative to the room floor is not a contact test on stairs.
+    # Disable the new height veto if either foot supplies evidence of slow,
+    # loaded elevated support anywhere in this session. No action IDs or
+    # model results are used; existing height/speed/load thresholds are reused.
+    if enforce_airborne:
+        raised_support = False
+        for side in ("left", "right"):
+            signal = _f6_signals(ctx, side)
+            first_pass = _f6_pressure(ctx, side, signal["v"] > F6_V_HI)
+            raised_support |= bool(np.any((signal["h"] >= F6_H_HIGH) &
+                (signal["v"] < F6_V_LO) & first_pass["loaded"]))
+        enforce_airborne = not raised_support
     for column, side in enumerate(("left", "right")):
         signals = _f6_signals(ctx, side)
         seed_air = signals["v"] > F6_V_HI
         first = _f6_pressure(ctx, side, seed_air)
-        state = _f6_machine(ctx, side, first["loaded"])
+        state = _f6_machine(ctx, side, first["loaded"], enforce_airborne=enforce_airborne)
         second = _f6_pressure(ctx, side, state == 0)
-        state = _f6_machine(ctx, side, second["loaded"])
+        state = _f6_machine(ctx, side, second["loaded"], enforce_airborne=enforce_airborne)
         states.append(state)
         loaded_values.append(second["loaded"])
     return np.stack(states, axis=1), np.stack(loaded_values, axis=1)
@@ -192,8 +220,8 @@ def _pressure_f6(ctx: dict) -> np.ndarray:
     return _f6_pipeline(ctx)[1].astype(np.float32)
 
 
-def _f6_soft(ctx: dict) -> np.ndarray:
-    states, loaded_values = _f6_pipeline(ctx)
+def _f6_soft(ctx: dict, *, enforce_airborne: bool = False) -> np.ndarray:
+    states, loaded_values = _f6_pipeline(ctx, enforce_airborne=enforce_airborne)
     out = np.zeros((ctx["n"], 2), dtype=np.float32)
     for column in range(2):
         state, loaded = states[:, column], loaded_values[:, column]
@@ -209,6 +237,7 @@ METHODS = {
     "joint_and": lambda ctx: _joint(ctx, "and"),
     "motion_f6": _motion_f6, "pressure_f6": _pressure_f6,
     "f6_soft": _f6_soft,
+    "f6_soft_time_accel_state_v2": lambda ctx: _f6_soft(ctx, enforce_airborne=True),
 }
 
 
@@ -301,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
     scope.add_argument("--split", choices=("train", "val", "test"), default=None)
     parser.add_argument("--methods", default="f6_soft",
                         help="comma-separated methods, or 'all' (default: f6_soft)")
+    parser.add_argument("--label-method", default=None,
+                        help="Optional output label name; computed method is unchanged.")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
     sessions = list(args.session)

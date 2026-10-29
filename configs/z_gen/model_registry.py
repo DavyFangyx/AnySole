@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from anysole.types import variant_from_config
+
 
 CONFIG_DIR = Path(__file__).resolve().parents[1]
 # V4B's partition is derived from RAW training-data kinematics (2026-09-24,
@@ -570,11 +572,11 @@ for _exp, _cprobs in (("V7_Cv5_SV1", [0.0, 1.0, 0.0]), ("V7_Cv5_ST1", [0.0, 0.0,
 
 # V1-last 统计（2026-10-26 用户裁定「统一口径」）：V1 = V7_Cv1 基准——
 # name 落 V7_Cv1 的 run 目录，which=last（与 V2/V3/V1_enum 同口径）。
-MODELS["V7_Cv1_stat"] = {**MODELS["V7_Cv1"], "label": "V7-Cv1-stat",
+MODELS["V7_Cv1_statistics"] = {**MODELS["V7_Cv1"], "label": "V7-Cv1-stat",
                            "name": "V7_Cv1", "train": False, "which": "last",
                            "eval_splits": ["val", "test"]}
 for _occ in ("010", "020", "030", "050"):
-    MODELS[f"V7_Cv1_stat_evalocc{_occ}"] = {
+    MODELS[f"V7_Cv1_statistics_evalocc{_occ}"] = {
         **MODELS["V7_Cv1"], "label": f"V7-Cv1-stat-evalocc{_occ}",
         "name": "V7_Cv1", "train": False, "which": "last",
         "eval_splits": ["val", "test"],
@@ -586,27 +588,27 @@ for _occ in ("010", "020", "030", "050"):
 # 专家 test 补跑（2026-10-26：clean 条目继承 eval_splits=["val"] 导致
 # 专家 test 缺失——eval-only 格补，不重训）。
 for _exp in ("V7_Cv5_SV1", "V7_Cv5_ST1"):
-    MODELS[f"{_exp}_stat"] = {**MODELS[_exp], "label": _exp + "-stat",
+    MODELS[f"{_exp}_statistics"] = {**MODELS[_exp], "label": _exp + "-stat",
                               "name": _exp, "train": False, "which": "last",
                               "eval_splits": ["val", "test"]}
 
 for _v in ("V7_Cv2", "V7_Cv3", "V7_Cv4"):
-    MODELS[f"{_v}_stat"] = {**MODELS[_v], "label": _v.replace("_", "-") + "-stat",
+    MODELS[f"{_v}_statistics"] = {**MODELS[_v], "label": _v.replace("_", "-") + "-stat",
                             "name": _v, "train": False, "which": "last",
                             "eval_splits": ["val", "test"]}
     for _occ in ("010", "020", "030", "050"):
-        MODELS[f"{_v}_stat_evalocc{_occ}"] = {
+        MODELS[f"{_v}_statistics_evalocc{_occ}"] = {
             **MODELS[_v], "label": _v.replace("_", "-") + f"-stat-evalocc{_occ}",
             "name": _v, "train": False, "which": "last",
             "eval_splits": ["val", "test"],
             "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml"}
 
 # V7_Cv5 统计（2026-10-26）：ckpt_last 固定口径（选点规则第三版）。
-MODELS["V7_Cv5_stat"] = {**MODELS["V7_Cv5"], "label": "V7-Cv5-stat",
+MODELS["V7_Cv5_statistics"] = {**MODELS["V7_Cv5"], "label": "V7-Cv5-stat",
                          "name": "V7_Cv5", "train": False, "which": "last",
                          "eval_splits": ["val", "test"]}
 for _occ in ("010", "020", "030", "050"):
-    MODELS[f"V7_Cv5_stat_evalocc{_occ}"] = {
+    MODELS[f"V7_Cv5_statistics_evalocc{_occ}"] = {
         **MODELS["V7_Cv5"], "label": f"V7-Cv5-stat-evalocc{_occ}",
         "name": "V7_Cv5", "train": False, "which": "last",
         "eval_splits": ["val", "test"],
@@ -616,11 +618,11 @@ for _occ in ("010", "020", "030", "050"):
 # 口径与 Cv5 stat 一致——cam3 test 面板 + occ 四档交叉评估（name 落训练
 # 条目名、which=last）。训练（00139/00140）完成后由 gen 接线发射。
 for _v in ("V7_Cv6", "V7_Cv7"):
-    MODELS[f"{_v}_stat"] = {**MODELS[_v], "label": _v.replace("_", "-") + "-stat",
+    MODELS[f"{_v}_statistics"] = {**MODELS[_v], "label": _v.replace("_", "-") + "-stat",
                             "name": _v, "train": False, "which": "last",
                             "eval_splits": ["val", "test"]}
     for _occ in ("010", "020", "030", "050"):
-        MODELS[f"{_v}_stat_evalocc{_occ}"] = {
+        MODELS[f"{_v}_statistics_evalocc{_occ}"] = {
             **MODELS[_v], "label": _v.replace("_", "-") + f"-stat-evalocc{_occ}",
             "name": _v, "train": False, "which": "last",
             "eval_splits": ["val", "test"],
@@ -722,39 +724,6 @@ for _name in ("V7_Av1", "V7_Bv1", "V7_Cv1"):
 # 波次：波 1 = V3_Ev1 ×5；波 2 = V3_Bv1/V5_Av4 ×5（无依赖，随波 1 并行）；
 # 波 3 = V5_Av1/V4_Av1 ×5（闸门 = 对应 fold E1 完成）。conf 生成 =
 # configs/z_gen/gen.py per_action_folds --wave 12|3（波 3 带闸门断言）。
-_FOLDS = (("fS13S14", "anysole/configs/v1.yaml"),
-          ("fS5S6S11", "anysole/configs/v1_fold_S5S6S11.yaml"),
-          ("fS5S11S12", "anysole/configs/v1_fold_S5S11S12.yaml"),
-          ("fS6S7S13", "anysole/configs/v1_fold_S6S7S13.yaml"),
-          ("fS5S6S8", "anysole/configs/v1_fold_S5S6S8.yaml"))
-# E1 fold 训练运行目录尾（tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_
-# bs256_sd1；基座逐项同参 → 目录名确定）。
-_FOLD_E1_CKPT = ("tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
-                 "checkpoints/ckpt_best.pt")
-for _fold, _yaml in _FOLDS:
-    MODELS["V3_Ev1_" + _fold] = {
-        **MODELS["V3_Ev1"], "label": "V3-3E-" + _fold, "name": "V3_Ev1_" + _fold,
-        "config": _yaml, "dump_detail": True}
-    # 本轮口径：所有模型接触方法统一 f6_soft（含 V3_Bv1 fold）。
-    MODELS["V3_Bv1_" + _fold] = {
-        **MODELS["V3_Bv1"], "label": "V3-3B-" + _fold, "name": "V3_Bv1_" + _fold,
-        "config": _yaml, "contact_method": "f6_soft", "dump_detail": True}
-    # V5_Av4 fold：统一编号 plain 名，配方继承 V5_Av4（= V5_Av4_cam3_v3off
-    # 基座条目；该条目保留不动——历史 conf 引用它）。
-    MODELS["V5_Av4_" + _fold] = {
-        **MODELS["V5_Av4_cam3_v3off"], "label": "V5-Av4-" + _fold,
-        "name": "V5_Av4_" + _fold,
-        "config": _yaml, "dump_detail": True}
-    _carrier = ("results/AnySole/V3_Ev1_%s_f6_soft/%s" % (_fold, _FOLD_E1_CKPT))
-    MODELS["V5_Av1_" + _fold] = {
-        **MODELS["V5_Av1"], "label": "V5-1-" + _fold, "name": "V5_Av1_" + _fold,
-        "config": _yaml, "dump_detail": True,
-        "train_args": {**MODELS["V5_Av1"]["train_args"], "carrier_from": _carrier}}
-    MODELS["V4_Av1_" + _fold] = {
-        **MODELS["V4_Av1"], "label": "V4-1-" + _fold, "name": "V4_Av1_" + _fold,
-        "config": _yaml, "dump_detail": True,
-        "train_args": {**MODELS["V4_Av1"]["train_args"], "carrier_from": _carrier}}
-
 # 冻结基底（该配置 vonly 专才 + 该配置主模型受过训 foot_conv），init_from
 # 指向 results/AnySole/V3_Dv1_<config>_joint_and/init_base_ttrained.pt。
 _V3_Dv1 = MODELS["V3_Dv1"]
@@ -774,6 +743,39 @@ for _occ in ("010", "020", "030", "050"):
         "train_args": {**_V3_Dv1["train_args"],
                        "init_from": f"results/AnySole/V3_Dv1_cam3_occ{_occ}_joint_and/init_base_ttrained.pt"},
     }
+
+_COMMON_FALLBACK = {
+    "CONFIG": "anysole/configs/v1.yaml",
+    "RESULTS_ROOT": "results",
+    "DISPLAY_ROOT": "results_display",
+    "MODAL": "anysolev2",
+    "CONTACT_METHOD": "joint_and",
+    "DEVICE": "cuda",
+    "TRAIN_SEED": "1",
+    "EPOCHS": "800",
+    "BATCH_SIZE": "256",
+    "PROTOCOL_SEED": "0",
+    "DISPLAY": "false",
+}
+
+
+def _load_defaults() -> dict[str, str]:
+    values = dict(_COMMON_FALLBACK)
+    path = CONFIG_DIR / "defaults.conf"
+    if not path.is_file():
+        return values
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key in values:
+            values[key] = value.split("#", 1)[0].strip()
+    return values
+
+
+COMMON = _load_defaults()
 
 # V3_Ev1 削弱首组（2026-10-17）：cam3 + occ010，训练规格与 V3_Ev1 完全一致；
 # 数据根差异由 runner 按名称尾缀推导 v1_cam3_occ010.yaml。
@@ -896,33 +898,6 @@ for _grad_base in ("V5_Av1", "V4_Av1"):
         }
 
 
-# 5-fold occ050 档（2026-10-23 裁定「加」）：V5_Av1/V4_Av1 × 5 fold ×
-# occ050——按动作 T 兑现只能在 occ 档测（cam3 池化干预已证 T 不参与）。
-# 基座 = V 失效梯度组条目（同 plain 基座规格，载体换接该 fold 的 E1）；
-# config = occ-fold yaml（cache_root = cam3_occ_lower050 + fold split）。
-_FOLD_OCC_YAMLS = {"fS13S14": "anysole/configs/v1_cam3_occ050.yaml"}
-_FOLD_OCC_YAMLS.update({_f: "anysole/configs/v1_occ050_fold_%s.yaml" % _f[1:]
-                        for _f, _ in _FOLDS if _f != "fS13S14"})
-for _fold, _occ_yaml in _FOLD_OCC_YAMLS.items():
-    _carrier = ("results/AnySole/V3_Ev1_%s_f6_soft/%s" % (_fold, _FOLD_E1_CKPT))
-    for _pre in ("V5_Av1", "V4_Av1"):
-        MODELS[f"{_pre}_occ050_{_fold}"] = {
-            **MODELS[f"{_pre}_cam3_occ050"], "label": f"{_pre}-occ050-" + _fold,
-            "name": f"{_pre}_occ050_{_fold}",
-            "config": _occ_yaml, "dump_detail": True,
-            "train_args": {**MODELS[f"{_pre}_cam3_occ050"]["train_args"],
-                           "carrier_from": _carrier}}
-    # 全面添加（2026-10-23）：V3_Bv1（无载体；接触 f6_soft 覆盖）与
-    # V5_Av4（配方继承 V5_Av4_cam3_v3off，carrier=scratch）。
-    MODELS[f"V3_Bv1_occ050_{_fold}"] = {
-        **MODELS["V3_Bv1_cam3_occ050"], "label": "V3-3B-occ050-" + _fold,
-        "name": f"V3_Bv1_occ050_{_fold}", "contact_method": "f6_soft",
-        "config": _occ_yaml, "dump_detail": True}
-    MODELS[f"V5_Av4_occ050_{_fold}"] = {
-        **MODELS["V5_Av4_cam3_v3off"], "label": "V5-Av4-occ050-" + _fold,
-        "name": f"V5_Av4_occ050_{_fold}",
-        "config": _occ_yaml, "dump_detail": True}
-
 
 # V6_Av1 occ_mix 对照（2026-10-20）：与 V5_Av1/V4_Av1 同规格，训练侧增开
 # occ_mix 三开关（预注册默认 p_occ=0.2 / p_nullV=0.1 / p_nullT=0.1）。
@@ -980,87 +955,6 @@ for _occ in ("010",):
     }
 
 # 5-fold occ010 档（2026-10-23 裁定「加」）：同 occ050 结构。
-_FOLD_OCC010_YAMLS = {"fS13S14": "anysole/configs/v1_cam3_occ010.yaml"}
-_FOLD_OCC010_YAMLS.update({_f: "anysole/configs/v1_occ010_fold_%s.yaml" % _f[1:]
-                           for _f, _ in _FOLDS if _f != "fS13S14"})
-for _fold, _occ_yaml in _FOLD_OCC010_YAMLS.items():
-    _carrier = ("results/AnySole/V3_Ev1_%s_f6_soft/%s" % (_fold, _FOLD_E1_CKPT))
-    for _pre in ("V5_Av1", "V4_Av1"):
-        MODELS[f"{_pre}_occ010_{_fold}"] = {
-            **MODELS[f"{_pre}_cam3_occ010"], "label": f"{_pre}-occ010-" + _fold,
-            "name": f"{_pre}_occ010_{_fold}",
-            "config": _occ_yaml, "dump_detail": True,
-            "train_args": {**MODELS[f"{_pre}_cam3_occ010"]["train_args"],
-                           "carrier_from": _carrier}}
-    # 全面添加（2026-10-23）：V3_Bv1（无载体；接触 f6_soft 覆盖）与
-    # V5_Av4（配方继承 V5_Av4_cam3_v3off——occ010_v3off 基座同配方）。
-    MODELS[f"V3_Bv1_occ010_{_fold}"] = {
-        **MODELS["V3_Bv1_cam3_occ010"], "label": "V3-3B-occ010-" + _fold,
-        "name": f"V3_Bv1_occ010_{_fold}", "contact_method": "f6_soft",
-        "config": _occ_yaml, "dump_detail": True}
-    MODELS[f"V5_Av4_occ010_{_fold}"] = {
-        **MODELS["V5_Av4_cam3_v3off"], "label": "V5-Av4-occ010-" + _fold,
-        "name": f"V5_Av4_occ010_{_fold}",
-        "config": _occ_yaml, "dump_detail": True}
-
-
-_COMMON_FALLBACK = {
-    "CONFIG": "anysole/configs/v1.yaml",
-    "RESULTS_ROOT": "results",
-    "DISPLAY_ROOT": "results_display",
-    "MODAL": "anysolev2",
-    "CONTACT_METHOD": "joint_and",
-    "DEVICE": "cuda",
-    "TRAIN_SEED": "1",
-    "EPOCHS": "800",
-    "BATCH_SIZE": "256",
-    "PROTOCOL_SEED": "0",
-    "DISPLAY": "false",
-}
-
-
-def _load_defaults() -> dict[str, str]:
-    values = dict(_COMMON_FALLBACK)
-    path = CONFIG_DIR / "defaults.conf"
-    if not path.is_file():
-        return values
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if key in values:
-            values[key] = value.split("#", 1)[0].strip()
-    return values
-
-
-COMMON = _load_defaults()
-
-# T 增强三组（2026-10-21，T增强三组实验方案.md；2026-10-24 基座换接 v3off 生产轴，
-# 原名保留以维持 results/ 目录寻址）：
-# V5_Av1_cam3_offfix_tphys = 维度 2 显式物理特征（T_phys 12→20）；
-# V5_Av1_cam3_offfix_d8   = 维度 3 足-地监督。
-MODELS["V5_Av1_cam3_offfix_tphys"] = {
-    **MODELS["V5_Av1_cam3_v3off"], "label": "V5-1-cam3-offfix-tphys",
-    "name": "V5_Av1_cam3_offfix_tphys",
-    "train_args": {**MODELS["V5_Av1_cam3_v3off"]["train_args"], "t_phys_v2": True}}
-MODELS["V5_Av1_cam3_offfix_d8"] = {
-    **MODELS["V5_Av1_cam3_v3off"], "label": "V5-1-cam3-offfix-d8",
-    "name": "V5_Av1_cam3_offfix_d8",
-    "train_args": {**MODELS["V5_Av1_cam3_v3off"]["train_args"],
-                   "d8_heads": True, "lambda_tcop": 0.1,
-                   "lambda_strike": 0.1, "lambda_gtcop": 0.1}}
-
-# 时间窗扫描（2026-10-22，z_note/multimodal_fusion/时间窗扫描实验.md）：
-# 五家族 x tw{5,10,15,20} x cam3/cam3_occ010（v3off 生产轴）。tw 是训练期
-# 协变量——eval 从 ckpt 读 tw（anysole/eval.py），评估期不可换窗，每格独立
-# 训练；stride 随 tw 非重叠（stride=tw 全贴片，tw5 = 4× 窗口数 ≈ 4× epoch
-# 时长）。E（V3_Ev1）格 = V4_Av1/V5_Av1 的同 (tw, 视觉) 载体（载体冻结自
-# 同配置 E ckpt_best；tw≠20 键不匹配、无 E 载体 build 硬失败）。
-# 波 1 = E + V3_Bv1 + V5_Av4；波 2 = V4_Av1 + V5_Av1（闸门 = 波 1 E 格完成）。
-from anysole.types import variant_from_config
-
 _TW_VALUES = (5, 10, 15)
 
 
@@ -1157,17 +1051,6 @@ for _mid in list(MODELS):
         if "_tw" in _mid or _mid.endswith(("cam3_v3off", "cam3_occ010_v3off")):
             MODELS[_mid] = {**MODELS[_mid], "dump_detail": True}
 
-# wo05 实验轴（2026-10-24，AnysoleWorkspace/protocol/splits/default/
-# splits_wo05.csv）：canonical split 去掉动作 05（绕圈跑）全部 4 条 train
-# 会话（S11051/S11053/S7053/S8053）→ train 92→88，val/test 不变。3 家族 ×
-# E1 四变体 = 12 模型（E1 约定：基名 = always-dual [1,0,0]；_drop = dropout
-# 统一 [0.5,0.25,0.25]；_vonly/_tonly = 单模态专家）。训练规格与 v3off E1
-# 条目逐项一致，唯一差异 = 名称尾缀 _wo05、config 指向 v1_wo05.yaml（仅
-# split_csv 差异）、V4_Av1 的 carrier_from 指向 V3_Ev1_wo05 的 ckpt_best。
-# V5_Av4 保持 carrier_from="scratch"（v5_1 entry 的 scratch 分支在
-# torch.load 之前返回——不装载任何 E ckpt，无 E 依赖，随波 1 并行）。
-# 波次：波 1 = V3_Ev1_wo05 + V5_Av4_wo05 ×8；波 2 = V4_Av1_wo05 ×4
-# （闸门 = 波 1 的 V3_Ev1_wo05 完成）。conf 生成 = configs/z_gen/gen.py wo05。
 _WO05_CONFIG = "anysole/configs/v1_wo05.yaml"
 _WO05_E1_CKPT = ("results/AnySole/V3_Ev1_wo05_f6_soft/"
                  "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
@@ -1194,60 +1077,9 @@ for _suf in ("", "_drop", "_vonly", "_tonly"):
         **_b, "label": "V4-1-wo05" + _suf.replace("_", "-"),
         "name": "V4_Av1_wo05" + _suf, "config": _WO05_CONFIG,
         "train_args": {**_b["train_args"], "carrier_from": _WO05_E1_CKPT}}
-
-
-# wo05 E5 遮挡交叉评估（2026-10-24）：eval-only 条目——复用各家族 _drop 统一
-# 模型的 ckpt（name 保持 _drop 基名；which=best → ckpt_best，对齐 E5 口径与
-# canonical occ json 的 checkpoint 字段），数据根 = v1_cam3_occ{N}_wo05.yaml
-# （显式 config 键）。零重训；入队闸门 = 对应家族 _drop conf 进 done/
-# （configs/z_gen/gen.py wo05 --wave 3 按家族把控）。
-for _f in ("V3_Ev1", "V4_Av1", "V5_Av4"):
-    for _occ in ("010", "020", "030", "050"):
-        _eval_id = f"{_f}_wo05_drop_evalocc{_occ}"
-        _src = MODELS[f"{_f}_wo05_drop"]
-        MODELS[_eval_id] = {
-            **_src,
-            "label": f"{_src['label']}-evalocc{_occ}",
-            "train": False,
-            "which": "best",
-            "config": f"anysole/configs/v1_cam3_occ{_occ}_wo05.yaml",
-        }
-
-
-# ckpt_last 重读（2026-10-24，用户裁定）：选择假象检查——V4_Av1_wo05_drop 的
-# ckpt_best 是 T 死的（val/tau0 VT 选择器在 T 的 val 边际为负时选走 T），
-# ckpt_last 门控活着（cam3 面板已有）；E5 的 occ 四档与 cam3 用 ckpt_last
-# 重读。V5_Av1_fS13S14（5-fold 塌缩 fold，ckpt_best T2M 296.9）的 ckpt_last
-# 同查。eval-only 零重训；name 保持源模型名 → ckpt 落源 run 目录的
-# ckpt_last.pt。
-for _occ in ("010", "020", "030", "050"):
-    _src = MODELS["V4_Av1_wo05_drop"]
-    _rid = "V4_Av1_wo05_drop_last_evalocc" + _occ
-    MODELS[_rid] = {
-        **_src, "label": _src["label"] + "-last-evalocc" + _occ,
-        "train": False, "which": "last",
-        "config": "anysole/configs/v1_cam3_occ%s_wo05.yaml" % _occ}
 MODELS["V4_Av1_wo05_drop_last_evalcam3"] = {
     **MODELS["V4_Av1_wo05_drop"], "label": "V4-1-wo05-drop-last-evalcam3",
     "train": False, "which": "last", "config": _WO05_CONFIG}
-MODELS["V5_Av1_fS13S14_last_evalcam3"] = {
-    **MODELS["V5_Av1_fS13S14"], "label": "V5-1-fS13S14-last-evalcam3",
-    "train": False, "which": "last"}
-# 5-fold 其余污染格（2026-10-24 查验补充）：V4_Av1/V5_Av1 的 fold 基名
-# 变体 ckpt_best 在平坦 val 曲线上落到 ep5~10（fS5S11S12/fS5S6S8 的
-# V5_Av1/V4_Av1 T2M 与 fS13S14 同型选择假象）。补全 ckpt_last 重读 →
-# 修正后的按动作表需要全部 5 fold 同口径（V5_Av1 fS13S14 已有、其余
-# 4 fold 补；V4_Av1 5 fold 全补）。dump_detail 随源条目继承。
-for _f in ("fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8"):
-    _src = MODELS["V5_Av1_" + _f]
-    MODELS["V5_Av1_%s_last_evalcam3" % _f] = {
-        **_src, "label": _src["label"] + "-last-evalcam3",
-        "train": False, "which": "last"}
-for _f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8"):
-    _src = MODELS["V4_Av1_" + _f]
-    MODELS["V4_Av1_%s_last_evalcam3" % _f] = {
-        **_src, "label": _src["label"] + "-last-evalcam3",
-        "train": False, "which": "last"}
 
 
 # λ 扫描（2026-10-24，用户裁定「先扫描一下这几个参数点」）：V5_Av1 / V5_Av4 /
@@ -1335,3 +1167,142 @@ for _occ in ("020", "030"):
         MODELS[_n] = {**_b4, "label": _n.replace("_", "-"), "name": _n,
                       "train_args": _tw_args(_b4["train_args"], _tw),
                       "dump_detail": True}
+
+
+# 2026-10-27: corrected contact supervision, separate run/cell namespace.
+# Historical IDs remain unchanged. These IDs reuse the same registered graphs;
+# the explicit contact version creates a different training result directory.
+_CORRECTED_CONTACT = "f6_soft_time_accel_v1"
+_CORRECTED_BASES = ["V7_Cv%d" % v for v in range(1, 8)] + ["V7_Cv5_SV1", "V7_Cv5_ST1"]
+for _base_id in _CORRECTED_BASES:
+    _corrected_id = _base_id + "_tafix"
+    MODELS[_corrected_id] = {
+        **MODELS[_base_id], "name": _base_id,
+        "label": _base_id.replace("_", "-") + "-time-accel-fixed",
+        "contact_method": _CORRECTED_CONTACT,
+        "eval_splits": ["val"], "which": "last",
+        "train_args": {**MODELS[_base_id]["train_args"], "final_eval_split": "none"},
+    }
+    MODELS[_corrected_id + "_statistics"] = {
+        **MODELS[_corrected_id], "train": False, "which": "last"}
+    for _occ in ("010", "020", "030", "050"):
+        MODELS[_corrected_id + "_evalocc" + _occ] = {
+            **MODELS[_corrected_id], "train": False, "which": "last",
+            "config": "anysole/configs/v1_cam3_occ%s_wo05.yaml" % _occ}
+
+# Reviewed state-machine correction. Historical f6_soft and *_tafix remain frozen.
+for _base_id in _CORRECTED_BASES:
+    _state_id = _base_id + "_statefix"
+    MODELS[_state_id] = {
+        **MODELS[_base_id], "name": _base_id,
+        "label": _base_id.replace("_", "-") + "-contact-state-v2",
+        "contact_method": "f6_soft_time_accel_state_v2",
+        "eval_splits": ["val"], "which": "last",
+        "train_args": {**MODELS[_base_id]["train_args"], "final_eval_split": "none"},
+    }
+    MODELS[_state_id + "_statistics"] = {**MODELS[_state_id], "train": False}
+    for _occ in ("010", "020", "030", "050"):
+        MODELS[_state_id + "_evalocc" + _occ] = {
+            **MODELS[_state_id], "train": False,
+            "config": "anysole/configs/v1_cam3_occ%s_wo05.yaml" % _occ}
+
+
+# Current SMPL24 motion source on the inherited frame grid (2026-10-29).
+# Historical identifiers and checkpoints keep their old package bindings.
+# The current architecture screen contains seven unified models, no experts.
+_SMPL24_PACKAGES = {
+    "tafix_smpl24": "f6_soft_time_accel_smpl24_v1",
+    "statefix_smpl24": "f6_soft_time_accel_state_smpl24_v1",
+}
+for _suffix, _contact in _SMPL24_PACKAGES.items():
+    for _i in range(1, 8):
+        _base = "V7_Cv%d" % _i
+        _new = _base + "_" + _suffix
+        MODELS[_new] = {
+            **MODELS[_base], "name": _base,
+            "label": _base + "-" + _suffix,
+            "contact_method": _contact, "eval_splits": ["val"], "which": "last",
+            # canonical split（splits.csv，2026-10-29 用户裁定；旧线保持 wo05）
+            "config": "anysole/configs/v1.yaml",
+            "train_args": {**MODELS[_base]["train_args"],
+                           "smpl_support_policy": "exclude", "final_eval_split": "none"},
+        }
+        MODELS[_new + "_statistics"] = {**MODELS[_new], "train": False}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS[_new + "_evalocc" + _occ] = {
+                **MODELS[_new], "train": False,
+                "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ,
+            }
+
+# ---- 种子派生条目（2026-10-29 用户裁定 --seed 1,2,3 多种子；方案 A = cell id 带 _sN）----
+# seed 为 spec 顶层键（train 命令 --seed N，variant 串 sdN → ckpt 目录自动分家）。
+_SEED_BASES = ["V7_Cv%d_statefix_smpl24" % i for i in range(1, 8)]
+for _base in _SEED_BASES:
+    for _n in (2, 3):
+        MODELS["%s_s%d" % (_base, _n)] = {
+            **MODELS[_base],
+            "label": "%s-s%d" % (MODELS[_base]["label"], _n),
+            "name": MODELS[_base]["name"], "seed": _n}
+        # 统计评估 cell 派生（读 seed N 的 ckpt：name=基名、seed=_n，
+        # variant 串 sdN 自动分家；cam3 + occ 四档）
+        MODELS["%s_s%d_statistics" % (_base, _n)] = {
+            **MODELS["%s_statistics" % _base],
+            "label": "%s-s%d-statistics" % (MODELS[_base]["label"], _n),
+            "name": MODELS[_base]["name"], "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_base, _n, _occ)] = {
+                **MODELS["%s_evalocc%s" % (_base, _occ)],
+                "label": "%s-s%d-evalocc%s" % (MODELS[_base]["label"], _n, _occ),
+                "name": MODELS[_base]["name"], "seed": _n}
+
+
+# ---- best 口径评估条目（2026-10-29 用户裁定 --ckpt last/best；Cv1–7）----
+# eval-only：which=best、name=基名；cam3 + occ 四档。
+_CKPT_BASES = ["V7_Cv%d_statefix_smpl24" % i for i in range(1, 8)]
+for _base in _CKPT_BASES:
+    MODELS["%s_evalbest" % _base] = {
+        **MODELS[_base], "label": MODELS[_base]["label"] + "-evalbest",
+        "name": MODELS[_base]["name"], "train": False, "which": "best"}
+    for _occ in ("010", "020", "030", "050"):
+        MODELS["%s_evalbest_occ%s" % (_base, _occ)] = {
+            **MODELS[_base], "label": "%s-evalbest-occ%s" % (MODELS[_base]["label"], _occ),
+            "name": MODELS[_base]["name"], "train": False, "which": "best",
+            "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+    # 种子派生（--ckpt best × --seed N）
+    for _n in (2, 3):
+        MODELS["%s_s%d_evalbest" % (_base, _n)] = {
+            **MODELS["%s_evalbest" % _base],
+            "label": "%s-s%d-evalbest" % (MODELS[_base]["label"], _n),
+            "name": MODELS[_base]["name"], "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalbest_occ%s" % (_base, _n, _occ)] = {
+                **MODELS["%s_evalbest_occ%s" % (_base, _occ)],
+                "label": "%s-s%d-evalbest-occ%s" % (MODELS[_base]["label"], _n, _occ),
+                "name": MODELS[_base]["name"], "seed": _n}
+
+
+# ---- 后缀清理（2026-10-29 用户裁定）：当前默认线占短名 V7_CvN ----
+# 数据包/来源差异不进模型名（方案 §6 版本登记只有 V7_CvN）：
+#   V7_CvN_statefix_smpl24 → V7_CvN（当前默认）
+#   V7_CvN_tafix_smpl24   → V7_CvN_tafix
+#   V7_CvN（旧 f6_soft）   → V7_CvN_f6
+#   V7_CvN_statefix/_tafix（旧 BVH 来源）→ 加 _bvh23
+def _apply_suffix_cleanup() -> None:
+    rename = {}
+    for _i in range(1, 8):
+        _b = "V7_Cv%d" % _i
+        rename["%s_statefix_smpl24" % _b] = _b
+        rename["%s_tafix_smpl24" % _b] = "%s_tafix" % _b
+        rename["%s_statefix" % _b] = "%s_statefix_bvh23" % _b
+        rename["%s_tafix" % _b] = "%s_tafix_bvh23" % _b
+        rename[_b] = "%s_f6" % _b
+    for _old_key in list(MODELS):
+        for _old_base, _new_base in rename.items():
+            if _old_key == _old_base or _old_key.startswith(_old_base + "_"):
+                _new_key = _old_key.replace(_old_base, _new_base, 1)
+                if _new_key not in MODELS:
+                    MODELS[_new_key] = MODELS.pop(_old_key)
+                break
+
+
+_apply_suffix_cleanup()

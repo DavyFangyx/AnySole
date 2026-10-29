@@ -31,71 +31,6 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "MODEL_IDS": ["V3_Bv2", "V3_Bv3"],
         "REQUIRES": [],
     },
-    # 5-fold 动作覆盖实验（2026-10-22）：受试者轮换 leave-subjects-out，
-    # test 覆盖 11/11 动作；波 1/2/3 与 fold 条目见 model_registry 同名块。
-    # 生成 = configs/z_gen/gen.py per_action_folds（--wave 12 先入队，
-    # 波 3 待波 1 E1 ckpt 完成后生成）。
-    "per_action_folds": {
-        "KIND": "model_suite",
-        "MODEL_IDS": [
-            "V3_Ev1_fS13S14", "V3_Ev1_fS5S6S11", "V3_Ev1_fS5S11S12",
-            "V3_Ev1_fS6S7S13", "V3_Ev1_fS5S6S8",
-            "V3_Bv1_fS13S14", "V3_Bv1_fS5S6S11", "V3_Bv1_fS5S11S12",
-            "V3_Bv1_fS6S7S13", "V3_Bv1_fS5S6S8",
-            "V5_Av4_fS13S14", "V5_Av4_fS5S6S11",
-            "V5_Av4_fS5S11S12", "V5_Av4_fS6S7S13",
-            "V5_Av4_fS5S6S8",
-            "V5_Av1_fS13S14", "V5_Av1_fS5S6S11", "V5_Av1_fS5S11S12",
-            "V5_Av1_fS6S7S13", "V5_Av1_fS5S6S8",
-            "V4_Av1_fS13S14", "V4_Av1_fS5S6S11", "V4_Av1_fS5S11S12",
-            "V4_Av1_fS6S7S13", "V4_Av1_fS5S6S8",
-            # occ050 档（2026-10-23 裁定「加」）
-            "V5_Av1_occ050_fS13S14", "V5_Av1_occ050_fS5S6S11",
-            "V5_Av1_occ050_fS5S11S12", "V5_Av1_occ050_fS6S7S13",
-            "V5_Av1_occ050_fS5S6S8",
-            "V4_Av1_occ050_fS13S14", "V4_Av1_occ050_fS5S6S11",
-            "V4_Av1_occ050_fS5S11S12", "V4_Av1_occ050_fS6S7S13",
-            "V4_Av1_occ050_fS5S6S8",
-            # occ010 档（2026-10-23 裁定「加」）
-            "V5_Av1_occ010_fS13S14", "V5_Av1_occ010_fS5S6S11",
-            "V5_Av1_occ010_fS5S11S12", "V5_Av1_occ010_fS6S7S13",
-            "V5_Av1_occ010_fS5S6S8",
-            "V4_Av1_occ010_fS13S14", "V4_Av1_occ010_fS5S6S11",
-            "V4_Av1_occ010_fS5S11S12", "V4_Av1_occ010_fS6S7S13",
-            "V4_Av1_occ010_fS5S6S8",
-            # 全面添加（2026-10-23）：V3_Bv1/V5_Av4 × occ010/occ050
-            "V3_Bv1_occ050_fS13S14", "V3_Bv1_occ050_fS5S6S11",
-            "V3_Bv1_occ050_fS5S11S12", "V3_Bv1_occ050_fS6S7S13",
-            "V3_Bv1_occ050_fS5S6S8",
-            "V5_Av4_occ050_fS13S14", "V5_Av4_occ050_fS5S6S11",
-            "V5_Av4_occ050_fS5S11S12", "V5_Av4_occ050_fS6S7S13",
-            "V5_Av4_occ050_fS5S6S8",
-            "V3_Bv1_occ010_fS13S14", "V3_Bv1_occ010_fS5S6S11",
-            "V3_Bv1_occ010_fS5S11S12", "V3_Bv1_occ010_fS6S7S13",
-            "V3_Bv1_occ010_fS5S6S8",
-            "V5_Av4_occ010_fS13S14", "V5_Av4_occ010_fS5S6S11",
-            "V5_Av4_occ010_fS5S11S12", "V5_Av4_occ010_fS6S7S13",
-            "V5_Av4_occ010_fS5S6S8",
-        ],
-        "REQUIRES": [],
-        # 波次（2026-10-22，原 per_action_folds.py 数据迁入）：波 3 闸门 =
-        # 波 1 的 5 个 V3_Ev1 fold conf 全部进 done/（carrier 依赖）。
-        "DEFAULT_WAVE": "12",
-        "WAVES": {
-            "12": ["V3_Ev1_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
-            + ["V3_Bv1_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
-            + ["V5_Av4_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")],
-            "3": ["V5_Av1_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
-            + ["V4_Av1_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
-            # occ050 档（2026-10-23 裁定「加」；载体闸门同波 3）
-            + ["V5_Av1_occ050_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
-            + ["V4_Av1_occ050_%s" % f for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")],
-        },
-        "WAVE_GATES": {
-            "3": ["*__V3_Ev1_%s.conf" % f
-                  for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")],
-        },
-    },
     "residual_test": {
         "KIND": "model_suite",
         "MODEL_IDS": ["V3_Cv1"],
@@ -152,11 +87,6 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         "REQUIRES": [],
     },
     # 新数据验证（2026-10-22）：生产 v3+offset facts 的替换验证。
-    "v3off_validation": {
-        "KIND": "model_suite",
-        "MODEL_IDS": ["V3_Bv1_cam3_v3off"],
-        "REQUIRES": [],
-    },
     # V3_Hv5 无锚版全网格（2026-10-20）：4 相机 × 3 遮挡 = 12 格
     # （T 价值区 = V 失效条件的无锚对照；cam{1,2,4}_occ{010,020} 的
     # 遮挡缓存由 extract_hrnet 生成）。
@@ -225,17 +155,16 @@ EXPERIMENTS: dict[str, dict[str, Any]] = {
         # 波 3 = wo05_eval 条目（E5 遮挡交叉评估），闸门 = 对应家族 _drop
         # conf 进 done/（gate_experiment 即训练条目的 conf 名前缀）。
         # DEFAULT_WAVE=auto：波 1 + 闸门满足的后续波，逐波跳过已入队模型。
+        # 2026-10-29 用户裁定：V4_Av1 双阶段自训（carrier=scratch），
+        # 与其余家族无依赖 → 12 格合为单波，无闸门。
         "DEFAULT_WAVE": "auto",
         "WAVES": {
             1: ["V3_Ev1_wo05", "V3_Ev1_wo05_drop", "V3_Ev1_wo05_vonly",
                 "V3_Ev1_wo05_tonly",
                 "V5_Av4_wo05", "V5_Av4_wo05_drop", "V5_Av4_wo05_vonly",
-                "V5_Av4_wo05_tonly"],
-            2: ["V4_Av1_wo05", "V4_Av1_wo05_drop", "V4_Av1_wo05_vonly",
+                "V5_Av4_wo05_tonly",
+                "V4_Av1_wo05", "V4_Av1_wo05_drop", "V4_Av1_wo05_vonly",
                 "V4_Av1_wo05_tonly"],
-        },
-        "WAVE_GATES": {
-            2: ["*__V3_Ev1_wo05.conf"],
         },
         "WAVE_EVAL": {
             "wave": 3,
@@ -562,6 +491,15 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
     return count
 
 
+def parse_seeds(value: str | None) -> list[int] | None:
+    if value is None:
+        return None
+    seeds = [int(x) for x in value.split(",") if x.strip()]
+    if not seeds or any(s < 1 for s in seeds):
+        raise SystemExit("--seed 需逗号分隔的正整数，如 1,2,3")
+    return seeds
+
+
 def parse_bool(value: str | None, flag: str) -> bool | None:
     """true/false 命令行参数解析（gen.py 与 gen_*.py 共用）。"""
     if value is None:
@@ -573,16 +511,238 @@ def parse_bool(value: str | None, flag: str) -> bool | None:
     raise SystemExit("%s must be true/false, got %r" % (flag, value))
 
 
+# 接触标签版本 → 注册表条目后缀（2026-10-29 用户裁定：--concat-method 即选接触标签）
+CONCAT_VERSIONS = {"f6_soft": "",
+                   "f6_soft_time_accel_v1": "_tafix",
+                   "f6_soft_time_accel_state_v2": "_statefix"}
+
+
+def concat_models(models: list[str], method: str) -> list[str]:
+    """按接触标签版本映射模型 id：f6_soft 原样；其余版本在后缀位置插入
+    _tafix/_statefix（注册表需存在对应条目，否则报错）。"""
+    suffix = CONCAT_VERSIONS[method]
+    if not suffix:
+        return models
+    all_suffixes = [v for v in CONCAT_VERSIONS.values() if v]
+    mapped = []
+    for model in models:
+        if model.endswith(suffix) or any(model.endswith(v) for v in all_suffixes):
+            # 已带版本后缀（含其他版本）的 id 显式编码了标签版本，不叠加
+            mapped.append(model)
+            continue
+        target = model + suffix
+        if target not in MODELS:
+            # 子后缀（_stat/_evalocc 等）前插入版本后缀
+            for sub in ("_statistics", "_evalocc", "_evalbest", "_precheck", "_sel", "_drop",
+                        "_vonly", "_tonly", "_nodrop", "_smpl24"):
+                if sub in model:
+                    target = model.replace(sub, suffix + sub, 1)
+                    break
+        if target not in MODELS:
+            raise SystemExit("--concat-method %s：%s 无对应注册条目（%s）"
+                             % (method, model, target))
+        mapped.append(target)
+    return mapped
+
+
+def ckpt_models(models: list[str], ckpt: str) -> list[str]:
+    """ckpt 口径映射（--ckpt last/best）：best 时把 _stat/_evalocc 系 id
+    映射到 _evalbest/_evalbest_occ 系（2026-10-29 注册的 Cv1–7 条目）；
+    last 原样。已含 _evalbest 的 id 不重复映射。"""
+    if ckpt == "last":
+        return models
+    mapped = []
+    for model in models:
+        if "_evalbest" in model:
+            mapped.append(model)
+            continue
+        # 尾部精确匹配（防 base 名里的 stat/occ 字样被误替换，如 statefix）
+        target = None
+        pos = model.rfind("_evalocc")
+        if pos != -1 and model[pos + len("_evalocc"):].isdigit() \
+                and len(model) - (pos + len("_evalocc")) == 3:
+            # 尾部 _evaloccNNN / _statistics_evaloccNNN → _evalbest_occNNN
+            base = model[:pos]
+            if base.endswith("_statistics"):
+                base = base[: -len("_statistics")]
+            target = base + "_evalbest_occ" + model[pos + len("_evalocc"):]
+        elif model.endswith("_statistics"):
+            target = model[: -len("_statistics")] + "_evalbest"
+        else:
+            target = model + "_evalbest"
+        if target not in MODELS:
+            raise SystemExit("--ckpt best：%s 无对应 best 口径条目（%s）"
+                             % (model, target))
+        mapped.append(target)
+    return mapped
+
+
+def seed_models(models: list[str], seeds: list[int]) -> list[str]:
+    """多种子展开（方案 A，2026-10-29）：seed 1 = 原 id；seed ≥2 = 追加 _sN。
+    只对「基名」id 展开（已带 _sN / _stat / _evalocc 等子后缀的 id 原样保留
+    ——评估类 cell 由其训练条目决定种子，不重复展开）。"""
+    expanded = []
+    for model in models:
+        if any(model.endswith(s) for s in ("_s2", "_s3")):
+            expanded.append(model)
+            continue
+        # 子后缀位置（_sN 插在子后缀前：V7_Cv5_statistics → V7_Cv5_s2_statistics）
+        sub_pos = None
+        for sub in ("_statistics", "_evalocc", "_evalbest", "_precheck", "_sel"):
+            pos = model.rfind(sub)
+            if pos != -1 and pos > 0:
+                sub_pos = pos
+                break
+        for n in seeds:
+            if n == 1:
+                target = model
+            elif sub_pos is not None:
+                target = model[:sub_pos] + "_s%d" % n + model[sub_pos:]
+            else:
+                target = "%s_s%d" % (model, n)
+            if target not in MODELS:
+                raise SystemExit("--seed %d：%s 无对应注册条目（%s）"
+                                 % (n, model, target))
+            expanded.append(target)
+    return expanded
+
+
 def add_gen_args(parser) -> None:
     """gen_*.py 公共参数：模型选择与 conf 覆盖开关。"""
     parser.add_argument("--models", default=None,
                         help="comma-separated model IDs（默认：脚本内 DEFAULT_MODELS）")
+    parser.add_argument("--seed", default=None,
+                        help="多种子（逗号分隔，如 1,2,3；1=基名，≥2=追加 _sN 条目）")
+    parser.add_argument("--concat-method", choices=list(CONCAT_VERSIONS),
+                        default="f6_soft",
+                        help="接触标签版本（默认 f6_soft；tafix/statefix 映射到 *_tafix/*_statefix 条目）")
     parser.add_argument("--wandb", default=None, help="true/false，覆盖实验级默认")
     parser.add_argument("--checkpoint-all", default=None, help="true/false，覆盖实验级默认")
     parser.add_argument("--force", action="store_true",
                         help="绕过生成期 skip 并写 FORCE=true（强制重跑，含重训）")
     parser.add_argument("--dry-run", action="store_true",
                         help="只打印将写入的 conf，不落盘")
+
+
+DONE_DIR = CONFIG_DIR / "done"
+
+
+def _wave_key(raw: dict[str, Any], key: str, table: str) -> Any:
+    """按 str 匹配 WAVES/WAVE_GATES 的键（兼容 int 键 1/2 与 str 键 "12"/"3"）。"""
+    for candidate in raw.get(table, {}):
+        if str(candidate) == str(key):
+            return candidate
+    raise SystemExit("unknown wave %r for %s (waves: %s)"
+                     % (key, raw.get("_experiment_id"),
+                        ",".join(str(k) for k in sorted(raw.get("WAVES", {}), key=str))))
+
+
+def _check_wave_gates(raw: dict[str, Any], wave: Any, hard: bool) -> bool:
+    gates = raw.get("WAVE_GATES", {})
+    patterns = [gates[k] for k in gates if str(k) == str(wave)]
+    patterns = [p for group in patterns for p in group]
+    missing = [pattern for pattern in patterns if not list(DONE_DIR.glob(pattern))]
+    if not missing:
+        return True
+    if hard:
+        raise SystemExit("波 %s 闸门未满足：%s 无 conf 进 done/"
+                         % (wave, "、".join(missing)))
+    for pattern in missing:
+        print("[gate] wave %s skipped: %s 未进 done/（完成后用 --wave %s 补发）"
+              % (wave, pattern, wave))
+    return False
+
+
+def _emit_wave(raw: dict[str, Any], wave: Any, selected: list[str],
+               wandb: bool | None, checkpoint_all: bool | None,
+               force: bool, dry_run: bool) -> int:
+    """发射一个训练波：闸门（硬）→ --models 子集 → emit（skip 默认开）。"""
+    _check_wave_gates(raw, wave, hard=True)
+    selected_set = set(selected)
+    wave_list = raw["WAVES"][_wave_key(raw, wave, "WAVES")]
+    models = [str(item) for item in wave_list
+              if not selected_set or str(item) in selected_set]
+    if not models:
+        print("[skip] wave %s: no selected model in this wave" % wave)
+        return 0
+    return emit_experiment(str(raw["_experiment_id"]), models,
+                           wandb=wandb, checkpoint_all=checkpoint_all,
+                           force=force, dry_run=dry_run)
+
+
+def _emit_eval_wave(raw: dict[str, Any], hard: bool,
+                    wandb: bool | None, checkpoint_all: bool | None,
+                    force: bool, dry_run: bool) -> int:
+    """发射 WAVE_EVAL 波（wo05 波 3）：按家族闸门筛 ready 家族后发 eval 条目。"""
+    eval_spec = raw["WAVE_EVAL"]
+    eval_id = str(eval_spec["experiment"])
+    ready: list[str] = []
+    for fam, base in eval_spec["families"].items():
+        if list(DONE_DIR.glob("*__%s.conf" % base)):
+            ready.extend(str(item) for item in EXPERIMENTS[eval_id]["MODEL_IDS"]
+                         if str(item).startswith(fam))
+        else:
+            print("[gate] wave %s skipped: %s 未进 done/" % (eval_spec["wave"], base))
+    if not ready:
+        if hard:
+            raise SystemExit("波 %s 闸门未满足：没有任何家族 _drop conf 进 done/"
+                             % eval_spec["wave"])
+        return 0
+    return emit_experiment(eval_id, ready,
+                           wandb=wandb, checkpoint_all=checkpoint_all,
+                           force=force, dry_run=dry_run)
+
+
+def emit_waved(experiment_id: str, wave: str | None = None,
+               models: list[str] | None = None, *,
+               wandb: bool | None = None,
+               checkpoint_all: bool | None = None,
+               force: bool | None = None,
+               dry_run: bool = False) -> int:
+    """波次感知发射（gen.py 与 gen_*.py 共用）。
+
+    - 无 WAVES 的条目：直接 emit_experiment（models 为全集或子集）
+    - 有 WAVES：wave 缺省取 DEFAULT_WAVE；auto = 级联（逐波软闸门）；
+      显式 wave = 硬闸门；WAVE_EVAL 波（wo05 波 3）按家族闸门发射
+    """
+    raw = dict(EXPERIMENTS[experiment_id])
+    raw["_experiment_id"] = experiment_id
+    waves = raw.get("WAVES")
+    wave_eval = raw.get("WAVE_EVAL")
+
+    if waves:
+        if wave is None:
+            wave = str(raw.get("DEFAULT_WAVE", sorted(waves, key=str)[0]))
+        if wave == "auto":
+            total = 0
+            for w in sorted(waves, key=str):
+                if _check_wave_gates(raw, w, hard=False):
+                    total += _emit_wave(raw, w, models or [], wandb,
+                                        checkpoint_all, bool(force), dry_run)
+            if wave_eval:
+                total += _emit_eval_wave(raw, hard=False, wandb=wandb,
+                                         checkpoint_all=checkpoint_all,
+                                         force=bool(force), dry_run=dry_run)
+            return total
+        if str(wave) in {str(k) for k in waves}:
+            total = _emit_wave(raw, wave, models or [], wandb, checkpoint_all,
+                               bool(force), dry_run)
+            if wave_eval and str(wave_eval.get("wave")) == str(wave):
+                total += _emit_eval_wave(raw, hard=True, wandb=wandb,
+                                         checkpoint_all=checkpoint_all,
+                                         force=bool(force), dry_run=dry_run)
+            return total
+        if wave_eval and str(wave_eval.get("wave")) == str(wave):
+            return _emit_eval_wave(raw, hard=True, wandb=wandb,
+                                   checkpoint_all=checkpoint_all,
+                                   force=bool(force), dry_run=dry_run)
+        raise SystemExit("unknown wave %r for %s (waves: %s)"
+                         % (wave, experiment_id,
+                            ",".join(str(k) for k in sorted(waves, key=str))))
+
+    return emit_experiment(experiment_id, models,
+                           wandb=wandb, checkpoint_all=checkpoint_all,
+                           force=force, dry_run=dry_run)
 
 
 def emit_subset(experiment_id: str, models: list[str], **kwargs) -> int:
@@ -641,12 +801,6 @@ EXPERIMENTS["v4b_finetune"] = {
     "KIND": "model_suite",
     "MODEL_IDS": ["V4_Av4", "V4_Av4_cam3_occ010",
                   "V4_Av4_drop", "V4_Av4_drop_cam3_occ010"],
-    "REQUIRES": [],
-}
-
-EXPERIMENTS["v7_precheck"] = {
-    "KIND": "model_suite",
-    "MODEL_IDS": ["V7_Av1_precheck", "V7_Bv1_precheck", "V7_Cv1_precheck"],
     "REQUIRES": [],
 }
 
@@ -718,17 +872,19 @@ EXPERIMENTS["v7_variants_precheck"] = {
 # V1–V3 统计（2026-10-26）：cam3 test 面板 + occ 四档交叉评估（15 格）。
 EXPERIMENTS["v7_variants_stats"] = {
     "KIND": "model_suite", "WANDB": False,
-    "MODEL_IDS": [f"{v}_stat" for v in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv4", "V7_Cv5")]
-    + [f"{v}_stat_evalocc{o}" for o in ("010","020","030","050")
-       for v in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv4", "V7_Cv5")],
+    "MODEL_IDS": [f"{v}_statistics" for v in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv4", "V7_Cv5", "V7_Cv6", "V7_Cv7")]
+    + [f"{v}_statistics_evalocc{o}" for o in ("010","020","030","050")
+       for v in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv4", "V7_Cv5", "V7_Cv6", "V7_Cv7")],
+    # 2026-10-29 用户裁定：Cv6/Cv7 是正常训练模型、无依赖——去掉 cv67
+    # 波次与闸门，普通全量发射；抢跑由两级 skip + 执行期 ckpt 守卫兜底。
     "REQUIRES": [],
 }
 
 # V7_Cv5 全量套餐专家（2026-10-26）。
 # 专家 test 补跑（2026-10-26）。
-EXPERIMENTS["v7_cv5_experts_stat"] = {
+EXPERIMENTS["v7_cv5_experts_statistics"] = {
     "KIND": "model_suite", "WANDB": False,
-    "MODEL_IDS": ["V7_Cv5_SV1_stat", "V7_Cv5_ST1_stat"],
+    "MODEL_IDS": ["V7_Cv5_SV1_statistics", "V7_Cv5_ST1_statistics"],
     "REQUIRES": [],
 }
 
@@ -769,18 +925,14 @@ EXPERIMENTS["cond_coop"] = {
 # 的 ckpt_last 跑 E5 occ 四档 + cam3；V5_Av1_fS13S14 的 ckpt_last cam3。
 # V4_Av1/V5_Av1 其余 fold 格（5-fold 按动作表修正口径）。eval-only 零重训
 # （条目定义见 model_registry 同名块）。
+# fold 系条目已随 per_action_folds 删除（2026-10-29）；仅留 wo05 系重读。
 EXPERIMENTS["ckpt_last_reread"] = {
     "KIND": "model_suite",
     "MODEL_IDS": ["V4_Av1_wo05_drop_last_evalcam3",
                   "V4_Av1_wo05_drop_last_evalocc010",
                   "V4_Av1_wo05_drop_last_evalocc020",
                   "V4_Av1_wo05_drop_last_evalocc030",
-                  "V4_Av1_wo05_drop_last_evalocc050",
-                  "V5_Av1_fS13S14_last_evalcam3"]
-    + ["V5_Av1_%s_last_evalcam3" % f
-       for f in ("fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")]
-    + ["V4_Av1_%s_last_evalcam3" % f
-       for f in ("fS13S14", "fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")],
+                  "V4_Av1_wo05_drop_last_evalocc050"],
     "REQUIRES": [],
 }
 
@@ -818,3 +970,48 @@ EXPERIMENTS["v7c_tune18"] = {
                   for csk in ("const", "cos")],
     "REQUIRES": [],
 }
+
+
+# Explicit corrected-label entries; historical experiments remain reproducible.
+_CORRECTED_IDS = ["V7_Cv%d_tafix" % v for v in range(1, 8)] + ["V7_Cv5_SV1_tafix", "V7_Cv5_ST1_tafix"]
+EXPERIMENTS["v7_corrected_train"] = {
+    "KIND": "model_suite", "MODEL_IDS": _CORRECTED_IDS, "REQUIRES": []}
+EXPERIMENTS["v7_corrected_eval_clean"] = {
+    "KIND": "model_suite", "MODEL_IDS": [x + "_statistics" for x in _CORRECTED_IDS], "REQUIRES": []}
+EXPERIMENTS["v7_corrected_eval_occ"] = {
+    "KIND": "model_suite", "MODEL_IDS": [x + "_evalocc" + o for x in _CORRECTED_IDS
+        for o in ("010", "020", "030", "050")], "REQUIRES": []}
+
+_STATE_IDS = ["V7_Cv%d_statefix" % v for v in range(1, 8)] + ["V7_Cv5_SV1_statefix", "V7_Cv5_ST1_statefix"]
+EXPERIMENTS["v7_state_corrected_train"] = {"KIND": "model_suite", "MODEL_IDS": _STATE_IDS, "REQUIRES": [], "CHECKPOINT_ALL": True}
+EXPERIMENTS["v7_state_corrected_eval_clean"] = {"KIND": "model_suite", "MODEL_IDS": [x + "_statistics" for x in _STATE_IDS], "REQUIRES": [], "CHECKPOINT_ALL": True}
+# best 口径评估（2026-10-29 用户裁定 --ckpt last/best）：Cv1–7_statefix_smpl24
+# 的 _evalbest（cam3）+ _evalbest_occ{010-050}，eval-only 零重训。
+EXPERIMENTS["v7_statefix_best_eval"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V7_Cv%d%s_evalbest" % (i, sd) for i in range(1, 8)
+                  for sd in ("", "_s2", "_s3")]
+    + ["V7_Cv%d%s_evalbest_occ%s" % (i, sd, o)
+       for i in range(1, 8) for sd in ("", "_s2", "_s3")
+       for o in ("010", "020", "030", "050")],
+    "REQUIRES": [],
+}
+
+EXPERIMENTS["v7_state_corrected_eval_occ"] = {"KIND": "model_suite", "MODEL_IDS": [x + "_evalocc" + o for x in _STATE_IDS for o in ("010", "020", "030", "050")], "REQUIRES": [], "CHECKPOINT_ALL": True}
+
+
+# Current-source packages, seven unified architectures, validation-only preview.
+for _kind in ("tafix", "statefix"):
+    _ids = ["V7_Cv%d" % i if _kind == "statefix" else "V7_Cv%d_tafix" % i for i in range(1, 8)]
+    _prefix = "v7" if _kind == "statefix" else "v7_tafix"
+    EXPERIMENTS[_prefix + "_train"] = {"KIND": "model_suite",
+        "MODEL_IDS": _ids + ["%s_s%d" % (x, n) for x in _ids for n in (2, 3)],
+        "REQUIRES": [], "CHECKPOINT_ALL": True}
+    _seeds = [x + s for x in _ids for s in ("", "_s2", "_s3")]
+    EXPERIMENTS[_prefix + "_eval_clean"] = {"KIND": "model_suite",
+        "MODEL_IDS": [x + "_statistics" for x in _seeds],
+        "REQUIRES": [], "CHECKPOINT_ALL": True}
+    EXPERIMENTS[_prefix + "_eval_occ"] = {"KIND": "model_suite",
+        "MODEL_IDS": [x + "_evalocc" + o for x in _seeds
+                      for o in ("010", "020", "030", "050")],
+        "REQUIRES": [], "CHECKPOINT_ALL": True}

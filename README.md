@@ -78,7 +78,7 @@ gait/
 | 准备数据（清洗/序列/特征/深度/关键点/CLIFF 初始化） | `AnysoleWorkspace/README.md` |
 | 训练/评估主模型 AnySole | `anysole/model_fix_note/command_manual.md` |
 | 训练/评估/运行基线 | `Baselines/command_manual.md` |
-| 跨模型比较与可视化（R_Test1/2/3/4） | `results_display/README.md` |
+| 跨模型比较与可视化（R_Test1/2/3/4） | `results_display/README_r_test.md` |
 | 各模型评价指标与能力矩阵 | `results_display/README_metrics.md` |
 | 后台队列跑实验 | `configs/Z_README.md` |
 | 评估协议与口径 | `z_note/评估/评估配置说明书.md` |

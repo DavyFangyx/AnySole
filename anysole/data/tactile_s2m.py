@@ -94,31 +94,18 @@ def resolve_legacy_bvh_path(meta: dict) -> Path:
 
 
 def _parse_legacy_bvh(path: Path) -> tuple[np.ndarray, float, np.ndarray]:
-    """The BVH parser used by Step2Motion's process_gait.py."""
-    text = Path(path).read_text(errors="replace").splitlines()
-    offsets = []
-    names = []
-    joint_i = -1
-    for line in text:
-        stripped = line.strip()
-        if stripped.startswith("ROOT ") or stripped.startswith("JOINT "):
-            names.append(stripped.split()[1])
-            joint_i += 1
-        elif stripped.startswith("OFFSET") and joint_i >= 0 and len(offsets) == joint_i:
-            offsets.append([float(v) for v in stripped.split()[1:4]])
-        if stripped.startswith("MOTION"):
-            break
-    motion_idx = next(i for i, line in enumerate(text) if line.startswith("MOTION"))
-    n_frames = int(text[motion_idx + 1].split(":")[1])
-    frame_time = float(text[motion_idx + 2].split(":")[1])
-    motion = np.asarray(
-        [list(map(float, line.split())) for line in text[motion_idx + 3 : motion_idx + 3 + n_frames]],
-        dtype=np.float64,
-    )
-    if motion.shape != (n_frames, 72):
+    """Legacy 72-channel contract from either BVH kind.
+
+    The farm BVH content is now the 2026-10-24 BVH24 export
+    (``motion_smpl24_blender_world_m.bvh``); ``parse_legacy_channels``
+    converts it onto the frozen legacy layout, so everything downstream of
+    this function keeps the historical contract untouched.
+    """
+    from Baselines.utils.bvh24_to_legacy import parse_legacy_channels
+
+    motion, frame_time, offsets = parse_legacy_channels(path)
+    if motion.shape[1] != 72:
         raise ValueError("Unexpected BVH motion shape %s in %s" % (motion.shape, path))
-    if tuple(names) != LEGACY_BVH_JOINT_NAMES:
-        raise ValueError("Unexpected BVH joint names in %s: %s" % (path, names))
     if len(offsets) != LEGACY_BVH_N_JOINTS:
         raise ValueError("Unexpected BVH joint count %d in %s" % (len(offsets), path))
     return motion, frame_time, np.asarray(offsets, dtype=np.float64)

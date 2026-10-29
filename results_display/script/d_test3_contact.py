@@ -36,6 +36,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 import os
 import sys
 from pathlib import Path
@@ -64,9 +67,12 @@ from utils.mpl_fonts import setup_cjk_fonts  # noqa: E402
 
 setup_cjk_fonts()
 
-from anysole.data.workspace_adapter import load_shared_session  # noqa: E402
+from anysole.data.workspace_adapter import load_shared_session, load_contact_label, LABEL_ROOT, shared_smpl_path
+from anysole.data.smpl_io import load_smpl
+from anysole.data.contact_package import VERSIONED_CONTACT_METHODS, expected_package_sha256  # noqa: E402
 from anysole.types import CONTACT_SUM_THRESH  # noqa: E402
-from utils.motion_io import load_session_gt  # noqa: E402
+from utils.motion_io import load_session_gt, load_motion
+from utils.versioned_contact_source import load_versioned_contact, bvh_time_support, package_info  # noqa: E402
 
 # --- Rendering constants, same visual style as Test1's panels. ---
 PANEL_W = 460
@@ -185,12 +191,32 @@ def foot_joint_indices(names: list[str]) -> dict[str, list[int]]:
     return out
 
 
+METHOD_ALIASES = {"tafix": "f6_soft_time_accel_v1", "statefix": "f6_soft_time_accel_state_v2"}
+
+
+def select_methods(value):
+    known = list(contact_methods.METHOD_NAMES) + list(VERSIONED_CONTACT_METHODS)
+    if value == "all":
+        return list(contact_methods.METHOD_NAMES)
+    wanted = [METHOD_ALIASES.get(item, item) for item in cli_common.split_csv_arg(value)]
+    unknown = set(wanted) - set(known)
+    if unknown or not wanted:
+        raise ValueError("Unknown or empty contact methods: " + str(sorted(unknown)))
+    return list(dict.fromkeys(wanted))
+
+
 def contact_path(seq_dir: Path, method: str) -> Path:
     return Path(seq_dir) / f"contact_{method}.npy"
 
 
-def load_contact(seq_dir: Path, n: int, left48, right48, method: str) -> tuple[np.ndarray, bool]:
+def load_contact(seq_dir: Path, n: int, left48, right48, method: str, source_bvh_root=None, candidate_root=None) -> tuple[np.ndarray, bool]:
     """Return (n, 2) bool contact [left, right] and an availability flag."""
+    if method in VERSIONED_CONTACT_METHODS:
+        shared = load_shared_session(Path(seq_dir).name)
+        contact, _source = load_versioned_contact(shared, method, source_bvh_root=source_bvh_root, candidate_root=candidate_root)
+        if contact.shape != (n, 2):
+            raise ValueError("Versioned contact must cover the exact shared frame grid")
+        return contact > 0.5, True
     path = contact_path(seq_dir, method)
     if path.is_file():
         raw = np.load(path).astype(np.float32)
@@ -218,10 +244,11 @@ def render_tactile_panel(
     session_id, frame_idx, n_frames, fps, valid, contact_available, csv_available, rate_l, rate_r,
     method, thr_l, thr_r,
 ):
+    method = {"f6_soft_time_accel_v1": "tafix", "f6_soft_time_accel_state_v2": "statefix"}.get(method, method)
     canvas = Image.new("RGB", (FOOT_W, CANVAS_H), (12, 12, 16))
     draw = ImageDraw.Draw(canvas)
     draw.rectangle([0, 0, FOOT_W - 1, CANVAS_H - 1], outline=(48, 48, 56))
-    draw_text(draw, (FOOT_W // 2, 12), f"Tactile + Contact ({method})", TITLE_FONT, fill=(230, 230, 235), anchor="mt")
+    draw_text(draw, (FOOT_W // 2, 12), f"Contact ({method})", TITLE_FONT, fill=(230, 230, 235), anchor="mt")
 
     left_img = Image.fromarray(pressure_to_heatmap(left_block))
     right_img = Image.fromarray(pressure_to_heatmap(right_block))
@@ -260,14 +287,16 @@ def render_tactile_panel(
                 sum_text = f"sum={s:.0f} > thr={thr:.0f}"
                 sum_color = badge_color
             else:
-                sum_text = f"sum={s:.0f} · {method} 判据"
+                sum_text = f"sum={s:.0f}"
                 sum_color = (180, 180, 190)
         else:
             sum_text, sum_color = "CSV missing", C_GRAY
         draw_text(draw, (center_x, y0 + INSOLE_H + 52), sum_text, INFO_FONT, fill=sum_color, anchor="mt")
 
-    if contact_available:
-        rate_line = f"contact L {rate_l:.0%}  R {rate_r:.0%}"
+    if contact_available and np.isfinite(rate_l) and np.isfinite(rate_r):
+        rate_line = f"valid contact L {rate_l:.0%}  R {rate_r:.0%}"
+    elif contact_available:
+        rate_line = "valid contact N/A (all invalid)"
     else:
         rate_line = "contact 无数据"
     draw_text(draw, (FOOT_W // 2, CANVAS_H - 52), rate_line, INFO_FONT, fill=(180, 180, 190), anchor="mb")
@@ -334,9 +363,9 @@ def render_contact_timeline(left_contact, right_contact, fake, t, n_frames, cont
     draw.rectangle([0, 0, TOTAL_W - 1, STRIP_H - 1], outline=(48, 48, 56))
     draw_text(draw, (8, 4), "Contact Timeline", INFO_FONT, fill=(200, 200, 210), anchor="lt")
 
-    legend_items = ((C_RED, "接触"), (C_GREEN, "无接触"), (C_YELLOW, "混合"))
+    legend_items = ((C_RED, "接触"), (C_GREEN, "无接触"), (C_YELLOW, "混合"), (C_GRAY, "无效"))
     for k, (color, label) in enumerate(legend_items):
-        x = 620 + k * 64
+        x = 525 + k * 72
         draw.rectangle([x, 10, x + 8, 18], fill=color)
         draw_text(draw, (x + 12, 4), label, LEGEND_FONT, fill=(200, 200, 210), anchor="lt")
 
@@ -355,7 +384,7 @@ def render_contact_timeline(left_contact, right_contact, fake, t, n_frames, cont
             lo = b * block_span
             hi = min(n_frames, lo + block_span)
             if not contact_available or fake[lo:hi].any():
-                color = C_YELLOW
+                color = C_GRAY
             elif contact[lo:hi].all():
                 color = C_RED
             elif not contact[lo:hi].any():
@@ -404,16 +433,23 @@ SUM_FIELDS = [
 THR_FIELDS = [f"rate_left_{int(t):d}" for t in CANDIDATE_THRESHOLDS] + [
     f"rate_right_{int(t):d}" for t in CANDIDATE_THRESHOLDS
 ]
-FIELD_NAMES = ["session_id", "n_frames", "contact_rate_left", "contact_rate_right"] + SUM_FIELDS + THR_FIELDS
+FIELD_NAMES = ["session_id", "n_frames", "contact_rate_left", "contact_rate_right",
+               "n_valid_frames", "n_invalid_frames", "contact_rate_valid_left", "contact_rate_valid_right"] + SUM_FIELDS + THR_FIELDS
 
 
-def analyze_session(session_id: str, contact: np.ndarray, left48, right48, csv_available: bool) -> dict:
+def analyze_session(session_id: str, contact: np.ndarray, left48, right48, csv_available: bool, valid_mask=None) -> dict:
     row: dict = {
         "session_id": session_id,
         "n_frames": int(contact.shape[0]),
         "contact_rate_left": round(float(contact[:, 0].mean()), 4),
         "contact_rate_right": round(float(contact[:, 1].mean()), 4),
     }
+    valid = np.ones(len(contact), dtype=bool) if valid_mask is None else np.asarray(valid_mask, dtype=bool)
+    if valid.shape != (len(contact),):
+        raise ValueError("Contact summary valid mask/frame mismatch")
+    row.update(n_valid_frames=int(valid.sum()), n_invalid_frames=int((~valid).sum()),
+               contact_rate_valid_left=round(float(contact[valid, 0].mean()), 6) if valid.any() else "",
+               contact_rate_valid_right=round(float(contact[valid, 1].mean()), 6) if valid.any() else "")
     if csv_available:
         sums_l = np.asarray(left48, dtype=np.float64).sum(axis=1)
         sums_r = np.asarray(right48, dtype=np.float64).sum(axis=1)
@@ -538,10 +574,13 @@ def parse_args() -> argparse.Namespace:
         default="all",
         help="Contact methods (see AnysoleWorkspace/tool/contact_labels.py): comma-separated or 'all' (default: all).",
     )
+    parser.add_argument("--workers", type=int, default=1, help="Independent CPU renderer processes; default 1.")
+    parser.add_argument("--source-bvh-root", type=Path, default=None, help="Explicit original BVH root for display audit; every file must match the pinned content hash.")
+    parser.add_argument("--candidate-label-root", type=Path, default=None, help="Explicit audited candidate package root; never changes the training label registry.")
     return parser.parse_args()
 
 
-def analysis_row(session_id: str, seq_dir: Path, fps: float, method: str) -> dict | None:
+def analysis_row(session_id: str, seq_dir: Path, fps: float, method: str, source_bvh_root=None, candidate_root=None) -> dict | None:
     """Compute the summary row without re-rendering the animation.
 
     Used for sessions whose animation already exists, so re-runs without
@@ -550,7 +589,7 @@ def analysis_row(session_id: str, seq_dir: Path, fps: float, method: str) -> dic
     shared = load_shared_session(session_id)
     n = int(len(shared["frames"]["frame_id"]))
     cpath = contact_path(seq_dir, method)
-    if cpath.is_file():
+    if cpath.is_file() and method not in VERSIONED_CONTACT_METHODS:
         contact_raw = np.load(cpath).astype(np.float32)
         n = min(n, contact_raw.shape[0])
     left48 = right48 = None
@@ -565,8 +604,9 @@ def analysis_row(session_id: str, seq_dir: Path, fps: float, method: str) -> dic
     if csv_available:
         left48 = left48[:n]
         right48 = right48[:n]
-    contact, _ = load_contact(seq_dir, n, left48, right48, method)
-    return analyze_session(session_id, contact, left48, right48, csv_available)
+    contact, _ = load_contact(seq_dir, n, left48, right48, method, source_bvh_root=source_bvh_root, candidate_root=candidate_root)
+    valid = np.asarray(shared["frames"]["valid"], dtype=bool)[:n] & ~np.asarray(shared["pressure"]["fake"], dtype=bool).reshape(-1)[:n]
+    return analyze_session(session_id, contact, left48, right48, csv_available, valid)
 
 
 def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, method: str) -> tuple[str, dict | None]:
@@ -574,7 +614,7 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, met
     seq_dir = session_dir(args.seq_root, session_id)
     if cli_common.outputs_ready([gen_path]) and not args.force:
         log.info(f"Skip {session_id} [{method}]: outputs already exist under {out_dir}")
-        return "skip", analysis_row(session_id, seq_dir, args.fps, method)
+        return "skip", analysis_row(session_id, seq_dir, args.fps, method, args.source_bvh_root, args.candidate_label_root)
 
     shared = load_shared_session(session_id)
     n = int(len(shared["frames"]["frame_id"]))
@@ -585,7 +625,7 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, met
 
     contact_raw = None
     cpath = contact_path(seq_dir, method)
-    if cpath.is_file():
+    if cpath.is_file() and method not in VERSIONED_CONTACT_METHODS:
         contact_raw = np.load(cpath).astype(np.float32)
     if contact_raw is not None and contact_raw.shape[0] != n:
         log.warning(f"{session_id}: {cpath.name} has {contact_raw.shape[0]} frames vs pressure {n}")
@@ -596,7 +636,7 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, met
     left48 = left48[:n]
     right48 = right48[:n]
     fake = fake[:n]
-    contact, contact_available = load_contact(seq_dir, n, left48, right48, method)
+    contact, contact_available = load_contact(seq_dir, n, left48, right48, method, source_bvh_root=args.source_bvh_root, candidate_root=args.candidate_label_root)
     if csv_available:
         left48 = left48[:n]
         right48 = right48[:n]
@@ -606,26 +646,39 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, met
     joints = edges = None
     foot_idx = {"left": [], "right": []}
     try:
-        joints, parents, names, gt_format = load_gt(seq_dir, n, args.fps)
+        if method in VERSIONED_CONTACT_METHODS and args.source_bvh_root:
+            _, provenance = load_versioned_contact(shared, method, args.source_bvh_root)
+            motion = load_motion(Path(provenance["original_BVH"]), query_t=np.asarray(shared["frames"]["mocap_time_s"])[:n])
+            joints, parents, names, gt_format = motion["joints"], motion["parents"], motion["names"], motion["format"]
+        else:
+            joints, parents, names, gt_format = load_gt(seq_dir, n, args.fps)
         edges = parents_to_edges(parents)
         foot_idx = foot_joint_indices(names)
         gt_ok, gt_msg = True, ""
     except (FileNotFoundError, ValueError) as exc:
         log.warning(f"{session_id}: GT motion load failed ({exc}); rendering placeholder skeleton")
 
-    row = analyze_session(session_id, contact, left48, right48, csv_available)
+    valid = np.asarray(shared["frames"]["valid"], dtype=bool)[:n] & ~fake.astype(bool)
+    row = analyze_session(session_id, contact, left48, right48, csv_available, valid)
     if n < 2:
         log.warning(f"{session_id}: only {n} frame(s), skipping animation")
         return "row-only", row
 
-    rate_l = float(contact[:, 0].mean())
-    rate_r = float(contact[:, 1].mean())
+    gt_supported = np.ones(n, dtype=bool)
+    if method in VERSIONED_CONTACT_METHODS and gt_ok and args.source_bvh_root:
+        gt_supported = bvh_time_support(Path(provenance["original_BVH"]), np.asarray(shared["frames"]["mocap_time_s"])[:n])
+    if method in VERSIONED_CONTACT_METHODS and gt_ok and gt_format.lower().startswith("smpl"):
+        source = shared_smpl_path(shared)
+        gt_supported = load_smpl(source, query_t=np.asarray(shared["frames"]["mocap_time_s"])[:n])["query_valid"]
+    rate_l = float(contact[valid, 0].mean()) if valid.any() else float("nan")
+    rate_r = float(contact[valid, 1].mean()) if valid.any() else float("nan")
     frame_ids = list(range(0, n, max(args.stride, 1)))
     if args.max_frames > 0:
         frame_ids = frame_ids[: args.max_frames]
     frame_fps = cli_common.viz_fps(args.fps, args.stride)
 
-    thr_l, thr_r = contact_methods.method_thresholds(seq_dir, method) or (None, None)
+    thr_l, thr_r = ((None, None) if method in VERSIONED_CONTACT_METHODS else
+                    contact_methods.method_thresholds(seq_dir, method) or (None, None))
 
     frames = []
     for t in frame_ids:
@@ -635,9 +688,10 @@ def render_session(args: argparse.Namespace, session_id: str, out_dir: Path, met
         right_sum = float(right48[t].sum()) if csv_available else None
         frames.append(compose_frame(
             left_block, right_block, contact[t, 0], contact[t, 1], left_sum, right_sum,
-            joints, edges, foot_idx, fake[t], session_id, t, n, args.fps,
+            joints, edges, foot_idx, not valid[t], session_id, t, n, args.fps,
             contact_available, csv_available, rate_l, rate_r,
-            contact[:, 0], contact[:, 1], fake, gt_ok, gt_msg, method, thr_l, thr_r,
+            contact[:, 0], contact[:, 1], ~valid, bool(gt_ok and gt_supported[t]),
+            gt_msg if gt_supported[t] else "GT time outside source coverage", method, thr_l, thr_r,
         ))
     if not frames:
         raise RuntimeError(f"No frames rendered for {session_id}")
@@ -668,8 +722,9 @@ def main() -> int:
     else:
         log.info(f"Sessions from {args.split} split ({len(session_ids)}): {session_ids}")
 
-    wanted = set(cli_common.split_csv_arg(args.methods))
-    methods = [m for m in contact_methods.METHOD_NAMES if args.methods == "all" or m in wanted]
+    methods = select_methods(args.methods)
+    if args.workers < 1:
+        raise ValueError("--workers must be positive")
     log.info(f"Contact methods ({len(methods)}): {methods}")
 
     # Ensure per-method label files exist for the sessions being rendered.
@@ -679,21 +734,51 @@ def main() -> int:
             session_dirs.append(session_dir(args.seq_root, session_id))
         except FileNotFoundError as exc:
             log.warning(f"Skip {session_id}: {exc}")
-    contact_methods.ensure_labels(session_dirs, methods)
+    contact_methods.ensure_labels(session_dirs, [method for method in methods if method not in VERSIONED_CONTACT_METHODS])
 
     for method in methods:
         method_dir = out_dir / method
         method_dir.mkdir(parents=True, exist_ok=True)
         log.info(f"=== method: {method} -> {method_dir}")
         collected = []
-        for session_id in session_ids:
-            try:
-                status, row = render_session(args, session_id, method_dir, method)
-            except (FileNotFoundError, ValueError) as exc:
-                log.warning(f"Skip {session_id}: {exc}")
-                continue
-            if row is not None:
-                collected.append(row)
+        if args.workers > 1:
+            with ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+                futures = [pool.submit(render_session, args, sid, method_dir, method) for sid in session_ids]
+                for sid, future in zip(session_ids, futures):
+                    try:
+                        status, row = future.result()
+                    except (FileNotFoundError, ValueError) as exc:
+                        if method in VERSIONED_CONTACT_METHODS:
+                            raise
+                        log.warning(f"Skip {sid}: {exc}")
+                        continue
+                    if row is not None:
+                        collected.append(row)
+        else:
+            for session_id in session_ids:
+                try:
+                    status, row = render_session(args, session_id, method_dir, method)
+                except (FileNotFoundError, ValueError) as exc:
+                    if method in VERSIONED_CONTACT_METHODS:
+                        raise
+                    log.warning(f"Skip {session_id}: {exc}")
+                    continue
+                if row is not None:
+                    collected.append(row)
+        if method in VERSIONED_CONTACT_METHODS:
+            if len(collected) != len(session_ids):
+                raise ValueError("Versioned D3 output does not cover every requested session")
+            package_root, _manifest, package_digest = package_info(method, args.candidate_label_root)
+            (method_dir / "label_source.json").write_text(json.dumps({
+                "method": method, "label_root": str(package_root),
+                "label_package_sha256": package_digest,
+                "candidate_not_promoted": bool(args.candidate_label_root),
+                "sessions": session_ids, "split": args.split,
+                "source": ("independent candidate NPZ package; not consumed by completed training" if args.candidate_label_root else "same immutable NPZ package consumed by training; no labels rebuilt"),
+                "explicit_original_bvh_root": str(args.source_bvh_root) if args.source_bvh_root else None,
+                "summary_denominators": {"contact_rate_left/right": "all frames (legacy column)",
+                                         "contact_rate_valid_left/right": "shared-valid and non-fake frames only"}
+            }, ensure_ascii=False, indent=2) + "\n")
         if collected:
             write_summary_csv(method_dir, collected)
         if method == "tactile_abs":

@@ -220,8 +220,12 @@ class AnySoleDataset(Dataset):
         d8_heads: bool = False,
         occ_mix: Optional[dict] = None,
         t_phys_v2: bool = False,
+        smpl_support_policy: str = "legacy_clip",
     ):
         self.mode = mode
+        if smpl_support_policy not in ("legacy_clip", "exclude"):
+            raise ValueError("smpl_support_policy must be legacy_clip or exclude")
+        self.smpl_support_policy = str(smpl_support_policy)
         self.window_length = int(window_length)
         self.tactile_input = str(tactile_input)
         self.t_phys_v2 = bool(t_phys_v2)
@@ -453,6 +457,14 @@ class AnySoleDataset(Dataset):
                 psi = None
                 traj_f2 = None
 
+            smpl_support_valid = np.asarray(motion["query_valid"], dtype=bool)
+            window_invalid_mask = fake_mask.astype(bool)
+            if self.smpl_support_policy == "exclude":
+                # Velocity and trans_anchor use the preceding frame too.
+                # Frame zero keeps the native zero-increment convention.
+                supervision_support = smpl_support_valid.copy()
+                supervision_support[1:] &= smpl_support_valid[:-1]
+                window_invalid_mask = window_invalid_mask | ~supervision_support
             session = {
                 "session_id": session_id,
                 "motion_format": "smpl",
@@ -475,6 +487,9 @@ class AnySoleDataset(Dataset):
                 "parents": motion["parents"].astype(np.int64),
                 "betas": motion.get("betas", np.zeros(10, dtype=np.float32)).astype(np.float32),
                 "fake_mask": fake_mask,
+                "smpl_support_valid": smpl_support_valid,
+                "window_invalid_mask": window_invalid_mask,
+                "smpl_support_policy": self.smpl_support_policy,
             }
             if self.occ_sampler is not None:
                 # occ_mix 挂钩点 1b：occ010 双缓存装载（同帧轴强制核对，
@@ -510,7 +525,7 @@ class AnySoleDataset(Dataset):
             for window_idx in range(n_windows):
                 left = window_idx * self.stride
                 right = left + self.window_length
-                if fake_mask[left:right].any():
+                if window_invalid_mask[left:right].any():
                     continue
                 self.valid_windows.append((file_index, left, right))
             self.sessions.append(session)

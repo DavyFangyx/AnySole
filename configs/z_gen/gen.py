@@ -31,9 +31,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from common import CONFIG_DIR, EXPERIMENTS, emit_experiment, parse_bool
-
-DONE_DIR = CONFIG_DIR / "done"
+from common import CONCAT_VERSIONS, EXPERIMENTS, concat_models, emit_waved, parse_bool
 
 
 def _list_experiments() -> None:
@@ -54,114 +52,13 @@ def _list_experiments() -> None:
                  wave_desc))
 
 
-def _wave_key(raw: dict[str, Any], key: str, table: str) -> Any:
-    """按 str 匹配 WAVES/WAVE_GATES 的键（兼容 int 键 1/2 与 str 键 "12"/"3"）。"""
-    for candidate in raw.get(table, {}):
-        if str(candidate) == str(key):
-            return candidate
-    raise SystemExit("unknown wave %r for %s (waves: %s)"
-                     % (key, raw.get("_experiment_id"),
-                        ",".join(str(k) for k in sorted(raw.get("WAVES", {}), key=str))))
-
-
-def _check_gates(raw: dict[str, Any], wave: Any, hard: bool) -> bool:
-    gates = raw.get("WAVE_GATES", {})
-    patterns = [gates[k] for k in gates if str(k) == str(wave)]
-    patterns = [p for group in patterns for p in group]
-    missing = [pattern for pattern in patterns if not list(DONE_DIR.glob(pattern))]
-    if not missing:
-        return True
-    if hard:
-        raise SystemExit("波 %s 闸门未满足：%s 无 conf 进 done/"
-                         % (wave, "、".join(missing)))
-    for pattern in missing:
-        print("[gate] wave %s skipped: %s 未进 done/（完成后用 --wave %s 补发）"
-              % (wave, pattern, wave))
-    return False
-
-
-def _emit_wave(raw: dict[str, Any], wave: Any, selected: list[str],
-              wandb: bool | None, checkpoint_all: bool | None,
-              force: bool, dry_run: bool) -> int:
-    """发射一个训练波：闸门（硬）→ --models 子集 → 跳过已入队模型 → emit。"""
-    _check_gates(raw, wave, hard=True)
-    selected_set = set(selected)
-    wave_list = raw["WAVES"][_wave_key(raw, wave, "WAVES")]
-    models = [str(item) for item in wave_list
-              if not selected_set or str(item) in selected_set]
-    if not models:
-        print("[skip] wave %s: no selected model in this wave" % wave)
-        return 0
-    return emit_experiment(str(raw["_experiment_id"]), models,
-                           wandb=wandb, checkpoint_all=checkpoint_all,
-                           force=force, dry_run=dry_run)
-
-
-def _emit_eval_wave(raw: dict[str, Any], hard: bool,
-                    wandb: bool | None, checkpoint_all: bool | None,
-                    force: bool, dry_run: bool) -> int:
-    """发射 WAVE_EVAL 波（wo05 波 3）：按家族闸门筛 ready 家族后发 eval 条目。"""
-    eval_spec = raw["WAVE_EVAL"]
-    eval_id = str(eval_spec["experiment"])
-    ready: list[str] = []
-    for fam, base in eval_spec["families"].items():
-        if list(DONE_DIR.glob("*__%s.conf" % base)):
-            ready.extend(str(item) for item in EXPERIMENTS[eval_id]["MODEL_IDS"]
-                         if str(item).startswith(fam))
-        else:
-            print("[gate] wave %s skipped: %s 未进 done/" % (eval_spec["wave"], base))
-    if not ready:
-        if hard:
-            raise SystemExit("波 %s 闸门未满足：没有任何家族 _drop conf 进 done/"
-                             % eval_spec["wave"])
-        return 0
-    return emit_experiment(eval_id, ready,
-                           wandb=wandb, checkpoint_all=checkpoint_all,
-                           force=force, dry_run=dry_run)
-
-
 def _emit(experiment_id: str, wave: str | None, models: list[str],
           wandb: bool | None, checkpoint_all: bool | None,
           force: bool, dry_run: bool) -> int:
-    raw = dict(EXPERIMENTS[experiment_id])
-    raw["_experiment_id"] = experiment_id
-    waves = raw.get("WAVES")
-    wave_eval = raw.get("WAVE_EVAL")
-
-    if waves:
-        if wave is None:
-            wave = str(raw.get("DEFAULT_WAVE", sorted(waves, key=str)[0]))
-        if wave == "auto":
-            total = 0
-            for w in sorted(waves, key=str):
-                if _check_gates(raw, w, hard=False):
-                    total += _emit_wave(raw, w, models, wandb, checkpoint_all,
-                                        force, dry_run)
-            if wave_eval:
-                total += _emit_eval_wave(raw, hard=False, wandb=wandb,
-                                         checkpoint_all=checkpoint_all,
-                                         force=force, dry_run=dry_run)
-            return total
-        if str(wave) in {str(k) for k in waves}:
-            total = _emit_wave(raw, wave, models, wandb, checkpoint_all,
-                               force, dry_run)
-            if wave_eval and str(wave_eval.get("wave")) == str(wave):
-                total += _emit_eval_wave(raw, hard=True, wandb=wandb,
-                                         checkpoint_all=checkpoint_all,
-                                         force=force, dry_run=dry_run)
-            return total
-        if wave_eval and str(wave_eval.get("wave")) == str(wave):
-            return _emit_eval_wave(raw, hard=True, wandb=wandb,
-                                   checkpoint_all=checkpoint_all,
-                                   force=force, dry_run=dry_run)
-        raise SystemExit("unknown wave %r for %s (waves: %s)"
-                         % (wave, experiment_id,
-                            ",".join(str(k) for k in sorted(waves, key=str))))
-
-    selected = models or None
-    return emit_experiment(experiment_id, selected,
-                           wandb=wandb, checkpoint_all=checkpoint_all,
-                           force=force, dry_run=dry_run)
+    """委托 common.emit_waved（波次感知发射，与 gen_*.py 共用同一引擎）。"""
+    return emit_waved(experiment_id, wave, models,
+                      wandb=wandb, checkpoint_all=checkpoint_all,
+                      force=force, dry_run=dry_run)
 
 
 def main() -> int:
@@ -171,8 +68,11 @@ def main() -> int:
                         help="EXPERIMENTS 条目名（缺省 = 列出全部条目）")
     parser.add_argument("--models", default="",
                         help="comma-separated model IDs（必须是该条目 MODEL_IDS 子集）")
+    parser.add_argument("--concat-method", choices=list(CONCAT_VERSIONS),
+                        default="f6_soft",
+                        help="接触标签版本（默认 f6_soft；tafix/statefix 映射到 *_tafix/*_statefix 条目）")
     parser.add_argument("--wave", default=None,
-                        help="波次键（wo05 / tw_scan / per_action_folds）")
+                        help="波次键（wo05 / tw_scan）")
     parser.add_argument("--wandb", default=None, help="true/false，覆盖实验级默认")
     parser.add_argument("--checkpoint-all", default=None, help="true/false，覆盖实验级默认")
     parser.add_argument("--force", action="store_true",
@@ -190,6 +90,7 @@ def main() -> int:
 
     selected = [item.strip() for item in args.models.split(",") if item.strip()]
     if selected:
+        selected = concat_models(selected, args.concat_method)
         allowed = set(str(item) for item in EXPERIMENTS[args.experiment]["MODEL_IDS"])
         if args.wave and "WAVES" in EXPERIMENTS[args.experiment]:
             allowed = set(str(item) for item in

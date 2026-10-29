@@ -60,6 +60,9 @@ __pycache__/
 /results/
 /results_display/*
 !/results_display/README.md
+!/results_display/README_d_test.md
+!/results_display/README_e_test.md
+!/results_display/README_r_test.md
 !/results_display/script/
 
 # WandB local runs and runtime outputs/caches

@@ -149,6 +149,11 @@ def label_path(session_id: str, method: str) -> Path:
 
 
 def load_contact_label(session: dict, method: str) -> np.ndarray:
+    # An explicit version keeps historical f6_soft runs reproducible. Missing
+    # or stale corrected packages raise ValueError, never the rebuild fallback.
+    from anysole.data.contact_package import VERSIONED_CONTACT_METHODS, ContactLabelPackage
+    if method in VERSIONED_CONTACT_METHODS:
+        return ContactLabelPackage(LABEL_ROOT / method, method=method).load(session)
     path = label_path(session["session_id"], method)
     if not path.is_file():
         raise FileNotFoundError(

@@ -161,6 +161,25 @@ std 下限 1e-2）；时间 PE；分组嵌入；6 层 pre-LN TransformerDecoder
   （`--wandb_experiment_tag` 由 Wandb_Analyzer 分组）。CLI 覆盖值随 ckpt 保存，
   eval/infer 从 ckpt 读配置。
 - 训练末尾自动跑一次 test eval（canonical session metrics 强制执行；`--no-write-motion` 可关闭动作导出）。
+- 独立 dropout 旋钮（两个），均写入 checkpoint 配置（eval/infer 自动读取）：
+  - `--dropout 0.1`：模型内部 nn.Dropout（fusion/pose/traj transformer）。`0.0` 关闭。
+  - `--dropoutVT DROP_V_PCT DROP_T_PCT`（或逗号写法 `--dropoutVT 20,30`）：**模态 dropout**，
+    V 丢弃 DROP_V_PCT%、T 丢弃 DROP_T_PCT%（映射为 config_probs `[1-v-t, t, v]`，即
+    VT/V-only/T-only）。`--dropoutVT 0,0` 关闭模态 dropout。
+
+  重训实验示例（关全部 dropout + 更多轮次）：
+
+  ```bash
+  conda activate touch_gait
+  python -m anysole.train --contact-method joint_and \
+    --dropoutVT 0,0 --epochs 400 \
+    --out-dir results/AnySole/anysolev1_joint_and/checkpoints
+  ```
+
+  > 注意：重训后必须重跑 `python -m anysole.eval --model-name <MODEL_NAME> --contact-method ...`
+  > 刷新 BVH/npz/metrics（见 `results_display/README_r_test.md` 的 R_Test3 说明）。
+  > 上述 dropout 旋钮仅适用于 anysolev1 扩散线；主线 anysolev2 为回归式模型，忽略
+  > 这些参数（train.py 会提示 knobs are ignored by modal anysolev2）。
 
 ---
 

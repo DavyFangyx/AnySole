@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -200,6 +201,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="AnySole-private contact-label scheme for contact_gt, and the model-dir "
         "suffix when --ckpt is omitted. Defaults to the checkpoint's explicit method.",
     )
+    parser.add_argument("--smpl-support-policy", choices=("exclude", "legacy_clip"), default=None,
+                        help="Explicit evaluation support policy; default follows checkpoint, legacy for old checkpoints")
     parser.add_argument("--split", choices=("train", "val", "test"), default="test")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--limit-sessions", type=int, default=None)
@@ -622,6 +625,13 @@ def _evaluate_one(
     contact_method = contact_method or ckpt_contact or str(config["contact_method"])
     if not contact_method:
         raise ValueError("contact_method must be explicit in --contact-method, checkpoint, or config")
+    from anysole.data.contact_package import VERSIONED_CONTACT_METHODS, corrected_contact_provenance
+    if ckpt_contact in VERSIONED_CONTACT_METHODS or contact_method in VERSIONED_CONTACT_METHODS:
+        if contact_method != ckpt_contact:
+            raise ValueError("Corrected contact evaluation requires a checkpoint trained with the same label version")
+        provenance = corrected_contact_provenance(contact_method)
+        if checkpoint["config"].get("contact_label_package_sha256") != provenance["contact_label_package_sha256"]:
+            raise ValueError("Checkpoint corrected contact package hash missing or mismatched")
     model = _load_model(checkpoint, config, device)
     # --no-imu checkpoints: the eval dataset must build the 38-dim T_s2m
     # (IMU channels deleted) to match the checkpoint's encoder input width.
@@ -675,6 +685,7 @@ def _evaluate_one(
         window_length=tw,
         session_ids=session_ids,
         contact_method=contact_method,
+        smpl_support_policy=(args.smpl_support_policy or checkpoint.get("config", {}).get("smpl_support_policy", "legacy_clip")),
         tactile_input=str(checkpoint.get("config", {}).get("tactile_input", "raw108")),
         no_imu=no_imu,
         v_input=str(checkpoint.get("config", {}).get("v_input", "hrnet")),
@@ -1052,6 +1063,17 @@ def _evaluate_one(
         z_src_override=z_src_override,
         null_t=null_t,
     )
+    # Bind exported scores to the actual weights and contact version.
+    from anysole.data.contact_package import sha256 as _artifact_sha256
+    provenance_fields = {"checkpoint_sha256": _artifact_sha256(ckpt),
+                         "checkpoint_epoch": int(checkpoint.get("epoch", -1)),
+                         "contact_label_package_sha256": checkpoint.get("config", {}).get("contact_label_package_sha256"),
+                         "contact_label_definition": checkpoint.get("config", {}).get("contact_label_definition")}
+    for exported_path in (protocol_out, metrics_out):
+        if exported_path is not None and Path(exported_path).is_file():
+            payload = json.loads(Path(exported_path).read_text())
+            payload.update(provenance_fields)
+            Path(exported_path).write_text(json.dumps(payload, indent=2) + "\n")
     if not final_metrics:
         raise RuntimeError(
             "canonical session evaluation requires non-overlapping windows; "

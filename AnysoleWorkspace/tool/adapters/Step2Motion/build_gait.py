@@ -8,12 +8,15 @@ public workspace contract only:
 * per-frame facts: ``shared/facts/sessions/cam3/<date>/<subject>/<sid>/``
   (``frames.npz`` frame id / mocap time / valid / fake,
   ``pressure_48.npz`` left/right 4x12 grids);
-* BVH source: the shared session metadata ``source_files.bvh``.
+* BVH source: the shared session metadata ``source_files.bvh``, consumed as
+  native SMPL-24 via ``Baselines.utils.bvh24_to_legacy.parse_bvh24_smpl``
+  (the 2026-10-24 BVH24 export; Blender frame FK, basis change to SMPL y-up).
 
-Semantics preserved verbatim from the native pipeline: BVH-23 joint order,
-Y-X-Z euler parsing, root translation, synthesized foot IMU, the D_Test4
-accepted 48->16 pooling (heel[0:8] + toe[8:16]) and the MotionDatasetState
-clip layout (first frame of every clip discarded).  The time axis is the
+Semantics preserved from the native pipeline: synthesized foot IMU, the
+D_Test4 accepted 48->16 pooling (heel[0:8] + toe[8:16]) and the
+MotionDatasetState clip layout (first frame of every clip discarded).  The
+skeleton is native SMPL-24 (npz joint order); pose targets are root-relative
+joint positions, 69 + 3 displacement = 72 channels.  The time axis is the
 shared ``mocap_time_s``; no visual/pressure offset is constructed here.
 Every kept input frame carries its shared ``frame_id`` (``clip_frame_ids``);
 fake frames never enter clips.
@@ -46,11 +49,12 @@ ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from Baselines.utils.bvh24_to_legacy import SMPL_JOINT_NAMES, SMPL_PARENTS, parse_bvh24_smpl  # noqa: E402
 from AnysoleWorkspace.tool.artifacts import sha256_file, write_artifact  # noqa: E402
 from AnysoleWorkspace.tool.workspace import canonical_uri, resolve_uri  # noqa: E402
 
 WORKSPACE = ROOT / "AnysoleWorkspace"
-ADAPTER_VERSION = "adapter_v1"
+ADAPTER_VERSION = "adapter_v2"
 INPUT_ROOT = WORKSPACE / "model_inputs/Step2Motion" / ADAPTER_VERSION
 SPLIT_CSV = WORKSPACE / "protocol/splits/default/splits.csv"
 MANIFEST = WORKSPACE / "protocol/manifests/session_manifest.jsonl"
@@ -61,45 +65,19 @@ TARGET_HZ = 40.0
 G = 9.81
 # input_T=100 plus the first frame MotionDataset discards
 MIN_FRAMES = 101
-FOOT_INDICES = [21, 22, 17, 18]  # right foot, right toe, left foot, left toe
+# npz SMPL-24 order: right ankle, right foot, left ankle, left foot
+FOOT_INDICES = [8, 11, 7, 10]
 
-# BVH-23 semantic order and hierarchy, preserved from the native pipeline.
-SRC_JOINTS = [
-    "Hips",
-    "Spine",
-    "Spine1",
-    "Spine2",
-    "Spine3",
-    "Neck",
-    "Head",
-    "LeftShoulder",
-    "LeftArm",
-    "LeftForeArm",
-    "LeftHand",
-    "RightShoulder",
-    "RightArm",
-    "RightForeArm",
-    "RightHand",
-    "LeftUpLeg",
-    "LeftLeg",
-    "LeftFoot",
-    "LeftToeBase",
-    "RightUpLeg",
-    "RightLeg",
-    "RightFoot",
-    "RightToeBase",
-]
-SRC_PARENTS = np.array(
-    [-1, 0, 1, 2, 3, 4, 5, 4, 7, 8, 9, 4, 11, 12, 13, 0, 15, 16, 17, 0, 19, 20, 21],
-    dtype=np.int64,
-)
+# SMPL-24 native skeleton (npz joint order), consumed from the BVH24 export.
+SRC_JOINTS = list(SMPL_JOINT_NAMES)
+SRC_PARENTS = SMPL_PARENTS.copy()
 JOINT_NAMES = SRC_JOINTS
 JOINT_PARENTS = SRC_PARENTS
 N_JOINTS = len(JOINT_NAMES)
-LEFT_FOOT = JOINT_NAMES.index("LeftFoot")
-RIGHT_FOOT = JOINT_NAMES.index("RightFoot")
-LEFT_TOE = JOINT_NAMES.index("LeftToeBase")
-RIGHT_TOE = JOINT_NAMES.index("RightToeBase")
+LEFT_FOOT = JOINT_NAMES.index("left_ankle")
+RIGHT_FOOT = JOINT_NAMES.index("right_ankle")
+LEFT_TOE = JOINT_NAMES.index("left_foot")
+RIGHT_TOE = JOINT_NAMES.index("right_foot")
 
 
 def parse_args() -> argparse.Namespace:
@@ -217,53 +195,12 @@ def cop_from_grid(values48: np.ndarray) -> np.ndarray:
     return cop
 
 
-def parse_bvh(path: Path) -> tuple[np.ndarray, float, np.ndarray]:
-    text = path.read_text(errors="replace").splitlines()
-    offsets = []
-    joint_i = -1
-    for line in text:
-        stripped = line.strip()
-        if stripped.startswith("ROOT ") or stripped.startswith("JOINT "):
-            joint_i += 1
-        elif stripped.startswith("OFFSET") and joint_i >= 0 and len(offsets) == joint_i:
-            offsets.append([float(v) for v in stripped.split()[1:4]])
-        if stripped.startswith("MOTION"):
-            break
-    motion_idx = next(i for i, line in enumerate(text) if line.startswith("MOTION"))
-    n_frames = int(text[motion_idx + 1].split(":")[1])
-    frame_time = float(text[motion_idx + 2].split(":")[1])
-    motion = np.asarray(
-        [list(map(float, line.split())) for line in text[motion_idx + 3 : motion_idx + 3 + n_frames]],
-        dtype=np.float64,
-    )
-    if motion.shape[1] != 72:
-        raise ValueError(f"Unexpected BVH channel count {motion.shape[1]} in {path}")
-    if len(offsets) != 23:
-        raise ValueError(f"Unexpected BVH joint count {len(offsets)} in {path}")
-    return motion, frame_time, np.asarray(offsets, dtype=np.float64)
-
-
-def interp_motion(motion: np.ndarray, frame_time: float, query_t: np.ndarray) -> np.ndarray:
-    src_t = np.arange(motion.shape[0], dtype=np.float64) * frame_time
-    out = np.empty((query_t.size, motion.shape[1]), dtype=np.float64)
-    for col in range(3):
-        out[:, col] = np.interp(query_t, src_t, motion[:, col])
-    clipped = np.clip(query_t, src_t[0], src_t[-1])
-    eulers = motion[:, 3:].reshape(motion.shape[0], 23, 3)
-    if motion.shape[0] == 1:
-        out[:, 3:] = motion[0, 3:]
-        return out
-    for joint_i in range(23):
-        key_rots = SciRotation.from_euler("YXZ", eulers[:, joint_i], degrees=True)
-        slerp = Slerp(src_t, key_rots)
-        out[:, 3 + 3 * joint_i : 6 + 3 * joint_i] = slerp(clipped).as_euler("YXZ", degrees=True)
-    return out
-
-
-def euler_yxz_to_rotmat(eulers_deg: np.ndarray) -> np.ndarray:
-    flat = eulers_deg.reshape(-1, 3)
-    mats = SciRotation.from_euler("YXZ", flat, degrees=True).as_matrix().astype(np.float64)
-    return mats.reshape(*eulers_deg.shape[:-1], 3, 3)
+def load_bvh24(path: Path, query_t: np.ndarray) -> dict:
+    """SMPL-24 world joints (y-up metres) resampled onto the shared grid."""
+    data = parse_bvh24_smpl(path, query_t=query_t)
+    if tuple(data["names"]) != tuple(SMPL_JOINT_NAMES):
+        raise ValueError(f"Unexpected BVH24 joints in {path}: {data['names']}")
+    return data
 
 
 def rotmat_to_quat_wxyz(rotmats: np.ndarray) -> np.ndarray:
@@ -305,14 +242,6 @@ def fk_local(local_rotmats: np.ndarray, offsets: np.ndarray, parents: np.ndarray
             offset = offsets[j][None, :, None]
             global_pos[:, j] = global_pos[:, parent] + (global_rot[:, parent] @ offset)[..., 0]
     return global_pos, global_rot
-
-
-def remap_skeleton(
-    src_offsets_cm: np.ndarray,
-    src_local_rotmats: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    src_offsets_m = src_offsets_cm * 0.01
-    return src_offsets_m, src_local_rotmats
 
 
 def rest_foot_imu_axes(offsets: np.ndarray) -> dict[str, np.ndarray]:
@@ -439,15 +368,11 @@ def convert_session(session: dict, min_frames: int, no_imu: bool = False) -> lis
     right48 = np.asarray(pressure["right48"], dtype=np.float32)
 
     bvh = shared_bvh_path(session)
-    motion, frame_time, src_offsets = parse_bvh(bvh)
-    sampled = interp_motion(motion, frame_time, mocap_t)
-    root_pos = sampled[:, :3] * 0.01
-    src_local = np.zeros((n, 23, 3, 3), dtype=np.float64)
-    src_local[:, 0] = euler_yxz_to_rotmat(sampled[:, 3:6])
-    src_local[:, 1:] = euler_yxz_to_rotmat(sampled[:, 6:].reshape(n, N_JOINTS - 1, 3))
-    dst_offsets, dst_local = remap_skeleton(src_offsets, src_local)
-    dst_pos, dst_global_rot = fk_local(dst_local, dst_offsets, JOINT_PARENTS)
-    dst_pos = dst_pos + root_pos[:, None, :]
+    bvh_data = load_bvh24(bvh, mocap_t)
+    dst_pos = np.asarray(bvh_data["joints"], dtype=np.float64)  # (n,24,3) y-up m
+    dst_global_rot = np.asarray(bvh_data["global_rotations"], dtype=np.float64)
+    dst_offsets = np.asarray(bvh_data["offsets"], dtype=np.float64)
+    root_pos = dst_pos[:, 0]
 
     if no_imu:
         # --no-imu: the IMU channels are structurally absent. synthesize_imu
@@ -803,22 +728,14 @@ def run_self_test() -> None:
     acc_flip, _ = synthesize_imu(pos, rot, rest, dt, True)
     assert np.allclose(acc_flip[10, 1], -1.0, atol=0.05)
 
-    src_offsets_cm = np.zeros((23, 3), dtype=np.float64)
-    src_offsets_cm[1] = [0.0, 8.0, 0.0]  # Spine
-    src_offsets_cm[2] = [0.0, 7.0, 0.0]  # Spine1
-    src_offsets_cm[3] = [0.0, 7.0, 0.0]  # Spine2
-    src_offsets_cm[4] = [0.0, 7.0, 0.0]  # Spine3
-    identity = np.broadcast_to(np.eye(3), (2, 23, 3, 3)).copy()
-    dst_offsets, dst_local = remap_skeleton(src_offsets_cm, identity)
-    # Offsets are local BVH bone lengths; 7 cm is 0.07 m, not the
-    # accumulated Spine->Spine3 chain length.
-    assert np.allclose(dst_offsets[JOINT_NAMES.index("Spine3")], [0.0, 0.07, 0.0])
-    assert np.allclose(dst_local, np.broadcast_to(np.eye(3), (2, N_JOINTS, 3, 3)))
-
-    motion = np.zeros((2, 72), dtype=np.float64)
-    motion[1, 3] = 90.0
-    sampled = interp_motion(motion, 0.1, np.array([0.05]))
-    assert abs(sampled[0, 3] - 45.0) < 1e-5
+    # SMPL-24 skeleton sanity: offsets are rest-pose bone vectors and FK of
+    # the rest pose reconstructs the rest positions.
+    offsets = np.zeros((N_JOINTS, 3), dtype=np.float64)
+    offsets[3] = [0.0, 0.10, 0.0]  # spine1 (npz idx 3, parent pelvis)
+    identity = np.broadcast_to(np.eye(3), (2, N_JOINTS, 3, 3)).copy()
+    rest_pos, _ = fk_local(identity, offsets, JOINT_PARENTS)
+    assert np.allclose(rest_pos[0, JOINT_NAMES.index("spine1")], [0.0, 0.10, 0.0])
+    assert rest_pos.shape == (2, N_JOINTS, 3)
 
     print("self-test ok")
 
@@ -1025,8 +942,8 @@ def main() -> int:
                 "min_frames": args.min_frames,
                 "target_hz": TARGET_HZ,
                 "input_dims": {"gait": 50, "gait_noimu": 38},
-                "output_dim": 69,
-                "skeleton": "BVH-23 Skeleton3 (Y-X-Z euler, root translation)",
+                "output_dim": 72,
+                "skeleton": "SMPL-24 native (npz joint order, root-relative positions)",
                 "tactile_source_chain": (
                     "raw pressure_left/right.csv (48/foot) -> shared/facts "
                     "pressure_48.npz (2x4x12) -> Step2Motion pool_48_to_16 "
