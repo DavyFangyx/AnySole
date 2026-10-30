@@ -17,6 +17,7 @@ Usage (touch_gait):
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import shlex
 import subprocess
@@ -324,7 +325,8 @@ def common_loader():
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=("wham", "sam3db", "gvhmr"), default="wham")
-    parser.add_argument("--session", required=True)
+    parser.add_argument("--session", default="", help="single session (overrides --split)")
+    parser.add_argument("--split", choices=("train", "val", "test", "all"), default="test")
     parser.add_argument("--cam", type=int, choices=(1, 2, 3, 4), default=3)
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--work-dir", default="", help="persistent work dir (default: temp)")
@@ -334,32 +336,52 @@ def main() -> int:
             encoding="utf-8"):
         row = json.loads(line)
         manifest[row["session_id"]] = row
-    if args.session not in manifest:
-        raise SystemExit(f"session not in manifest: {args.session}")
-    row = manifest[args.session]
-    date, subject = session_parts(row)
     unit_manifest = NATIVE_ROOT / "SAM3DB_baseline" / ".run" / "manifest.jsonl"
-    unit = unit_entry(unit_manifest, date, args.session, args.cam)
-    tmp = Path(args.work_dir) if args.work_dir else None
-    if tmp is None:
-        context = tempfile.TemporaryDirectory(dir=WORKSPACE / "work")
-        tmp = Path(context.name)
+    if args.session:
+        sessions = [args.session]
     else:
-        tmp.mkdir(parents=True, exist_ok=True)
-        context = None
-    try:
-        if args.model == "wham":
-            result = generate_wham(row, args.cam, unit, tmp, args.gpu)
-        elif args.model == "sam3db":
-            result = generate_sam3db(row, args.cam, unit, tmp, args.gpu)
-        elif args.model == "gvhmr":
-            result = generate_gvhmr(row, args.cam, unit, tmp, args.gpu)
+        sessions = []
+        with (WORKSPACE / "protocol/splits/default/splits.csv").open(
+                encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                columns = ("train", "val", "test") if args.split == "all" else (args.split,)
+                for column in columns:
+                    value = (row.get(column) or "").strip()
+                    if value and value not in sessions:
+                        sessions.append(value)
+    failures = []
+    for session in sessions:
+        if session not in manifest:
+            failures.append((session, "not in manifest"))
+            continue
+        row = manifest[session]
+        date, subject = session_parts(row)
+        unit = unit_entry(unit_manifest, date, session, args.cam)
+        tmp = Path(args.work_dir) if args.work_dir else None
+        if tmp is None:
+            context = tempfile.TemporaryDirectory(dir=WORKSPACE / "work")
+            tmp = Path(context.name)
         else:
-            raise SystemExit(f"unknown model: {args.model}")
-        print(f"wrote {result}")
-    finally:
-        if context is not None:
-            context.cleanup()
+            tmp.mkdir(parents=True, exist_ok=True)
+            context = None
+        try:
+            if args.model == "wham":
+                result = generate_wham(row, args.cam, unit, tmp, args.gpu)
+            elif args.model == "sam3db":
+                result = generate_sam3db(row, args.cam, unit, tmp, args.gpu)
+            elif args.model == "gvhmr":
+                result = generate_gvhmr(row, args.cam, unit, tmp, args.gpu)
+            else:
+                raise SystemExit(f"unknown model: {args.model}")
+            print(f"wrote {result}")
+        except Exception as exc:  # noqa: BLE001 — per-session resilience
+            failures.append((session, f"{type(exc).__name__}: {exc}"))
+            print(f"FAIL {args.model} {session}: {type(exc).__name__}: {exc}")
+        finally:
+            if context is not None:
+                context.cleanup()
+    if failures:
+        raise SystemExit(f"{len(failures)} session(s) failed: {failures[:5]}")
     return 0
 
 
