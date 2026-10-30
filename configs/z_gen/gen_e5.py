@@ -27,6 +27,14 @@ def main() -> int:
     seeds = parse_seeds(args.seed)
     if seeds:
         models = seed_models(models, seeds)
+    # E5 = 单一主模型 × occ 四档：基名（V7_Cv5）自动展开为 _evalocc{010-050}
+    expanded = []
+    for m in models:
+        if "_evalocc" in m or "_evalbest" in m:
+            expanded.append(m)
+        else:
+            expanded += [m + "_evalocc" + o for o in ("010", "020", "030", "050")]
+    models = expanded
     wandb = parse_bool(args.wandb, "--wandb")
     checkpoint_all = parse_bool(args.checkpoint_all, "--checkpoint-all")
     if args.ckpt == "best":

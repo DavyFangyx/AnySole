@@ -19,7 +19,8 @@ else:
     DEFAULT_DATASET_ROOT = Path("/data/lizhe/projects/Tactile")
     DEFAULT_WHAM_ROOT = _PROJECT_ROOT / "Baselines" / "WHAM"
     DEFAULT_RESULT_ROOT = _PROJECT_ROOT / "AnysoleWorkspace" / "work" / "visual_baselines"
-DEFAULT_WHAM_PYTHON = Path(os.environ.get("VB_WHAM_PYTHON", "python"))
+DEFAULT_WHAM_PYTHON = Path(os.environ.get("VB_WHAM_PYTHON",
+                       "/data/fangyuxuan/miniconda3/envs/wham/bin/python"))
 DEFAULT_GPU_IDS = tuple(range(7))
 DEFAULT_WORKERS_PER_GPU = 2
 

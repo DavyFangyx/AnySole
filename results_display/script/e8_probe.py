@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """E8 基于探针的模态互补信息分析（实验计划 E8 口径）。
 
-冻结 U（缺省 V7_Cv5，ckpt_last，wo05 划分），逐窗口读 V/T 时序记忆
-m_v / m_t（V7MotionHead 输入前），三组 ridge 探针预测骨盆相对踝足位置
-（4 关节 × 3 维，mm），训练集拟合、验证集选正则、测试集评估。
+冻结 U（缺省 V7_Cv5，ckpt_last，canonical 划分 splits.csv），逐窗口读 V/T
+时序记忆 m_v / m_t（V7MotionHead 输入前），三组 ridge 探针预测骨盆相对踝足
+位置（4 关节 × 3 维，mm），训练集拟合、验证集选正则、测试集评估。
 
 探针组（同一种 ridge，同一批窗口）：
 - M_V        视觉可解码信息
@@ -36,8 +36,9 @@ from anysole.data.dataset import AnySoleDataset, collate_windows  # noqa: E402
 from anysole.registry import get_builder, infer_anysole_paths  # noqa: E402
 from anysole.types import ANKLE_FOOT_JOINTS, JOINT_NAMES  # noqa: E402
 
+# 与 e_results_export.py ETEST 默认口径一致（state_smpl24 × test）
 OUT_DIR = REPO / "results_display/Etest/E8_ComplementarityProbe"
-SPLIT_CSV = (REPO / "AnysoleWorkspace/protocol/splits/default/splits_wo05.csv")
+SPLIT_CSV = (REPO / "AnysoleWorkspace/protocol/splits/default/splits.csv")
 LAMBDAS = [1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3]
 PELVIS = JOINT_NAMES.index("pelvis")
 TTA_VARIANTS = {  # 与 run_tta TTA_MODELS 一致
@@ -50,7 +51,7 @@ TTA_VARIANTS = {  # 与 run_tta TTA_MODELS 一致
 
 
 def build_model(model_name: str, device: torch.device):
-    paths = infer_anysole_paths(model_name, contact="f6_soft",
+    paths = infer_anysole_paths(model_name, contact="f6_soft_time_accel_state_smpl24_v1",
                                 variant=TTA_VARIANTS[model_name], which="last")
     ckpt = torch.load(paths["ckpt"], map_location="cpu")
     saved = ckpt["config"]
@@ -67,7 +68,8 @@ def build_model(model_name: str, device: torch.device):
 def collect(model, mode: str, device: torch.device) -> tuple[np.ndarray, np.ndarray]:
     """逐窗口读 m_v/m_t（VT 条件）与骨盆相对踝足位置（mm）。"""
     dataset = AnySoleDataset(mode, split_csv=SPLIT_CSV, cam_id=3, stride=20,
-                             contact_method="f6_soft", tactile_input="raw108")
+                             contact_method="f6_soft_time_accel_state_smpl24_v1",
+                             tactile_input="raw108")
     loader = DataLoader(dataset, batch_size=16, shuffle=False,
                         num_workers=2, collate_fn=collate_windows)
     x_v, x_t, y = [], [], []
@@ -151,9 +153,9 @@ def main() -> int:
         w.writerows(rows)
     report = """# E8 基于探针的模态互补信息分析
 
-口径：U = V7_Cv5（ckpt_last，wo05 划分）；VT 条件逐窗口读 V/T 时序记忆
-m_v / m_t（V7MotionHead 输入前，维度 %d / %d）；目标 = 骨盆相对踝足位置
-（4 关节 × 3 维，mm）；ridge 闭式解，λ ∈ {1e-2..1e3} 在 val 上选最优后
+口径：U = V7_Cv5（ckpt_last，canonical 划分 splits.csv）；VT 条件逐窗口读 V/T
+时序记忆 m_v / m_t（V7MotionHead 输入前，维度 %d / %d）；目标 = 骨盆相对踝足
+位置（4 关节 × 3 维，mm）；ridge 闭式解，λ ∈ {1e-2..1e3} 在 val 上选最优后
 test 评估。
 
 | 探针输入 | test 误差 (mm) |

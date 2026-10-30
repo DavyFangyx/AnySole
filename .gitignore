@@ -126,3 +126,6 @@ z_note/data_pressure_fixpipe/backup/
 # HF 原始数据包（部署者下载；含四相机 jpg/触觉 tactile_v3 树/BVH/SMPL npz/
 # 空间时间配置，机器本地数据，不进 git）
 /AnysoleWorkspace/hf-raw/
+
+
+Vision_Baseline/

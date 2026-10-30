@@ -289,7 +289,7 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
 
 def parse_seeds(value: str | None) -> list[int] | None:
     if value is None:
-        return None
+        return [1]  # 默认 seed 1（用户裁定：默认就是 seed1，cell 带 _s1）
     seeds = [int(x) for x in value.split(",") if x.strip()]
     if not seeds or any(s < 1 for s in seeds):
         raise SystemExit("--seed 需逗号分隔的正整数，如 1,2,3")
@@ -374,24 +374,29 @@ def ckpt_models(models: list[str], ckpt: str) -> list[str]:
 
 
 def seed_models(models: list[str], seeds: list[int]) -> list[str]:
-    """多种子展开（方案 A，2026-10-29）：seed 1 = 原 id；seed ≥2 = 追加 _sN。
-    只对「基名」id 展开（已带 _sN / _stat / _evalocc 等子后缀的 id 原样保留
-    ——评估类 cell 由其训练条目决定种子，不重复展开）。"""
+    """多种子展开（方案 A，2026-10-29）：seed 1 = _s1 显式（用户裁定「默认
+    就是 seed1，名字和目录都要带 _s1」）；seed ≥2 = 追加 _sN。子后缀插入
+    （V7_Cv5_evalocc010 → V7_Cv5_s2_evalocc010）；已带 _sN 的 id 原样保留。"""
     expanded = []
     for model in models:
         if any(model.endswith(s) for s in ("_s2", "_s3")):
             expanded.append(model)
             continue
-        # 子后缀位置（_sN 插在子后缀前：V7_Cv5_statistics → V7_Cv5_s2_statistics）
+        # 子后缀位置（_sN 插在子后缀前：V7_Cv5_evalocc010 → V7_Cv5_s2_evalocc010）
         sub_pos = None
-        for sub in ("_statistics", "_evalocc", "_evalbest", "_precheck", "_sel"):
+        for sub in ("_evalocc", "_evalbest", "_precheck", "_sel"):
             pos = model.rfind(sub)
             if pos != -1 and pos > 0:
                 sub_pos = pos
                 break
         for n in seeds:
             if n == 1:
-                target = model
+                if re.search(r"_s\d+($|_)", model):
+                    target = model
+                elif sub_pos is not None:
+                    target = model[:sub_pos] + "_s1" + model[sub_pos:]
+                else:
+                    target = "%s_s1" % model
             elif sub_pos is not None:
                 target = model[:sub_pos] + "_s%d" % n + model[sub_pos:]
             else:
@@ -408,7 +413,7 @@ def add_gen_args(parser) -> None:
     parser.add_argument("--models", default=None,
                         help="comma-separated model IDs（默认：脚本内 DEFAULT_MODELS）")
     parser.add_argument("--seed", default=None,
-                        help="多种子（逗号分隔，如 1,2,3；1=基名，≥2=追加 _sN 条目）")
+                        help="多种子（逗号分隔，如 1,2,3；缺省 1；seed 1 也显式 _s1）")
     parser.add_argument("--concat-method", choices=list(CONCAT_VERSIONS),
                         default="f6_soft",
                         help="接触标签版本（默认 f6_soft；tafix/statefix 映射到 *_tafix/*_statefix 条目）")
@@ -615,9 +620,9 @@ _STATE_IDS = ["V7_Cv%d_statefix" % v for v in range(1, 8)] + ["V7_Cv5_SV1_statef
 EXPERIMENTS["v7_statefix_best_eval"] = {
     "KIND": "model_suite",
     "MODEL_IDS": ["V7_Cv%d%s_evalbest" % (i, sd) for i in range(1, 8)
-                  for sd in ("", "_s2", "_s3")]
+                  for sd in ("_s1", "_s2", "_s3")]
     + ["V7_Cv%d%s_evalbest_occ%s" % (i, sd, o)
-       for i in range(1, 8) for sd in ("", "_s2", "_s3")
+       for i in range(1, 8) for sd in ("_s1", "_s2", "_s3")
        for o in ("010", "020", "030", "050")],
     "REQUIRES": [],
 }
@@ -626,14 +631,11 @@ EXPERIMENTS["v7_statefix_best_eval"] = {
 for _kind in ("tafix", "statefix"):
     _ids = ["V7_Cv%d" % i if _kind == "statefix" else "V7_Cv%d_tafix" % i for i in range(1, 8)]
     _prefix = "v7" if _kind == "statefix" else "v7_tafix"
+    _seeded = [x + s for x in _ids for s in ("_s1", "_s2", "_s3")]
     EXPERIMENTS[_prefix + "_train"] = {"KIND": "model_suite",
-        "MODEL_IDS": _ids + ["%s_s%d" % (x, n) for x in _ids for n in (2, 3)],
-        "REQUIRES": [], "CHECKPOINT_ALL": True}
-    _seeds = [x + s for x in _ids for s in ("", "_s2", "_s3")]
-    EXPERIMENTS[_prefix + "_eval_clean"] = {"KIND": "model_suite",
-        "MODEL_IDS": [x + "_statistics" for x in _seeds],
-        "REQUIRES": [], "CHECKPOINT_ALL": True}
+        "MODEL_IDS": _seeded,
+        "REQUIRES": []}
     EXPERIMENTS[_prefix + "_eval_occ"] = {"KIND": "model_suite",
-        "MODEL_IDS": [x + "_evalocc" + o for x in _seeds
+        "MODEL_IDS": [x + "_evalocc" + o for x in _seeded
                       for o in ("010", "020", "030", "050")],
-        "REQUIRES": [], "CHECKPOINT_ALL": True}
+        "REQUIRES": []}

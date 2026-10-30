@@ -235,57 +235,23 @@ def compact_wham(raw_results: dict, frames: int, unit_root: Path) -> Path:
 
 
 def generate_sam3db(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) -> Path:
-    """Drive the migrated SAM3DB runtime per frame; assemble the result.pkl
-    contract (io.load_sam), mirroring the source worker's assembly."""
-    import pickle
+    """Drive the SAM3DB worker in the vb_tactile environment (torch 2.10 stack)."""
     date, subject = session_parts(row)
-    frames = unit_frame_paths(row, cam, unit)
     unit_root = work_dir / "sam3db" / f"{date}_{row['session_id']}_c{cam}"
     unit_root.mkdir(parents=True, exist_ok=True)
-    from AnysoleWorkspace.tool.adapters.visual_baselines import common
-    calibration, _, _ = common.load_calibration(date)
-    width, height = [int(value) for value in calibration["image_size_px"]]
-    side = np.load(FRONTEND_BBOX / date / subject / row["session_id"] / "bbox.npz",
-                   allow_pickle=False)
-    visual = np.asarray(side["visual_time_s"], dtype=np.float64)
-    boxes_norm = np.asarray(side["bbox_xyxy_norm"], dtype=np.float64)
-    start = common.recording_start_day_s(row)
-    boxes_px = []
-    for record in unit["frames"]:
-        canonical = int(np.argmin(np.abs(visual - (float(record["timestamp_seconds"]) - start))))
-        norm = boxes_norm[canonical]
-        boxes_px.append(np.asarray([norm[0] * width, norm[1] * height,
-                                    norm[2] * width, norm[3] * height], dtype=np.float32))
-    sys.path.insert(0, str(ROOT / "AnysoleWorkspace" / "tool" / "adapters" / "SAM3DB"))
-    from runtime import Engine
-    engine = Engine(device=f"cuda:{gpu}")
-    try:
-        array_lists = {"frame": [], "bbox_xyxy": [], "global_orient": [], "body_pose": [],
-                       "betas": [], "camera_translation": [], "focal_length": [],
-                       "similarity_scale": [], "similarity_rotation": [],
-                       "similarity_translation": [], "smpl_joints_2d": [],
-                       "alignment_rmse": []}
-        for frame_path, bbox, record in zip(frames, boxes_px, unit["frames"]):
-            output = engine.infer(frame_path, bbox, (width, height))
-            array_lists["frame"].append(int(record["frame"]))
-            for name in array_lists:
-                if name != "frame":
-                    array_lists[name].append(output[name])
-        arrays = {name: np.asarray(values) for name, values in array_lists.items()}
-        arrays["frame"] = arrays["frame"].astype(np.int32)
-        for name in arrays:
-            if name != "frame":
-                arrays[name] = arrays[name].astype(np.float32)
-    finally:
-        engine.close()
-    result = {"schema_id": "sam3db_result_v1", "schema_version": 1,
-              "unit_id": unit["unit_id"], "config_hash": "project-layout",
-              "frame_count": len(frames), "image_size": [width, height],
-              "fps": 30.0, "arrays": arrays}
-    destination = unit_root / "result.pkl"
-    with destination.open("wb") as handle:
-        pickle.dump(result, handle)
-    return destination
+    command = [
+        "/data/fangyuxuan/miniconda3/envs/vb_tactile/bin/python",
+        str(Path(__file__).resolve().parent / "_sam3db_worker.py"),
+        "--session", row["session_id"],
+        "--cam", str(cam),
+        "--gpu", str(gpu),
+        "--work-dir", str(unit_root),
+    ]
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise RuntimeError(f"SAM3DB worker failed with exit code {completed.returncode}:\n"
+                           f"{completed.stderr[-1200:]}")
+    return unit_root / "result.pkl"
 
 
 def main() -> int:

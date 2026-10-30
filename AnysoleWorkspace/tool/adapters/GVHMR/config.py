@@ -33,7 +33,8 @@ DEFAULT_SMPLX_TO_SMPL = (_PROJECT_ASSETS / "utils" / "body_model" / "smplx2smpl_
                          else UPSTREAM_ROOT / "hmr4d" / "utils" / "body_model" / "smplx2smpl_sparse.pt")
 DEFAULT_HMR2_CHECKPOINT = ASSET_ROOT / "checkpoints" / "hmr2" / "epoch=10-step=25000.ckpt"
 DEFAULT_VITPOSE_CHECKPOINT = ASSET_ROOT / "checkpoints" / "vitpose" / "vitpose-h-multi-coco.pth"
-DEFAULT_PYTHON = Path(os.environ.get("VB_GVHMR_PYTHON", "python"))
+DEFAULT_PYTHON = Path(os.environ.get("VB_GVHMR_PYTHON",
+                      "/data/fangyuxuan/miniconda3/envs/vb_gvhmr/bin/python"))
 DEFAULT_DATASET_ROOT = Path("/data/lizhe/projects/Tactile")
 DEFAULT_RESULT_ROOT = (_PROJECT_ROOT / "AnysoleWorkspace" / "work" / "visual_baselines"
                        if not os.environ.get("VB_WORKSPACE_ROOT")

@@ -1264,16 +1264,19 @@ for _suffix, _contact in _SMPL24_PACKAGES.items():
         MODELS[_new] = {
             **MODELS[_base], "name": _base,
             "label": _base + "-" + _suffix,
-            "contact_method": _contact, "eval_splits": ["val"], "which": "last",
+            "contact_method": _contact, "eval_splits": ["val", "test"], "which": "last",
             # canonical split（splits.csv，2026-10-29 用户裁定；旧线保持 wo05）
             "config": "anysole/configs/v1.yaml",
             "train_args": {**MODELS[_base]["train_args"],
                            "smpl_support_policy": "exclude", "final_eval_split": "none"},
         }
-        MODELS[_new + "_statistics"] = {**MODELS[_new], "train": False}
+        # 训练 cell 即正式统计 cell（2026-10-29 用户裁定：_statistics 后缀作废，
+        # 评估本身就是要 test——train 格 val+test 一次跑齐，test 逐帧预测落
+        # predictions/eval_motion，E2/E5/E6/E7 直接读训练 cell）
         for _occ in ("010", "020", "030", "050"):
             MODELS[_new + "_evalocc" + _occ] = {
                 **MODELS[_new], "train": False,
+                "eval_splits": ["val", "test"],
                 "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ,
             }
 
@@ -1313,12 +1316,6 @@ for _base in _SEED_BASES:
             **MODELS[_base],
             "label": "%s-s%d" % (MODELS[_base]["label"], _n),
             "name": MODELS[_base]["name"], "seed": _n}
-        # 统计评估 cell 派生（读 seed N 的 ckpt：name=基名、seed=_n，
-        # variant 串 sdN 自动分家；cam3 + occ 四档）
-        MODELS["%s_s%d_statistics" % (_base, _n)] = {
-            **MODELS["%s_statistics" % _base],
-            "label": "%s-s%d-statistics" % (MODELS[_base]["label"], _n),
-            "name": MODELS[_base]["name"], "seed": _n}
         for _occ in ("010", "020", "030", "050"):
             MODELS["%s_s%d_evalocc%s" % (_base, _n, _occ)] = {
                 **MODELS["%s_evalocc%s" % (_base, _occ)],
@@ -1332,11 +1329,13 @@ _CKPT_BASES = ["V7_Cv%d" % i for i in range(1, 8)]
 for _base in _CKPT_BASES:
     MODELS["%s_evalbest" % _base] = {
         **MODELS[_base], "label": MODELS[_base]["label"] + "-evalbest",
-        "name": MODELS[_base]["name"], "train": False, "which": "best"}
+        "name": MODELS[_base]["name"], "train": False, "which": "best",
+        "eval_splits": ["val", "test"]}
     for _occ in ("010", "020", "030", "050"):
         MODELS["%s_evalbest_occ%s" % (_base, _occ)] = {
             **MODELS[_base], "label": "%s-evalbest-occ%s" % (MODELS[_base]["label"], _occ),
             "name": MODELS[_base]["name"], "train": False, "which": "best",
+            "eval_splits": ["val", "test"],
             "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
     # 种子派生（--ckpt best × --seed N）
     for _n in (1, 2, 3):
@@ -1387,9 +1386,10 @@ def _drop_all_but_current() -> None:
     keep = set()
     for _i in range(1, 8):
         for _base in ("V7_Cv%d" % _i, "V7_Cv%d_tafix" % _i):
-            for _sd in ("", "_s1", "_s2", "_s3"):
+            # seed 1 显式 _s1（2026-10-29 用户裁定）；裸名行已无实验发射
+            # （训练 cell 即评估 cell），不进白名单
+            for _sd in ("_s1", "_s2", "_s3"):
                 keep.add(_base + _sd)
-                keep.add(_base + _sd + "_statistics")
                 keep.add(_base + _sd + "_evalbest")
                 for _o in ("010", "020", "030", "050"):
                     keep.add(_base + _sd + "_evalocc" + _o)

@@ -54,7 +54,7 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "field stack, e.g. tw40_st40_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1).")
     parser.add_argument("--contact-method", default="joint_and",
                         help="Contact-label scheme in the dir name (default joint_and).")
-    parser.add_argument("--which", choices=("last", "best"), default="last",
+    parser.add_argument("--ckpt", choices=("last", "best"), default="last",
                         help="Which checkpoint to address: last = ckpt_last (end of every "
                         "run), best = ckpt_best (val-metric-best intermediate, for final "
                         "reports).")
@@ -140,7 +140,7 @@ def main(argv=None) -> int:
             raise ValueError("--ckpt is required unless --model-name is given")
         args.ckpt = infer_anysole_paths(
             args.model_name, variant=args.variant,
-            contact=args.contact_method, which=args.which,
+            contact=args.contact_method, which=args.ckpt,
         )["ckpt"]
     device = resolve_device(args.device)
     config = load_config(args.config)

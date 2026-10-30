@@ -89,25 +89,22 @@ cd /data/fangyuxuan/projects/gait
 
 # 全量套餐：当前默认七个 U（--wandb/--checkpoint-all 默认 false，不写即关）
 python configs/z_gen/gen_full_package.py --concat-method f6_soft --seed 1
-
 # 仅 U
 python configs/z_gen/gen_u_only.py --models V7_Cv5 --concat-method f6_soft --seed 1,2,3
 # --wandb true --checkpoint-all true
 # 多种子示例：--seed 1,2,3
+# --tw N
 
 # ---- 测试层：用 ckpt 在 test 上验证评估（eval-only）----
 
 # E1 专家对比（默认 Cv5 last 的 V/T/VT 面板）
-python configs/z_gen/gen_e1.py --concat-method f6_soft --seed 1,2,3
-
+python configs/z_gen/gen_e1.py --concat-method f6_soft --seed 1
 # E2 主性能评估（口径可切：--ckpt last/best）
-python configs/z_gen/gen_e2.py --models V7_Cv5_statistics --concat-method f6_soft --ckpt last --seed 1,2,3
-
+python configs/z_gen/gen_e2.py --models V7_Cv5 --concat-method f6_soft --ckpt last --seed 1
 # E4 消融组
-python configs/z_gen/gen_e4.py --concat-method f6_soft --seed 1,2,3
-
+python configs/z_gen/gen_e4.py --concat-method f6_soft --seed 1
 # E5 遮挡交叉评估（默认 occ 四档；口径可切：--ckpt last/best）
-python configs/z_gen/gen_e5.py --concat-method f6_soft --ckpt last --seed 1,2,3
+python configs/z_gen/gen_e5.py --models V7_Cv5 --concat-method f6_soft --ckpt last --seed 1
 
 # ---- 调参（需要时用）----
 

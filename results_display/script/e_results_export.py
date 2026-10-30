@@ -6,7 +6,7 @@
 - E2：cells（A/B/C last/best + Cv1–7 last）+ 外部基线 md → Full_Table1_E2_Performance.csv
 - E3：Etest/10_21/e3_multiview.json → Full_Table1_E3_MultiView.csv
 - E4：cells（Cv1–7 stat，三条件十指标 + Δ）→ Full_Table1_E4_Ablation_AllMetrics.csv
-- E5：cells（A/B/C last/best × occ 四档 + Cv1–7 last occ）→ Full_Table1_E5_Occlusion.csv
+- E5：主模型 V7_Cv5（last/best × occ000-050 五档）→ Full_Table1_E5_Occlusion.csv
 - E6：E6_接触相位/e6_table.json + PNG → Full_Table1_E6_PhaseGain.csv + Full_FigN_E6_Phase_{g}.png
 - E7：E7_动态输入/e7_table.json + PNG → Full_Table1_E7_DynamicStages.csv + Full_FigN_E7_Stages_{a}.png
 
@@ -94,9 +94,9 @@ def md_tables(path: Path) -> list[dict]:
 
 
 def display_name(cell_id: str) -> str:
-    """cell id → 展示模型名：V7_Cv5_statistics_evalocc010 → V7_Cv5。"""
-    for suffix in ("_statistics_evalocc", "_evalbest_occ", "_evalocc", "_evalbest",
-                   "_statistics", "_sel_evalocc", "_sel"):
+    """cell id → 展示模型名：V7_Cv5_s1_evalocc010 → V7_Cv5。"""
+    for suffix in ("_s1", "_s2", "_s3", "_statistics_evalocc", "_evalbest_occ",
+                   "_evalocc", "_evalbest", "_statistics", "_sel_evalocc", "_sel"):
         if suffix in cell_id:
             return cell_id.split(suffix)[0]
     return cell_id
@@ -145,31 +145,32 @@ def metric_row(m: dict, cond: str) -> list:
 
 
 def seeded_metrics(model_id: str, split=None) -> dict | None:
-    """自动扫描 base 与 *_sN 种子变体 cell，聚合为 mean / mean±std
-    （2026-10-29 用户裁定：方案 A——多 seed 存 mean±std、单 seed 存单值）。
+    """自动扫描 {base} 与 {base}_sN 种子变体 cell，聚合为 mean / mean±std
+    （2026-10-29 用户裁定：方案 A——多 seed 存 mean±std、单 seed 存单值；
+    seed 1 显式 _s1；_statistics 后缀作废，训练 cell 即评估 cell）。
 
-    扫描在 namespace 映射后的目录名上进行（变体 = mapped_key + _sN）；
-    聚合只在同一条件内做；值为标量 = 单 seed，值为 (mean, std) = 多 seed。
+    扫描在 namespace 映射后的目录名上进行（变体 = mapped_key + _sN，
+    另兼容无 _sN 的历史 cell）；聚合只在同一条件内做；值为标量 = 单 seed，
+    值为 (mean, std) = 多 seed。
     """
     key = _namespace_cell(model_id)
     # _sN 插在子后缀前（与 conf 层 seed_models 一致）：
-    # V7_Cv5_statefix_smpl24_statistics → V7_Cv5_statefix_smpl24_s2_statistics
+    # V7_Cv5_evalocc010 → V7_Cv5_s2_evalocc010
     sub_pos = None
-    for sub in ("_statistics", "_evalocc", "_evalbest", "_precheck", "_sel"):
+    for sub in ("_evalocc", "_evalbest", "_precheck", "_sel", "_statistics"):
         pos = key.rfind(sub)
         if pos != -1 and pos > 0:
             sub_pos = pos
             break
+
     def _variant(n):
-        if n == 1:
-            return key
         if sub_pos is not None:
             return key[:sub_pos] + "_s%d" % n + key[sub_pos:]
         return key + "_s%d" % n
 
-    cands = [key] + sorted(
+    cands = sorted(
         p.name for p in (CELLS).iterdir()
-        if p.name in {_variant(2), _variant(3)})
+        if p.name in {key, _variant(1), _variant(2), _variant(3)})
     ms = [cell_metrics(c, split) for c in cands]
     ms = [m for m in ms if m]
     if not ms:
@@ -224,35 +225,19 @@ def delta_row(m: dict) -> list:
 
 
 # ---------------- E1：专家对比（cells 驱动） ----------------
-# 专家口径（2026-10-26 裁定）：Cv1–4 家族共享 A 骨架专家 V7_SV1/V7_ST1；
-# Cv5 家族 = 同架构专家 V7_Cv5_SV1_stat/V7_Cv5_ST1_stat（v7_c2 双门）。
-EXPERT_CELLS = {"V7_SV1": "S_V@V", "V7_ST1": "S_T@T",
-                "V7_Cv5_SV1_statistics": "S_V@V", "V7_Cv5_ST1_statistics": "S_T@T"}
-
-
+# 专家条目已随历史清理删除（2026-10-29）；当前 E1 面板 = Cv1–7 统一模型
+# 的 U@V / U@T / U@VT（同一训练 cell，_statistics 后缀作废）。
 def export_e1(models: list[str]) -> None:
     header = ["家族", "测试设定", "模型"] + METRICS10
     rows = []
     families = models or ["V7_Cv%d" % n for n in range(1, 8)]
     for fam in families:
-        u = seeded_metrics(fam + ("_f6_statistics" if CONTACT_NAMESPACE == "legacy" else "_statistics"))
+        u = seeded_metrics(fam + ("_f6_statistics" if CONTACT_NAMESPACE == "legacy" else ""))
         if not u:
-            print("[skip] E1 %s: %s_stat 无 cell 结果" % (fam, fam))
+            print("[skip] E1 %s: 无 cell 结果" % fam)
             continue
         for cond, setting in (("T2M", "T"), ("V2M", "V"), ("VT2M", "VT")):
-            rows.append([fam, setting, "U@" + {"T": "T", "V": "V", "VT": "VT"}[setting]]
-                        + metric_row(u, cond))
-        if CONTACT_NAMESPACE != "legacy" and fam not in ("V7_Cv2", "V7_Cv5"):
-            raise ValueError("E1 needs explicitly matched experts for family: " + fam)
-        experts = (["V7_Cv5_SV1_statistics", "V7_Cv5_ST1_statistics"] if fam in ("V7_Cv2", "V7_Cv5")
-                   else ["V7_SV1", "V7_ST1"])
-        for cell, setting in zip(experts, ("S_V@V", "S_T@T")):
-            e = seeded_metrics(cell)
-            if not e:
-                print("[skip] E1 %s: 专家 cell %s 无结果" % (fam, cell))
-                continue
-            cond = "V2M" if setting == "S_V@V" else "T2M"
-            rows.append([fam, setting[2], setting] + metric_row(e, cond))
+            rows.append([fam, setting, "U@" + setting] + metric_row(u, cond))
     write_csv(ETEST / "E1_CleanPerformance" / "Full_Table1_E1_Experts.csv", header, rows)
 
 
@@ -264,15 +249,17 @@ def _selected(cell_ids: list[str], models: list[str]) -> list[str]:
 def export_e2(models: list[str], ckpt: str) -> None:
     """四张表（2026-10-27 用户裁定）：V 块 / T 块 / VT 块 / 汇总。
 
-    模型类型列：外部基线 = 四外部方法；Ours = AnySole 自家对照模型
-    （V4_Av1_wo05_drop / V5_Av4_wo05_drop，wo05 时代）；U = 统一模型。
+    模型类型列：外部基线 = 四外部方法；U = 统一模型（Cv1–7，
+    Cv6 为 S_VT 专家角色）。旧候选 A/B 不入表（2026-10-30 用户裁定）。
     """
     header = ["类型", "模型", "口径"] + METRICS10
-    # Cv1 的 first_round cell 已删（双 id 遗留）；Cv1 行由 V7_Cv1_stat 提供
-    # （display 层只读专门统计测试 cell，2026-10-27 用户裁定）
-    last_cells = _selected(["V7_Av1", "V7_Bv1"]
-                           + ["V7_Cv%d%s_statistics" % (n, "_f6" if CONTACT_NAMESPACE == "legacy" else "") for n in range(1, 8)], models)
-    best_cells = _selected(["V7_Av1_evalbest", "V7_Bv1_evalbest", "V7_Cv1_evalbest"], models)
+    # 当前线：训练 cell 即评估 cell（V7_CvN → 自动扫 _s1/_s2/_s3）；
+    # legacy 线保持 _f6_statistics 旧命名（display 层只读专门测试 cell）
+    last_cells = _selected(["V7_Cv%d%s%s" % (n,
+                                           "_f6" if CONTACT_NAMESPACE == "legacy" else "",
+                                           "_statistics" if CONTACT_NAMESPACE == "legacy" else "")
+                              for n in range(1, 8)], models)
+    best_cells = _selected(["V7_Cv1_evalbest"], models)
     rows_by_block = {"V": [], "T": [], "VT": []}
     for cond, block in (("V2M", "V"), ("T2M", "T"), ("VT2M", "VT")):
         if ckpt != "best":
@@ -280,7 +267,7 @@ def export_e2(models: list[str], ckpt: str) -> None:
                 m = seeded_metrics(model)
                 if m and cond in m:
                     rows_by_block[block].append(
-                        ["S_VT" if model == "V7_Cv6_statistics" else "U", "%s（%s）" % (COND_ZH[cond], display_name(model)), "last"]
+                        ["S_VT" if model == "V7_Cv6" else "U", "%s（%s）" % (COND_ZH[cond], display_name(model)), "last"]
                         + metric_row(m, cond))
         if ckpt != "last":
             for model in best_cells:
@@ -291,7 +278,7 @@ def export_e2(models: list[str], ckpt: str) -> None:
                         + metric_row(m, cond))
     # 基线表（md 驱动；首列即块）。Ours（V4_Av1_wo05_drop 等）是 AnySole
     # 自家模型但不属于本实验默认生成名单 → 不入表（2026-10-27 用户裁定）。
-    base_src = (REPO / "results_display/Etest/E2_MainPerformance/E2_外部基线主结果.md") if EVAL_SPLIT == "test" else Path("/nonexistent/validation_external_baselines")
+    base_src = (ETEST / "E2_MainPerformance/E2_外部基线主结果.md") if EVAL_SPLIT == "test" else Path("/nonexistent/validation_external_baselines")
     if base_src.is_file():
         for t in md_tables(base_src):
             for r in t["rows"]:
@@ -322,14 +309,17 @@ def export_e4(models: list[str], ckpt: str) -> None:
         raise SystemExit("E4 消融组目前只有 last 口径（Cv 家族 best 口径 cells 未注册）")
     header = ["模型", "条件"] + METRICS10
     rows = []
-    cells = _selected(["V7_Cv%d%s_statistics" % (n, "_f6" if CONTACT_NAMESPACE == "legacy" else "") for n in range(1, 8)], models)
+    cells = _selected(["V7_Cv%d%s%s" % (n,
+                                        "_f6" if CONTACT_NAMESPACE == "legacy" else "",
+                                        "_statistics" if CONTACT_NAMESPACE == "legacy" else "")
+                       for n in range(1, 8)], models)
     for cell_id in cells:
         m = seeded_metrics(cell_id)
         if not m:
             continue
-        for cond in (("VT2M",) if cell_id == "V7_Cv6_statistics" else CONDS):
-            rows.append([display_name(cell_id), "S_VT@VT" if cell_id == "V7_Cv6_statistics" else COND_ZH[cond]] + metric_row(m, cond))
-        if cell_id == "V7_Cv6_statistics":
+        for cond in (("VT2M",) if cell_id == "V7_Cv6" else CONDS):
+            rows.append([display_name(cell_id), "S_VT@VT" if cell_id == "V7_Cv6" else COND_ZH[cond]] + metric_row(m, cond))
+        if cell_id == "V7_Cv6":
             continue
         rows.append([display_name(cell_id), "Δ(VT−V)"] + delta_row(m))
     write_csv(ETEST / "E4_ComponentAblation" / "Full_Table1_E4_Ablation_AllMetrics.csv",
@@ -340,21 +330,13 @@ def export_e4(models: list[str], ckpt: str) -> None:
 def export_e5(models: list[str], ckpt: str) -> None:
     header = ["模型", "口径", "档位", "行"] + METRICS10
     rows = []
-    last_cells = {"occ000": ["V7_Av1", "V7_Bv1", "V7_Cv1"]}
-    best_cells = {"occ000": ["V7_Av1_evalbest", "V7_Bv1_evalbest", "V7_Cv1_evalbest"]}
+    # E5 = 单一主模型（2026-10-30 用户裁定）：U = V7_Cv5 一份 ckpt × occ 五档
+    model = models[0] if models else "V7_Cv5"
+    last_cells = {"occ000": [model]}
+    best_cells = {"occ000": ["%s_evalbest" % model]}
     for occ in ("010", "020", "030", "050"):
-        last_cells["occ%s" % occ] = ["V7_Av1_evalocc%s" % occ,
-                                     "V7_Bv1_evalocc%s" % occ,
-                                     "V7_Cv1_evalocc%s" % occ]
-        best_cells["occ%s" % occ] = ["V7_Av1_evalbest_occ%s" % occ,
-                                     "V7_Bv1_evalbest_occ%s" % occ,
-                                     "V7_Cv1_evalbest_occ%s" % occ]
-    for occ, ids in last_cells.items():
-        for n in range(1, 8):
-            if occ == "occ000":
-                ids.append("V7_Cv%d%s_statistics" % (n, "_f6" if CONTACT_NAMESPACE == "legacy" else ""))
-            else:
-                ids.append("V7_Cv%d%s_statistics_evalocc%s" % (n, "_f6" if CONTACT_NAMESPACE == "legacy" else "", occ[3:]))
+        last_cells["occ%s" % occ] = ["%s_evalocc%s" % (model, occ)]
+        best_cells["occ%s" % occ] = ["%s_evalbest_occ%s" % (model, occ)]
     for occ in ("occ000", "occ010", "occ020", "occ030", "occ050"):
         last_ids = _selected(last_cells[occ], models)
         best_ids = _selected(best_cells.get(occ, []), models)
@@ -394,9 +376,9 @@ def export_e5_figure(models: list[str]) -> None:
     import matplotlib.pyplot as plt
 
     model = models[0] if models else "V7_Cv5"
-    cells = {"occ000": model + "_statistics"}
+    cells = {"occ000": model}
     for occ in ("010", "020", "030", "050"):
-        cells["occ%s" % occ] = "%s_statistics_evalocc%s" % (model, occ)
+        cells["occ%s" % occ] = "%s_evalocc%s" % (model, occ)
     metrics = ["PA-MPJPE", "MPJPE", "GlobalMPJPE", "traj_ATE",
                "GroundPen", "FootSliding"]
     xs = [0, 10, 20, 30, 50]
@@ -463,39 +445,66 @@ def _stage1_agg(json_path: Path, key: str) -> tuple[str, str]:
     return "%.3f" % vals.mean(), "%.3f" % vals.std()
 
 
+def _combo_stats(base: Path, model: str, n: int, key: str) -> tuple[str, str]:
+    """组合间口径（2026-10-30 用户裁定）：std 列人口 = 相机组合间。
+
+    来源 = run_tta --cams 模式逐组合产物（{model}_test_i{n}_cams*.json）；
+    每个文件一个组合的会话均值 → 跨组合 mean±std。
+    n=4 单一组合：std = —（表注：无组合间标准差）。
+    """
+    import numpy as np
+    files = sorted(base.glob(f"anysole_tta_stage1_{model}_test_i{n}_cams*.json"))
+    if not files:
+        # 兜底：--i 单进程产物（内部含 combos+overall）
+        merged = base / f"anysole_tta_stage1_{model}_test_i{n}_lr0.01.json"
+        if merged.is_file():
+            d = json.loads(merged.read_text(encoding="utf-8"))
+            cell = d.get("overall", {}).get(key)
+            if cell and cell.get("mean") is not None:
+                std = cell.get("std")
+                return "%.3f" % cell["mean"], ("%.3f" % std if std is not None else "—")
+        if n == 4:
+            # i=4 = 固定四相机组合 = 单组合模式产物（sessions 平铺，无组合间 std）
+            plain = base / f"anysole_tta_stage1_{model}_test_lr0.01.json"
+            if plain.is_file():
+                d = json.loads(plain.read_text(encoding="utf-8"))
+                vals = [v[key] for v in d["sessions"].values()
+                        if v.get(key) is not None and np.isfinite(v[key])]
+                if vals:
+                    return "%.3f" % np.mean(vals), "—"
+        return "—", "—"
+    means = []
+    for f in files:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        for cm in d.get("combos", {}).values():
+            if cm.get(key) is not None:
+                means.append(cm[key])
+    means = [m for m in means if np.isfinite(m)]
+    if not means:
+        return "—", "—"
+    if len(means) == 1:
+        return "%.3f" % means[0], "—"
+    return "%.3f" % np.mean(means), "%.3f" % np.std(means)
+
+
 def export_e3() -> None:
-    src = ETEST / "E3_MultiViewConsistency" / "e3_multiview.json"
-    plain = {}
-    if src.is_file():
-        data = json.loads(src.read_text(encoding="utf-8"))
-        plain = {n: data["plain_fusion"][n] for n in data.get("plain_fusion", {})}
-    # U@V{i}（TTA 框架）已落地产物（E3 口径说明 2026-10-27）：
-    # V3_Bv1 i=1 = cam3_init（val 11 会话）；i=4 = stage1 lr0.06 定案
-    # pa_virt_refined（精修后 virtual 聚合，30.7）。i=2/3 无子集支持；
-    # V7C Cv1 运行中、Cv2–5 未跑——均填 —。
-    tta_metrics = REPO / "results/baselines/HMR2.0/metrics"
+    """五条对照线 × 视角数 1-4（实验计划 §E3，方法对比表）。
+
+    当前状态（2026-10-30）：标定多视角上限、TTA 原方法、朴素无标定晚融合、
+    U@V{i}+接触约束 均未落地 → 填 —；U@V{i}（TTA 框架）= 主模型 V7_Cv5
+    的 test TTA，std 列 = 组合间标准差：i=1 单视角 pa_init（无 TTA）、
+    i>=2 TTA pa_virt_refined；i=4 单一组合无组合间标准差 → —（表注）。
+    """
+    stage1_dir = REPO / "results/baselines/HMR2.0/metrics"
     header = ["对比线", "模型", "视角数", "PA-MPJPE_mean", "PA-MPJPE_std",
               "MPJPE_mean", "MPJPE_std", "GlobalMPJPE_mean", "GlobalMPJPE_std"]
     rows = []
     for line in E3_LINES:
         for n in ("1", "2", "3", "4"):
-            if line == "朴素无标定晚融合" and n in plain:
-                v = plain[n]
-                rows.append([line, "V3_Bv1", n, "—", "—",
-                             round(v.get("mpjpe_mean", 0), 3),
-                             round(v.get("mpjpe_std", 0), 3),
-                             round(v.get("gmpjpe_mean", 0), 3),
-                             round(v.get("gmpjpe_std", 0), 3)])
-            elif line == "U@V{i}（TTA 框架）" and n in ("1", "4"):
-                if n == "1":
-                    mean, std = _stage1_agg(
-                        tta_metrics / "anysole_tta_stage1_val_cam3_init.json",
-                        "pa_init_cam3")
-                else:
-                    mean, std = _stage1_agg(
-                        tta_metrics / "anysole_tta_stage1_val_lr0.06.json",
-                        "pa_virt_refined")
-                rows.append([line, "V3_Bv1", n, mean, std, "—", "—", "—", "—"])
+            if line == "U@V{i}（TTA 框架）":
+                key = "pa_init" if n == "1" else "pa_virt_refined"
+                mean, std = _combo_stats(stage1_dir, "V7_Cv5", int(n), key)
+                rows.append([line, "V7_Cv5", n, mean, std, "—", "—", "—", "—"])
             else:
                 rows.append([line, "—", n, "—", "—", "—", "—", "—", "—"])
     write_csv(ETEST / "E3_MultiViewConsistency" / "Full_Table1_E3_MultiView.csv",
@@ -510,6 +519,154 @@ E6_ACTION_VALUES = ["walk", "walk", "run", "run", "squat", "stand_shift",
                     "single_stand", "jump_jack", "lateral", "sit_stand", "stairs"]
 E6_PHASE_ZH = {"0": "稳定支撑", "1": "摆动", "2": "落脚附近", "3": "离地附近"}
 
+
+def export_e6_detail() -> None:
+    """--detail：E6 分脚、未平滑逐帧结果（2026-10-30 用户要求）。
+
+    数据源 = anysole_tta/e6_phase_analysis.py 的 load_session（帧网格已对齐
+    校验的逐帧 V/VT 分脚误差），不做任何平滑与双足平均。
+    产物（E6_ContactPhaseAnalysis/detail/ 下 4 个文件夹，2026-10-30 用户要求）：
+      每模型 {model}/{action}/{sid}.csv|.png（分脚未平滑）；
+      merged/{action}/{sid}.csv|.png（三模型并列对比）。
+      csv 列 = frame/time_s/phase_L/phase_R/valid/分脚 V/VT/Δ（Δ = VT − V，mm）；
+      png = 左右脚两个子图，逐帧未平滑 Δ=VT−V 原始曲线（带零线）+ 相位背景带。
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    sys.path.insert(0, str(REPO / "z_note/HMR2.0/hmr2_gait"))
+    from anysole_tta.e6_phase_analysis import (DEFAULT_MODELS,
+                                                build_session_sets,
+                                                load_session)
+    from anysole_tta.phase_common import PHASE_NAMES
+    FPS = 40.0
+    out_root = ETEST / "E6_ContactPhaseAnalysis" / "detail"
+    phase_colors = {0: "#d9d9d9", 1: "#ffffff", 2: "#f4a582", 3: "#92c5de"}
+    header = ["frame", "time_s", "phase_L", "phase_R", "valid",
+              "V_left", "VT_left", "D_left", "V_right", "VT_right", "D_right"]
+    session_sets = build_session_sets()
+    cache = {}
+
+    def get_data(model, sid):
+        key = (model, sid)
+        if key not in cache:
+            cache[key] = load_session(model, sid)
+        return cache[key]
+
+    def phase_bands(ax, data, foot, t):
+        ph = data["phase"][:, 0 if foot == "left" else 1]
+        for k in range(4):
+            sel = ph == k
+            if sel.any():
+                boundaries = np.flatnonzero(np.diff(
+                    np.r_[False, sel, False].astype(np.int8)))
+                for start, stop in zip(boundaries[::2], boundaries[1::2]):
+                    ax.axvspan(t[start], t[stop - 1] + 1.0 / FPS,
+                               color=phase_colors[k], alpha=0.55, lw=0,
+                               label=PHASE_NAMES[k]
+                               if (start == boundaries[0] and foot == "left") else None)
+
+    def frame_rows(data, n):
+        rows = []
+        for i in range(n):
+            if not bool(data["valid"][i]):
+                rows.append([i, round(i / FPS, 3), "", "", "", "", "", "",
+                             "", "", ""])
+                continue
+            rows.append([
+                i, round(i / FPS, 3),
+                E6_PHASE_ZH[str(int(data["phase"][i, 0]))],
+                E6_PHASE_ZH[str(int(data["phase"][i, 1]))],
+                1,
+                round(float(data["V2M_left"][i]), 2),
+                round(float(data["VT2M_left"][i]), 2),
+                round(float(data["VT2M_left"][i] - data["V2M_left"][i]), 2),
+                round(float(data["V2M_right"][i]), 2),
+                round(float(data["VT2M_right"][i]), 2),
+                round(float(data["VT2M_right"][i] - data["V2M_right"][i]), 2),
+            ])
+        return rows
+
+    # 1) 每模型单文件夹
+    for model in DEFAULT_MODELS:
+        for action, sids in session_sets.items():
+            for sid in sids:
+                data = get_data(model, sid)
+                n = len(data["phase"])
+                out_dir = out_root / model / action
+                write_csv(out_dir / ("%s.csv" % sid), header, frame_rows(data, n))
+                t = np.arange(n) / FPS
+                fig, axes = plt.subplots(2, 1, figsize=(9, 4.6), sharex=True)
+                for ax, foot in zip(axes, ("left", "right")):
+                    phase_bands(ax, data, foot, t)
+                    d = data["VT2M_" + foot] - data["V2M_" + foot]
+                    ax.plot(t, d, color="#2a78d6", lw=0.8)
+                    ax.axhline(0, color="k", lw=0.6, ls="--")
+                    ax.set_ylabel("%s Δ = VT − V (mm)" % foot)
+                    ax.margins(y=0.1)
+                axes[-1].set_xlabel("time (s)")
+                handles, labels = axes[0].get_legend_handles_labels()
+                fig.legend(handles, labels, loc="lower center", ncol=6,
+                           fontsize=8, frameon=False)
+                fig.suptitle("%s %s raw per-foot Δ (no smoothing) - %s"
+                             % (model, sid, action), fontsize=11)
+                fig.tight_layout(rect=(0, 0.05, 1, 0.95))
+                fig.savefig(out_dir / ("%s.png" % sid), dpi=150)
+                plt.close(fig)
+
+    # 2) merged：三模型并列（宽表 CSV + 三曲线同图）
+    merged_header = ["frame", "time_s", "phase_L", "phase_R", "valid"]
+    for model in DEFAULT_MODELS:
+        short = display_name(model)
+        merged_header += ["%s_V_left" % short, "%s_VT_left" % short,
+                          "%s_D_left" % short, "%s_V_right" % short,
+                          "%s_VT_right" % short, "%s_D_right" % short]
+    for action, sids in session_sets.items():
+        for sid in sids:
+            datas = [get_data(model, sid) for model in DEFAULT_MODELS]
+            n = len(datas[0]["phase"])
+            t = np.arange(n) / FPS
+            rows = []
+            for i in range(n):
+                valid_all = all(bool(d["valid"][i]) for d in datas)
+                base = [i, round(i / FPS, 3),
+                        E6_PHASE_ZH[str(int(datas[0]["phase"][i, 0]))],
+                        E6_PHASE_ZH[str(int(datas[0]["phase"][i, 1]))],
+                        1 if valid_all else 0]
+                for d in datas:
+                    if not valid_all:
+                        base += ["", "", "", "", "", ""]
+                        continue
+                    base += [
+                        round(float(d["V2M_left"][i]), 2),
+                        round(float(d["VT2M_left"][i]), 2),
+                        round(float(d["VT2M_left"][i] - d["V2M_left"][i]), 2),
+                        round(float(d["V2M_right"][i]), 2),
+                        round(float(d["VT2M_right"][i]), 2),
+                        round(float(d["VT2M_right"][i] - d["V2M_right"][i]), 2),
+                    ]
+                rows.append(base)
+            out_dir = out_root / "merged" / action
+            write_csv(out_dir / ("%s.csv" % sid), merged_header, rows)
+            fig, axes = plt.subplots(2, 1, figsize=(9, 4.6), sharex=True)
+            for ax, foot in zip(axes, ("left", "right")):
+                phase_bands(ax, datas[0], foot, t)
+                for ci, (model, d) in enumerate(zip(DEFAULT_MODELS, datas)):
+                    delta = d["VT2M_" + foot] - d["V2M_" + foot]
+                    ax.plot(t, delta, color="C%d" % ci, lw=0.8,
+                            label=display_name(model))
+                ax.axhline(0, color="k", lw=0.6, ls="--")
+                ax.set_ylabel("%s Δ = VT − V (mm)" % foot)
+                ax.margins(y=0.1)
+            axes[-1].set_xlabel("time (s)")
+            handles, labels = axes[0].get_legend_handles_labels()
+            fig.legend(handles, labels, loc="lower center", ncol=6, fontsize=8,
+                       frameon=False)
+            fig.suptitle("%s merged raw per-foot Δ (no smoothing) - %s"
+                         % (sid, action), fontsize=11)
+            fig.tight_layout(rect=(0, 0.05, 1, 0.95))
+            fig.savefig(out_dir / ("%s.png" % sid), dpi=150)
+            plt.close(fig)
 
 def export_e6() -> None:
     src_dir = ETEST / "E6_ContactPhaseAnalysis"
@@ -561,11 +718,33 @@ def export_e7() -> None:
                            for st in stages])
     write_csv(dst_dir / "Full_Table1_E7_DynamicStages.csv", header, rows)
     for i, action in enumerate(("walk", "run", "squat"), 1):
-        src_png = src_dir / ("e7_phase_%s.png" % action)
+        # 新驱动直写 Full_ 命名 PNG；旧命名（e7_phase_*.png）仅作兜底
+        src_png = dst_dir / ("Full_Fig%d_E7_Stages_%s.png" % (i, action))
+        if not src_png.is_file():
+            src_png = src_dir / ("e7_phase_%s.png" % action)
         if src_png.is_file():
             dst_png = dst_dir / ("Full_Fig%d_E7_Stages_%s.png" % (i, action))
-            shutil.copyfile(src_png, dst_png)
-            print("[png] %s" % dst_png)
+            if src_png != dst_png:
+                shutil.copyfile(src_png, dst_png)
+                print("[png] %s" % dst_png)
+
+
+# ---------------- teaser（E6/E7 可见人体 SMPL） ----------------
+def export_teasers(exp: str) -> None:
+    """--teaser：E6/E7 teaser 图（anysole_tta/e_teaser.py，--count 按总时长
+    1/N 间距抽取，偏航置零侧视）。需 touch_gait 环境。默认关闭。"""
+    import subprocess
+    script = REPO / "z_note/HMR2.0/hmr2_gait/anysole_tta/e_teaser.py"
+    cmds = []
+    if exp in ("all", "e6"):
+        cmds.append([sys.executable, str(script), "--mode", "e6"])
+    if exp in ("all", "e7"):
+        cmds.append([sys.executable, str(script), "--mode", "e7"])
+    for cmd in cmds:
+        print("[teaser]", " ".join(cmd))
+        subprocess.run(cmd, check=True,
+                       cwd=str(script.parents[1]))
+    print("[teaser] done")
 
 
 # ---------------- 报告 md 迁移 ----------------
@@ -588,14 +767,16 @@ def main() -> int:
     ap.add_argument("--out-dir", type=Path)
     ap.add_argument("--cell-map", type=Path, help="Explicit cell ID to native result JSON mapping")
     ap.add_argument("--strict", action="store_true", help="Fail rather than silently omit required results")
+    ap.add_argument("--detail", action="store_true",
+                    help="E6 额外生成分脚、未平滑逐帧结果（detail/ 目录）")
+    ap.add_argument("--teaser", action="store_true",
+                    help="E6/E7 生成可见人体 SMPL teaser 图（默认关闭；需 touch_gait）")
     args = ap.parse_args()
     CONTACT_NAMESPACE, EVAL_SPLIT, STRICT_EXPORT = args.contact_version, args.split, args.strict
     if args.cell_map:
         CELL_MAP = json.loads(args.cell_map.read_text())
     if args.out_dir:
         ETEST = args.out_dir
-    elif CONTACT_NAMESPACE != "legacy" or EVAL_SPLIT != "test":
-        ETEST = REPO / "results_display" / ("Etest_" + CONTACT_NAMESPACE + "_" + EVAL_SPLIT)
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     exp = args.experiment.lower()
     if exp in ("all", "e1"):
@@ -610,8 +791,15 @@ def main() -> int:
         export_e5(models, args.ckpt)
     if exp in ("all", "e6"):
         export_e6()
+        if args.detail:
+            export_e6_detail()
     if exp in ("all", "e7"):
         export_e7()
+    if args.teaser:
+        if exp in ("all", "e6", "e7"):
+            export_teasers(exp)
+        else:
+            print("[skip] --teaser 只适用于 E6/E7")
     ETEST.mkdir(parents=True, exist_ok=True)
     (ETEST / ("export_receipt_" + exp + ".json")).write_text(json.dumps({
         "split": EVAL_SPLIT, "contact_version": CONTACT_NAMESPACE,

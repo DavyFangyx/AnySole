@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""E2 主性能评估生成器（测试层）：三块十指标；--ckpt best → v7_statefix_best_eval。
+"""E2 主性能评估生成器（测试层）：训练 cell 自带 val+test 正式统计
+（_statistics 后缀已作废）；--ckpt best → v7_statefix_best_eval。
 
 用法：
   python configs/z_gen/configs/z_gen/gen_e2.py [--models a,b] [--concat-method f6_soft] [--seed 1,2,3] [--force] [--dry-run]
@@ -11,7 +12,7 @@ import argparse
 from common import (add_gen_args, ckpt_models, concat_models,
                     emit_subset, parse_bool, parse_seeds, seed_models)
 
-DEFAULT_MODELS = ['V7_Cv5_statistics']
+DEFAULT_MODELS = ['V7_Cv5']
 
 
 def main() -> int:
@@ -35,7 +36,7 @@ def main() -> int:
                             checkpoint_all=checkpoint_all, force=args.force,
                             dry_run=args.dry_run)
     else:
-        total = emit_subset("v7_eval_clean", models, wandb=wandb,
+        total = emit_subset("v7_train", models, wandb=wandb,
                             checkpoint_all=checkpoint_all, force=args.force,
                             dry_run=args.dry_run)
     print("generated %d queue task(s)%s" % (total, " (dry-run)" if args.dry_run else ""))

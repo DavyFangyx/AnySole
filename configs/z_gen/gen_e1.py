@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""E1 专家对比生成器（测试层）：默认 Cv5 last 的 V/T/VT 面板。
+"""E1 专家对比生成器（测试层）：默认 Cv5 的 V/T/VT 面板——
+训练 cell 自带 val+test 正式统计（_statistics 后缀已作废），此脚本只负责
+确保训练 cell 存在。
 
 用法：
   python configs/z_gen/configs/z_gen/gen_e1.py [--models a,b] [--concat-method f6_soft] [--seed 1,2,3] [--force] [--dry-run]
@@ -11,7 +13,7 @@ import argparse
 from common import (add_gen_args, concat_models, emit_subset, parse_bool,
                     parse_seeds, seed_models)
 
-DEFAULT_MODELS = ["V7_Cv5_statistics"]
+DEFAULT_MODELS = ["V7_Cv5"]
 
 
 def main() -> int:
@@ -27,7 +29,7 @@ def main() -> int:
         models = seed_models(models, seeds)
     wandb = parse_bool(args.wandb, "--wandb")
     checkpoint_all = parse_bool(args.checkpoint_all, "--checkpoint-all")
-    total = emit_subset("v7_eval_clean", models, wandb=wandb, checkpoint_all=checkpoint_all,
+    total = emit_subset("v7_train", models, wandb=wandb, checkpoint_all=checkpoint_all,
                         force=args.force, dry_run=args.dry_run)
     print("generated %d queue task(s)%s" % (total, " (dry-run)" if args.dry_run else ""))
     return 0

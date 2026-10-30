@@ -61,7 +61,8 @@ def runtime_environment(gpu: int | None = None) -> dict[str, str]:
     pythonpath = [str(UPSTREAM_ROOT), str(CODE_ROOT)]
     if env.get("PYTHONPATH"):
         pythonpath.append(env["PYTHONPATH"])
-    prefix_lib = str(Path(os.environ.get("VB_TACTILE_PREFIX", str(Path(__file__).resolve().parents[4] / "AnysoleWorkspace"))))
+    prefix_lib = str(Path(os.environ.get("VB_TACTILE_PREFIX",
+                         "/data/fangyuxuan/miniconda3/envs/vb_tactile")) / "lib")
     library_path = prefix_lib
     if env.get("LD_LIBRARY_PATH"):
         library_path += ":" + env["LD_LIBRARY_PATH"]
