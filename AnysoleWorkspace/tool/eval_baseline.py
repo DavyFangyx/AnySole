@@ -105,6 +105,7 @@ def eval_visual(args: argparse.Namespace) -> None:
     exportable = split_sessions(args.split)
     command = [TOUCH_GAIT, str(WORKSPACE / "tool/export_baseline_motion.py"),
                "--model", args.model, "--split", args.split, "--cam", str(args.cam),
+               "--package-root", str(WORKSPACE / "work" / "visual_baselines"),
                "--force"]
     run(command, cwd=ROOT)
     root = ROOT / "results" / "baselines" / {"wham": "WHAM", "sam3db": "SAM3DB",
