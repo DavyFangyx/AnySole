@@ -254,6 +254,73 @@ def generate_sam3db(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) -
     return unit_root / "result.pkl"
 
 
+def generate_gvhmr(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) -> Path:
+    """Drive the migrated GVHMR worker (run_request) in the vb_gvhmr environment."""
+    date, subject = session_parts(row)
+    frames = unit_frame_paths(row, cam, unit)
+    unit_root = work_dir / "gvhmr" / f"{date}_{row['session_id']}_c{cam}"
+    unit_root.mkdir(parents=True, exist_ok=True)
+    video = build_sequence_video(frames, unit_root)
+    calibration, _, _ = common_loader().load_calibration(date)
+    width, height = [int(v) for v in calibration["image_size_px"]]
+    side = np.load(FRONTEND_BBOX / date / subject / row["session_id"] / "bbox.npz",
+                   allow_pickle=False)
+    visual = np.asarray(side["visual_time_s"], dtype=np.float64)
+    boxes_norm = np.asarray(side["bbox_xyxy_norm"], dtype=np.float64)
+    start = common_loader().recording_start_day_s(row)
+    boxes_px = []
+    for record in unit["frames"]:
+        canonical = int(np.argmin(np.abs(visual - (float(record["timestamp_seconds"]) - start))))
+        norm = boxes_norm[canonical]
+        boxes_px.append([norm[0] * width, norm[1] * height,
+                         norm[2] * width, norm[3] * height])
+    import AnysoleWorkspace.tool.adapters.GVHMR.config as gvhmr_config
+    request = {
+        "work_dir": str(unit_root),
+        "upstream_root": str(gvhmr_config.UPSTREAM_ROOT),
+        "checkpoint_path": str(gvhmr_config.DEFAULT_CHECKPOINT),
+        "smplx_model_path": str(gvhmr_config.DEFAULT_SMPLX_MODEL),
+        "smpl_model_path": str(gvhmr_config.DEFAULT_SMPL_MODEL),
+        "mapper_path": str(gvhmr_config.DEFAULT_SMPLX_TO_SMPL),
+        "hmr2_checkpoint_path": str(gvhmr_config.DEFAULT_HMR2_CHECKPOINT),
+        "vitpose_checkpoint_path": str(gvhmr_config.DEFAULT_VITPOSE_CHECKPOINT),
+        "video_path": str(video),
+        "frame_count": len(frames),
+        "bbox_xyxy_px": boxes_px,
+        "cuda_device": gpu,
+    }
+    request_file = unit_root / "request.json"
+    request_file.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+    output = unit_root / "result.npz"
+    command = [
+        "/data/fangyuxuan/miniconda3/envs/vb_gvhmr/bin/python",
+        "-m", "GVHMR.worker",
+        "--request", str(request_file),
+        "--output", str(output),
+    ]
+    import os as _os
+    env = {**_os.environ, "PYTHONPATH": str(ROOT / "AnysoleWorkspace/tool/adapters")}
+    completed = subprocess.run(command, check=False, capture_output=True, text=True, env=env)
+    if completed.returncode != 0 or not output.is_file():
+        raise RuntimeError(f"GVHMR worker failed with exit code {completed.returncode}:\n"
+                           f"{completed.stderr[-1200:]}")
+    # 源侧 worker 的 result.npz 契约包含单元帧号与时间戳（保存预测同款 25 键）；
+    # 本地 worker 写 21 键，驱动补上导出适配器严格读取所需的两键。
+    with np.load(output, allow_pickle=False) as archive:
+        payload = {key: archive[key] for key in archive}
+    payload["source_frame_numbers"] = np.asarray(
+        [frame["frame"] for frame in unit["frames"]], dtype=np.int64)
+    payload["physical_times_s"] = np.asarray(
+        [frame["timestamp_seconds"] for frame in unit["frames"]], dtype=np.float64)
+    np.savez(output, **payload)
+    return output
+
+
+def common_loader():
+    from AnysoleWorkspace.tool.adapters.visual_baselines import common as _common
+    return _common
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=("wham", "sam3db", "gvhmr"), default="wham")
@@ -285,8 +352,10 @@ def main() -> int:
             result = generate_wham(row, args.cam, unit, tmp, args.gpu)
         elif args.model == "sam3db":
             result = generate_sam3db(row, args.cam, unit, tmp, args.gpu)
+        elif args.model == "gvhmr":
+            result = generate_gvhmr(row, args.cam, unit, tmp, args.gpu)
         else:
-            raise SystemExit("gvhmr generation driver pending smoke")
+            raise SystemExit(f"unknown model: {args.model}")
         print(f"wrote {result}")
     finally:
         if context is not None:
