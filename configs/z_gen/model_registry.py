@@ -1405,3 +1405,26 @@ def _drop_all_but_current() -> None:
 
 
 _drop_all_but_current()
+
+# V7 C 门控修改方案（2026-10-30，z_note/multimodal_fusion/V7_方案/
+# V7_C门控修改方案.md §3/§8）：T（逐帧双门）/ LR（窗口四组门）/ TLR
+# （逐帧四组门）三实验组。训练配方与 V7_Cv5 当前线逐项一致（contact =
+# f6_soft_time_accel_state_smpl24_v1、v1.yaml canonical split、三条件
+# 枚举、ckpt_last 口径、740ep；B 基线 = 现有 V7_Cv5_s1 ckpt_last——
+# 生产代码自其训练后未变，不补跑）；结构差异由入口 STRUCTURE 携带
+# （v7_route_temporal / v7_route_parts）。seed 2/3 按方案 §8.4 于 val
+# 确认后补发（条目先注册不发射）；Q/S 按 §8.3 于 TLR 完成后另立。
+_V7_CV5_S1_CELL = MODELS["V7_Cv5_s1"]
+for _gate in ("V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR"):
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d" % (_gate, _n)] = {
+            **_V7_CV5_S1_CELL,
+            "label": "%s-s%d" % (_gate.replace("_", "-"), _n),
+            "name": _gate, "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_gate, _n, _occ)] = {
+                **_V7_CV5_S1_CELL,
+                "label": "%s-s%d-evalocc%s" % (_gate.replace("_", "-"), _n, _occ),
+                "name": _gate, "seed": _n, "train": False,
+                "eval_splits": ["val", "test"],
+                "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}

@@ -118,6 +118,13 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V7_Cv6": ModelEntry("V7_Cv6", "v7_c2", "V7_Cv5 双门 + 无模态缺失训练（始终 VT；2026-10-26）"),
     "V7_Cv6_precheck": ModelEntry("V7_Cv6_precheck", "v7_c2", "V7_Cv6 六轮预检"),
     "V7_Cv7": ModelEntry("V7_Cv7", "v7_a", "无门控 A + 枚举三条件训练（2026-10-26）"),
+    # V7 C 门控修改方案（2026-10-30，z_note/multimodal_fusion/V7_方案/
+    # V7_C门控修改方案.md §3）：T/LR/TLR 三实验组，独立模型与结果目录，
+    # 不占用新的 V7_Cv 编号、不覆盖 Cv5/Cv7 历史产物。Q/S 按方案 §8.3
+    # 于 TLR 完成后另立。
+    "V7_Cv5T": ModelEntry("V7_Cv5T", "v7_c2t", "V7_Cv5T: Cv5 双门逐帧化（T 时间门，2026-10-30）"),
+    "V7_Cv5LR": ModelEntry("V7_Cv5LR", "v7_c2lr", "V7_Cv5LR: Cv5 双门 + 左右部位门（LR，2026-10-30）"),
+    "V7_Cv5TLR": ModelEntry("V7_Cv5TLR", "v7_c2tlr", "V7_Cv5TLR: 逐帧 + 左右部位组合门（TLR，2026-10-30）"),
     "V7_Cv7_precheck": ModelEntry("V7_Cv7_precheck", "v7_a", "V7_Cv7 六轮预检"),
     "V7_SV1": ModelEntry("V7_SV1", "v7_a", "V7 E1 专家 S_V（仅视觉训练，2026-10-26）"),
     "V7_ST1": ModelEntry("V7_ST1", "v7_a", "V7 E1 专家 S_T（仅触觉训练，2026-10-26）"),

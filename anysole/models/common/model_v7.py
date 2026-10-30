@@ -45,11 +45,29 @@ from anysole.types import (
     D_MODEL,
     FPS,
     PART_JOINTS,
+    PART_NAMES,
     POSE_DIM,
     TW,
 )
 
 __all__ = ["AnySoleModelV7"]
+
+# V7 C 门控修改方案（2026-10-30，z_note/multimodal_fusion/V7_方案/
+# V7_C门控修改方案.md §5）：左右门分组严格按 PART_NAMES 映射，不另写
+# 关节序号体系。门组序 = vel（根速度 query）/ other（其余姿态）/
+# left（l_leg、l_foot）/ right（r_leg、r_foot）；query 轴序 = [根速度]
+# + PART_NAMES（9 部位）。
+_V7_GATE_GROUPS = ("vel", "other", "left", "right")
+_V7_PART_GATE_GROUP = {
+    "root": "other", "torso": "other", "headneck": "other",
+    "l_arm": "other", "r_arm": "other",
+    "l_leg": "left", "r_leg": "right",
+    "l_foot": "left", "r_foot": "right",
+}
+if set(_V7_PART_GATE_GROUP) != set(PART_NAMES):
+    raise AssertionError("part gate groups must cover PART_NAMES exactly")
+_V7_QUERY_GATE_IDX = (0,) + tuple(
+    _V7_GATE_GROUPS.index(_V7_PART_GATE_GROUP[name]) for name in PART_NAMES)
 
 
 class _V7DecoderLayer(nn.Module):
@@ -169,11 +187,20 @@ class V7MotionHead(nn.Module):
 
 
 class AnySoleModelV7(nn.Module):
-    """独立证据 + 共享生成（候选 A/B/C 载体）。"""
+    """独立证据 + 共享生成（候选 A/B/C 载体）。
+
+    C 类门控的额外开关（V7_C门控修改方案，2026-10-30）：
+      ``route_temporal``：逐帧门（T/TLR）——x_t 不池化，MLP 逐帧作用于
+        末维（门参数量与 Cv5 相同，仍六层共享）。
+      ``part_routes``：四组门（LR/TLR）——vel/other/left/right，左右门
+        = 姿态门深拷贝（初始化等价契约 §5：共享模块随机初始化不受新增
+        参数影响；LR 的相同门初始化复现 B，TLR 复现 T）。
+    """
 
     def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, pose_layers=6,
                  contact_root: bool = False, reliability_route: bool = False,
-                 task_routes: bool = False, t_only_adapters: bool = False):
+                 task_routes: bool = False, t_only_adapters: bool = False,
+                 route_temporal: bool = False, part_routes: bool = False):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -187,8 +214,14 @@ class AnySoleModelV7(nn.Module):
         self.reliability_route = bool(reliability_route)
         self.task_routes = bool(task_routes)
         self.t_only_adapters = bool(t_only_adapters)
+        self.route_temporal = bool(route_temporal)
+        self.part_routes = bool(part_routes)
         if self.task_routes and not self.reliability_route:
             raise ValueError("Task routes require tactile reliability routing")
+        if self.route_temporal and not self.reliability_route:
+            raise ValueError("Temporal routing requires tactile reliability routing")
+        if self.part_routes and not self.task_routes:
+            raise ValueError("Part routing requires task routes")
         self.embeddings = SharedEmbeddings(dim=d, tw=tw)
         self.encoders = ModalEncoders(
             self.embeddings, dim=d, tw=tw, tactile_input="raw108",
@@ -202,14 +235,19 @@ class AnySoleModelV7(nn.Module):
             n_layers=pose_layers, route=reliability_route)
         self.contact_head = V41ContactHead(dim=d)
         if reliability_route:
-            # C：窗口级 T 信任门（端到端学习，v1 无显式质量标签——设计
-            # 思路 §3 候选 C 的第一版）。输入 = V/T 编码 token 的窗口均值。
+            # C：T 信任门（端到端学习，v1 无显式质量标签——设计思路 §3
+            # 候选 C 的第一版）。输入 = V/T 编码 token（窗口均值或逐帧，
+            # 由 route_temporal 决定）。task_routes 下本 MLP = 姿态门。
             self.route_mlp = nn.Sequential(
                 nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 1))
         # Add private parameters after shared initialization. V2 initially
         # reproduces C's single gate, then learns independent root routing.
         if self.task_routes:
             self.route_root_mlp = copy.deepcopy(self.route_mlp)
+        if self.part_routes:
+            # 左右门 = 姿态门深拷贝再独立学习（初始化等价契约）。
+            self.route_left_mlp = copy.deepcopy(self.route_mlp)
+            self.route_right_mlp = copy.deepcopy(self.route_mlp)
         if self.t_only_adapters:
             with torch.random.fork_rng(devices=[]):
                 self.t_only_root_adapter = self._make_t_only_adapter(d)
@@ -225,15 +263,43 @@ class AnySoleModelV7(nn.Module):
         return adapter
 
     def _route_gate(self, v_tok, t_tok):
-        # 窗口级池化（2026-10-25 修订）：两路 token 的窗口均值 → 每训练
-        # 窗口一个标量门（设计思路 §3 候选 C 的「窗口级」原义）。
-        x = torch.cat([v_tok, t_tok], dim=-1).mean(dim=1)   # (B, 2d)
-        g = torch.sigmoid(self.route_mlp(x))                # (B, 1)
+        # C 类 T 信任门（V7_C门控修改方案 §2/§4/§5）：
+        #   x_t = cat(v_tok_t, t_tok_t)。窗口级（B 基线/LR）= 时间均值池化
+        #   后每训练窗口一组门；逐帧（T/TLR）= 每帧一组门（MLP 作用于末维，
+        #   门参数量与 Cv5 相同）。组 = vel（根速度 query）/ other（其余
+        #   姿态）/ left（l_leg、l_foot）/ right（r_leg、r_foot）；无
+        #   part_routes 时合为单一姿态门（T）。
+        x = torch.cat([v_tok, t_tok], dim=-1)               # (B, tw, 2d)
+        if not self.route_temporal:
+            x = x.mean(dim=1)                               # (B, 2d)
+        if self.part_routes:
+            g_vel = torch.sigmoid(self.route_root_mlp(x))   # (B, tw|1, 1)
+            g_other = torch.sigmoid(self.route_mlp(x))
+            g_left = torch.sigmoid(self.route_left_mlp(x))
+            g_right = torch.sigmoid(self.route_right_mlp(x))
+            gates = torch.cat([g_vel, g_other, g_left, g_right], dim=-1)
+            gates = gates[..., _V7_QUERY_GATE_IDX]          # (B, tw|1, 10)
+            return self._expand_gate(gates)                 # (B, tw, 10, 1)
         if self.task_routes:
             root = torch.sigmoid(self.route_root_mlp(x))
-            gates = torch.cat([root, g.expand(-1, self.pose_head.n_parts)], dim=1)
-            return gates[:, None, :, None].expand(-1, self.tw, -1, -1)
+            pose = torch.sigmoid(self.route_mlp(x))
+            if self.route_temporal:
+                gates = torch.cat(
+                    [root, pose.expand(-1, -1, self.pose_head.n_parts)], dim=-1)
+            else:
+                gates = torch.cat(
+                    [root, pose.expand(-1, self.pose_head.n_parts)], dim=-1)
+            return self._expand_gate(gates)
+        g = torch.sigmoid(self.route_mlp(x))
+        if self.route_temporal:
+            return g.unsqueeze(-1)                          # (B, tw, 1)
         return g.view(-1, 1, 1).expand(-1, self.tw, 1)      # (B, tw, 1)
+
+    def _expand_gate(self, gates):
+        # (B, tw, 10)（逐帧）或 (B, 10)（窗口）→ (B, tw, 10, 1)。
+        if gates.dim() == 3:
+            return gates.unsqueeze(-1)
+        return gates[:, None, :, None].expand(-1, self.tw, -1, -1)
 
     def forward(self, V_feat, T_raw, T_phys, config_id=None, subject_ids=None,
                 T_s2m=None, V_hmr=None, mask_v=None, mask_t=None,

@@ -1,26 +1,26 @@
-"""V7 B: registered weight, total-loss contribution and root-motion gradients."""
+"""V7 B: foot-loss contribution and root-motion gradients (synthetic configs).
+
+V7_Bv1 已随 10-29 当前线清理出屏（λ_foot 不再有注册模型）；foot 损失路径
+（losses.py 的 v7_contact_root 结构开关）的回归覆盖改用合成有效配置——
+机制本身不变：可信支撑窗口足底世界速度 → 0，软权重 = 接触概率 × T 在场，
+经 FK 回传姿态与根。
+"""
 import unittest
 
 import torch
 
-from anysole.registry import get_builder
-from anysole.train import load_config, parse_args
 from anysole.types import CONFIG_V, FPS, JOINT_PARENTS
 from anysole.utils.losses import compute_losses
-from configs.tools.common import config_path, load_registry
-from configs.tools.runner import _train_command
+from configs.tools.common import load_registry
 
 
-def training_config(model):
-    registry = load_registry()
-    args = parse_args(_train_command(registry, model)[3:])
-    config = load_config(config_path(registry, model))
-    entry = get_builder(model)
-    config.update(entry.STRUCTURE)
-    config.update(entry.CONFIG_EXTRA)
-    for key, value in vars(args).items():
-        if key.startswith("lambda_") and value is not None:
-            config[key] = value
+def training_config(with_foot):
+    # v7=True 走 compute_losses_v7（foot 通道所在分支）；contact_root 结构
+    # 开关 + λ_foot 权重为 B 机制的全部有效配置。
+    config = {"modal": "anysolev2", "v7": True,
+              "v7_contact_root": bool(with_foot)}
+    if with_foot:
+        config["lambda_foot"] = 1.0
     return config
 
 
@@ -46,16 +46,19 @@ def isolated_motion():
 
 class V7FootLossTests(unittest.TestCase):
     def setUp(self):
-        self.a = training_config("V7_Av1")
-        self.b = training_config("V7_Bv1")
+        self.a = training_config(False)
+        self.b = training_config(True)
         self.cid = torch.zeros(1, dtype=torch.long)
 
-    def test_registered_recipe_records_the_weight_without_cli_aliasing(self):
+    def test_current_screen_registers_no_foot_weight(self):
+        # 当前线（10-29 清理后）无模型注册 λ_foot——foot 机制仅由结构开关
+        # 驱动（合成配置回归覆盖），防止旧 B 配方被静默重新挂上。
         self.assertEqual(self.b.get("lambda_foot"), 1.)
         self.assertEqual(self.a.get("lambda_foot", 0.), 0.)
         registry = load_registry()
-        args = parse_args(_train_command(registry, "V7_Bv1")[3:])
-        self.assertIsNone(args.lambda_foot_res)
+        for model_id, spec in registry["models"].items():
+            if "V7_Cv" in model_id:
+                self.assertNotIn("lambda_foot", spec.get("train_args", {}))
 
     def test_b_minus_a_equals_the_weighted_foot_loss(self):
         out, batch = isolated_motion()

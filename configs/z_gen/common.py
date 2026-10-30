@@ -639,3 +639,12 @@ for _kind in ("tafix", "statefix"):
         "MODEL_IDS": [x + "_evalocc" + o for x in _seeded
                       for o in ("010", "020", "030", "050")],
         "REQUIRES": []}
+
+# V7 C 门控修改方案（2026-10-30）：T/LR/TLR 训练格与 occ 四档交叉评估格。
+# 首轮只发 s1；s2/s3 按方案 §8.4 于 val 确认后补发（条目已注册）。
+_V7_GATE_BASES = ("V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR")
+EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
+    x + s for x in _V7_GATE_BASES for s in ("_s1", "_s2", "_s3")]
+EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
+    x + s + "_evalocc" + o for x in _V7_GATE_BASES
+    for s in ("_s1", "_s2", "_s3") for o in ("010", "020", "030", "050")]

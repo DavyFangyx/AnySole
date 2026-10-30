@@ -1,5 +1,5 @@
 """Guard current-source labels against motion changes and historical reuse."""
-import json,tempfile,unittest
+import json,re,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 import numpy as np
@@ -38,9 +38,17 @@ class Smpl24ContactReleaseTests(unittest.TestCase):
  def test_registry_current_screen_has_seven_unified_models(self):
   from configs.z_gen.model_registry import MODELS
   from configs.z_gen.common import EXPERIMENTS
-  ids=EXPERIMENTS['v7_statefix_smpl24_train']['MODEL_IDS'];self.assertEqual(len(ids),7)
+  ids=[i for i in EXPERIMENTS['v7_train']['MODEL_IDS'] if re.fullmatch(r'V7_Cv[1-7]_s1',i)];self.assertEqual(len(ids),7)
   for i,key in enumerate(ids,1):
-   m=MODELS[key];self.assertEqual(m['name'],'V7_Cv%d'%i);self.assertEqual(m['which'],'last');self.assertEqual(m['contact_method'],p.SMPL24_STATE_CONTACT_METHOD);self.assertEqual(m['eval_splits'],['val']);self.assertEqual(m['train_args']['smpl_support_policy'],'exclude')
+   m=MODELS[key];self.assertEqual(m['name'],'V7_Cv%d'%i);self.assertEqual(m['which'],'last');self.assertEqual(m['contact_method'],p.SMPL24_STATE_CONTACT_METHOD);self.assertEqual(m['eval_splits'],['val','test']);self.assertEqual(m['train_args']['smpl_support_policy'],'exclude')
+  # 门控组（2026-10-30 V7_C门控修改方案 §8.2）：T/LR/TLR s1 与 Cv5 同包
+  # 同配方（B 基线一致性——contact 包 / split / 有效帧 / SMPL 策略）。
+  for key in ('V7_Cv5T_s1','V7_Cv5LR_s1','V7_Cv5TLR_s1'):
+   m=MODELS[key]
+   self.assertEqual(m['name'],key[:-3]);self.assertEqual(m['which'],'last')
+   self.assertEqual(m['contact_method'],p.SMPL24_STATE_CONTACT_METHOD)
+   self.assertEqual(m['eval_splits'],['val','test'])
+   self.assertEqual(m['train_args']['smpl_support_policy'],'exclude')
  def test_cli_default_option(self):
   with patch.object(adapter,'build_one',return_value=[]) as make:
    adapter.main(['--session','demo']);self.assertIsNone(make.call_args.kwargs['label_method'])
