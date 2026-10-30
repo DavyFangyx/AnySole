@@ -113,9 +113,6 @@ z_note/data_pressure_fixpipe/Tactile_pressure_handoff_20261020_v3/
 # 备份目录与审计/探针中间产物（机器本地，不进 git）
 z_note/data_pressure_fixpipe/backup/
 
-# HMR2.0 实验线的第三方参考仓库（论文仓库 clone，不进 git；实验文档保留）
-/z_note/HMR2.0/4D-Humans/
-/z_note/HMR2.0/hmr2_gait/
 
 # 机器本地临时目录（跨用户压力导出等临时数据）
 /tmp/
