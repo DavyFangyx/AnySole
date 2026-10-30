@@ -27,6 +27,8 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[4]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 WORKSPACE = ROOT / "AnysoleWorkspace"
 NATIVE_ROOT = WORKSPACE / "work" / "visual_baselines" / "reference_results" / "3_Result"
 FRONTEND_BBOX = WORKSPACE / "shared" / "frontends" / "human_masks" / "sam31" / "v1"
@@ -36,7 +38,10 @@ WHAM_PYTHON = "/data/fangyuxuan/miniconda3/envs/wham/bin/python"
 WHAM_CHECKPOINTS = WEIGHTS_ROOT / "third_party" / "WHAM" / "checkpoints"
 GENERATION_ENV = {
     "WHAM_ROOT": str(BASELINES / "WHAM"),
-    "PYTHONPATH": str(BASELINES / "WHAM"),
+    # vendored ViTPose 自带整套 mmpose，必须先于 site-packages 遮蔽 pip 版
+    # （否则 ViT backbone 未注册：KeyError: ViT is not in the models registry）。
+    "PYTHONPATH": str(BASELINES / "WHAM" / "third-party" / "ViTPose") + ":"
+                  + str(BASELINES / "WHAM"),
 }
 SCHEMA_ID = "target_bboxes_v1"
 SCHEMA_VERSION = 1
@@ -156,9 +161,12 @@ def build_sequence_video(frame_paths: list[Path], unit_root: Path,
     frames_file.write_text("".join(f"file '{path}'\n" for path in frame_paths),
                            encoding="utf-8")
     video = unit_root / "sequence.mp4"
-    command = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(frames_file),
-               "-vf", f"fps={fps}", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-               str(video)]
+    # 镜像源侧 build_video_command（WHAM runner.py:210）：输入侧 -r 声明速率，
+    # 不得用输出侧 fps 滤镜（会复制帧：60->72@30fps）。
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+               "-f", "concat", "-safe", "0", "-r", f"{fps:g}",
+               "-i", str(frames_file.resolve()), "-c:v", "libx264",
+               "-pix_fmt", "yuv420p", str(video.resolve())]
     completed = subprocess.run(command, check=False,
                                capture_output=True, text=True)
     if completed.returncode != 0 or not video.is_file():
@@ -184,35 +192,43 @@ def generate_wham(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) -> 
         WHAM_PYTHON, str(BASELINES / "WHAM" / "demo.py"),
         "--video", str(video),
         "--output_pth", str(output),
-        "--target-bboxes", str(sidecar),
+        "--target_bboxes", str(sidecar),
         "--save_pkl",
         "--estimate_local_only",
     ]
     env = {**__import__("os").environ, **GENERATION_ENV,
            "CUDA_VISIBLE_DEVICES": str(gpu)}
-    completed = subprocess.run(command, cwd=BASELINES / "WHAM", env=env, check=False)
+    completed = subprocess.run(command, cwd=BASELINES / "WHAM", env=env, check=False,
+                               capture_output=True, text=True)
     if completed.returncode != 0:
-        raise RuntimeError(f"WHAM demo failed with exit code {completed.returncode}")
-    raw = joblib.load(output / "wham_output.pkl")
+        raise RuntimeError(f"WHAM demo failed with exit code {completed.returncode}:\n"
+                           f"{completed.stderr[-1200:]}")
+    # demo.py 在 output_pth 下再建视频名目录（sequence.mp4 -> sequence/）。
+    raw = joblib.load(output / "sequence" / "wham_output.pkl")
     return compact_wham(raw, len(unit["frames"]), unit_root)
 
 
 def compact_wham(raw_results: dict, frames: int, unit_root: Path) -> Path:
-    """wham_output.pkl -> package result.pkl contract (io.load_wham)."""
+    """wham_output.pkl -> package result.pkl contract (io.load_wham).
+
+    The demo already emits the track-0 record with all contract fields; the
+    compact step validates the exact shapes the strict reader expects.
+    """
     import joblib
-    # WHAM demo results: per-frame records; the exact key layout is inspected
-    # and validated at smoke time — assert the contract instead of guessing.
-    if not isinstance(raw_results, dict) or len(raw_results) != frames:
-        raise ValueError(f"unexpected WHAM output shape: {len(raw_results)} frames")
-    track = {}
-    for name in ("pose", "trans", "betas", "verts"):
-        values = [raw_results[index][name] for index in range(frames)]
-        track[name] = np.asarray(values)
-    track["frame_ids"] = np.arange(frames, dtype=np.int64)
+    if not isinstance(raw_results, dict) or set(raw_results) != {0}:
+        raise ValueError(f"unexpected WHAM output tracks: {set(raw_results)}")
+    track = raw_results[0]
+    required = {"pose", "trans", "betas", "verts", "frame_ids"}
+    if not required.issubset(track):
+        raise ValueError(f"WHAM track fields missing: {required - set(track)}")
     for name, shape in (("pose", (frames, 72)), ("trans", (frames, 3)),
                         ("betas", (frames, 10)), ("verts", (frames, 6890, 3))):
-        if track[name].shape != shape:
-            raise ValueError(f"WHAM compact: {name} shape {track[name].shape}")
+        value = np.asarray(track[name])
+        if value.shape != shape or not np.isfinite(value).all():
+            raise ValueError(f"WHAM compact: {name} shape {value.shape}")
+    frame_ids = np.asarray(track["frame_ids"], dtype=np.int64)
+    if not np.array_equal(frame_ids, np.arange(frames)):
+        raise ValueError("WHAM frame_ids do not resolve exactly")
     result = unit_root / "result.pkl"
     joblib.dump({0: track}, result)
     return result
@@ -278,6 +294,7 @@ def main() -> int:
     parser.add_argument("--session", required=True)
     parser.add_argument("--cam", type=int, choices=(1, 2, 3, 4), default=3)
     parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--work-dir", default="", help="persistent work dir (default: temp)")
     args = parser.parse_args()
     manifest = {}
     for line in (WORKSPACE / "protocol/manifests" / "session_manifest.jsonl").open(
@@ -290,14 +307,24 @@ def main() -> int:
     date, subject = session_parts(row)
     unit_manifest = NATIVE_ROOT / "SAM3DB_baseline" / ".run" / "manifest.jsonl"
     unit = unit_entry(unit_manifest, date, args.session, args.cam)
-    with tempfile.TemporaryDirectory(dir=WORKSPACE / "work") as tmp:
+    tmp = Path(args.work_dir) if args.work_dir else None
+    if tmp is None:
+        context = tempfile.TemporaryDirectory(dir=WORKSPACE / "work")
+        tmp = Path(context.name)
+    else:
+        tmp.mkdir(parents=True, exist_ok=True)
+        context = None
+    try:
         if args.model == "wham":
-            result = generate_wham(row, args.cam, unit, Path(tmp), args.gpu)
+            result = generate_wham(row, args.cam, unit, tmp, args.gpu)
         elif args.model == "sam3db":
-            result = generate_sam3db(row, args.cam, unit, Path(tmp), args.gpu)
+            result = generate_sam3db(row, args.cam, unit, tmp, args.gpu)
         else:
             raise SystemExit("gvhmr generation driver pending smoke")
         print(f"wrote {result}")
+    finally:
+        if context is not None:
+            context.cleanup()
     return 0
 
 
