@@ -6,20 +6,38 @@ import os
 from pathlib import Path
 
 
-WORKSPACE_ROOT = Path(os.environ.get("VB_WORKSPACE_ROOT", Path(__file__).resolve().parents[2]))
-CODE_ROOT = WORKSPACE_ROOT / "2_Code"
-UPSTREAM_ROOT = WORKSPACE_ROOT / "third_party" / "GVHMR"
-ASSET_ROOT = WORKSPACE_ROOT / "models" / "gvhmr"
+# 决策 11（2026-10-30 收口）：项目布局为默认运行布局（包删除后照常）；
+# VB_WORKSPACE_ROOT 保留源侧包布局兼容。
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+if os.environ.get("VB_WORKSPACE_ROOT"):
+    WORKSPACE_ROOT = Path(os.environ["VB_WORKSPACE_ROOT"])
+    CODE_ROOT = WORKSPACE_ROOT / "2_Code"
+    UPSTREAM_ROOT = WORKSPACE_ROOT / "third_party" / "GVHMR"
+    ASSET_ROOT = WORKSPACE_ROOT / "models" / "gvhmr"
+else:
+    WORKSPACE_ROOT = _PROJECT_ROOT
+    CODE_ROOT = _PROJECT_ROOT / "AnysoleWorkspace" / "tool" / "adapters" / "GVHMR"
+    UPSTREAM_ROOT = _PROJECT_ROOT / "Baselines" / "GVHMR"
+    ASSET_ROOT = _PROJECT_ROOT / "AnysoleWorkspace" / "assets" / "third_party" / "visual_baselines" / "weights" / "models" / "gvhmr"
+_PROJECT_ASSETS = _PROJECT_ROOT / "AnysoleWorkspace" / "assets" / "third_party" / "visual_baselines"
 DEFAULT_CHECKPOINT = ASSET_ROOT / "checkpoints" / "gvhmr" / "gvhmr_siga24_release.ckpt"
 DEFAULT_BODY_MODELS = UPSTREAM_ROOT / "inputs" / "checkpoints" / "body_models"
-DEFAULT_SMPLX_MODEL = WORKSPACE_ROOT / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
-DEFAULT_SMPL_MODEL = WORKSPACE_ROOT / "models" / "smpl" / "SMPL_NEUTRAL.pkl"
-DEFAULT_SMPLX_TO_SMPL = UPSTREAM_ROOT / "hmr4d" / "utils" / "body_model" / "smplx2smpl_sparse.pt"
+DEFAULT_SMPLX_MODEL = (_PROJECT_ASSETS / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
+                       if not os.environ.get("VB_WORKSPACE_ROOT")
+                       else WORKSPACE_ROOT / "models" / "smplx" / "SMPLX_NEUTRAL.npz")
+DEFAULT_SMPL_MODEL = (_PROJECT_ASSETS / "models" / "smpl" / "SMPL_NEUTRAL.pkl"
+                      if not os.environ.get("VB_WORKSPACE_ROOT")
+                      else WORKSPACE_ROOT / "models" / "smpl" / "SMPL_NEUTRAL.pkl")
+DEFAULT_SMPLX_TO_SMPL = (_PROJECT_ASSETS / "utils" / "body_model" / "smplx2smpl_sparse.pt"
+                         if not os.environ.get("VB_WORKSPACE_ROOT")
+                         else UPSTREAM_ROOT / "hmr4d" / "utils" / "body_model" / "smplx2smpl_sparse.pt")
 DEFAULT_HMR2_CHECKPOINT = ASSET_ROOT / "checkpoints" / "hmr2" / "epoch=10-step=25000.ckpt"
 DEFAULT_VITPOSE_CHECKPOINT = ASSET_ROOT / "checkpoints" / "vitpose" / "vitpose-h-multi-coco.pth"
 DEFAULT_PYTHON = Path(os.environ.get("VB_GVHMR_PYTHON", "python"))
-DEFAULT_DATASET_ROOT = WORKSPACE_ROOT / "1_Dataset"
-DEFAULT_RESULT_ROOT = WORKSPACE_ROOT / ".ai" / "tmp" / "gvhmr_baseline"
+DEFAULT_DATASET_ROOT = Path("/data/lizhe/projects/Tactile")
+DEFAULT_RESULT_ROOT = (_PROJECT_ROOT / "AnysoleWorkspace" / "work" / "visual_baselines"
+                       if not os.environ.get("VB_WORKSPACE_ROOT")
+                       else WORKSPACE_ROOT / ".ai" / "tmp" / "gvhmr_baseline")
 
 
 def required_assets(

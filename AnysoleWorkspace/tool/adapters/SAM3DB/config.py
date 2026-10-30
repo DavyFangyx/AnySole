@@ -6,26 +6,35 @@ import os
 from pathlib import Path
 
 
-WORKSPACE_ROOT = Path(os.environ.get("VB_WORKSPACE_ROOT", Path(__file__).resolve().parents[2]))
-DATASET_ROOT = WORKSPACE_ROOT / "1_Dataset"
-CODE_ROOT = WORKSPACE_ROOT / "2_Code"
-UPSTREAM_ROOT = WORKSPACE_ROOT / "third_party" / "fast-sam-3d-body"
-DINOV3_ROOT = WORKSPACE_ROOT / "third_party" / "dinov3"
-RESULT_ROOT = WORKSPACE_ROOT / "3_Result" / "SAM3DB_baseline"
-CHECKPOINT_ROOT = UPSTREAM_ROOT / "checkpoints" / "sam-3d-body-dinov3"
-MOGE_MODEL = WORKSPACE_ROOT / "models" / "moge-2-vits-normal" / "model.pt"
-SMPL_MODEL = WORKSPACE_ROOT / "models" / "smpl" / "SMPL_NEUTRAL.pkl"
+# 决策 11（2026-10-30 收口）：项目布局为默认运行布局（包删除后照常）；
+# VB_WORKSPACE_ROOT 保留源侧包布局兼容。
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+if os.environ.get("VB_WORKSPACE_ROOT"):
+    WORKSPACE_ROOT = Path(os.environ["VB_WORKSPACE_ROOT"])
+    DATASET_ROOT = WORKSPACE_ROOT / "1_Dataset"
+    CODE_ROOT = WORKSPACE_ROOT / "2_Code"
+    UPSTREAM_ROOT = WORKSPACE_ROOT / "third_party" / "fast-sam-3d-body"
+    DINOV3_ROOT = WORKSPACE_ROOT / "third_party" / "dinov3"
+    RESULT_ROOT = WORKSPACE_ROOT / "3_Result" / "SAM3DB_baseline"
+    CHECKPOINT_ROOT = UPSTREAM_ROOT / "checkpoints" / "sam-3d-body-dinov3"
+    MOGE_MODEL = WORKSPACE_ROOT / "models" / "moge-2-vits-normal" / "model.pt"
+    SMPL_MODEL = WORKSPACE_ROOT / "models" / "smpl" / "SMPL_NEUTRAL.pkl"
+    MHR_MAPPING = (WORKSPACE_ROOT / "third_party" / "mhr" / "tools"
+                   / "mhr_smpl_conversion" / "assets" / "mhr2smpl_mapping.npz")
+else:
+    WORKSPACE_ROOT = _PROJECT_ROOT
+    DATASET_ROOT = Path("/data/lizhe/projects/Tactile")
+    CODE_ROOT = _PROJECT_ROOT / "AnysoleWorkspace" / "tool" / "adapters" / "SAM3DB"
+    UPSTREAM_ROOT = _PROJECT_ROOT / "Baselines" / "SAM3DB" / "fast-sam-3d-body"
+    DINOV3_ROOT = _PROJECT_ROOT / "Baselines" / "SAM3DB" / "dinov3"
+    RESULT_ROOT = _PROJECT_ROOT / "AnysoleWorkspace" / "work" / "visual_baselines" / "reference_results" / "3_Result" / "SAM3DB_baseline"
+    _W = _PROJECT_ROOT / "AnysoleWorkspace" / "assets" / "third_party" / "visual_baselines"
+    CHECKPOINT_ROOT = _W / "weights" / "models" / "sam-3d-body-dinov3"
+    MOGE_MODEL = _W / "weights" / "models" / "moge-2-vits-normal" / "model.pt"
+    SMPL_MODEL = _W / "models" / "smpl" / "SMPL_NEUTRAL.pkl"
+    MHR_MAPPING = _W / "mhr_smpl_conversion" / "assets" / "mhr2smpl_mapping.npz"
 MHR2SMPL_MODEL_DIR = (
     UPSTREAM_ROOT / "mhr2smpl" / "experiments" / "multiview_n30000_e500"
-)
-MHR_MAPPING = (
-    WORKSPACE_ROOT
-    / "third_party"
-    / "mhr"
-    / "tools"
-    / "mhr_smpl_conversion"
-    / "assets"
-    / "mhr2smpl_mapping.npz"
 )
 MHR_FACE_MESH = MHR_MAPPING.with_name("mhr_face_mask.ply")
 DEFAULT_FPS = 30.0
@@ -52,7 +61,7 @@ def runtime_environment(gpu: int | None = None) -> dict[str, str]:
     pythonpath = [str(UPSTREAM_ROOT), str(CODE_ROOT)]
     if env.get("PYTHONPATH"):
         pythonpath.append(env["PYTHONPATH"])
-    prefix_lib = str(Path(os.environ["VB_TACTILE_PREFIX"]) / "lib")
+    prefix_lib = str(Path(os.environ.get("VB_TACTILE_PREFIX", str(Path(__file__).resolve().parents[4] / "AnysoleWorkspace"))))
     library_path = prefix_lib
     if env.get("LD_LIBRARY_PATH"):
         library_path += ":" + env["LD_LIBRARY_PATH"]
