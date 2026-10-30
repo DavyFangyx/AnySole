@@ -8,10 +8,10 @@
   {model}_stat cell 逐帧预测（V2M/T2M/VT2M，ckpt_last）；Vi 阶段 =
   run_tta --v-only；ViT 阶段 = run_tta（CONFIG_VT）——均 --ckpt last、
   与 cell 口径一致。
-- 基线组合（外部基线，各自协议 GT 口径）：V/Vi/ViT 暂无基线（表内「—」）；
-  T 阶段 = Step2Motion（bvh23，vs BVH-23 GT 同帧——Baselines gt_loading
-  路径，E2 同口径，勿与 SMPL GT 直接比）；VT 阶段 = MotionPRO（smpl24，
-  vs SMPL-24 GT）。标定多视角基线 2026-10-28 用户裁定不接入。
+- 基线组合（外部基线，SMPL-24 GT 同口径）：V/Vi/ViT 暂无基线（表内「—」）；
+  T 阶段 = Step2Motion（smpl24 协议直出，2026-10-28 切换，与 MotionPRO
+  导出同构）；VT 阶段 = MotionPRO（smpl24 vs SMPL-24 GT）。标定多视角
+  基线 2026-10-28 用户裁定不接入。
 
 阶段划分 = 窗口对齐（stride20 窗口网格，与 run_tta --win-frac 选窗规则
 一致；阶段边界不落窗口中部，无缺口）。
@@ -185,13 +185,16 @@ def render_figure(action: str, sids: list[str],
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
 
     ncols = 2
     nrows = max(1, (len(sids) + 1) // 2)
     fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 3.2 * nrows),
                              squeeze=False)
-    stage_colors = {"V": "#f4a582", "T": "#92c5de", "VT": "#d9d9d9",
-                    "Vi": "#b2df8a", "ViT": "#cba9f2"}
+    # 阶段带 = 5 类色按时间轴顺序取连续色（已校验 CVD/对比度）；带内文字标名，
+    # 身份不只靠颜色。曲线仍用 C0/C1/C2。
+    stage_colors = {"V": "#2a78d6", "T": "#eb6834", "VT": "#1baf7a",
+                    "Vi": "#eda100", "ViT": "#e87ba4"}
     stage_labels = {"V": "V (mono-cam)", "T": "T (tactile)",
                     "VT": "VT (cam+tactile)", "Vi": "Vi (multi-cam)",
                     "ViT": "ViT (multi-cam+tactile)"}
@@ -200,10 +203,19 @@ def render_figure(action: str, sids: list[str],
         t = np.arange(n) / FPS
         st = stage_of_frame(np.arange(n), n)
         ax.set_xlim(0, t[-1])
-        for stage in STAGES:
-            f0, f1 = STAGE_FRAC[stage]
-            ax.axvspan(f0 * t[-1], f1 * t[-1], color=stage_colors[stage],
-                       alpha=0.25, lw=0, label=stage_labels[stage])
+        # 阶段带边界 = stage_of_frame 实际窗口边界（与曲线分段同源 → 严格对齐）；
+        # 带间留 1 帧缝使「分离的时间块」可读
+        for si, stage in enumerate(STAGES):
+            sel = np.flatnonzero(st == si)
+            # 带间留 1 帧缝（首带前/末带后不缩，贴住坐标轴）
+            t0 = sel[0] / FPS + (0.5 / FPS if si else 0)
+            t1 = (sel[-1] + 1) / FPS - (0.5 / FPS if si < len(STAGES) - 1 else 0)
+            ax.axvspan(t0, t1, color=stage_colors[stage], alpha=0.22, lw=0)
+            ax.text((t0 + t1) / 2, 0.97, stage_labels[stage],
+                    transform=ax.get_xaxis_transform(), ha="center", va="top",
+                    fontsize=6.5, color="#3c3b38",
+                    path_effects=[pe.withStroke(linewidth=2.2,
+                                                foreground="white")])
         for ci, label in enumerate(curves[sid]):
             err, vmask = curves[sid][label]
             e = np.where(vmask, err, np.nan)
@@ -225,7 +237,7 @@ def render_figure(action: str, sids: list[str],
     for ax in axes.flat[len(sids):]:
         ax.axis("off")
     handles, labels = axes.flat[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=8, fontsize=7)
+    fig.legend(handles, labels, loc="lower center", ncol=6, fontsize=7)
     fig.suptitle(f"E7 dynamic input availability — {action}", y=0.99)
     fig.tight_layout(rect=(0, 0.06, 1, 0.95))
     out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -340,10 +352,9 @@ def main():
             lines.append("| %s | %s |" % (sys_name, " | ".join(cells)))
 
     lines.append("")
-    lines.append("基线组合（外部基线，各自协议 GT 口径）：V/Vi/ViT 暂无基线（—）；"
-                 "T=Step2Motion（bvh23 vs BVH-23 GT 同帧，E2 同路径）；"
-                 "VT=MotionPRO（smpl24 vs SMPL-24 GT）。跨骨架并列，阶段间对比"
-                 "以各系统自身协议 GT 为基准。\n")
+    lines.append("基线组合（外部基线，SMPL-24 GT 同口径）：V/Vi/ViT 暂无基线（—）；"
+                 "T=Step2Motion、VT=MotionPRO 均 smpl24 协议直出 vs SMPL-24 GT。"
+                 "阶段间对比以各系统自身协议 GT 为基准。\n")
     (out_dir / "E7_动态输入重建.md").write_text(
         "\n".join(lines), encoding="utf-8")
     print("→", out_dir)

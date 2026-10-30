@@ -2,7 +2,9 @@
 
 设计规则（2026-10-26 裁定；2026-10-30 无标定裁定修订）：
 - 优化只使用推理时可得信息；GT 只进独立评估，不进初始化/优化/停止/选择；
-- 输入条件 = 原方案（CONFIG_VT：真实 V + 真实 T；T 属原方案输入，非触觉约束）；
+- 输入条件 = 纯视觉 CONFIG_V（2026-10-30 用户裁定：本线 = AnySole +
+  无标定**纯视觉** TTA，代码级固定 CONFIG_V，不依赖运行参数；带触觉的
+  VT 线后续单独实现）；
 - 优化变量 = per-view h（pose head 部位表示：decoder 输出、_unembed 前，
   论文 token_out 的对应位置；梯度只经冻结的 _unembed/SMPL·FK 层，不回传
   decoder/fusion/编码器）+ 逐视角弱透视相机叶子（R 6D、s、txy）+ 共享
@@ -199,9 +201,11 @@ def init_weak_cam(joints_world: np.ndarray, det_px: np.ndarray,
     → (R6 (T,6), s (T,1), txy (T,2))：逐帧弱透视相机最小二乘 init。
 
     模型 u ≈ s·(R@X)[:2] + txy。零外部标定——仅模型自身 init 3D 与
-    检测 2D 的对应（PnP 式）：M2 = ucᵀXc(XcᵀXc)⁻¹ ≈ s·R[:2]，
-    SVD 取行空间正交基为 R 前两行、奇异值均值为 s；6D 口径 = R 前两列
-    （与 rot6d_to_rotmat 一致）。
+    检测 2D 的对应。M2 = ucᵀXc(XcᵀXc)⁻¹ ≈ s·R[:2]（最小二乘的行即
+    s·r1、s·r2）——**直接取 M2 行恢复旋转**（正交化 + 叉乘补第三行；
+    2026-10-30 修复：此前用 SVD 行空间基，基在平面内可任意旋转，
+    与真实 r1/r2 差一个 2D 正交变换——合成数据旋转误差 180°）。
+    6D 口径 = R 前两列（与 rot6d_to_rotmat 一致）。
     """
     T = joints_world.shape[0]
     R6 = np.zeros((T, 6))
@@ -216,11 +220,14 @@ def init_weak_cam(joints_world: np.ndarray, det_px: np.ndarray,
         Xc = X - X.mean(0)
         uc = u - u.mean(0)
         M2 = (uc.T @ Xc) @ np.linalg.inv(Xc.T @ Xc + 1e-8 * np.eye(3))  # (2,3) ≈ s·R[:2]
-        _, Ss, Vh = np.linalg.svd(M2)   # Vh 行 = 右奇异向量（3 维）
-        r1, r2 = Vh[0], Vh[1]
-        r3 = np.cross(r1, r2)           # det=+1 由构造保证
+        m1, m2 = M2[0], M2[1]
+        r1 = m1 / np.linalg.norm(m1)
+        r2_raw = m2 - (m2 @ r1) * r1
+        r2 = r2_raw / np.linalg.norm(r2_raw)
+        r3 = np.cross(r1, r2)                       # det=+1 由构造保证
         R = np.stack([r1, r2, r3])
-        s = float(np.clip(Ss.mean(), 1e-3, 1e4))
+        s = float(np.clip((np.linalg.norm(m1) + np.linalg.norm(r2_raw)) / 2.0,
+                          1e-3, 1e4))
         txy = u.mean(0) - s * (R @ X.mean(0))[:2]
         R6[t] = np.concatenate([R[:, 0], R[:, 1]])
         S[t, 0] = s
@@ -265,7 +272,7 @@ def load_detector(sid: str, cam: int) -> tuple[np.ndarray, np.ndarray]:
 
 def run_session(model, smpl_layer, leaf, sid, n_windows, steps, warmup, clip, lr,
                 grad_diag, device, wins=None, dump_dir=None,
-                config_value=CONFIG_VT, win_frac=None, contact_method="f6_soft",
+                config_value=CONFIG_V, win_frac=None, contact_method="f6_soft",
                 cams=(1, 2, 3, 4), calib: bool = False):
     from anysole.data.dataset import AnySoleDataset, collate_windows
     from anysole.train import condition_inputs, move_batch
@@ -535,8 +542,6 @@ def main():
     ap.add_argument("--win-frac", default=None,
                     help="\"f0,f1\"：取窗口序号占比在 [f0,f1) 的窗口"
                          "（E7 五阶段时间轴用；与 --wins 互斥）")
-    ap.add_argument("--v-only", action="store_true",
-                    help="输入条件 = CONFIG_V（E7 Vi 阶段：多相机纯视觉 TTA）")
     ap.add_argument("--i", type=int, default=None, choices=(1, 2, 3, 4),
                     help="视角数：跑全部 C(4,i) 相机组合——std 列人口 = 组合间；"
                          "i=4 单一组合无组合间 std；缺省 = 固定组合 1,2,3,4")
@@ -613,7 +618,7 @@ def main():
                               sid, args.n_windows, args.steps,
                               args.warmup, args.clip, args.lr, args.grad_diag,
                               args.device, wins=wins, dump_dir=args.dump_kp,
-                              config_value=CONFIG_V if args.v_only else CONFIG_VT,
+                              config_value=CONFIG_V,
                               win_frac=win_frac, contact_method=contact_method,
                               cams=cams)
             stats = summarize(res)

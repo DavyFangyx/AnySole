@@ -487,11 +487,55 @@ def _combo_stats(base: Path, model: str, n: int, key: str) -> tuple[str, str]:
     return "%.3f" % np.mean(means), "%.3f" % np.std(means)
 
 
+def _line1_stats(base: Path, n: int) -> tuple[str, str, str, str]:
+    """标定多视角线（EasyMocap，2026-10-30 集成）：组合间口径（同 _combo_stats）。
+
+    来源 = predictions/easymocap/{sid}_n{n}_{camstr}.npz（每组合每会话一份）：
+    每组合先取会话均值（per-session MPJPE/GMPJPE 由 calib_baseline 同款
+    pelvis_align + mean_point_error 计算），再跨组合 mean±std；
+    n=4 单一组合 std = —。返回 (MPJPE_mean, MPJPE_std, GMPJPE_mean, GMPJPE_std)。
+    """
+    import numpy as np
+    pred_dir = base / "predictions/easymocap"
+    if not pred_dir.is_dir():
+        return "—", "—", "—", "—"
+    try:
+        from anysole_tta.calib_baseline import _eval, load_gt_joints
+    except Exception:
+        return "—", "—", "—", "—"
+    combos = [c for c in ((1,), (2,), (3,), (4,), (1, 2), (1, 3), (1, 4),
+                          (2, 3), (2, 4), (3, 4), (1, 2, 3), (1, 2, 4),
+                          (1, 3, 4), (2, 3, 4), (1, 2, 3, 4)) if len(c) == n]
+    m_means, g_means = [], []
+    for combo in combos:
+        camstr = "".join(str(c) for c in combo)
+        gts, m_vals, g_vals = {}, [], []
+        for f in sorted(pred_dir.glob(f"*_n{n}_{camstr}.npz")):
+            sid = f.name.split("_")[0]
+            if sid not in gts:
+                gts[sid] = load_gt_joints(sid)[0]
+            d = np.load(f)
+            m, g = _eval(d["joints"], gts[sid])
+            m_vals.append(m)
+            g_vals.append(g)
+        if m_vals:
+            m_means.append(np.mean(m_vals))
+            g_means.append(np.mean(g_vals))
+    if not m_means:
+        return "—", "—", "—", "—"
+    if len(m_means) == 1:
+        return ("%.3f" % m_means[0], "—", "%.3f" % g_means[0], "—")
+    return ("%.3f" % np.mean(m_means), "%.3f" % np.std(m_means),
+            "%.3f" % np.mean(g_means), "%.3f" % np.std(g_means))
+
+
 def export_e3() -> None:
     """五条对照线 × 视角数 1-4（实验计划 §E3，方法对比表）。
 
-    当前状态（2026-10-30）：标定多视角上限、TTA 原方法、朴素无标定晚融合、
-    U@V{i}+接触约束 均未落地 → 填 —；U@V{i}（TTA 框架）= 主模型 V7_Cv5
+    当前状态（2026-10-30）：标定多视角上限 = EasyMocap（RTMPose 检测 +
+    真值外参三角化 + 原生 SMPL 拟合，2026-10-30 集成，_line1_stats 读
+    predictions/easymocap 缓存）；TTA 原方法、朴素无标定晚融合、
+    U@V{i}+接触约束 未落地 → 填 —；U@V{i}（TTA 框架）= 主模型 V7_Cv5
     的 test TTA，std 列 = 组合间标准差：i=1 单视角 pa_init（无 TTA）、
     i>=2 TTA pa_virt_refined；i=4 单一组合无组合间标准差 → —（表注）。
     """
@@ -501,7 +545,11 @@ def export_e3() -> None:
     rows = []
     for line in E3_LINES:
         for n in ("1", "2", "3", "4"):
-            if line == "U@V{i}（TTA 框架）":
+            if line == "标定多视角（参考上限）":
+                m_mean, m_std, g_mean, g_std = _line1_stats(stage1_dir, int(n))
+                rows.append([line, "EasyMocap", n, "—", "—",
+                             m_mean, m_std, g_mean, g_std])
+            elif line == "U@V{i}（TTA 框架）":
                 key = "pa_init" if n == "1" else "pa_virt_refined"
                 mean, std = _combo_stats(stage1_dir, "V7_Cv5", int(n), key)
                 rows.append([line, "V7_Cv5", n, mean, std, "—", "—", "—", "—"])

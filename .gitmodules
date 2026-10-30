@@ -1,3 +1,6 @@
 [submodule "z_note/HMR2.0/4D-Humans"]
 	path = z_note/HMR2.0/4D-Humans
 	url = https://github.com/shubham-goel/4D-Humans.git
+[submodule "z_note/HMR2.0/EasyMocap"]
+	path = z_note/HMR2.0/EasyMocap
+	url = https://github.com/zju3dv/EasyMocap.git
