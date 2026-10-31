@@ -47,7 +47,7 @@ Cv 家族暂只 last）。表格数字来自 cells（评估由 conf 管线完成
 |---|---|---|
 | E1 | `python results_display/script/e_results_export.py --experiment E1 --models V7_Cv5` | `--models` = 家族（Cv1–7，缺省全列，21 行 = 7 家族 × V/T/VT） |
 | E2 | `python results_display/script/e_results_export.py --experiment E2 --models V7_Cv5 --ckpt last` | `--models` 可选（缺省 Cv1–7，旧候选 A/B 不入表）；`--ckpt last/best`。四张表：Table1=V 块 / Table2=T 块 / Table3=VT 块 / Table4=汇总（模型类型列：U / 外部基线） |
-| E3 | 待跑（实验组五线未落地，口径见 `z_note/实验计划.md` §E3） | 五线：外部标定基线 / TTA 原方法 / U@V{i}（TTA 框架）/ U@V{i}+接触约束 / 真值外参参考上限；pilot 数据不入组 |
+| E3 | TTA 原方法（HMR 2.0，无标定）：`python hmr2_tta/eval/eval_tta.py --split test --i 4 --device cuda:2`（单命令 = TTA + 窗口三指标，hmr2 env）；AnySole TTA（V7_Cv5 无标定纯视觉）：`python anysole_tta/run_tta.py --model V7_Cv5 --split test --ckpt last --lr 0.01 --i 4 --device cuda:2`；AnySole TTA wLcon 加 `--contact --lcontact 1.0` | 四线（2026-10-31 用户裁定，朴素晚融合不作数）：标定多视角（参考上限）= EasyMocap / TTA 原方法 = HMR 2.0 / AnySole TTA = V7_Cv5 / AnySole TTA wLcon（接触约束）；pilot 数据不入组 |
 | E4 | `python results_display/script/e_results_export.py --experiment E4 --ckpt last` | 模型固定（Cv1–7 消融组）；`--ckpt` 目前仅 last |
 | E5 | `python results_display/script/e_results_export.py --experiment E5 --models V7_Cv5 --ckpt last` | 主模型 V7_Cv5 单模型（occ000-050 五档，固定一份 ckpt）；图 1 = `Full_Fig1_E5_Degradation.png`（x=遮挡档、y=相对 occ000 退化，V 蓝实线 / VT 橙虚线，子图六指标） |
 | E6 | `python anysole_tta/e6_phase_analysis.py --models V7_Cv4_s1,V7_Cv5_s1,V7_Cv7_s1 --ckpt last` | 模型固定三个；`--ckpt` 目前仅 last |
@@ -58,8 +58,9 @@ Cv 家族暂只 last）。表格数字来自 cells（评估由 conf 管线完成
 
 - 模型行 = `results/cells/<model_id>/metrics/{val,test}.json`（协议三条件十指标，
   唯一实现 `anysole/utils/eval_protocol.py`）
-- E3/E6/E7 = 分析驱动产物（`z_note/HMR2.0/hmr2_gait/anysole_tta/`）：
-  `e6_phase_analysis.py` / `e7_driver.py` 产出 json+PNG 进各自实验目录
+- E3/E6/E7 = 分析驱动产物（仓库根 `anysole_tta/` 与 `hmr2_tta/`）：
+  `e6_phase_analysis.py` / `e7_driver.py` 产出 json+PNG 进各自实验目录；
+  E3 TTA 两线驱动同上（`anysole_tta/run_tta.py`、`hmr2_tta/eval/`）
 - 统一导出/刷新 CSV：`python results_display/script/e_results_export.py`
 
 ## 运行指令
@@ -68,21 +69,44 @@ Cv 家族暂只 last）。表格数字来自 cells（评估由 conf 管线完成
 （把原始结果转成命名规范的表 CSV / 图 PNG）。驱动不进 queue、不经过 scheduler。
 
 ```bash
-# ---- 第一步：运行分析驱动（选 ckpt 运行实验、产出原始结果；E3/E6/E7 在
-# hmr2_gait 目录、touch_gait 环境）----
-cd /data/fangyuxuan/projects/gait/z_note/HMR2.0/hmr2_gait
-eval "$(conda shell.bash hook)" && conda activate touch_gait
 
 # E3 多视角 TTA（--ckpt last/best 选口径；V7_Cv1..Cv5 已接入；正式口径 = test）
-# V7 的实际配置：
-- TTA 步数 200
-- 叶子学习率 0.01
-- warm-up 20
-- 梯度裁剪 0.1
-- L_2D 权重 3e-6（px²）——单位不同不可直接比
-- 一致性 λcon 权重 1.0
-- 正则 λreg 权重 1e-2
-python anysole_tta/run_tta.py --model V7_Cv5 --split test --ckpt last --lr 0.01 --device cuda:2
+
+四条对比线（2026-10-31 用户裁定；朴素晚融合不作数）：
+- 标定多视角（参考上限）= EasyMocap（anysole_tta/easymocap_baseline.py）
+- TTA 原方法 = HMR 2.0（hmr2_tta/eval/，论文口径）
+- AnySole TTA = V7_Cv5（anysole_tta/run_tta.py，无标定纯视觉）
+- AnySole TTA wL_contact = 接触约束
+
+各实验组实际配置表：
+| 实验组 | 入口 | 步数 | 叶子 lr | warm-up | 梯度裁剪 | λ2d | λcon | λreg |
+|---|---|---|---|---|---|---|---|---|
+| AnySole TTA | anysole_tta/run_tta.py（--steps/--lr/--warmup/--clip 手动可配） | 200 | 0.01 | 20 | 0.1 | 3e-6（px²，固定） | 1.0（rad²，固定） | 1e-2（固定） |
+| TTA 原方法 | hmr2_tta/eval/（不开放给 run_tta.py 配置） | 200 | 0.1 | 20 | 0.1 | 0.3（归一化） | θ/β/mesh 分项各 1.0 | 1e-2 |
+| AnySole TTA wLcon | run_tta.py --contact（输入 VT；--lcontact 手动可配，缺省 1.0） | 200 | 0.01 | 20 | 0.1 | 3e-6（px²，固定） | 1.0（rad²，固定） | 1e-2（固定） |
+
+# 四组完整命令（正式口径 = test 36 会话；std = 组合间；i=4 单组合无 std；
+# 逐组合并行分卡 = --gpu；逐组合产物独立命名，导出器按 glob 聚合）
+
+# ① 标定多视角（参考上限）= EasyMocap（touch_gait）
+conda activate touch_gait
+python anysole_tta/easymocap_baseline.py --split test --n 2,3,4 --device cuda:2
+python anysole_tta/easymocap_baseline.py --split test --aggregate
+
+# ② TTA 原方法 = HMR 2.0（hmr2 env；无标定，论文口径 200/0.1/20/0.1）
+conda activate hmr2
+python hmr2_tta/eval/eval_tta.py --split test --gpu 4,5,6,7
+
+# ③ AnySole TTA = V7_Cv5（touch_gait；无标定纯视觉 V）
+conda activate touch_gait
+python anysole_tta/run_tta.py --model V7_Cv5 --split test --ckpt last --lr 0.01 --gpu 4,5,6,7
+
+# ④ AnySole TTA wLcon（VT + 接触约束；--lcontact 缺省 1.0）
+conda activate touch_gait
+python anysole_tta/run_tta.py --model V7_Cv5 --split test --ckpt last --lr 0.01 --contact --gpu 1,2,3,7
+
+# 说明：--n 2,3,4 可限定视角数子集；--gpu 缺省时按 --device 单卡串行。
+# 会话集 = splits.csv 的 split 列（--split 参数），不手写 SIDS。
 
 # E6 接触相位分析（读训练 cell 逐帧预测 + 接触标签；--ckpt 选口径）
 python anysole_tta/e6_phase_analysis.py --models V7_Cv4_s1,V7_Cv5_s1,V7_Cv7_s1 --ckpt last
@@ -98,6 +122,7 @@ python /data/fangyuxuan/projects/gait/results_display/script/e8_probe.py --model
 ```bash
 # ---- 第二步：统一导出整理（表 = CSV、图 = PNG，命名见上文；在仓库根跑）----
 cd /data/fangyuxuan/projects/gait
+conda activate touch_gait
 
 # 全部实验
 python results_display/script/e_results_export.py
@@ -107,6 +132,6 @@ python results_display/script/e_results_export.py
 # 指定实验
 python results_display/script/e_results_export.py --experiment E2 --models V7_Cv5 --ckpt last
 python results_display/script/e_results_export.py --experiment E5
-python results_display/script/e_results_export.py --experiment E3
+python results_display/script/e_results_export.py --experiment E6 --teaser
 ```
 

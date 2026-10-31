@@ -3,7 +3,7 @@
 
 数据源与去向：
 - E1：z_note/E_Test/C版本对照/E1_同架构专家对比.md 表格 → E1_.../Full_Table1_E1_Experts.csv
-- E2：cells（A/B/C last/best + Cv1–7 last）+ 外部基线 md → Full_Table1_E2_Performance.csv
+- E2：cells（Cv1–7 last / V7_Cv1_evalbest）+ 基线公共评估产物（results/baselines/*/metrics/test_comparison.json）→ Full_Table1_E2_Performance.csv
 - E3：Etest/10_21/e3_multiview.json → Full_Table1_E3_MultiView.csv
 - E4：cells（Cv1–7 stat，三条件十指标 + Δ）→ Full_Table1_E4_Ablation_AllMetrics.csv
 - E5：主模型 V7_Cv5（last/best × occ000-050 五档）→ Full_Table1_E5_Occlusion.csv
@@ -19,6 +19,7 @@ import csv
 import json
 import re
 import shutil
+import subprocess
 import sys
 
 import numpy as np
@@ -68,29 +69,6 @@ def write_csv(path: Path, header: list[str], rows: list[list]) -> None:
         w.writerow(header)
         w.writerows(rows)
     print("[csv] %s (%d rows)" % (path, len(rows)))
-
-
-def md_tables(path: Path) -> list[dict]:
-    """解析 md 中的 pipe 表：返回 [{section, header, rows}]。"""
-    tables2, cur2, section2 = [], None, ""
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("##") or line.startswith("###"):
-            section2 = line.lstrip("#").strip()
-        if not line.strip().startswith("|"):
-            if cur2 is not None:
-                tables2.append(cur2)
-                cur2 = None
-            continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if cur2 is None:
-            cur2 = {"section": section2, "header": cells, "rows": []}
-        elif all(re.fullmatch(r":?-{2,}:?", c or "-") for c in cells):
-            continue
-        else:
-            cur2["rows"].append(cells)
-    if cur2 is not None:
-        tables2.append(cur2)
-    return tables2
 
 
 def display_name(cell_id: str) -> str:
@@ -241,16 +219,50 @@ def export_e1(models: list[str]) -> None:
     write_csv(ETEST / "E1_CleanPerformance" / "Full_Table1_E1_Experts.csv", header, rows)
 
 
-# ---------------- E2：主性能（cells 驱动 + 基线 md） ----------------
+# ---------------- E2：主性能（cells 驱动 + 基线公共评估产物） ----------------
 def _selected(cell_ids: list[str], models: list[str]) -> list[str]:
     return [c for c in cell_ids if not models or any(m in c for m in models)]
+
+
+BASELINE_METRIC_KEYS = {
+    "PA-MPJPE": "pa_mpjpe_mm",
+    "MPJPE": "mpjpe_mm",
+    "GlobalMPJPE": "global_mpjpe_mm",
+    "W-MPJPE100": "w_mpjpe100_mm",
+    "MPJRE": "mpjae_deg",
+    "traj_ATE": "root_ate_mm",
+    "RootOrientationDrift": "root_orientation_drift_deg",
+    "FootSliding": "foot_sliding_mm",
+    "GroundPen": "ground_pen_mm",
+    "Jitter_pred": "jitter_pred_m_s3",
+}
+
+
+def _baseline_rows() -> dict[str, list[list]]:
+    """基线行 = 各基线公共评估产物 test_comparison.json（2026-10-31 裁定：
+    数据驱动，不读 md）。mode 决定块；V2T 与无运动指标者不产出行。"""
+    rows_by_block: dict[str, list[list]] = {"V": [], "T": [], "VT": []}
+    block_of = {"V2M": "V", "T2M": "T", "VT2M": "VT"}
+    for path in sorted((REPO / "results" / "baselines").glob("*/metrics/test_comparison.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        block = block_of.get(str(payload.get("mode") or ""))
+        if not block:
+            continue
+        s = payload.get("summary") or {}
+        name = payload.get("display_name") or path.parents[2].name
+        row = ["外部基线", name, "—"]
+        for key in BASELINE_METRIC_KEYS.values():
+            v = s.get(key)
+            row.append(round(v, 3) if isinstance(v, (int, float)) and np.isfinite(v) else "—")
+        rows_by_block[block].append(row)
+    return rows_by_block
 
 
 def export_e2(models: list[str], ckpt: str) -> None:
     """四张表（2026-10-27 用户裁定）：V 块 / T 块 / VT 块 / 汇总。
 
-    模型类型列：外部基线 = 四外部方法；U = 统一模型（Cv1–7，
-    Cv6 为 S_VT 专家角色）。旧候选 A/B 不入表（2026-10-30 用户裁定）。
+    模型类型列：外部基线 = 各基线公共评估产物（mode 决定块）；U = 统一模型
+    （Cv1–7，Cv6 为 S_VT 专家角色）。旧候选 A/B 不入表（2026-10-30 用户裁定）。
     """
     header = ["类型", "模型", "口径"] + METRICS10
     # 当前线：训练 cell 即评估 cell（V7_CvN → 自动扫 _s1/_s2/_s3）；
@@ -276,16 +288,9 @@ def export_e2(models: list[str], ckpt: str) -> None:
                     rows_by_block[block].append(
                         ["U", "%s（%s）" % (COND_ZH[cond], display_name(model)), "best"]
                         + metric_row(m, cond))
-    # 基线表（md 驱动；首列即块）。Ours（V4_Av1_wo05_drop 等）是 AnySole
-    # 自家模型但不属于本实验默认生成名单 → 不入表（2026-10-27 用户裁定）。
-    base_src = (ETEST / "E2_MainPerformance/E2_外部基线主结果.md") if EVAL_SPLIT == "test" else Path("/nonexistent/validation_external_baselines")
-    if base_src.is_file():
-        for t in md_tables(base_src):
-            for r in t["rows"]:
-                if r[1].startswith("Ours"):
-                    continue
-                rows_by_block.setdefault(r[0], []).append(
-                    ["外部基线", r[1], "—"] + r[2:])
+    # 基线行：公共评估产物驱动（Ours 自身模型不在此目录，天然不入表）
+    for block, rows in _baseline_rows().items():
+        rows_by_block[block].extend(rows)
     out = ETEST / "E2_MainPerformance"
     for table_no, block in enumerate(("V", "T", "VT"), 1):
         write_csv(out / ("Full_Table%d_E2_Performance_%s.csv" % (table_no, block)),
@@ -428,8 +433,8 @@ def export_e5_figure(models: list[str]) -> None:
 # 朴素无标定晚融合 = pilot 的 plain_fusion（eval_multiview.py 定义：
 # V3_Bv1 原模型 per-view V2M 世界系平均）——明确对应，已落地填数。
 # 其余线来源待用户确认后填入；未落地填 "—"。
-E3_LINES = ["标定多视角（参考上限）", "TTA 原方法", "朴素无标定晚融合",
-            "U@V{i}（TTA 框架）", "U@V{i} + 接触约束（TTA 框架）"]
+E3_LINES = ["标定多视角（参考上限）", "TTA 原方法",
+            "AnySole TTA", "AnySole TTA wLcon"]
 
 
 def _stage1_agg(json_path: Path, key: str) -> tuple[str, str]:
@@ -464,14 +469,17 @@ def _combo_stats(base: Path, model: str, n: int, key: str) -> tuple[str, str]:
                 std = cell.get("std")
                 return "%.3f" % cell["mean"], ("%.3f" % std if std is not None else "—")
         if n == 4:
-            # i=4 = 固定四相机组合 = 单组合模式产物（sessions 平铺，无组合间 std）
+            # i=4 = 固定四相机组合 = 单组合模式产物（sessions 平铺，无组合间 std）。
+            # 口径守卫：只接受无标定产物（camera_calibration == "none"；
+            # 标定时代的存量 json 不入表）
             plain = base / f"anysole_tta_stage1_{model}_test_lr0.01.json"
             if plain.is_file():
                 d = json.loads(plain.read_text(encoding="utf-8"))
-                vals = [v[key] for v in d["sessions"].values()
-                        if v.get(key) is not None and np.isfinite(v[key])]
-                if vals:
-                    return "%.3f" % np.mean(vals), "—"
+                if d.get("camera_calibration") == "none":
+                    vals = [v[key] for v in d["sessions"].values()
+                            if v.get(key) is not None and np.isfinite(v[key])]
+                    if vals:
+                        return "%.3f" % np.mean(vals), "—"
         return "—", "—"
     means = []
     for f in files:
@@ -487,57 +495,112 @@ def _combo_stats(base: Path, model: str, n: int, key: str) -> tuple[str, str]:
     return "%.3f" % np.mean(means), "%.3f" % np.std(means)
 
 
-def _line1_stats(base: Path, n: int) -> tuple[str, str, str, str]:
+def _line1_stats(base: Path, n: int) -> tuple[str, str, str, str, str, str]:
     """标定多视角线（EasyMocap，2026-10-30 集成）：组合间口径（同 _combo_stats）。
 
-    来源 = predictions/easymocap/{sid}_n{n}_{camstr}.npz（每组合每会话一份）：
-    每组合先取会话均值（per-session MPJPE/GMPJPE 由 calib_baseline 同款
-    pelvis_align + mean_point_error 计算），再跨组合 mean±std；
-    n=4 单一组合 std = —。返回 (MPJPE_mean, MPJPE_std, GMPJPE_mean, GMPJPE_std)。
+    首选读聚合缓存 metrics/e3_multiview.json 的 easymocap 键（由
+    anysole_tta/easymocap_baseline.py --aggregate 生成，纯 json 读取、
+    本导出器无 touch_gait 依赖也可跑）；键缺失时兜底从
+    predictions/easymocap/{sid}_n{n}_{camstr}.npz 重算（每组合取会话均值、
+    再跨组合 mean±std；n=4 单一组合 std = —，重算需 touch_gait 依赖）。
+    返回 (PA_mean, PA_std, MPJPE_mean, MPJPE_std, GMPJPE_mean, GMPJPE_std)。
     """
+    cache = base / "e3_multiview.json"
+    if cache.is_file():
+        try:
+            cell = json.loads(cache.read_text(encoding="utf-8")) \
+                .get("easymocap", {}).get(str(n))
+            if cell and cell.get("mpjpe_mean") is not None:
+                def _fmt(v):
+                    return "%.3f" % v if v is not None else "—"
+                return (_fmt(cell.get("pa_mpjpe_mean")),
+                        _fmt(cell.get("pa_mpjpe_std")),
+                        _fmt(cell["mpjpe_mean"]), _fmt(cell["mpjpe_std"]),
+                        _fmt(cell["gmpjpe_mean"]), _fmt(cell["gmpjpe_std"]))
+        except Exception:
+            pass
     import numpy as np
-    pred_dir = base / "predictions/easymocap"
+    pred_dir = base.parent / "predictions/easymocap"
     if not pred_dir.is_dir():
-        return "—", "—", "—", "—"
+        return "—", "—", "—", "—", "—", "—"
     try:
-        from anysole_tta.calib_baseline import _eval, load_gt_joints
+        import sys
+        sys.path.insert(0, str(REPO))
+        from anysole_tta.calib_baseline import load_gt_joints
+        from anysole_tta.easymocap_baseline import _eval3
     except Exception:
-        return "—", "—", "—", "—"
+        return "—", "—", "—", "—", "—", "—"
     combos = [c for c in ((1,), (2,), (3,), (4,), (1, 2), (1, 3), (1, 4),
                           (2, 3), (2, 4), (3, 4), (1, 2, 3), (1, 2, 4),
                           (1, 3, 4), (2, 3, 4), (1, 2, 3, 4)) if len(c) == n]
-    m_means, g_means = [], []
+    p_means, m_means, g_means = [], [], []
     for combo in combos:
         camstr = "".join(str(c) for c in combo)
-        gts, m_vals, g_vals = {}, [], []
+        gts, p_vals, m_vals, g_vals = {}, [], [], []
         for f in sorted(pred_dir.glob(f"*_n{n}_{camstr}.npz")):
             sid = f.name.split("_")[0]
             if sid not in gts:
                 gts[sid] = load_gt_joints(sid)[0]
             d = np.load(f)
-            m, g = _eval(d["joints"], gts[sid])
+            pa, m, g = _eval3(d["joints"], gts[sid])
+            p_vals.append(pa)
             m_vals.append(m)
             g_vals.append(g)
         if m_vals:
+            p_means.append(np.mean(p_vals))
             m_means.append(np.mean(m_vals))
             g_means.append(np.mean(g_vals))
     if not m_means:
-        return "—", "—", "—", "—"
+        return "—", "—", "—", "—", "—", "—"
     if len(m_means) == 1:
-        return ("%.3f" % m_means[0], "—", "%.3f" % g_means[0], "—")
-    return ("%.3f" % np.mean(m_means), "%.3f" % np.std(m_means),
+        return ("%.3f" % p_means[0], "—", "%.3f" % m_means[0], "—",
+                "%.3f" % g_means[0], "—")
+    return ("%.3f" % np.mean(p_means), "%.3f" % np.std(p_means),
+            "%.3f" % np.mean(m_means), "%.3f" % np.std(m_means),
             "%.3f" % np.mean(g_means), "%.3f" % np.std(g_means))
 
 
-def export_e3() -> None:
-    """五条对照线 × 视角数 1-4（实验计划 §E3，方法对比表）。
+def _hmr_stats(base: Path, n: int, arm: str, metric: str) -> tuple[str, str]:
+    """HMR2.0 TTA 阶段 2 产物（tta_theta_windows_i{N}.json）的 overall 组合间
+    mean±std；i=4 单一组合 std=None → —。"""
+    import glob
+    import numpy as np
+    files = sorted(glob.glob(str(base / "zero" / f"tta_theta_windows_i{n}*.json")))
+    if not files:
+        return "—", "—"
+    means = []
+    for f in files:
+        d = json.loads(open(f, encoding="utf-8").read())
+        if "overall" in d:      # --i 单进程产物：直接取 overall
+            cell = d["overall"].get(arm, {}).get(metric, {})
+            if cell and cell.get("mean") is not None:
+                means.append(cell["mean"])
+        else:                   # --cams 逐组合产物：取该组合会话均值
+            for cm in d.get("combos", {}).values():
+                v = cm.get(arm, {}).get(metric)
+                if v is not None:
+                    means.append(v)
+    if not means:
+        return "—", "—"
+    if len(means) == 1:
+        return "%.3f" % means[0], "—"
+    return "%.3f" % np.mean(means), "%.3f" % np.std(means)
 
-    当前状态（2026-10-30）：标定多视角上限 = EasyMocap（RTMPose 检测 +
-    真值外参三角化 + 原生 SMPL 拟合，2026-10-30 集成，_line1_stats 读
-    predictions/easymocap 缓存）；TTA 原方法、朴素无标定晚融合、
-    U@V{i}+接触约束 未落地 → 填 —；U@V{i}（TTA 框架）= 主模型 V7_Cv5
-    的 test TTA，std 列 = 组合间标准差：i=1 单视角 pa_init（无 TTA）、
-    i>=2 TTA pa_virt_refined；i=4 单一组合无组合间标准差 → —（表注）。
+
+def export_e3() -> None:
+    """四条对照线 × 视角数 1-4（2026-10-31 用户裁定：只此四线，
+    朴素无标定晚融合不作数）。
+
+    - 标定多视角（参考上限）= EasyMocap（RTMPose 检测 + 真值外参三角化 +
+      原生 SMPL 拟合；_line1_stats 读 predictions/easymocap 缓存）
+    - TTA 原方法 = HMR 2.0（无标定 TTA；_hmr_stats 读
+      metrics/zero/tta_theta_windows_i{N}.json：i=1 单视角 pa_init、
+      i>=2 virtual 臂；三指标 PA/MPJPE/GlobalMPJPE）
+    - AnySole TTA = V7_Cv5 无标定纯视觉 TTA（_combo_stats 读
+      anysole_tta_stage1_V7_Cv5_test_i{N}_cams*.json：i=1 pa_init、
+      i>=2 pa_virt_refined/mpjpe_virt_refined/gmpjpe_virt_refined）
+    - AnySole TTA wLcon = 待跑（接触约束第二版）→ 填 —
+    std 列人口 = 组合间；i=4 单一组合无组合间标准差 → —（表注）。
     """
     stage1_dir = REPO / "results/baselines/HMR2.0/metrics"
     header = ["对比线", "模型", "视角数", "PA-MPJPE_mean", "PA-MPJPE_std",
@@ -545,17 +608,37 @@ def export_e3() -> None:
     rows = []
     for line in E3_LINES:
         for n in ("1", "2", "3", "4"):
+            ni = int(n)
             if line == "标定多视角（参考上限）":
-                m_mean, m_std, g_mean, g_std = _line1_stats(stage1_dir, int(n))
-                rows.append([line, "EasyMocap", n, "—", "—",
+                pa_mean, pa_std, m_mean, m_std, g_mean, g_std = \
+                    _line1_stats(stage1_dir, ni)
+                rows.append([line, "EasyMocap", n, pa_mean, pa_std,
                              m_mean, m_std, g_mean, g_std])
-            elif line == "U@V{i}（TTA 框架）":
-                key = "pa_init" if n == "1" else "pa_virt_refined"
-                mean, std = _combo_stats(stage1_dir, "V7_Cv5", int(n), key)
-                rows.append([line, "V7_Cv5", n, mean, std, "—", "—", "—", "—"])
+            elif line == "TTA 原方法":
+                arm = "pa_init" if n == "1" else "pa_virtual"
+                pa_mean, pa_std = _hmr_stats(stage1_dir, ni, arm, "pa")
+                m_mean, m_std = _hmr_stats(stage1_dir, ni, arm, "mpjpe")
+                g_mean, g_std = _hmr_stats(stage1_dir, ni, arm, "gmpjpe")
+                rows.append([line, "HMR 2.0", n, pa_mean, pa_std,
+                             m_mean, m_std, g_mean, g_std])
+            elif line == "AnySole TTA":
+                if n == "1":
+                    pa_mean, pa_std = _combo_stats(stage1_dir, "V7_Cv5", ni,
+                                                   "pa_init")
+                    rows.append([line, "V7_Cv5", n, pa_mean, pa_std,
+                                 "—", "—", "—", "—"])
+                else:
+                    pa_mean, pa_std = _combo_stats(stage1_dir, "V7_Cv5", ni,
+                                                   "pa_virt_refined")
+                    m_mean, m_std = _combo_stats(stage1_dir, "V7_Cv5", ni,
+                                                 "mpjpe_virt_refined")
+                    g_mean, g_std = _combo_stats(stage1_dir, "V7_Cv5", ni,
+                                                 "gmpjpe_virt_refined")
+                    rows.append([line, "V7_Cv5", n, pa_mean, pa_std,
+                                 m_mean, m_std, g_mean, g_std])
             else:
-                rows.append([line, "—", n, "—", "—", "—", "—", "—", "—"])
-    write_csv(ETEST / "E3_MultiViewConsistency" / "Full_Table1_E3_MultiView.csv",
+                rows.append([line, "V7_Cv5", n, "—", "—", "—", "—", "—", "—"])
+        write_csv(ETEST / "E3_MultiViewConsistency" / "Full_Table1_E3_MultiView.csv",
               header, rows)
 
 
@@ -567,154 +650,6 @@ E6_ACTION_VALUES = ["walk", "walk", "run", "run", "squat", "stand_shift",
                     "single_stand", "jump_jack", "lateral", "sit_stand", "stairs"]
 E6_PHASE_ZH = {"0": "稳定支撑", "1": "摆动", "2": "落脚附近", "3": "离地附近"}
 
-
-def export_e6_detail() -> None:
-    """--detail：E6 分脚、未平滑逐帧结果（2026-10-30 用户要求）。
-
-    数据源 = anysole_tta/e6_phase_analysis.py 的 load_session（帧网格已对齐
-    校验的逐帧 V/VT 分脚误差），不做任何平滑与双足平均。
-    产物（E6_ContactPhaseAnalysis/detail/ 下 4 个文件夹，2026-10-30 用户要求）：
-      每模型 {model}/{action}/{sid}.csv|.png（分脚未平滑）；
-      merged/{action}/{sid}.csv|.png（三模型并列对比）。
-      csv 列 = frame/time_s/phase_L/phase_R/valid/分脚 V/VT/Δ（Δ = VT − V，mm）；
-      png = 左右脚两个子图，逐帧未平滑 Δ=VT−V 原始曲线（带零线）+ 相位背景带。
-    """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    sys.path.insert(0, str(REPO / "z_note/HMR2.0/hmr2_gait"))
-    from anysole_tta.e6_phase_analysis import (DEFAULT_MODELS,
-                                                build_session_sets,
-                                                load_session)
-    from anysole_tta.phase_common import PHASE_NAMES
-    FPS = 40.0
-    out_root = ETEST / "E6_ContactPhaseAnalysis" / "detail"
-    phase_colors = {0: "#d9d9d9", 1: "#ffffff", 2: "#f4a582", 3: "#92c5de"}
-    header = ["frame", "time_s", "phase_L", "phase_R", "valid",
-              "V_left", "VT_left", "D_left", "V_right", "VT_right", "D_right"]
-    session_sets = build_session_sets()
-    cache = {}
-
-    def get_data(model, sid):
-        key = (model, sid)
-        if key not in cache:
-            cache[key] = load_session(model, sid)
-        return cache[key]
-
-    def phase_bands(ax, data, foot, t):
-        ph = data["phase"][:, 0 if foot == "left" else 1]
-        for k in range(4):
-            sel = ph == k
-            if sel.any():
-                boundaries = np.flatnonzero(np.diff(
-                    np.r_[False, sel, False].astype(np.int8)))
-                for start, stop in zip(boundaries[::2], boundaries[1::2]):
-                    ax.axvspan(t[start], t[stop - 1] + 1.0 / FPS,
-                               color=phase_colors[k], alpha=0.55, lw=0,
-                               label=PHASE_NAMES[k]
-                               if (start == boundaries[0] and foot == "left") else None)
-
-    def frame_rows(data, n):
-        rows = []
-        for i in range(n):
-            if not bool(data["valid"][i]):
-                rows.append([i, round(i / FPS, 3), "", "", "", "", "", "",
-                             "", "", ""])
-                continue
-            rows.append([
-                i, round(i / FPS, 3),
-                E6_PHASE_ZH[str(int(data["phase"][i, 0]))],
-                E6_PHASE_ZH[str(int(data["phase"][i, 1]))],
-                1,
-                round(float(data["V2M_left"][i]), 2),
-                round(float(data["VT2M_left"][i]), 2),
-                round(float(data["VT2M_left"][i] - data["V2M_left"][i]), 2),
-                round(float(data["V2M_right"][i]), 2),
-                round(float(data["VT2M_right"][i]), 2),
-                round(float(data["VT2M_right"][i] - data["V2M_right"][i]), 2),
-            ])
-        return rows
-
-    # 1) 每模型单文件夹
-    for model in DEFAULT_MODELS:
-        for action, sids in session_sets.items():
-            for sid in sids:
-                data = get_data(model, sid)
-                n = len(data["phase"])
-                out_dir = out_root / model / action
-                write_csv(out_dir / ("%s.csv" % sid), header, frame_rows(data, n))
-                t = np.arange(n) / FPS
-                fig, axes = plt.subplots(2, 1, figsize=(9, 4.6), sharex=True)
-                for ax, foot in zip(axes, ("left", "right")):
-                    phase_bands(ax, data, foot, t)
-                    d = data["VT2M_" + foot] - data["V2M_" + foot]
-                    ax.plot(t, d, color="#2a78d6", lw=0.8)
-                    ax.axhline(0, color="k", lw=0.6, ls="--")
-                    ax.set_ylabel("%s Δ = VT − V (mm)" % foot)
-                    ax.margins(y=0.1)
-                axes[-1].set_xlabel("time (s)")
-                handles, labels = axes[0].get_legend_handles_labels()
-                fig.legend(handles, labels, loc="lower center", ncol=6,
-                           fontsize=8, frameon=False)
-                fig.suptitle("%s %s raw per-foot Δ (no smoothing) - %s"
-                             % (model, sid, action), fontsize=11)
-                fig.tight_layout(rect=(0, 0.05, 1, 0.95))
-                fig.savefig(out_dir / ("%s.png" % sid), dpi=150)
-                plt.close(fig)
-
-    # 2) merged：三模型并列（宽表 CSV + 三曲线同图）
-    merged_header = ["frame", "time_s", "phase_L", "phase_R", "valid"]
-    for model in DEFAULT_MODELS:
-        short = display_name(model)
-        merged_header += ["%s_V_left" % short, "%s_VT_left" % short,
-                          "%s_D_left" % short, "%s_V_right" % short,
-                          "%s_VT_right" % short, "%s_D_right" % short]
-    for action, sids in session_sets.items():
-        for sid in sids:
-            datas = [get_data(model, sid) for model in DEFAULT_MODELS]
-            n = len(datas[0]["phase"])
-            t = np.arange(n) / FPS
-            rows = []
-            for i in range(n):
-                valid_all = all(bool(d["valid"][i]) for d in datas)
-                base = [i, round(i / FPS, 3),
-                        E6_PHASE_ZH[str(int(datas[0]["phase"][i, 0]))],
-                        E6_PHASE_ZH[str(int(datas[0]["phase"][i, 1]))],
-                        1 if valid_all else 0]
-                for d in datas:
-                    if not valid_all:
-                        base += ["", "", "", "", "", ""]
-                        continue
-                    base += [
-                        round(float(d["V2M_left"][i]), 2),
-                        round(float(d["VT2M_left"][i]), 2),
-                        round(float(d["VT2M_left"][i] - d["V2M_left"][i]), 2),
-                        round(float(d["V2M_right"][i]), 2),
-                        round(float(d["VT2M_right"][i]), 2),
-                        round(float(d["VT2M_right"][i] - d["V2M_right"][i]), 2),
-                    ]
-                rows.append(base)
-            out_dir = out_root / "merged" / action
-            write_csv(out_dir / ("%s.csv" % sid), merged_header, rows)
-            fig, axes = plt.subplots(2, 1, figsize=(9, 4.6), sharex=True)
-            for ax, foot in zip(axes, ("left", "right")):
-                phase_bands(ax, datas[0], foot, t)
-                for ci, (model, d) in enumerate(zip(DEFAULT_MODELS, datas)):
-                    delta = d["VT2M_" + foot] - d["V2M_" + foot]
-                    ax.plot(t, delta, color="C%d" % ci, lw=0.8,
-                            label=display_name(model))
-                ax.axhline(0, color="k", lw=0.6, ls="--")
-                ax.set_ylabel("%s Δ = VT − V (mm)" % foot)
-                ax.margins(y=0.1)
-            axes[-1].set_xlabel("time (s)")
-            handles, labels = axes[0].get_legend_handles_labels()
-            fig.legend(handles, labels, loc="lower center", ncol=6, fontsize=8,
-                       frameon=False)
-            fig.suptitle("%s merged raw per-foot Δ (no smoothing) - %s"
-                         % (sid, action), fontsize=11)
-            fig.tight_layout(rect=(0, 0.05, 1, 0.95))
-            fig.savefig(out_dir / ("%s.png" % sid), dpi=150)
-            plt.close(fig)
 
 def export_e6() -> None:
     src_dir = ETEST / "E6_ContactPhaseAnalysis"
@@ -735,18 +670,39 @@ def export_e6() -> None:
                     rows.append([group, model, foot, E6_PHASE_ZH[phase],
                                  round(v["V"], 3), round(v["VT"], 3), round(v["G"], 3)])
     write_csv(dst_dir / "Full_Table1_E6_PhaseGain.csv", header, rows)
-    for group in E6_GROUP_ORDER:
-        # 新驱动直写 Full_ 命名 PNG；旧命名（e6_phase_*.png）仅作兜底
-        src_png = dst_dir / ("Full_Fig%d_E6_Phase_%s.png"
-                             % (E6_ACTION_VALUES.index(group) + 1, group))
-        if not src_png.is_file():
-            src_png = src_dir / ("e6_phase_%s.png" % group)
-        if src_png.is_file():
-            dst_png = dst_dir / ("Full_Fig%d_E6_Phase_%s.png"
-                                 % (E6_ACTION_VALUES.index(group) + 1, group))
-            if src_png != dst_png:
-                shutil.copyfile(src_png, dst_png)
-                print("[png] %s" % dst_png)
+    # 新版口径（2026-10-31 用户裁定）：驱动直写逐会话 1×2 上下分布图
+    # Full_Fig_{action}_{sid}.png（上左脚/下右脚，分脚不合并不平均）；
+    # group_compare/{curves,scatter}/ 由 results_display/script/
+    # e6_group_compare.py 生成。旧合并双足命名
+    # （Full_FigN_E6_Phase_{group}.png / e6_phase_*.png）已废止，不再复制。
+    n_figs = len(list(dst_dir.glob("Full_Fig_*.png")))
+    print("[png] E6 per-session figures: %d (Full_Fig_{action}_{sid}.png)"
+          % n_figs)
+
+
+def _touch_gait_python() -> str:
+    """touch_gait 解释器（E6 明细图/teaser 子进程需要 cv2/torch；调用方可能
+    在 base 环境跑本导出脚本，子进程必须显式用 touch_gait python）。"""
+    import os
+    cand = Path.home() / "miniconda3/envs/touch_gait/bin/python"
+    if cand.is_file():
+        return str(cand)
+    prefix = os.environ.get("CONDA_PREFIX")
+    if prefix and Path(prefix).name == "touch_gait":
+        return str(Path(prefix) / "bin/python")
+    return sys.executable
+
+
+def export_e6_group_compare(models: list[str]) -> None:
+    """--detail（2026-10-31 用户裁定）：E6 明细对比图——group_compare/
+    {curves,scatter}/，逐会话 1×2 上下分布（上左脚/下右脚）、左右脚分开
+    不平滑。生成器 = results_display/script/e6_group_compare.py
+    （--models 缺省七模型；--actions 过滤动作）。"""
+    cmd = [_touch_gait_python(),
+           str(REPO / "results_display/script/e6_group_compare.py")]
+    if models:
+        cmd += ["--models", ",".join(models)]
+    subprocess.run(cmd, cwd=str(REPO), check=True)
 
 
 # ---------------- E7：动态输入（json + PNG） ----------------
@@ -782,16 +738,17 @@ def export_teasers(exp: str) -> None:
     """--teaser：E6/E7 teaser 图（anysole_tta/e_teaser.py，--count 按总时长
     1/N 间距抽取，偏航置零侧视）。需 touch_gait 环境。默认关闭。"""
     import subprocess
-    script = REPO / "z_note/HMR2.0/hmr2_gait/anysole_tta/e_teaser.py"
+    # HMR2.0 线已从 z_note/HMR2.0/hmr2_gait 迁到仓库根 anysole_tta/
+    # （2026-10-31 用户重组；e_teaser.py 现位于 REPO/anysole_tta/）。
+    script = REPO / "anysole_tta/e_teaser.py"
     cmds = []
     if exp in ("all", "e6"):
-        cmds.append([sys.executable, str(script), "--mode", "e6"])
+        cmds.append([_touch_gait_python(), str(script), "--mode", "e6"])
     if exp in ("all", "e7"):
-        cmds.append([sys.executable, str(script), "--mode", "e7"])
+        cmds.append([_touch_gait_python(), str(script), "--mode", "e7"])
     for cmd in cmds:
         print("[teaser]", " ".join(cmd))
-        subprocess.run(cmd, check=True,
-                       cwd=str(script.parents[1]))
+        subprocess.run(cmd, check=True, cwd=str(REPO))
     print("[teaser] done")
 
 
@@ -816,7 +773,8 @@ def main() -> int:
     ap.add_argument("--cell-map", type=Path, help="Explicit cell ID to native result JSON mapping")
     ap.add_argument("--strict", action="store_true", help="Fail rather than silently omit required results")
     ap.add_argument("--detail", action="store_true",
-                    help="E6 额外生成分脚、未平滑逐帧结果（detail/ 目录）")
+                    help="E6 生成明细对比图（group_compare/{curves,scatter}/："
+                         "逐会话 1×2 上下分布、左右脚分开不平滑）")
     ap.add_argument("--teaser", action="store_true",
                     help="E6/E7 生成可见人体 SMPL teaser 图（默认关闭；需 touch_gait）")
     args = ap.parse_args()
@@ -840,7 +798,7 @@ def main() -> int:
     if exp in ("all", "e6"):
         export_e6()
         if args.detail:
-            export_e6_detail()
+            export_e6_group_compare(models)
     if exp in ("all", "e7"):
         export_e7()
     if args.teaser:

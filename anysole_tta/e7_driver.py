@@ -8,10 +8,12 @@
   {model}_stat cell 逐帧预测（V2M/T2M/VT2M，ckpt_last）；Vi 阶段 =
   run_tta --v-only；ViT 阶段 = run_tta（CONFIG_VT）——均 --ckpt last、
   与 cell 口径一致。
-- 基线组合（外部基线，SMPL-24 GT 同口径）：V/Vi/ViT 暂无基线（表内「—」）；
-  T 阶段 = Step2Motion（smpl24 协议直出，2026-10-28 切换，与 MotionPRO
-  导出同构）；VT 阶段 = MotionPRO（smpl24 vs SMPL-24 GT）。标定多视角
-  基线 2026-10-28 用户裁定不接入。
+- 基线组合（外部基线，SMPL-24 GT 同口径）：V 阶段 = WHAM（smpl24 协议
+  直出，2026-10-30 接入）；T 阶段 = Step2Motion（smpl24 协议直出，
+  2026-10-28 切换，与 MotionPRO 导出同构）；VT 阶段 = MotionPRO
+  （smpl24 vs SMPL-24 GT）；Vi/ViT 阶段 = EasyMocap 标定多视角基线
+  （n=4 四相机，2026-10-30 用户裁定接入——多视角参考线，与 E3 表 4 线 1
+  同源，easymocap_baseline.py 缓存）。
 
 阶段划分 = 窗口对齐（stride20 窗口网格，与 run_tta --win-frac 选窗规则
 一致；阶段边界不落窗口中部，无缺口）。
@@ -57,6 +59,8 @@ TTA_DUMP_ROOT = RESULTS_ROOT / "predictions/e7_tta"
 SMPL_ANKLE_FOOT = (7, 8, 10, 11)
 S2M_ROOT = PROJECT_ROOT / "results/baselines/Step2Motion/predictions/gait_model_smpl24/eval_motion"
 MPRO_ROOT = PROJECT_ROOT / "results/baselines/MotionPRO/predictions/carpet_v2/eval_motion"
+WHAM_ROOT = PROJECT_ROOT / "results/baselines/WHAM/predictions/local_gen/eval_motion"
+EMC_ROOT = RESULTS_ROOT / "predictions/easymocap"   # EasyMocap n=4 四相机缓存
 
 
 def _display_to_native(points: np.ndarray) -> np.ndarray:
@@ -135,14 +139,29 @@ def _ankle_foot_mpjpe(pred: np.ndarray, sid: str, *, pelvis: tuple,
 
 
 def load_baseline_stage(stage: str, sid: str, n: int) -> tuple[np.ndarray, np.ndarray]:
-    """基线组合单阶段逐帧踝足 MPJPE（mm，各自协议 GT 口径）。
+    """基线组合单阶段逐帧踝足 MPJPE（mm，SMPL-24 GT 同口径）。
 
-    V/Vi/ViT 暂无基线 → 全 NaN；T = Step2Motion（smpl24 协议直出 vs
-    SMPL-24 GT，2026-10-28 切换后与 MotionPRO 同口径）；VT = MotionPRO
-    （smpl24 vs SMPL-24 GT，display→native 转换）。
+    V = WHAM（smpl24 协议直出，2026-10-30 接入）；T = Step2Motion
+    （smpl24 协议直出，2026-10-28 切换后与 MotionPRO 同口径）；
+    VT = MotionPRO（smpl24 vs SMPL-24 GT，display→native 转换）；
+    Vi/ViT = EasyMocap 标定多视角 n=4 四相机（2026-10-30 用户裁定接入；
+    缓存关节已为 native y-up 世界系，与 GT 同基，无需 display 转换）。
     """
-    if stage in ("V", "Vi", "ViT"):
-        return np.full(n, np.nan), np.zeros(n, dtype=bool)
+    if stage in ("Vi", "ViT"):
+        d = np.load(EMC_ROOT / f"{sid}_n4_1234.npz")
+        err = _ankle_foot_mpjpe(d["joints"], sid, pelvis=(1, 2), n=n)
+        vout = np.zeros(n, dtype=bool)
+        vout[:len(err)] = True
+        return err, vout
+    if stage == "V":
+        # WHAM：world_z_up 显示系 → native；同 MotionPRO 口径
+        d = np.load(WHAM_ROOT / f"{sid}.npz", allow_pickle=True)
+        joints = _display_to_native(d["joint_xyz_world"])   # (T,24,3) native
+        vmask = d["valid_mask"]
+        err = _ankle_foot_mpjpe(joints, sid, pelvis=(1, 2), n=n)
+        vout = np.zeros(n, dtype=bool)
+        vout[:len(err)] = vmask[:len(err)]
+        return err, vout
     if stage == "T":
         # Step2Motion 2026-10-28 已切 smpl24 协议直出（world_z_up/smpl24，
         # 与 MotionPRO 导出同构）；GT 同用 facts SMPL-24 FK
@@ -204,16 +223,17 @@ def render_figure(action: str, sids: list[str],
         st = stage_of_frame(np.arange(n), n)
         ax.set_xlim(0, t[-1])
         # 阶段带边界 = stage_of_frame 实际窗口边界（与曲线分段同源 → 严格对齐）；
-        # 带间留 1 帧缝使「分离的时间块」可读
+        # 带间留 1 帧缝使「分离的时间块」可读；带内短标（窄带可容纳），
+        # 全名走图例
         for si, stage in enumerate(STAGES):
             sel = np.flatnonzero(st == si)
-            # 带间留 1 帧缝（首带前/末带后不缩，贴住坐标轴）
             t0 = sel[0] / FPS + (0.5 / FPS if si else 0)
             t1 = (sel[-1] + 1) / FPS - (0.5 / FPS if si < len(STAGES) - 1 else 0)
-            ax.axvspan(t0, t1, color=stage_colors[stage], alpha=0.22, lw=0)
-            ax.text((t0 + t1) / 2, 0.97, stage_labels[stage],
+            ax.axvspan(t0, t1, color=stage_colors[stage], alpha=0.22, lw=0,
+                       label=stage_labels[stage])
+            ax.text((t0 + t1) / 2, 0.97, stage,
                     transform=ax.get_xaxis_transform(), ha="center", va="top",
-                    fontsize=6.5, color="#3c3b38",
+                    fontsize=7.5, fontweight="bold", color="#3c3b38",
                     path_effects=[pe.withStroke(linewidth=2.2,
                                                 foreground="white")])
         for ci, label in enumerate(curves[sid]):
@@ -237,7 +257,7 @@ def render_figure(action: str, sids: list[str],
     for ax in axes.flat[len(sids):]:
         ax.axis("off")
     handles, labels = axes.flat[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=6, fontsize=7)
+    fig.legend(handles, labels, loc="lower center", ncol=8, fontsize=7)
     fig.suptitle(f"E7 dynamic input availability — {action}", y=0.99)
     fig.tight_layout(rect=(0, 0.06, 1, 0.95))
     out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -352,9 +372,9 @@ def main():
             lines.append("| %s | %s |" % (sys_name, " | ".join(cells)))
 
     lines.append("")
-    lines.append("基线组合（外部基线，SMPL-24 GT 同口径）：V/Vi/ViT 暂无基线（—）；"
-                 "T=Step2Motion、VT=MotionPRO 均 smpl24 协议直出 vs SMPL-24 GT。"
-                 "阶段间对比以各系统自身协议 GT 为基准。\n")
+    lines.append("基线组合（外部基线，SMPL-24 GT 同口径）：V=WHAM、"
+                 "T=Step2Motion、VT=MotionPRO 均 smpl24 协议直出 vs SMPL-24 GT；"
+                 "Vi/ViT 暂无基线（—）。阶段间对比以各系统自身协议 GT 为基准。\n")
     (out_dir / "E7_动态输入重建.md").write_text(
         "\n".join(lines), encoding="utf-8")
     print("→", out_dir)

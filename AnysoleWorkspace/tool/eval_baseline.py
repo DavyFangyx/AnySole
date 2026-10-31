@@ -105,7 +105,7 @@ def eval_visual(args: argparse.Namespace) -> None:
     exportable = split_sessions(args.split)
     command = [TOUCH_GAIT, str(WORKSPACE / "tool/export_baseline_motion.py"),
                "--model", args.model, "--split", args.split, "--cam", str(args.cam),
-               "--package-root", str(WORKSPACE / "work" / "visual_baselines"),
+               "--package-root", str(WORKSPACE / "work" / "visual_baselines_local"),
                "--force"]
     run(command, cwd=ROOT)
     root = ROOT / "results" / "baselines" / {"wham": "WHAM", "sam3db": "SAM3DB",
@@ -130,7 +130,7 @@ def main() -> int:
     parser.add_argument("--female", default=FEMALES)
     parser.add_argument("--cam", type=int, choices=(1, 2, 3, 4), default=3,
                         help="camera manifest (visual baselines)")
-    parser.add_argument("--variant", default="package_export",
+    parser.add_argument("--variant", default="local_gen",
                         help="prediction variant subdir (visual baselines)")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()

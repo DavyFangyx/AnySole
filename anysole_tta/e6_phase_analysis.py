@@ -147,55 +147,55 @@ def render_table(agg: dict[str, dict[str, dict]]) -> str:
 
 
 def render_figure(action: str, sids: list[str], data: dict[str, dict[str, dict]],
-                  out_png: Path) -> None:
-    """每动作图：每会话一个子图，x=时间，y=G（双足均值），两模型曲线，
-    底部左右脚相位带。图内英文（项目口径）。"""
+                  out_dir: Path) -> None:
+    """每动作 × 每会话一张图（2026-10-31 用户裁定：1×2 上下分布，上=左脚、
+    下=右脚，左右脚分开不合并不平均）：每面板 x=时间、y=该脚 Δ = VT − V、
+    各模型曲线 + 该脚相位带。图内英文（项目口径）。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    ncols = 2
-    nrows = max(1, (len(sids) + 1) // 2)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 3.2 * nrows),
-                             squeeze=False)
+    n_models = len(next(iter(next(iter(data.values())).values())))
     phase_colors = {0: "#d9d9d9", 1: "#ffffff", 2: "#f4a582", 3: "#92c5de"}
-    for ax, sid in zip(axes.flat, sids):
+    for sid in sids:
+        fig, axes = plt.subplots(2, 1, figsize=(9, 7.2), sharex=True,
+                                 squeeze=True)
         d = data[sid]
         any_data = next(iter(d.values()))
         t = np.arange(len(any_data["phase"])) / FPS
-        ax.set_xlim(0, t[-1])
-        for band_idx, (ymin, ymax) in enumerate(((0.07, 0.14), (0.0, 0.07))):
-            ph = any_data["phase"][:, band_idx]
+        for foot_i, (ax, foot) in enumerate(zip(axes, ("left", "right"))):
+            ax.set_xlim(0, t[-1])
+            ph = any_data["phase"][:, foot_i]
             for k in range(4):
                 sel = ph == k
                 if sel.any():
                     boundaries = np.flatnonzero(np.diff(np.r_[False, sel, False].astype(np.int8)))
                     for number, (start, stop) in enumerate(zip(boundaries[::2], boundaries[1::2])):
-                        ax.axvspan(t[start], t[stop - 1] + 1.0 / FPS, ymin=ymin, ymax=ymax,
+                        ax.axvspan(t[start], t[stop - 1] + 1.0 / FPS, ymin=0.0, ymax=0.08,
                                    color=phase_colors[k], alpha=0.6, lw=0,
-                                   label=PHASE_NAMES[k] if band_idx == 0 and number == 0 else None)
-        for mi, (model, mdata) in enumerate(d.items()):
-            v = (mdata[f"V2M_left"] + mdata[f"V2M_right"]) / 2
-            vt = (mdata[f"VT2M_left"] + mdata[f"VT2M_right"]) / 2
-            g = vt - v
-            w = 20
-            sma = np.convolve(g, np.ones(w) / w, mode="same")
-            ax.plot(t, g, color=f"C{mi}", alpha=0.25, lw=0.8)
-            ax.plot(t, sma, color=f"C{mi}", lw=1.6, label=model)
-        ax.axhline(0, color="k", lw=0.6, ls="--")
-        ax.set_title(sid)
-        ax.set_xlabel("time (s)")
-        ax.set_ylabel("Δ = VT - V (mm)")
-        ax.set_ylim(-60, 60)
-    for ax in axes.flat[len(sids):]:
-        ax.axis("off")
-    handles, labels = axes.flat[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=5, fontsize=8)
-    fig.suptitle(f"E6 tactile gain by contact phase — {action}", y=0.99)
-    fig.tight_layout(rect=(0, 0.06, 1, 0.95))
-    out_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_png, dpi=150)
-    plt.close(fig)
+                                   label=PHASE_NAMES[k] if number == 0 else None)
+            for mi, (model, mdata) in enumerate(d.items()):
+                g = mdata[f"VT2M_{foot}"] - mdata[f"V2M_{foot}"]
+                w = 20
+                sma = np.convolve(np.nan_to_num(g), np.ones(w) / w, mode="same")
+                ax.plot(t, g, color=f"C{mi}", alpha=0.25, lw=0.8)
+                ax.plot(t, sma, color=f"C{mi}", lw=1.6,
+                        label=model if foot_i == 0 else None)
+            ax.axhline(0, color="k", lw=0.6, ls="--")
+            ax.set_title("%s foot" % foot, fontsize=10)
+            ax.set_ylabel("Δ = VT - V (mm)")
+            ax.set_ylim(-60, 60)
+        axes[-1].set_xlabel("time (s)")
+        handles, labels = axes[0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc="lower center", ncol=min(7, n_models),
+                   fontsize=8, frameon=False)
+        fig.suptitle(f"E6 tactile gain by contact phase — {action} — {sid}",
+                     y=0.99)
+        fig.tight_layout(rect=(0, 0.05, 1, 0.96))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_dir / f"Full_Fig_{action}_{sid}.png", dpi=150)
+        plt.close(fig)
+
 
 
 def main():
@@ -256,10 +256,7 @@ def main():
                for model in models}
         table[action] = {"sessions": sids, "table": agg}
         if not args.no_figure:
-            fig_no = list(ACTION_GROUPS.values()).index(action) + 1
-            render_figure(action, sids, data,
-                          Path(args.out_dir) /
-                          f"Full_Fig{fig_no}_E6_Phase_{action}.png")
+            render_figure(action, sids, data, Path(args.out_dir))
         print(f"[{action}] sessions={len(sids)}")
         for model in models:
             for foot in ("left", "right"):

@@ -22,11 +22,17 @@
 ```bash
 conda activate touch_gait
 # 单独生成：--models 顶层选中（anysole + 各基线名）、--model-name 选主模型
+python results_display/script/r_test1_visualize.py \
+  --model-name V7_Cv5 \
+  --models anysole \
+  --contact-method f6_soft_time_accel_state_smpl24_v1 \
+  --split test --gen gif
 
 # ① 选定主模型 + 全部基线（缺省主模型 V3_Bv1、基线全部）
 python results_display/script/r_test1_visualize.py --model-name V3_4b --models anysole,motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion
 # ② 只要基线（不要主模型）
 python results_display/script/r_test1_visualize.py --models motionpro,mmvp_pressure_toolkit,mmvp_vp-mocap,step2motion --session S13011
+python results_display/script/r_test1_visualize.py --models step2motion --split test
 # ③ 缺省 = 主模型 V3_Bv1 + 全部基线
 python results_display/script/r_test1_visualize.py --session S13011
 

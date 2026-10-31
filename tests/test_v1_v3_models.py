@@ -115,7 +115,7 @@ class NewModelTests(unittest.TestCase):
     def test_missing_inputs_do_not_leak_and_all_gradients_are_finite(self):
         data = batch()
         for name in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv6", "V7_Cv7",
-                     "V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR"):
+                     "V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR", "V7_Cv5Q"):
             model = build(name)
             for mode, keys in ((CONFIG_V, ("T_raw", "T_phys")), (CONFIG_T, ("V_feat",))):
                 changed = dict(data)
@@ -132,7 +132,7 @@ class NewModelTests(unittest.TestCase):
     def test_checkpoint_reload_preserves_each_new_structure(self):
         data = batch()
         for name in ("V7_Cv1", "V7_Cv2", "V7_Cv3", "V7_Cv6", "V7_Cv7",
-                     "V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR"):
+                     "V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR", "V7_Cv5Q"):
             model = build(name)
             stream = io.BytesIO()
             torch.save({"model": model.state_dict(), "config": config(name), "epoch": 1}, stream)
@@ -244,10 +244,47 @@ class NewModelTests(unittest.TestCase):
         # 扰动左门后模型输出变化（门实际参与调制）。
         self.assertGreater((after["x0_hat"] - before["x0_hat"]).abs().max().item(), 0.)
 
+    def test_q_conditional_gate_reads_first_layer_context(self):
+        # Q = TLR 结构（同参数集合、同初始化），门输入改为第一层解码上下文：
+        # 与 TLR 的 token 门不同值、形状/组广播不变、梯度经上下文回传。
+        tlr, q = build("V7_Cv5TLR"), build("V7_Cv5Q")
+        self.assertEqual(set(tlr.state_dict()), set(q.state_dict()))
+        for key in tlr.state_dict():
+            torch.testing.assert_close(tlr.state_dict()[key], q.state_dict()[key], rtol=0, atol=0)
+        data = batch()
+        with torch.no_grad():
+            x, y = forward(tlr, data, 0), forward(q, data, 0)
+        self.assertEqual(tuple(y["route_gate"].shape), (2, 4, 10, 1))
+        # 门值不同（条件输入 ≠ token 输入）但组广播结构一致。
+        self.assertGreater((x["route_gate"] - y["route_gate"]).abs().max().item(), 0.)
+        self.assertGreater(
+            (y["route_gate"][:, 1:, 0, 0] - y["route_gate"][:, :1, 0, 0]).abs().max().item(), 0.)
+        self.assertEqual(
+            (y["route_gate"][:, :, 1:6, 0] - y["route_gate"][:, :, 1:2, 0]).abs().max().item(), 0.)
+        self.assertEqual(
+            (y["route_gate"][:, :, 6:7, 0] - y["route_gate"][:, :, 8:9, 0]).abs().max().item(), 0.)
+        # 梯度经第一层上下文回传到门 MLP（有效条件下有限非零）。
+        q.zero_grad(set_to_none=True)
+        out = forward(q, data, 0)
+        (out["x0_hat"].square().mean() + out["v_hat"].square().mean()).backward()
+        for pname in ("route_mlp", "route_root_mlp", "route_left_mlp", "route_right_mlp"):
+            for p in getattr(q, pname).parameters():
+                self.assertIsNotNone(p.grad)
+                self.assertTrue(torch.isfinite(p.grad).all())
+                self.assertGreater(p.grad.abs().sum().item(), 0.)
+        # gate_override 干预钩子：替换解码器门改变输出（§7 诊断用）。
+        with torch.no_grad():
+            ref = forward(q, data, 0)
+            gate0 = ref["route_gate"].clone()
+            gate0[..., 1:6, :] = 0.0   # 关掉 other 组（query 1-5）
+            z = q(data["V_feat"], data["T_raw"], data["T_phys"],
+                  torch.zeros(2, dtype=torch.long), gate_override=gate0)
+        self.assertGreater((z["x0_hat"] - ref["x0_hat"]).abs().max().item(), 0.)
+
 
 class EnumerationTests(unittest.TestCase):
     def test_streamed_enum_matches_weighted_objective_and_gradients(self):
-        for name in ("V7_Cv4", "V7_Cv7", "V7_Cv5TLR"):
+        for name in ("V7_Cv4", "V7_Cv7", "V7_Cv5TLR", "V7_Cv5Q"):
             model = build(name)
             reference = copy.deepcopy(model)
             data = batch()
@@ -289,12 +326,13 @@ class EnumerationTests(unittest.TestCase):
         # Cv5_s1 实际运行记录逐项一致（contact v1 / v1.yaml / 三条件枚举 /
         # ckpt_last / 740ep；条目定义见 z_gen/model_registry 同名块）。
         enum = {"V7_Cv4_s1", "V7_Cv5_s1", "V7_Cv7_s1",
-                "V7_Cv5T_s1", "V7_Cv5LR_s1", "V7_Cv5TLR_s1"}
+                "V7_Cv5T_s1", "V7_Cv5LR_s1", "V7_Cv5TLR_s1", "V7_Cv5Q_s1"}
         # Cv6 = 双门 + 始终 VT（无模态缺失训练，消融组 2026-10-26）。
         probs = {"V7_Cv6_s1": [1.0, 0.0, 0.0]}
         for name in ("V7_Cv1_s1", "V7_Cv2_s1", "V7_Cv3_s1", "V7_Cv4_s1",
                      "V7_Cv5_s1", "V7_Cv6_s1", "V7_Cv7_s1",
-                     "V7_Cv5T_s1", "V7_Cv5LR_s1", "V7_Cv5TLR_s1"):
+                     "V7_Cv5T_s1", "V7_Cv5LR_s1", "V7_Cv5TLR_s1",
+                     "V7_Cv5Q_s1"):
             spec = registry["models"][name]
             args = parse_args(_train_command(registry, name)[3:])
             self.assertEqual(args.config_probs, probs.get(name, [.5, .25, .25]))
@@ -313,7 +351,10 @@ class EnumerationTests(unittest.TestCase):
         for variant, extra in (("V7_Cv5T", {"v7_route_temporal": True}),
                                ("V7_Cv5LR", {"v7_route_parts": True}),
                                ("V7_Cv5TLR", {"v7_route_temporal": True,
-                                              "v7_route_parts": True})):
+                                              "v7_route_parts": True}),
+                               ("V7_Cv5Q", {"v7_route_temporal": True,
+                                            "v7_route_parts": True,
+                                            "v7_route_conditional": True})):
             struct = dict(get_builder(variant).STRUCTURE)
             self.assertEqual({**base_struct, **extra}, struct)
 

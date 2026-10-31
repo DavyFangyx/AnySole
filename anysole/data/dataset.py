@@ -220,6 +220,7 @@ class AnySoleDataset(Dataset):
         d8_heads: bool = False,
         occ_mix: Optional[dict] = None,
         t_phys_v2: bool = False,
+        tactile_aug: Optional[dict] = None,
         smpl_support_policy: str = "legacy_clip",
     ):
         self.mode = mode
@@ -271,6 +272,12 @@ class AnySoleDataset(Dataset):
         # （None = 现行为逐位不变）。启用后逐会话装载 occ010 双缓存、
         # __getitem__ 采样窗源并挂标签（occ_src/occ_v_zeroed/occ_t_zeroed）。
         self.occ_sampler = OccMixSampler(**occ_mix) if occ_mix else None
+        # 阶段 3 触觉泛化增强（2026-10-31，E6 门控重设计）：训练侧 T_raw
+        # 数据增强，默认关（None = 现行为逐位不变）。只在 mode=="train"
+        # 生效，eval/val/test 逐位不变。键：
+        #   gain_range [lo, hi] / bias_frac —— G-b 鞋垫增益偏置（每窗每足）
+        #   frame_dropout p —— G-c 整帧 T token 置零
+        self.tactile_aug = dict(tactile_aug) if tactile_aug else None
 
         if session_ids is None:
             column = {"train": "train", "eval": "val", "val": "val", "test": "test"}[mode]
@@ -537,6 +544,36 @@ class AnySoleDataset(Dataset):
     def __len__(self) -> int:
         return len(self.valid_windows)
 
+    def _augment_tactile(self, t_raw: torch.Tensor, t_phys: torch.Tensor):
+        """阶段 3 触觉泛化增强（G-b 增益偏置 / G-c 整帧 dropout）。
+
+        T_raw 布局 = [左足 48, 右足 48]（normalize_raw 后 ∈ [0,1]）；T_phys
+        布局 = [左足 6, 右足 6]。G-b 每窗每足独立增益 [lo,hi] + 偏置 ±bias
+        （模拟跨受试者标定漂移），只作用于原始压力格，不碰 T_phys。G-c 以
+        p 逐帧整帧置零 T_raw 与 T_phys（模拟该帧触觉失效）。仅在训练时调用。
+        """
+        aug = self.tactile_aug
+        if aug is None or self.mode != "train":
+            return t_raw, t_phys
+        # G-b：每窗每足独立增益 + 偏置
+        gain_range = aug.get("gain_range")
+        if gain_range:
+            lo, hi = float(gain_range[0]), float(gain_range[1])
+            bias_frac = float(aug.get("bias_frac", 0.05))
+            out = t_raw.clone()
+            for foot in (slice(0, 48), slice(48, 96)):
+                gain = out.new_empty(1).uniform_(lo, hi)
+                bias = out.new_empty(1).uniform_(-bias_frac, bias_frac)
+                out[:, foot] = (out[:, foot] * gain + bias).clamp_(0.0, 1.0)
+            t_raw = out
+        # G-c：整帧 dropout（T token 置零 → 编码器输出该帧触觉缺失）
+        p = float(aug.get("frame_dropout", 0.0))
+        if p > 0.0:
+            mask = (t_raw.new_empty(t_raw.shape[0], 1).uniform_() >= p).to(t_raw.dtype)
+            t_raw = t_raw * mask
+            t_phys = t_phys * mask
+        return t_raw, t_phys
+
     def __getitem__(self, idx: int) -> dict:
         file_index, left, right = self.valid_windows[idx]
         session = self.sessions[file_index]
@@ -568,6 +605,10 @@ class AnySoleDataset(Dataset):
             "session_id": session["session_id"],
             "frame_start": torch.tensor(left, dtype=torch.long),
         }
+        # 阶段 3 触觉泛化增强（训练侧；eval/val 逐位不变）。
+        if self.tactile_aug is not None:
+            item["T_raw"], item["T_phys"] = self._augment_tactile(
+                item["T_raw"], item["T_phys"])
         if aug is not None:
             item.update(aug.batch_fields())
         if self.v_input == "hmr_gvhmr":

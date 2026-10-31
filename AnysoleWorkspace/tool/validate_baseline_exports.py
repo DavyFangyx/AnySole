@@ -22,9 +22,9 @@ MODELS = {
     "pressure_toolkit": {"root": "baselines/pressure_toolkit", "kind": "motion", "subdir": "predictions/eval_motion"},
     "vp_mocap": {"root": "baselines/VP-MoCap", "kind": "motion", "subdir": "predictions/eval_motion"},
     "fpp_v2t": {"root": "baselines/FPP-Net", "kind": "v2t", "subdir": "predictions/v2t"},
-    "wham": {"root": "baselines/WHAM", "kind": "motion", "subdir": "predictions/package_export/eval_motion"},
-    "sam3db": {"root": "baselines/SAM3DB", "kind": "motion", "subdir": "predictions/package_export/eval_motion"},
-    "gvhmr": {"root": "baselines/GVHMR", "kind": "motion", "subdir": "predictions/package_export/eval_motion"},
+    "wham": {"root": "baselines/WHAM", "kind": "motion", "subdir": "predictions/local_gen/eval_motion"},
+    "sam3db": {"root": "baselines/SAM3DB", "kind": "motion", "subdir": "predictions/local_gen/eval_motion"},
+    "gvhmr": {"root": "baselines/GVHMR", "kind": "motion", "subdir": "predictions/local_gen/eval_motion"},
 }
 
 

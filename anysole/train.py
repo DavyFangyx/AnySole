@@ -689,6 +689,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="维度 2：T_phys 12→20 维显式物理特征（着地几何+双足关系）")
     parser.add_argument("--d8-heads", action="store_true", default=None,
                         help="维度 3：足-地监督三头（tcop 自重建 + 着地模式 + GT CoP）")
+    parser.add_argument("--tactile-gainbias", action="store_true",
+                        help="阶段 3 G-b：训练侧鞋垫增益偏置增强（每窗每足 gain[0.7,1.3] + bias±5%，"
+                             "默认关）。")
+    parser.add_argument("--tactile-frame-dropout", type=float, default=None, metavar="P",
+                        help="阶段 3 G-c：训练侧整帧 T token dropout 概率 p（默认关；建议 0.2）。")
     parser.add_argument("--p-occ", type=float, default=None, metavar="P",
                         help="V6_Av1 occ_mix: P(occ010 source window) (default 0.2).")
     parser.add_argument("--p-nullv", type=float, default=None, metavar="P",
@@ -1455,6 +1460,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             "p_nullV": float(config.get("p_nullV", 0.1)),
             "p_T": float(config.get("p_nullT", 0.1)),
         }
+    # 阶段 3 触觉泛化增强（2026-10-31）：训练侧 T_raw 增强，默认关。
+    # tactile_aug dict 直接传给 AnySoleDataset（train 侧），val/eval 不传。
+    tactile_aug_kwargs = None
+    if args.tactile_gainbias:
+        tactile_aug_kwargs = dict(tactile_aug_kwargs or {},
+                                  gain_range=[0.7, 1.3], bias_frac=0.05)
+    if getattr(args, "tactile_frame_dropout", None) is not None:
+        tactile_aug_kwargs = dict(tactile_aug_kwargs or {},
+                                  frame_dropout=float(args.tactile_frame_dropout))
     config["motion_protocol"] = MOTION_PROTOCOL
     config["motion_n_joints"] = int(N_JOINTS)
     config["motion_pose_dim"] = int(POSE_DIM)
@@ -1484,6 +1498,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             occ_mix=occ_mix_kwargs,
             t_phys_v2=bool(config.get("t_phys_v2", False)),
             d8_heads=bool(config.get("d8_heads", False)),
+            tactile_aug=tactile_aug_kwargs,
             smpl_support_policy=str(config.get("smpl_support_policy", "exclude")),
         )
     except FileNotFoundError as exc:

@@ -74,7 +74,8 @@ def main() -> int:
     import os as _os
     _os.environ.update(runtime_environment(args.gpu))
     from SAM3DB.runtime import Engine
-    engine = Engine(device=f"cuda:{args.gpu}")
+    # runtime_environment 已把 CUDA_VISIBLE_DEVICES 隔离为单卡，设备号恒为 0。
+    engine = Engine(device="cuda:0")
     try:
         array_lists = {"frame": [], "bbox_xyxy": [], "global_orient": [], "body_pose": [],
                        "betas": [], "camera_translation": [], "focal_length": [],

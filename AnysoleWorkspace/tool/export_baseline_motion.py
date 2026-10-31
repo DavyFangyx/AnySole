@@ -436,14 +436,14 @@ def main() -> None:
     parser.add_argument("--pressure-root", default="work://pressure_toolkit/fitting")
     parser.add_argument("--female", "--famale", dest="female", default="S14")
     # 决策 11（2026-10-29）：视觉基线导出参数（包根 / 相机 / 变体目录）。
-    # 决策 11 收口（2026-10-30）：默认指向项目工作区镜像（包删除后照常）；
-    # Vision_Baseline 仅为传输期临时位置，不再作为默认。
+    # 决策 11 收口（2026-10-31）：传输包预测已删，默认指向本地生成镜像
+    # （generate.py 缺省落盘区，变体 local_gen）。
     parser.add_argument("--package-root",
-                        default=str(ROOT / "AnysoleWorkspace" / "work" / "visual_baselines"),
+                        default=str(ROOT / "AnysoleWorkspace" / "work" / "visual_baselines_local"),
                         help="consolidated native prediction root")
     parser.add_argument("--cam", type=int, choices=(1, 2, 3, 4), default=3,
                         help="camera manifest to export (cam3 = main manifest)")
-    parser.add_argument("--variant", default="package_export",
+    parser.add_argument("--variant", default="local_gen",
                         help="prediction variant subdir (visual baselines only)")
     parser.add_argument("--unit-manifest", default="",
                         help="override path to the package per-unit manifest.jsonl (visual baselines)")

@@ -79,6 +79,9 @@ TRAIN_ARG_FLAG_MAP = {
     "occ_a3_monitor": "--occ-a3-monitor",
     "t_phys_v2": "--t-phys-v2",
     "d8_heads": "--d8-heads",
+    # 阶段 3 触觉泛化增强（2026-10-31，E6 门控重设计）：训练侧 T_raw 增强。
+    "tactile_gainbias": "--tactile-gainbias",
+    "tactile_frame_dropout": "--tactile-frame-dropout",
     "lambda_tcop": "--lambda-tcop",
     "lambda_strike": "--lambda-strike",
     "lambda_gtcop": "--lambda-gtcop",
@@ -106,7 +109,7 @@ TRAIN_ARG_FLAG_MAP = {
     "wandb_eval_interval": "--wandb_eval_interval",
 }
 TRAIN_STORE_TRUE = {"assign_cluster", "occ_mix", "occ_a3_monitor",
-                    "t_phys_v2", "d8_heads", "checkpoint_all"}
+                    "t_phys_v2", "d8_heads", "checkpoint_all", "tactile_gainbias"}
 
 
 def _parse_value(raw: str) -> Any:

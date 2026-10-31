@@ -122,7 +122,7 @@ python configs/z_gen/gen.py <条目> --models a,b --concat-method f6_soft
 # ---- 队列运维 ----
 
 # 启动 worker（每卡可多个，重复执行 = 追加）
-CUDA_VISIBLE_DEVICES=5 bash configs/bg.sh
+CUDA_VISIBLE_DEVICES=6 bash configs/bg.sh
 
 # 看队列状态
 python configs/tools/status.py

@@ -640,11 +640,30 @@ for _kind in ("tafix", "statefix"):
                       for o in ("010", "020", "030", "050")],
         "REQUIRES": []}
 
-# V7 C 门控修改方案（2026-10-30）：T/LR/TLR 训练格与 occ 四档交叉评估格。
-# 首轮只发 s1；s2/s3 按方案 §8.4 于 val 确认后补发（条目已注册）。
-_V7_GATE_BASES = ("V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR")
+# V7 C 门控修改方案（2026-10-30）：T/LR/TLR 训练格与 occ 四档交叉评估格；
+# Q（§6，2026-10-31）同格注册。首轮只发 s1；s2/s3 按方案 §8.4 于 val
+# 确认后补发（条目已注册）。
+_V7_GATE_BASES = ("V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR", "V7_Cv5Q")
 EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
     x + s for x in _V7_GATE_BASES for s in ("_s1", "_s2", "_s3")]
 EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
     x + s + "_evalocc" + o for x in _V7_GATE_BASES
     for s in ("_s1", "_s2", "_s3") for o in ("010", "020", "030", "050")]
+EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
+    "V3_Bv1" + s for s in ("_s1", "_s2", "_s3")]
+# 阶段 3 触觉泛化（2026-10-31，E6 门控重设计）：G-b 增益偏置 / G-c token
+# dropout，首轮只发 s1。evalocc 交叉评估格同 v7_train 门控组。
+_V7_TACTILE_BASES = ("V7_Cv7_gb", "V7_Cv7_gc")
+EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
+    x + s for x in _V7_TACTILE_BASES for s in ("_s1",)]
+EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
+    x + s + "_evalocc" + o for x in _V7_TACTILE_BASES
+    for s in ("_s1",) for o in ("010", "020", "030", "050")]
+# 阶段 2 受试者交叉泛化（2026-10-31，E6 门控重设计配套）：V7_Cv7 leave-
+# subjects-out 4 折（splits_test_*.csv），首轮只发 s1。fold 条目见
+# model_registry.py 同名块；每 fold 专属 config = v1_fold_<testSubjects>.yaml。
+_V7_CROSSFIT_BASES = ("V7_Cv7_fS5S6S11", "V7_Cv7_fS5S11S12",
+                      "V7_Cv7_fS6S7S13", "V7_Cv7_fS5S6S8")
+EXPERIMENTS["v7_crossfit"] = {"KIND": "model_suite",
+    "MODEL_IDS": [x + "_s1" for x in _V7_CROSSFIT_BASES],
+    "REQUIRES": []}

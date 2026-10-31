@@ -87,6 +87,11 @@ def load_unit(package_root: str | Path, baseline: str, date: str, session: str, 
     """
     manifest = Path(manifest_override) if manifest_override else (
         Path(package_root) / "reference_results" / "3_Result" / f"{baseline}_baseline" / ".run" / "manifest.jsonl")
+    if manifest_override is None and not manifest.is_file():
+        # 单元清单为三基线共用主清单，只存一份于 SAM3DB_baseline/.run/。
+        master = Path(package_root) / "reference_results" / "3_Result" / "SAM3DB_baseline" / ".run" / "manifest.jsonl"
+        if master.is_file():
+            manifest = master
     unit_id = f"{date}/method_1_offset/{session}/camera_{cam}"
     with manifest.open(encoding="utf-8") as handle:
         for line in handle:

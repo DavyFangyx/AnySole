@@ -76,7 +76,8 @@ class TTAFrameSet:
     def __init__(self, model, tokens: torch.Tensor, init_theta: dict,
                  det2d: torch.Tensor, centers: np.ndarray, patch_ws: np.ndarray,
                  lambda_theta: float = 1.0, lambda_beta: float = 1.0,
-                 lambda_mesh: float = 1.0, lambda_reg: float = 1e-2):
+                 lambda_mesh: float = 1.0, lambda_2d: float = 0.3,
+                 lambda_reg: float = 1e-2):
         """无标定（用户裁定：TTA 本体即无标定方法）。tokens (V,1024)；
         init_theta = {pose_6d (V,144), betas (V,10), cam (V,3)}；det2d
         (V,44,3) 归一化 crop 坐标 + conf（Halpe-26 映射子集 conf>0，其余 0）。
@@ -91,6 +92,7 @@ class TTAFrameSet:
                                  batch_size=1, num_betas=10).to(tokens.device)
         self.l_theta, self.l_beta, self.l_mesh, self.l_reg = (
             lambda_theta, lambda_beta, lambda_mesh, lambda_reg)
+        self.l_2d = lambda_2d  # 论文附录 λ2d=0.3（同一归一化 crop 坐标空间）
         v = len(tokens)
         dev = tokens.device
         self.tokens = tokens.detach().clone().requires_grad_(True)
@@ -166,7 +168,7 @@ class TTAFrameSet:
         lreg = ((pose_i - self.init["pose_6d"]).pow(2).mean() +
                 (betas_i - self.init["betas"]).pow(2).mean() +
                 (cam_i - self.init["cam"]).pow(2).mean())
-        return l2d + lcon + self.l_reg * lreg, (l2d, lcon, lreg)
+        return self.l_2d * l2d + lcon + self.l_reg * lreg, (l2d, lcon, lreg)
 
     def optimize(self, steps: int = 200, lr: float = 0.1, warmup: int = 20,
                  clip: float = 0.1):

@@ -35,6 +35,25 @@
   python anysole_tta/run_tta.py --model V7_Cv5 --wins 10,11 --dump-kp /tmp/tta_kp  # E7
 输出：results/baselines/HMR2.0/metrics/anysole_tta_stage1_{model}_{split}_lr{lr}.json
 
+E3 四条对比线（2026-10-31 用户裁定；朴素晚融合不作数）：
+- 标定多视角（参考上限）= EasyMocap：anysole_tta/easymocap_baseline.py
+  （RTMPose 检测 + 真值外参三角化 + SMPL 拟合；产物 predictions/easymocap/
+  {sid}_n{n}_{camstr}.npz，表填数走 e_results_export.py --experiment E3）
+- TTA 原方法 = HMR 2.0（hmr2_tta/eval/，论文口径）
+- AnySole TTA = 本驱动（V7_Cv5，无标定纯视觉）
+- AnySole TTA wLcon = 接触约束（本驱动 --contact：输入 VT + L_contact =
+  Σ_t Σ_r ĉ_{t,r}·(y_t[j_r] − h)²；ĉ = 各视角接触概率均值
+  （sigmoid(contact_logits)），j_r = SMPL-24 足关节 10/11，h = 共享地面
+  高度叶子，与相机叶子一同优化；--lcontact 手动可配）
+
+各实验组实际配置表（2026-10-31 用户裁定；CLI 露出项手动可配、以赋值为准，
+代码固定项在此登记）：
+
+| 实验组 | 入口 | 步数 | 叶子 lr | warm-up | 梯度裁剪 | λ2d | λcon | λreg |
+|---|---|---|---|---|---|---|---|---|
+| AnySole TTA | anysole_tta/run_tta.py（--steps/--lr/--warmup/--clip 手动可配） | 200 | 0.01 | 20 | 0.1 | 3e-6（px²，固定） | 1.0（rad²，固定） | 1e-2（固定） |
+| TTA 原方法 | hmr2_tta/eval/（不开放给本入口配置） | 200 | 0.1 | 20 | 0.1 | 0.3（归一化） | θ/β/mesh 分项各 1.0 | 1e-2 |
+
 模型表（TTA 驱动接入，2026-10-27）：
 - V3_Bv1：叶子 = h（pose head 部位表示，h_override 注入，model_v2）
 - V7_Cv1..Cv5：叶子 = z（V7MotionHead decoder 输出 = 根+9 部位 query，
@@ -88,12 +107,8 @@ H26_ORDER = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19,
              0, 20, 21, 22, 23, 24, 25]
 CONF_THR = 0.5
 IMG_W, IMG_H = 1624.0, 1240.0
-# 损失尺度审计（2026-10-26，S12011 首窗 init）：
-#   L_2D（px²）：val ≈ 5500（RMS≈74px）；‖∂l2d/∂h‖ ≈ 226（λ=1 时）
-#   L_con（rad²）：val ≈ 0.019（RMS 元素 ≈ 0.14 ≈ 8°）；‖∂lcon/∂h‖ ≈ 6.5e-4
-# 平衡（值与梯度同比）：λ2d·5500 ≈ 0.019 → λ2d ≈ 3.5e-6；λ2d·226 ≈ 6.5e-4
-#   → λ2d ≈ 2.9e-6。取 λ2d = 3e-6（px²）、λcon = 1.0（rad²）。
-# L_reg 为锚定项（init 梯度为零，随优化增长），λreg = 1e-2 按保护角色设。
+# 各实验组实际配置表见文首 docstring（2026-10-31 用户裁定）；
+# λ2d 3e-6 的推导审计见 z_note/评估/实验报告_V3_3B_TTA.md。
 LAMBDA_2D, LAMBDA_CON, LAMBDA_REG = 3e-6, 1.0, 1e-2
 RECORD_STEPS = (0, 30, 50, 100, 150, 200)
 VAL_SESSIONS = ["S12011", "S12012", "S12013", "S12021", "S12042", "S12061",
@@ -273,7 +288,8 @@ def load_detector(sid: str, cam: int) -> tuple[np.ndarray, np.ndarray]:
 def run_session(model, smpl_layer, leaf, sid, n_windows, steps, warmup, clip, lr,
                 grad_diag, device, wins=None, dump_dir=None,
                 config_value=CONFIG_V, win_frac=None, contact_method="f6_soft",
-                cams=(1, 2, 3, 4), calib: bool = False):
+                cams=(1, 2, 3, 4), calib: bool = False,
+                contact: bool = False, lcontact: float = 1.0):
     from anysole.data.dataset import AnySoleDataset, collate_windows
     from anysole.train import condition_inputs, move_batch
     from anysole.utils.geometry import fk_pose6d, rot6d_to_rotmat
@@ -389,6 +405,7 @@ def run_session(model, smpl_layer, leaf, sid, n_windows, steps, warmup, clip, lr
         # 逐视角弱透视相机 init（无标定：仅模型自身 init 3D ↔ 检测 2D 的
         # PnP 式最小二乘，零外部标定）
         camR0, camS0, camT0 = [], [], []
+        feet_y0 = []
         for i in range(len(cams)):
             rots_i = rot6d_to_rotmat(poses0[i].reshape(-1, 24, 6))
             so = smpl_layer(global_orient=rots_i[:, :1], body_pose=rots_i[:, 1:],
@@ -403,6 +420,8 @@ def run_session(model, smpl_layer, leaf, sid, n_windows, steps, warmup, clip, lr
             camR0.append(torch.from_numpy(r6).float().to(device))
             camS0.append(torch.from_numpy(s_).float().to(device))
             camT0.append(torch.from_numpy(t_).float().to(device))
+            if contact:
+                feet_y0.append(so.joints[:, [10, 11], 1].detach())  # (tw,2)
 
         # 优化
         leaves = [h.reshape(-1, h.shape[-1]).clone().requires_grad_(True)
@@ -411,7 +430,13 @@ def run_session(model, smpl_layer, leaf, sid, n_windows, steps, warmup, clip, lr
         camS = [s.clone().requires_grad_(True) for s in camS0]
         camT = [t.clone().requires_grad_(True) for t in camT0]
         beta = torch.zeros(10, device=device, requires_grad=True)   # 共享形状叶子
-        opt = torch.optim.Adam(leaves + camR + camS + camT + [beta], lr=lr)
+        h = None
+        h0 = None
+        if contact:
+            h0 = torch.cat(feet_y0, 0).mean().detach()      # 共享地面高度初值
+            h = h0.clone().requires_grad_(True)
+        opt = torch.optim.Adam(leaves + camR + camS + camT + [beta]
+                               + ([h] if contact else []), lr=lr)
 
         def forward_step(i, cam, leaves_):
             batch = collate_windows([items[cam][st]])
@@ -433,14 +458,25 @@ def run_session(model, smpl_layer, leaf, sid, n_windows, steps, warmup, clip, lr
             proj = camS[i][:, None] * Xr[..., :2] + camT[i][:, None, :]  # 弱透视 px
             err = det_mask[i] * (proj - det_n[i]).pow(2).sum(-1)
             l2d_i = err.sum() / det_mask[i].sum().clamp(min=1)
+            if contact:
+                # ĉ^v：模型预测的每足接触概率（sigmoid(contact_logits)）
+                prob = torch.sigmoid(out["contact_logits"][0])     # (tw,2)
+                feet_y = smpl_out.joints[:, [10, 11], 1]           # (tw,2)
+                return out, rots, l2d_i, prob, feet_y
             return out, rots, l2d_i
 
         for step in range(steps):
             lr_eff = lr * min(1.0, (step + 1) / max(1, warmup))
             opt.param_groups[0]["lr"] = lr_eff
             losses_2d, rots_all, poses_all = [], [], []
+            probs_all, feet_all = [], []
             for i, cam in enumerate(cams):
-                out, rots, l2d_i = forward_step(i, cam, leaves)
+                if contact:
+                    out, rots, l2d_i, prob, feet_y = forward_step(i, cam, leaves)
+                    probs_all.append(prob)
+                    feet_all.append(feet_y)
+                else:
+                    out, rots, l2d_i = forward_step(i, cam, leaves)
                 losses_2d.append(l2d_i)
                 rots_all.append(rots)
                 poses_all.append(out["x0_hat"][0])
@@ -455,7 +491,16 @@ def run_session(model, smpl_layer, leaf, sid, n_windows, steps, warmup, clip, lr
                 sum((camS[i] - camS0[i]).pow(2).mean() for i in range(len(cams))) / len(cams) + \
                 sum((camT[i] - camT0[i]).pow(2).mean() for i in range(len(cams))) / len(cams) + \
                 beta.pow(2).mean()
-            loss = LAMBDA_2D * l2d + LAMBDA_CON * lcon + LAMBDA_REG * lreg
+            if contact:
+                # L_contact = Σ_t Σ_r ĉ_{t,r}·(y_t[j_r] − h)²；ĉ = 各视角均值
+                chat = torch.stack(probs_all).mean(0)               # (tw,2)
+                y_feet = torch.stack(feet_all)                      # (V,tw,2)
+                lcontact_term = (chat * (y_feet - h).pow(2)).mean()
+                lreg = lreg + (h - h0).pow(2).mean()
+            else:
+                lcontact_term = torch.zeros((), device=device)
+            loss = LAMBDA_2D * l2d + LAMBDA_CON * lcon + LAMBDA_REG * lreg + \
+                (lcontact * lcontact_term if contact else 0.0)
             if step == 0 and grad_diag and res["n"] == 0:
                 # 损失尺度审计：各加权项的有效梯度范数（仅首窗第 0 步）
                 diag = {"l2d_val": float(l2d.item()), "lcon_val": float(lcon.item()),
@@ -530,6 +575,47 @@ def summarize(res):
     return out
 
 
+def _combo_out_path(args) -> Path:
+    """逐组合独立产物路径（导出器按 glob 聚合）。"""
+    return RESULTS_ROOT / "metrics" / (
+        f"anysole_tta_stage1_{args.model}_{args.split}"
+        + f"_i{len(args.cams.split(',')) if args.cams else 0}"
+        + f"_cams{args.cams if args.cams else ''}"
+        + ("_contact" if args.contact else "")
+        + f"_lr{args.lr}.json")
+
+
+def _launch_parallel(args, cams_list) -> None:
+    """--gpu 分卡：逐组合子进程并行（本进程只调度，全部完成后退出）。
+    子进程走 --cams 单组合路径，产物文件独立命名。"""
+    import subprocess
+    import time
+    gpus = [int(x) for x in args.gpu.split(",") if x.strip()]
+    procs = []
+    for k, cams in enumerate(cams_list):
+        cmd = [sys.executable, str(Path(__file__).resolve()),
+               "--model", args.model, "--split", args.split,
+               "--ckpt", args.ckpt, "--lr", str(args.lr),
+               "--cams", ",".join(map(str, cams)),
+               "--device", "cuda:%d" % gpus[k % len(gpus)]]
+        if args.contact:
+            cmd += ["--contact", "--lcontact", str(args.lcontact)]
+        if args.sessions:
+            cmd += ["--sessions", args.sessions]
+        if args.n_windows != 16:
+            cmd += ["--n-windows", str(args.n_windows)]
+        if args.steps != 200:
+            cmd += ["--steps", str(args.steps)]
+        print("[launch]", ",".join(map(str, cams)), "->", "cuda:%d" % gpus[k % len(gpus)])
+        procs.append(subprocess.Popen(cmd, start_new_session=True))
+    while any(p.poll() is None for p in procs):
+        time.sleep(10)
+    bad = [p for p in procs if p.returncode != 0]
+    print(f"[launch] {len(procs) - len(bad)}/{len(procs)} 组合完成")
+    if bad:
+        raise SystemExit(f"{len(bad)} 个组合失败")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="V3_Bv1", choices=tuple(TTA_MODELS))
@@ -546,7 +632,12 @@ def main():
                     help="视角数：跑全部 C(4,i) 相机组合——std 列人口 = 组合间；"
                          "i=4 单一组合无组合间 std；缺省 = 固定组合 1,2,3,4")
     ap.add_argument("--cams", default=None,
-                    help="逗号分隔相机子集（如 1,2）；与 --i 互斥")
+                    help="逗号分隔相机子集（如 1,2）；与 --i/--n 互斥")
+    ap.add_argument("--n", default=None,
+                    help="逗号分隔视角数（如 2,3,4；缺省 = 全部 1,2,3,4）")
+    ap.add_argument("--gpu", default=None,
+                    help="逗号分隔卡号（如 1,2,3,7）：逐组合并行分卡，"
+                         "单命令跑完全部组合（缺省 = --device 单卡）")
     ap.add_argument("--seed", type=int, default=1,
                     help="种子（variant sdN 选多种子 ckpt；缺省 1）")
     ap.add_argument("--ckpt", default="last", choices=("best", "last"),
@@ -558,8 +649,14 @@ def main():
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--warmup", type=int, default=20)
     ap.add_argument("--clip", type=float, default=0.1)
-    ap.add_argument("--lr", type=float, default=0.01)
+    ap.add_argument("--lr", type=float, default=0.01, help="缺省 0.01；各实验组口径以手动赋值（--lr）为准")
     ap.add_argument("--grad-diag", action="store_true")
+    ap.add_argument("--contact", action="store_true",
+                    help="AnySole TTA wLcon 组：输入 VT + 足-地接触约束"
+                         "（ĉ = 各视角接触概率均值，h = 共享地面高度叶子；"
+                         "缺省 = 纯视觉 V 组）")
+    ap.add_argument("--lcontact", type=float, default=1.0,
+                    help="接触约束权重（--contact 组）")
     ap.add_argument("--device", default="cuda:7")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
@@ -577,12 +674,13 @@ def main():
         raise SystemExit("--wins 与 --win-frac 互斥")
     if args.dump_kp:
         Path(args.dump_kp).mkdir(parents=True, exist_ok=True)
-    out_path = args.out or str(RESULTS_ROOT / "metrics" /
-                               f"anysole_tta_stage1_{args.model}_{args.split}"
-                               + (f"_i{args.i}" if args.i is not None else
-                                  (f"_cams{','.join(sorted(args.cams.split(',')))}"
-                                   if args.cams else ""))
-                               + f"_lr{args.lr}.json")
+    out_path = args.out or str(RESULTS_ROOT / "metrics" / (
+        f"anysole_tta_stage1_{args.model}_{args.split}"
+        + (f"_i{args.i}" if args.i is not None else
+           (f"_i{len(args.cams.split(','))}_cams{','.join(sorted(args.cams.split(',')))}"
+            if args.cams else ""))
+        + ("_contact" if args.contact else "")
+        + f"_lr{args.lr}.json"))
     model, saved = build_model(args.model, args.device, which=args.ckpt, checkpoint=args.checkpoint, seed=args.seed)
     contact_method = saved.get("contact_method", TTA_MODELS[args.model]["contact"])
     from anysole.data.contact_package import VERSIONED_CONTACT_METHODS, corrected_contact_provenance
@@ -598,62 +696,57 @@ def main():
     from itertools import combinations
     if args.i is not None and args.cams:
         raise SystemExit("--i 与 --cams 互斥")
+    if args.n is not None and args.cams:
+        raise SystemExit("--n 与 --cams 互斥")
     if args.cams:
         cams_list = [tuple(int(x) for x in args.cams.split(",") if x.strip())]
     elif args.i is not None:
         cams_list = list(combinations((1, 2, 3, 4), args.i))
+    elif args.n is not None:
+        cams_list = [c for n in (int(x) for x in args.n.split(",") if x.strip())
+                     for c in combinations((1, 2, 3, 4), n)]
     else:
-        cams_list = [(1, 2, 3, 4)]
+        cams_list = [c for n in (1, 2, 3, 4) for c in combinations((1, 2, 3, 4), n)]
+    if args.gpu:
+        _launch_parallel(args, cams_list)
+        return
     metric_keys = ("pa_init", "pa_virt_init", "pa_refined", "pa_virt_refined",
                    "mpjpe_virt_refined", "gmpjpe_virt_refined")
-    combo_mode = (args.i is not None) or (args.cams is not None)
-    if combo_mode:
-        summary["cams_list"] = [",".join(map(str, c)) for c in cams_list]
-        summary["combos"] = {}
     for cams in cams_list:
         combo_key = ",".join(map(str, cams))
         combo_sessions = {}
+        combo_summary = {"sessions": {}, "combos": {}, "cams_list": [combo_key],
+                         "checkpoint": summary["checkpoint"],
+                         "contact_method": summary["contact_method"],
+                         "camera_calibration": summary["camera_calibration"],
+                         "extra_contact_loss": summary["extra_contact_loss"]}
         for sid in sids:
             res = run_session(model, smpl_layer, TTA_MODELS[args.model]["leaf"],
                               sid, args.n_windows, args.steps,
                               args.warmup, args.clip, args.lr, args.grad_diag,
                               args.device, wins=wins, dump_dir=args.dump_kp,
-                              config_value=CONFIG_V,
+                              config_value=CONFIG_VT if args.contact else CONFIG_V,
                               win_frac=win_frac, contact_method=contact_method,
-                              cams=cams)
+                              cams=cams, contact=args.contact,
+                              lcontact=args.lcontact)
             stats = summarize(res)
-            if combo_mode:
-                summary["sessions"].setdefault(sid, {})[combo_key] = stats
-                combo_sessions[sid] = stats
-            else:
-                summary["sessions"][sid] = stats
+            combo_summary["sessions"][sid] = stats
+            combo_sessions[sid] = stats
             print(f"[{sid}] done: { {k: (round(v, 1) if v is not None else None) for k, v in stats.items() if k in ('pa_init','pa_virt_init','pa_refined','pa_virt_refined')} }")
-            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-            Path(out_path).write_text(json.dumps(summary, indent=1), encoding="utf-8")
-        if combo_mode:
-            combo_mean = {}
-            for k in metric_keys:
-                vals = [s[k] for s in combo_sessions.values() if s[k] is not None]
-                combo_mean[k] = float(np.mean(vals)) if vals else None
-            summary["combos"][combo_key] = combo_mean
-            print(f"[combo {combo_key}] { {k: round(v, 1) for k, v in combo_mean.items()} }")
-            Path(out_path).write_text(json.dumps(summary, indent=1), encoding="utf-8")
-    if combo_mode:
-        # std 列人口 = 组合间：均值/标准差均跨相机组合（i=4 单组合 → std=None）
-        overall = {}
+            combo_path = _combo_out_path(args)
+            Path(combo_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(combo_path).write_text(json.dumps(combo_summary, indent=1),
+                                        encoding="utf-8")
+        combo_mean = {}
         for k in metric_keys:
-            vals = [summary["combos"][ck][k] for ck in summary["combos"]
-                    if summary["combos"][ck].get(k) is not None]
-            overall[k] = {"mean": float(np.mean(vals)) if vals else None,
-                          "std": float(np.std(vals)) if len(vals) > 1 else None}
-        summary["overall"] = overall
-    else:
-        overall = {k: float(np.mean([s[k] for s in summary["sessions"].values()
-                                     if s[k] is not None]))
-                   for k in metric_keys}
-    Path(out_path).write_text(json.dumps(summary, indent=1), encoding="utf-8")
-    print("overall:", overall)
-    print("→", out_path)
+            vals = [s[k] for s in combo_sessions.values() if s[k] is not None]
+            combo_mean[k] = float(np.mean(vals)) if vals else None
+        combo_summary["combos"][combo_key] = combo_mean
+        print(f"[combo {combo_key}] { {k: (round(v, 1) if v is not None else None) for k, v in combo_mean.items()} }")
+        Path(combo_path).write_text(json.dumps(combo_summary, indent=1),
+                                    encoding="utf-8")
+    print("→", str(RESULTS_ROOT / "metrics") +
+          f"/anysole_tta_stage1_{args.model}_{args.split}_i*_cams*.json")
 
 
 if __name__ == "__main__":

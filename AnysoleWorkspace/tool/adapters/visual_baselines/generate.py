@@ -6,6 +6,9 @@ inputs — RGB recordings under the raw farm, target boxes from the workspace
 human-masks frontend (bbox.npz, direct_csv_bbox) — and writes per-unit
 ``result.pkl``/``result.npz`` in the package's saved-prediction contract so the
 existing export adapter consumes them unchanged (decision archive 11).
+Output lands under ``work/visual_baselines_local`` (persistent, package-mirror
+layout); point the exporter's ``--package-root`` there to export local
+predictions (variant ``local_gen``).
 
 Nothing here reads or imports the transfer package; after consolidation the
 package itself can be deleted.
@@ -22,7 +25,6 @@ import json
 import shlex
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +34,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 WORKSPACE = ROOT / "AnysoleWorkspace"
 NATIVE_ROOT = WORKSPACE / "work" / "visual_baselines" / "reference_results" / "3_Result"
+# 本地生成缺省落盘区：与包镜像同构（reference_results/3_Result/<Model>_baseline/
+# <short_id>/result.pkl），导出器 --package-root 指向此处即消费本地预测。
+LOCAL_ROOT = WORKSPACE / "work" / "visual_baselines_local"
 FRONTEND_BBOX = WORKSPACE / "shared" / "frontends" / "human_masks" / "sam31" / "v1"
 WEIGHTS_ROOT = WORKSPACE / "assets" / "third_party" / "visual_baselines" / "weights"
 BASELINES = ROOT / "Baselines"
@@ -98,7 +103,7 @@ def unit_frame_paths(row: dict, cam: int, unit: dict) -> list[Path]:
 
 def _jpeg_wall_seconds(name: str) -> float:
     """Seconds-of-day from a recording JPEG name like ``3_205513.956.jpg``."""
-    clock = name.split("_")[-1].split(".")[0]
+    clock = name.split("_")[-1].rsplit(".", 1)[0]
     hour = int(clock[:2]); minute = int(clock[2:4]); second = float(clock[4:])
     return hour * 3600.0 + minute * 60.0 + second
 
@@ -180,7 +185,7 @@ def generate_wham(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) -> 
     import joblib
     date, subject = session_parts(row)
     frames = unit_frame_paths(row, cam, unit)
-    unit_root = work_dir / "wham" / f"{date}_{row['session_id']}_c{cam}"
+    unit_root = work_dir / "reference_results" / "3_Result" / "WHAM_baseline" / f"{date}_m1_{row['session_id']}_c{cam}"
     unit_root.mkdir(parents=True, exist_ok=True)
     video = build_sequence_video(frames, unit_root)
     calibration, _, _ = __import__(
@@ -238,7 +243,7 @@ def compact_wham(raw_results: dict, frames: int, unit_root: Path) -> Path:
 def generate_sam3db(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) -> Path:
     """Drive the SAM3DB worker in the vb_tactile environment (torch 2.10 stack)."""
     date, subject = session_parts(row)
-    unit_root = work_dir / "sam3db" / f"{date}_{row['session_id']}_c{cam}"
+    unit_root = work_dir / "reference_results" / "3_Result" / "SAM3DB_baseline" / f"{date}_m1_{row['session_id']}_c{cam}"
     unit_root.mkdir(parents=True, exist_ok=True)
     command = [
         "/data/fangyuxuan/miniconda3/envs/vb_tactile/bin/python",
@@ -259,7 +264,7 @@ def generate_gvhmr(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) ->
     """Drive the migrated GVHMR worker (run_request) in the vb_gvhmr environment."""
     date, subject = session_parts(row)
     frames = unit_frame_paths(row, cam, unit)
-    unit_root = work_dir / "gvhmr" / f"{date}_{row['session_id']}_c{cam}"
+    unit_root = work_dir / "reference_results" / "3_Result" / "GVHMR_baseline" / f"{date}_m1_{row['session_id']}_c{cam}"
     unit_root.mkdir(parents=True, exist_ok=True)
     video = build_sequence_video(frames, unit_root)
     calibration, _, _ = common_loader().load_calibration(date)
@@ -329,7 +334,8 @@ def main() -> int:
     parser.add_argument("--split", choices=("train", "val", "test", "all"), default="test")
     parser.add_argument("--cam", type=int, choices=(1, 2, 3, 4), default=3)
     parser.add_argument("--gpu", type=int, default=0)
-    parser.add_argument("--work-dir", default="", help="persistent work dir (default: temp)")
+    parser.add_argument("--work-dir", default="",
+                        help="persistent work dir (default: work/visual_baselines_local)")
     args = parser.parse_args()
     manifest = {}
     for line in (WORKSPACE / "protocol/manifests" / "session_manifest.jsonl").open(
@@ -357,13 +363,8 @@ def main() -> int:
         row = manifest[session]
         date, subject = session_parts(row)
         unit = unit_entry(unit_manifest, date, session, args.cam)
-        tmp = Path(args.work_dir) if args.work_dir else None
-        if tmp is None:
-            context = tempfile.TemporaryDirectory(dir=WORKSPACE / "work")
-            tmp = Path(context.name)
-        else:
-            tmp.mkdir(parents=True, exist_ok=True)
-            context = None
+        tmp = Path(args.work_dir) if args.work_dir else LOCAL_ROOT
+        tmp.mkdir(parents=True, exist_ok=True)
         try:
             if args.model == "wham":
                 result = generate_wham(row, args.cam, unit, tmp, args.gpu)
@@ -377,9 +378,6 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001 — per-session resilience
             failures.append((session, f"{type(exc).__name__}: {exc}"))
             print(f"FAIL {args.model} {session}: {type(exc).__name__}: {exc}")
-        finally:
-            if context is not None:
-                context.cleanup()
     if failures:
         raise SystemExit(f"{len(failures)} session(s) failed: {failures[:5]}")
     return 0

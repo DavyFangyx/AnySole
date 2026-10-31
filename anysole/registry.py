@@ -125,7 +125,21 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V7_Cv5T": ModelEntry("V7_Cv5T", "v7_c2t", "V7_Cv5T: Cv5 双门逐帧化（T 时间门，2026-10-30）"),
     "V7_Cv5LR": ModelEntry("V7_Cv5LR", "v7_c2lr", "V7_Cv5LR: Cv5 双门 + 左右部位门（LR，2026-10-30）"),
     "V7_Cv5TLR": ModelEntry("V7_Cv5TLR", "v7_c2tlr", "V7_Cv5TLR: 逐帧 + 左右部位组合门（TLR，2026-10-30）"),
+    "V7_Cv5Q": ModelEntry("V7_Cv5Q", "v7_c2q", "V7_Cv5Q: TLR + 第一层解码上下文条件门（Q，2026-10-31）"),
     "V7_Cv7_precheck": ModelEntry("V7_Cv7_precheck", "v7_a", "V7_Cv7 六轮预检"),
+    # 阶段 3 触觉泛化（2026-10-31，E6 门控重设计）：以 Cv7（v7_a 无门
+    # 入口）为基座，训练侧数据增强单点实验。结构不变，只有训练配方
+    # （G-b 鞋垫增益偏置 / G-c T token dropout）不同，故共用 v7_a 入口，
+    # 由新模型名分家到独立结果目录。
+    "V7_Cv7_gb": ModelEntry("V7_Cv7_gb", "v7_a", "V7_Cv7 + 鞋垫增益偏置增强 (G-b)"),
+    "V7_Cv7_gc": ModelEntry("V7_Cv7_gc", "v7_a", "V7_Cv7 + T token dropout (G-c)"),
+    # 阶段 2 受试者交叉泛化（2026-10-31，E6 门控重设计配套）：V7_Cv7
+    # leave-subjects-out 4 折，结构不变（v7_a 无门入口），只有 split 配置
+    # 不同（v1_fold_*.yaml → splits_test_*.csv），新模型名分家到独立结果目录。
+    "V7_Cv7_fS5S6S11": ModelEntry("V7_Cv7_fS5S6S11", "v7_a", "V7_Cv7 折 fS5S6S11（leave-subjects-out）"),
+    "V7_Cv7_fS5S11S12": ModelEntry("V7_Cv7_fS5S11S12", "v7_a", "V7_Cv7 折 fS5S11S12（leave-subjects-out）"),
+    "V7_Cv7_fS6S7S13": ModelEntry("V7_Cv7_fS6S7S13", "v7_a", "V7_Cv7 折 fS6S7S13（leave-subjects-out）"),
+    "V7_Cv7_fS5S6S8": ModelEntry("V7_Cv7_fS5S6S8", "v7_a", "V7_Cv7 折 fS5S6S8（leave-subjects-out）"),
     "V7_SV1": ModelEntry("V7_SV1", "v7_a", "V7 E1 专家 S_V（仅视觉训练，2026-10-26）"),
     "V7_ST1": ModelEntry("V7_ST1", "v7_a", "V7 E1 专家 S_T（仅触觉训练，2026-10-26）"),
     "V7_Cv5_SV1": ModelEntry("V7_Cv5_SV1", "v7_c2", "V7_Cv5 E1 专家 S_V（双门同架构，2026-10-26）"),

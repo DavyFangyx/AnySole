@@ -1408,14 +1408,16 @@ _drop_all_but_current()
 
 # V7 C 门控修改方案（2026-10-30，z_note/multimodal_fusion/V7_方案/
 # V7_C门控修改方案.md §3/§8）：T（逐帧双门）/ LR（窗口四组门）/ TLR
-# （逐帧四组门）三实验组。训练配方与 V7_Cv5 当前线逐项一致（contact =
+# （逐帧四组门）三实验组；Q（§6，TLR 完成后的条件输入组，2026-10-31）。
+# 训练配方与 V7_Cv5 当前线逐项一致（contact =
 # f6_soft_time_accel_state_smpl24_v1、v1.yaml canonical split、三条件
 # 枚举、ckpt_last 口径、740ep；B 基线 = 现有 V7_Cv5_s1 ckpt_last——
 # 生产代码自其训练后未变，不补跑）；结构差异由入口 STRUCTURE 携带
-# （v7_route_temporal / v7_route_parts）。seed 2/3 按方案 §8.4 于 val
-# 确认后补发（条目先注册不发射）；Q/S 按 §8.3 于 TLR 完成后另立。
+# （v7_route_temporal / v7_route_parts / v7_route_conditional）。
+# seed 2/3 按方案 §8.4 于 val 确认后补发（条目先注册不发射）；
+# S 按 §7 硬门槛通过后另立。
 _V7_CV5_S1_CELL = MODELS["V7_Cv5_s1"]
-for _gate in ("V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR"):
+for _gate in ("V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR", "V7_Cv5Q"):
     for _n in (1, 2, 3):
         MODELS["%s_s%d" % (_gate, _n)] = {
             **_V7_CV5_S1_CELL,
@@ -1428,3 +1430,68 @@ for _gate in ("V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR"):
                 "name": _gate, "seed": _n, "train": False,
                 "eval_splits": ["val", "test"],
                 "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+
+# V3_Bv1（V3-3B）重注册（2026-10-31 用户要求「只想要运行 V3B」）：
+# 架构入口 = anysole MODEL_REGISTRY["V3_Bv1"] → module v3_3b（未删）；
+# 旧 BVH-23 ckpt 已不存在（results/AnySole 无 V3_Bv1* 目录），新轴
+# （v1.yaml SMPL24 + 当前接触包）从零重训。种子 1/2/3 注册。
+_V3B_TA = {"lambda_assign": 0.05, "lambda_sigma": 0.01,
+           "sigma_freeze_frac": 0.1, "lr_warmup_frac": 0.05,
+           "grad_clip": 5.0, "final_eval_split": "none",
+           "smpl_support_policy": "exclude",
+           "checkpoint_policy": "multi_metric", "checkpoint_role": "auto"}
+for _n in (1, 2, 3):
+    MODELS["V3_Bv1_s%d" % _n] = dict(
+        label="V3-3B-s%d" % _n, name="V3_Bv1", which="last", train=True,
+        epochs=740, seed=_n,
+        contact_method="f6_soft_time_accel_state_smpl24_v1",
+        provides=("base", "foot_conv", "pose_parts9", "soft_parts", "gate_sigma"),
+        config="anysole/configs/v1.yaml",
+        eval_splits=["val", "test"],
+        train_args=_V3B_TA)
+
+# 阶段 3 触觉泛化（2026-10-31，E6 门控重设计）：以 V7_Cv7（无门 v7_a 入口）
+# 为基座，训练侧单点数据增强。配方与 V7_Cv7_s1 逐项一致（contact =
+# f6_soft_time_accel_state_smpl24_v1、v1.yaml canonical split、三条件枚举、
+# ckpt_last、740ep），唯一差异是 train_args 里的增强开关：
+#   G-b = tactile_gainbias（鞋垫增益偏置，每窗每足 gain[0.7,1.3]+bias±5%）
+#   G-c = tactile_frame_dropout 0.2（整帧 T token 置零）
+# 结构不变 → 共用 v7_a 入口；新模型名分家到独立结果目录。
+_V7_CV7_S1_CELL = MODELS["V7_Cv7_s1"]
+for _name, _aug in (("V7_Cv7_gb", {"tactile_gainbias": True}),
+                    ("V7_Cv7_gc", {"tactile_frame_dropout": 0.2})):
+    MODELS["%s_s1" % _name] = {
+        **_V7_CV7_S1_CELL,
+        "label": "%s-s1" % _name.replace("_", "-"),
+        "name": _name,
+        "train_args": {**_V7_CV7_S1_CELL["train_args"], **_aug}}
+    for _occ in ("010", "020", "030", "050"):
+        MODELS["%s_s1_evalocc%s" % (_name, _occ)] = {
+            **_V7_CV7_S1_CELL,
+            "label": "%s-s1-evalocc%s" % (_name.replace("_", "-"), _occ),
+            "name": _name, "seed": 1, "train": False,
+            "eval_splits": ["val", "test"],
+            "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+
+# 阶段 2 受试者交叉泛化（2026-10-31，E6 门控重设计配套）：leave-subjects-out
+# 4 折，复用 2026-10-22 的 5-fold 动作覆盖轮换 split（splits_test_*.csv，
+# 已恢复到 protocol/splits/default/）。基座 = V7_Cv7_s1（无门 v7_a 入口、
+# contact f6_soft_time_accel_state_smpl24_v1、三条件枚举、ckpt_last、740ep）。
+# 差异：config → 每 fold 专属 yaml（split_csv 指向该 fold 文件，val/test
+# 口径随 fold 改变）；name → V7_Cv7_f<testSubjects> 分家到独立结果目录，
+# 避免与 V7_Cv7_s1 主模型 ckpt 冲突。eval_splits 含 test（fold-out 受试者
+# 的泛化读数）。
+_V7_CV7_FOLDS = (
+    ("V7_Cv7_fS5S6S11",  "anysole/configs/v1_fold_S5S6S11.yaml"),
+    ("V7_Cv7_fS5S11S12", "anysole/configs/v1_fold_S5S11S12.yaml"),
+    ("V7_Cv7_fS6S7S13",  "anysole/configs/v1_fold_S6S7S13.yaml"),
+    ("V7_Cv7_fS5S6S8",   "anysole/configs/v1_fold_S5S6S8.yaml"),
+)
+for _fname, _fconfig in _V7_CV7_FOLDS:
+    MODELS["%s_s1" % _fname] = {
+        **_V7_CV7_S1_CELL,
+        "label": "%s-s1" % _fname.replace("_", "-"),
+        "name": _fname,
+        "config": _fconfig,
+        "eval_splits": ["val", "test"]}
+

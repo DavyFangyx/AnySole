@@ -95,24 +95,30 @@ class _V7DecoderLayer(nn.Module):
         self.ln_t = nn.LayerNorm(dim)
         self.ln_f = nn.LayerNorm(dim)
 
-    def forward(self, q, m_v, m_t, v_present, t_present, tw, gate=None):
-        # q / m_v / m_t: (B, seq, d)；v_present/t_present: (B,) float01
+    def forward(self, q, m_v, m_t, v_present, t_present, tw, gate=None,
+                gate_fn=None):
+        # q / m_v / m_t: (B, seq, d)；v_present/t_present: (B,) float01。
+        # gate_fn（Q，§6）：第一层以「视觉更新后的 query h 与未乘门的 T
+        # 注意力输出 a_T」为条件计算门——本层使用，并返回供后续层复用。
         h = self.ln_q(q + self.self_attn(q, q, q, need_weights=False)[0])
         v_out = self.xattn_v(h, m_v, m_v, need_weights=False)[0]
         h = self.ln_v(h + v_out * v_present.view(-1, 1, 1))
         t_out = self.xattn_t(h, m_t, m_t, need_weights=False)[0]
+        if gate_fn is not None:
+            gate = gate_fn(h, t_out)
         if gate is not None:
             batch, queries, dim = t_out.shape
             nq = queries // tw
             t_out = t_out.view(batch, tw, nq, dim)
-            if gate.shape == (batch, tw, 1):
-                gate = gate.unsqueeze(2)
-            elif gate.shape != (batch, tw, nq, 1):
+            g = gate  # 局部变形，不改变返回给后续层复用的门形状
+            if g.shape == (batch, tw, 1):
+                g = g.unsqueeze(2)
+            elif g.shape != (batch, tw, nq, 1):
                 raise ValueError("T gate must be window-level or match the motion queries")
-            t_out = t_out * gate
+            t_out = t_out * g
             t_out = t_out.view(q.shape[0], q.shape[1], q.shape[2])
         h = self.ln_t(h + t_out * t_present.view(-1, 1, 1))
-        return self.ln_f(h + self.ffn(h))
+        return self.ln_f(h + self.ffn(h)), gate
 
 
 class V7MotionHead(nn.Module):
@@ -150,7 +156,8 @@ class V7MotionHead(nn.Module):
         self.pose_std = pose_std.to(self.pose_std.dtype)
 
     def forward(self, m_v, m_t, v_present, t_present, gate=None,
-                t_only_mask=None, t_only_adapters=None, z_override=None):
+                t_only_mask=None, t_only_adapters=None, z_override=None,
+                gate_fn=None):
         """→ (pose (B,tw,POSE_DIM), v_hat (B,tw,3), z_root, z_parts)
 
         ``z_override``（TTA 注入点，2026-10-27）：给定 (B, tw*(1+n_parts), d)
@@ -166,7 +173,9 @@ class V7MotionHead(nn.Module):
         q = torch.cat([q_root, q_parts], dim=2)          # (B, tw, 1+9, d)
         q = q.reshape(B, self.tw * (1 + self.n_parts), self.dim)
         for layer in self.layers:
-            q = layer(q, m_v, m_t, v_present, t_present, self.tw, gate=gate)
+            q, gate = layer(q, m_v, m_t, v_present, t_present, self.tw,
+                            gate=gate, gate_fn=gate_fn)
+            gate_fn = None  # Q：第一层计算的同一组门供后续五层复用（§6）
         if z_override is not None:
             q = z_override  # TTA 注入点（decoder 输出 / out_parts·root_head 前）
         q = q.reshape(B, self.tw, 1 + self.n_parts, self.dim)
@@ -195,12 +204,16 @@ class AnySoleModelV7(nn.Module):
       ``part_routes``：四组门（LR/TLR）——vel/other/left/right，左右门
         = 姿态门深拷贝（初始化等价契约 §5：共享模块随机初始化不受新增
         参数影响；LR 的相同门初始化复现 B，TLR 复现 T）。
+      ``route_conditional``：Q（§6）——保持 TLR 四组逐帧门与 MLP 尺寸，
+        门输入改为第一层解码上下文（视觉更新后的 query 均值 + 未乘门的
+        T 注意力输出均值），第一层计算、六层复用；无新增参数。
     """
 
     def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, pose_layers=6,
                  contact_root: bool = False, reliability_route: bool = False,
                  task_routes: bool = False, t_only_adapters: bool = False,
-                 route_temporal: bool = False, part_routes: bool = False):
+                 route_temporal: bool = False, part_routes: bool = False,
+                 route_conditional: bool = False):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -216,12 +229,18 @@ class AnySoleModelV7(nn.Module):
         self.t_only_adapters = bool(t_only_adapters)
         self.route_temporal = bool(route_temporal)
         self.part_routes = bool(part_routes)
+        self.route_conditional = bool(route_conditional)
         if self.task_routes and not self.reliability_route:
             raise ValueError("Task routes require tactile reliability routing")
         if self.route_temporal and not self.reliability_route:
             raise ValueError("Temporal routing requires tactile reliability routing")
         if self.part_routes and not self.task_routes:
             raise ValueError("Part routing requires task routes")
+        if self.route_conditional and not (self.reliability_route
+                                           and self.task_routes
+                                           and self.route_temporal
+                                           and self.part_routes):
+            raise ValueError("Conditional routing (Q) requires TLR's full gate structure")
         self.embeddings = SharedEmbeddings(dim=d, tw=tw)
         self.encoders = ModalEncoders(
             self.embeddings, dim=d, tw=tw, tactile_input="raw108",
@@ -301,12 +320,39 @@ class AnySoleModelV7(nn.Module):
             return gates.unsqueeze(-1)
         return gates[:, None, :, None].expand(-1, self.tw, -1, -1)
 
+    def _route_gate_conditional(self, h, a_t):
+        # Q 条件输入（V7_C门控修改方案 §6）：h = 第一层 query 自注意力 +
+        # V 交叉注意力后的表示；a_t = 尚未乘门的 T 交叉注意力输出，均为
+        # (B, tw*(1+n_parts), d)。按四组在同一帧内平均 query：
+        #   u_t,k = cat(mean_query(h_t,k), mean_query(a_T_t,k))  (B, tw, 2d)
+        #   g_t,k = sigmoid(MLP_k(u_t,k)) → 展开 (B, tw, 10, 1)
+        # 梯度正常经 h / a_T 回传（不 detach）；缺失模态仍由存在掩码硬关闭。
+        b = h.shape[0]
+        nq = 1 + self.pose_head.n_parts
+        h = h.view(b, self.tw, nq, self.d)
+        a = a_t.view(b, self.tw, nq, self.d)
+        idx = h.new_tensor(_V7_QUERY_GATE_IDX, dtype=torch.long)
+        onehot = F.one_hot(idx, num_classes=len(_V7_GATE_GROUPS)).to(h.dtype)
+        counts = onehot.sum(0).clamp(min=1)
+        mean_h = torch.einsum("btqd,qk->btkd", h, onehot) / counts.view(1, 1, -1, 1)
+        mean_a = torch.einsum("btqd,qk->btkd", a, onehot) / counts.view(1, 1, -1, 1)
+        u = torch.cat([mean_h, mean_a], dim=-1)          # (B, tw, 4, 2d)
+        g_vel = torch.sigmoid(self.route_root_mlp(u[..., 0, :]))
+        g_other = torch.sigmoid(self.route_mlp(u[..., 1, :]))
+        g_left = torch.sigmoid(self.route_left_mlp(u[..., 2, :]))
+        g_right = torch.sigmoid(self.route_right_mlp(u[..., 3, :]))
+        gates = torch.cat([g_vel, g_other, g_left, g_right], dim=-1)  # (B, tw, 4)
+        gates = gates[..., _V7_QUERY_GATE_IDX]           # (B, tw, 10)
+        return gates.unsqueeze(-1)                       # (B, tw, 10, 1)
+
     def forward(self, V_feat, T_raw, T_phys, config_id=None, subject_ids=None,
                 T_s2m=None, V_hmr=None, mask_v=None, mask_t=None,
-                v_present=None, t_present=None, z_override=None):
+                v_present=None, t_present=None, z_override=None,
+                gate_override=None):
         """三条件 = 同一前向的三种输入组合。存在掩码默认由 config_id 决定
         （与输入置零同一决定，设计思路 §4）；v_present/t_present 允许调用
-        侧覆盖（诊断/干预用）。"""
+        侧覆盖（诊断/干预用）；gate_override（§7 干预诊断钩子）非 None 时
+        替换解码器门（仅诊断脚本用，训练/推理不读 GT）。"""
         if config_id is None:
             config_id = torch.zeros(V_feat.shape[0], dtype=torch.long,
                                     device=V_feat.device)
@@ -319,14 +365,29 @@ class AnySoleModelV7(nn.Module):
                                      mask_v=mask_v, mask_t=mask_t)
         m_v = self.v_temporal(v_tok)
         m_t = self.t_temporal(t_tok)
-        gate = self._route_gate(v_tok, t_tok) if self.reliability_route else None
+        if gate_override is not None:
+            gate = gate_override   # 干预/诊断钩子（§7 单组关门；推理不读 GT）
+        elif self.route_conditional:
+            gate = None            # Q：门由第一层解码上下文计算（gate_fn）
+        else:
+            gate = self._route_gate(v_tok, t_tok) if self.reliability_route else None
+        if self.route_conditional and gate_override is None:
+            captured = {}
+
+            def gate_fn(h, a_t):
+                captured["gate"] = self._route_gate_conditional(h, a_t)
+                return captured["gate"]
+        else:
+            gate_fn = None
         adapters = ((self.t_only_root_adapter, self.t_only_pose_adapter)
                     if self.t_only_adapters else None)
         t_only = (~v_present.bool()) & t_present.bool()
         pose, v_hat, z_root, z_parts = self.pose_head(
-            m_v, m_t, v_present, t_present, gate=gate,
+            m_v, m_t, v_present, t_present, gate=gate, gate_fn=gate_fn,
             t_only_mask=t_only, t_only_adapters=adapters,
             z_override=z_override)
+        if self.route_conditional and gate_override is None:
+            gate = captured.get("gate")  # 监控/损失输出用（Q 的门在解码器内计算）
         trans_hat = torch.cumsum(v_hat, dim=1) / float(FPS)
         contact_logits = self.contact_head(t_tok)
         return {

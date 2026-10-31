@@ -79,8 +79,11 @@ def _pack_motion_export(session: dict, windows: list[tuple], pos_mode: bool) -> 
     seen = np.zeros((n_frames,), dtype=bool)
     ordered = sorted(windows, key=lambda item: int(item[0]))
 
-    # Preserve the historical crossfade only across genuinely adjacent
-    # prediction ranges.  Never crossfade over a skipped/fake-frame gap.
+    # Crossfade only across genuinely overlapping time ranges (continuation
+    # evals), blending same-time frames.  Back-to-back or gapped windows are
+    # stitched directly: the historical 4-frame crossfade blended predictions
+    # of different frames, which amplified per-window root-orientation
+    # differences (e.g. T2M heading flips) after 6D re-orthonormalization.
     fade = 0 if pos_mode else 4
     if fade > 0:
         for previous, current in zip(ordered, ordered[1:]):
@@ -88,18 +91,22 @@ def _pack_motion_export(session: dict, windows: list[tuple], pos_mode: bool) -> 
             current_start = int(current[0])
             previous_len = int(np.asarray(previous[1]).shape[0])
             current_len = int(np.asarray(current[1]).shape[0])
-            if current_start != previous_start + previous_len:
-                continue
-            if previous_len < fade or current_len < fade:
+            if current_start >= previous_start + previous_len:
+                continue  # back-to-back or gapped: nothing to blend
+            overlap = previous_start + previous_len - current_start
+            fade_n = min(fade, overlap)
+            if fade_n < 1:
                 continue
             previous_pose = np.asarray(previous[1])
             current_pose = np.asarray(current[1])
             previous_trans = np.asarray(previous[2])
             current_trans = np.asarray(current[2])
-            for j in range(fade):
-                alpha = (j + 1) / (fade + 1)
-                a = previous_len - fade + j
-                b = j
+            for j in range(fade_n):
+                alpha = (j + 1) / (fade_n + 1)
+                a = previous_len - fade_n + j
+                b = j + overlap - fade_n
+                if b < 0 or b >= current_len:
+                    continue
                 old_a, old_b = previous_pose[a].copy(), current_pose[b].copy()
                 previous_pose[a] = (1 - alpha) * old_a + alpha * old_b
                 current_pose[b] = (1 - alpha) * old_b + alpha * old_a
