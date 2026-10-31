@@ -11,13 +11,19 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")" && pwd)"
 queue="${1:-$root/queue}"
-running_dir="$root/running"
-done_dir="$root/done"
-failed="$root/failed"
-mkdir -p "$queue" "$running_dir" "$done_dir" "$failed" "$root/logs"
+state_root="${ANYSOLE_QUEUE_STATE_ROOT:-$root}"
+running_dir="$state_root/running"
+done_dir="$state_root/done"
+failed="$state_root/failed"
+mkdir -p "$queue" "$running_dir" "$done_dir" "$failed" "$state_root/logs"
 shopt -s nullglob
 
 while true; do
+  # Pause only new dispatch; already claimed work continues to its checkpoint.
+  if [[ -f "$state_root/PAUSE_DISPATCH" ]]; then
+    sleep 5
+    continue
+  fi
   cfg=""
   for f in "$queue"/*.conf; do
     name="$(basename "$f")"
@@ -48,14 +54,18 @@ while true; do
     continue
   fi
   gpu="${CUDA_VISIBLE_DEVICES:-shared}"
-  log="${2:-$root/logs/scheduler_GPU${gpu}.log}"
+  log="${2:-$state_root/logs/scheduler_GPU${gpu}.log}"
   echo "START $(date -Is) $name" >> "$log"
   if bash "$root/run.sh" "$running_dir/$name" >> "$log" 2>&1; then
     mv "$running_dir/$name" "$done_dir/$name"
     echo "[$(date -Is)] OK     $name"
   else
+    rc=$?
+    printf '%s\n' "$rc" > "$failed/$name.exit_code"
     mv "$running_dir/$name" "$failed/$name"
     echo "[$(date -Is)] FAIL   $name"
   fi
 done
 echo "FINISHED $(date -Is)"
+failed_files=("$failed"/*.conf)
+((${#failed_files[@]} == 0))

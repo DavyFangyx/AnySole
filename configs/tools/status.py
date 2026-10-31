@@ -2,8 +2,9 @@
 """Shared-queue status (configs/queue + running/done/failed)."""
 
 from pathlib import Path
+import os
 
-root = Path(__file__).resolve().parents[1]  # configs/
+root = Path(os.environ.get("ANYSOLE_QUEUE_STATE_ROOT", Path(__file__).resolve().parents[1]))
 values = []
 for state in ("queue", "running", "done", "failed"):
     values.append("%s=%d" % (state, len(list((root / state).glob("*.conf")))))

@@ -13,7 +13,6 @@ from pathlib import Path
 
 import numpy as np
 
-from AnysoleWorkspace.tool._bvh_aligner_pose import parse_bvh_aligner
 from scipy.ndimage import median_filter
 from anysole.data.workspace_adapter import (
     PROTOCOL_SPLIT,
@@ -253,6 +252,7 @@ def _load_split_ids(split: str) -> list[str]:
 
 
 def _context(session: dict) -> dict:
+    from AnysoleWorkspace.tool._bvh_aligner_pose import parse_bvh_aligner
     frames = session["frames"]
     pressure = session["pressure"]
     n = len(frames["frame_id"])

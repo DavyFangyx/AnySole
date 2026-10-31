@@ -632,13 +632,15 @@ def _v5_1_traj_losses(v_hat, trans_hat, vel_gt, mask, weights):
     )
 
 
-def _v5_1_contact_bce(logits, gt, live, air_w, pos_weight):
+def _v5_1_contact_bce(logits, gt, live, air_w, pos_weight, weight_mean=None):
     """G 配方 air 加权 pos-weighted BCE（逐元素权重 = (1 + air_w·(1-gt))
     × live 样本掩码；和值归一 → 掩码外样本零贡献）。"""
     elem = F.binary_cross_entropy_with_logits(
         logits, gt, pos_weight=pos_weight, reduction="none")
     w = (1.0 + air_w * (1.0 - gt.float())) * live.to(logits.device).float().view(-1, 1, 1)
-    return (elem * w).sum() / w.sum().clamp(min=1.0)
+    denominator = (w.sum() if weight_mean is None else
+                   weight_mean * live.float().sum() * gt.shape[1] * gt.shape[2])
+    return (elem * w).sum() / denominator.clamp(min=1.0)
 
 
 def _v5_1_gauss_mu_mse(mu, gt, gt_mask, live):
@@ -864,9 +866,24 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
     gt = batch["contact_gt"]
     pos = gt.float().mean().clamp(1e-4, 1.0 - 1e-4)
     pos_weight = ((1.0 - pos) / pos).clamp(0.05, 20.0)
+    if "contact_pos_weight" in weights:
+        # An effective grouped batch supplies this once, so splitting it into
+        # microbatches does not silently change the BCE objective.
+        pos_weight = torch.as_tensor(weights["contact_pos_weight"],
+                                     device=gt.device, dtype=gt.dtype)
+        if pos_weight.numel() != 1 or not torch.isfinite(pos_weight).all() or (pos_weight < 0).any():
+            raise ValueError("contact_pos_weight must be one finite nonnegative scalar")
     air_w = _weight(weights, "lambda_air", 0.0)
+    contact_weight_mean = None
+    if "contact_weight_mean" in weights:
+        contact_weight_mean = torch.as_tensor(weights["contact_weight_mean"],
+                                              device=gt.device, dtype=gt.dtype)
+        if (contact_weight_mean.numel() != 1 or
+                not torch.isfinite(contact_weight_mean).all() or
+                (contact_weight_mean <= 0).any()):
+            raise ValueError("contact_weight_mean must be one finite positive scalar")
     l_contact = _v5_1_contact_bce(out["contact_logits"], gt, t_present,
-                                  air_w, pos_weight)
+                                  air_w, pos_weight, weight_mean=contact_weight_mean)
 
     l_foot = l_pose.new_zeros(())
     if out.get("z_root") is not None and bool(weights.get("v7_contact_root")):
@@ -937,6 +954,162 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
         "L_route": l_route,
         "loss": total,
     }
+
+
+def _e3_valid_mask(valid, shape, device):
+    if valid is None:
+        return torch.ones(shape, device=device, dtype=torch.bool)
+    mask = torch.as_tensor(valid, device=device, dtype=torch.bool)
+    while mask.ndim < len(shape):
+        mask = mask.unsqueeze(-1)
+    try:
+        return torch.broadcast_to(mask, shape)
+    except RuntimeError as exc:
+        raise ValueError("valid mask is incompatible with prediction shape") from exc
+
+
+def pressure_supervision(prediction, truth, valid=None):
+    """Masked true-pressure MSE in normalized clip(raw,0,1023)/1023 units.
+
+    Return a masks-only denominator; no prediction/contact-derived weighting.
+    Accept [B,T,96], or [B,C,T,96] with truth [B,T,96]. The helper is explicitly
+    added by the grouped trainer, so legacy compute_losses_v7 stays unchanged.
+    """
+    if prediction.shape[-1] != 96:
+        raise ValueError("pressure must have left48 followed by right48")
+    if prediction.ndim == 4 and truth.ndim == 3:
+        truth = truth[:, None].expand_as(prediction)
+    if prediction.shape != truth.shape:
+        raise ValueError("pressure prediction and truth must have the same shape")
+    mask = _e3_valid_mask(valid, prediction.shape, prediction.device)
+    # Select before arithmetic: masked NaNs must not poison values/gradients.
+    residual = prediction.float()[mask] - truth.float()[mask]
+    raw = residual.square().sum()
+    count = int(mask.sum().item())
+    return {"raw_sum": raw, "valid_count": count, "loss": raw / max(count, 1),
+            "unit": "normalized_reading_squared"}
+
+
+def pressure_pair_loss(prediction, view_valid=None, pressure_valid=None):
+    """All unordered camera-pair pressure MSE on the same physical time grid.
+
+    prediction [B,C,T,96], view_valid [B,C,T], pressure_valid [B,T,96].
+    No camera identity is merged with physical batch identity. Empty support
+    yields a differentiable zero, and denominators depend only on masks.
+    """
+    if prediction.ndim != 4 or prediction.shape[-1] != 96:
+        raise ValueError("pressure pair expects [B,C,T,96]")
+    batch, views, time, cells = prediction.shape
+    visual = _e3_valid_mask(view_valid, (batch, views, time), prediction.device)
+    pressure = _e3_valid_mask(pressure_valid, (batch, time, cells), prediction.device)
+    raw = prediction.reshape(-1)[:0].sum().float()
+    count = 0
+    for left in range(views):
+        for right in range(left + 1, views):
+            mask = pressure & (visual[:, left] & visual[:, right])[..., None]
+            delta = prediction[:, left].float()[mask] - prediction[:, right].float()[mask]
+            raw = raw + delta.square().sum()
+            count += int(mask.sum().item())
+    return {"raw_sum": raw, "valid_count": count, "loss": raw / max(count, 1),
+            "unit": "normalized_reading_squared"}
+
+
+def contact_height_original(points, contact, ground_height, valid=None):
+    """G1: raw soft-contact squared world-Y height, with a shared ground h.
+
+    points [B,T,R,3] or [B,C,T,R,3], contact [B,T,R]. c is detached;
+    h remains differentiable. valid is a point/frame mask. Multi-view input
+    averages the available views per physical (t,r), then SUMS time/regions.
+    loss is that raw sum divided only by the number of physical batch rows
+    with valid support. No confidence/time/region/scale normalization occurs.
+    For full windows B=1 this is exactly the manuscript sum; lambda on this
+    batch-mean convention equals B*lambda on a batch-total convention.
+    element_sum additionally exposes the unnormalized all-view sum.
+    """
+    if points.ndim not in (4, 5) or points.shape[-1] != 3:
+        raise ValueError("contact points must be [B,T,R,3] or [B,C,T,R,3]")
+    if points.ndim == 4:
+        points = points[:, None]
+        if valid is not None:
+            valid = torch.as_tensor(valid, device=points.device)[:, None]
+    batch, views, time, regions, _ = points.shape
+    if tuple(contact.shape) != (batch, time, regions):
+        raise ValueError("contact must be [B,T,R], once per physical window")
+    mask = _e3_valid_mask(valid, (batch, views, time, regions), points.device)
+    weights = contact.detach().to(device=points.device, dtype=points.dtype)[:, None].expand_as(mask)
+    if not torch.isfinite(weights[mask]).all() or ((weights[mask] < 0) | (weights[mask] > 1)).any():
+        raise ValueError("contact weights must be finite soft probabilities")
+    ground = torch.as_tensor(ground_height, device=points.device, dtype=points.dtype)
+    if ground.ndim == 1:
+        ground = ground[:, None, None, None]
+    elif ground.ndim == 2:
+        ground = ground[:, None, :, None]
+    elif ground.ndim != 0:
+        raise ValueError("ground_height must be scalar, [B], [B,1] or [B,T]")
+    try:
+        ground = torch.broadcast_to(ground, mask.shape)
+    except RuntimeError as exc:
+        raise ValueError("ground_height does not match physical batch/time") from exc
+    height = points[..., 1]
+    # Where-before-arithmetic makes invalid NaNs harmless in backward too.
+    safe_height = torch.where(mask, height, torch.zeros_like(height))
+    safe_ground = torch.where(mask, ground, torch.zeros_like(ground))
+    safe_weight = torch.where(mask, weights, torch.zeros_like(weights))
+    values = safe_weight * (safe_height - safe_ground).square()
+    view_count = mask.sum(dim=1)
+    raw = (values.sum(dim=1) / view_count.clamp_min(1)).sum()
+    count = int(view_count.any(dim=-1).any(dim=-1).sum().item())
+    return {"raw_sum": raw, "valid_count": count, "loss": raw / max(count, 1),
+            "element_sum": values.sum(), "view_count": view_count,
+            "unit": "meter_squared_time_region_sum_per_physical_window"}
+
+
+def e3_parameter_groups(model):
+    """HF_motion by Parameter identity, excluding aliased shared embeddings.
+
+    F_motion comprises decoder layers/root_query/part_queries. It excludes
+    motion output heads, both temporals/encoders, embeddings and gate MLPs.
+    """
+    if not hasattr(model, "pressure_readout"):
+        raise ValueError("HF_motion requires the enabled pressure readout")
+    seen = set()
+    groups = {}
+    candidates = {"H": list(model.pressure_readout.parameters()),
+                  "F_motion": list(model.pose_head.layers.parameters()) +
+                              [model.pose_head.root_query, model.pose_head.part_queries]}
+    for name, parameters in candidates.items():
+        groups[name] = []
+        for parameter in parameters:
+            if parameter.requires_grad and id(parameter) not in seen:
+                groups[name].append(parameter)
+                seen.add(id(parameter))
+    groups["HF_motion"] = groups["H"] + groups["F_motion"]
+    groups["other"] = [p for p in model.parameters() if p.requires_grad and id(p) not in seen]
+    return groups
+
+
+def hf_motion_parameters(model):
+    return e3_parameter_groups(model)["HF_motion"]
+
+
+def backward_e3_losses(supervised_loss, pressure_pair, model, scaler=None):
+    """Only pair is routed to HF_motion; all supervision keeps its normal graph.
+
+    Inputs are already weighted, including accumulation normalization. Call
+    once per microbatch, then unscale/clip/optimizer step once per effective
+    batch. No gradients outside this loss are erased or overwritten.
+    """
+    scale = scaler.scale if scaler is not None else lambda value: value
+    if pressure_pair is not None:
+        parameters = hf_motion_parameters(model)
+        gradients = torch.autograd.grad(scale(pressure_pair), parameters,
+                                        retain_graph=True, allow_unused=True)
+        for parameter, gradient in zip(parameters, gradients):
+            if gradient is not None:
+                parameter.grad = (gradient.detach() if parameter.grad is None
+                                  else parameter.grad + gradient.detach())
+    if supervised_loss is not None:
+        scale(supervised_loss).backward()
 
 
 def per_sample_contact_bce(logits, gt, pos_weight, air_w):

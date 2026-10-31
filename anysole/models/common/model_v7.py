@@ -39,6 +39,7 @@ from anysole.models.common.model_v4_1 import (
     _temporal_encoder,
 )
 from anysole.models.common.pose_head import _part_place_idx
+from anysole.models.common.pressure_readout import QueryPressureHead
 from anysole.types import (
     CONFIG_T,
     CONFIG_V,
@@ -160,6 +161,21 @@ class V7MotionHead(nn.Module):
             mask = t_only_mask.to(q.dtype).view(B, 1, 1, 1)
             z_root = z_root + mask * t_only_adapters[0](z_root)
             z_parts = z_parts + mask * t_only_adapters[1](z_parts)
+        return self.decode_z(torch.cat([z_root, z_parts], dim=2))
+
+    def decode_z(self, z):
+        """Read post-adapter motion tokens without rerunning the decoder.
+
+        Accept [B,tw,1+n_parts,d] or its flattened time/part equivalent.
+        The public tokens returned by forward are already adapted; applying
+        T-only adapters here a second time would invalidate a zero-step TTA.
+        """
+        expected = (self.tw, 1 + self.n_parts, self.dim)
+        if z.ndim == 3 and tuple(z.shape[1:]) == (self.tw * expected[1], self.dim):
+            z = z.reshape(z.shape[0], *expected)
+        elif z.ndim != 4 or tuple(z.shape[1:]) != expected:
+            raise ValueError("motion z must be [B,tw,1+n_parts,d] or [B,tw*(1+n_parts),d]")
+        z_root, z_parts = z[:, :, :1], z[:, :, 1:]
         v_hat = self.root_head(z_root)[:, :, 0, :]       # (B, tw, 3)
         pose_parts = torch.cat(
             [self.out_parts[p](z_parts[..., p, :]) for p in range(self.n_parts)],
@@ -173,7 +189,9 @@ class AnySoleModelV7(nn.Module):
 
     def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, pose_layers=6,
                  contact_root: bool = False, reliability_route: bool = False,
-                 task_routes: bool = False, t_only_adapters: bool = False):
+                 task_routes: bool = False, t_only_adapters: bool = False,
+                 pressure_head: str = "none", pressure_cell_mean=None,
+                 pressure_seed: int = 1):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -214,6 +232,29 @@ class AnySoleModelV7(nn.Module):
             with torch.random.fork_rng(devices=[]):
                 self.t_only_root_adapter = self._make_t_only_adapter(d)
                 self.t_only_pose_adapter = self._make_t_only_adapter(d)
+        # Optional H is constructed after the common backbone and cannot alter
+        # common initialization or RNG. Its deterministic attention also avoids
+        # consuming extra dropout draws between the shared condition forwards.
+        if pressure_head not in (None, "none"):
+            if pressure_head != "query_factorized":
+                raise ValueError("V7 pressure readout supports query_factorized only")
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(int(pressure_seed))
+                self.pressure_readout = QueryPressureHead(
+                    kind=pressure_head, dim=d, nhead=nhead, dropout=0.,
+                    cell_mean=pressure_cell_mean, memory="motion_z")
+
+    def decode_z(self, z, frame_valid=None, timestamps=None):
+        """Decode the exact post-adapter z returned by forward (TTA contract)."""
+        pose, velocity, root, parts = self.pose_head.decode_z(z)
+        tokens = torch.cat([root, parts], dim=2)
+        pressure = (self.pressure_readout(tokens, frame_valid=frame_valid,
+                                         timestamps=timestamps)["pressure_hat"]
+                    if hasattr(self, "pressure_readout") else None)
+        return {"x0_hat": pose, "v_hat": velocity,
+                "trans_hat": torch.cumsum(velocity, dim=1) / float(FPS),
+                "z": tokens, "z_root": root, "z_parts": parts,
+                "pressure_hat": pressure}
 
     @staticmethod
     def _make_t_only_adapter(dim):
@@ -237,7 +278,8 @@ class AnySoleModelV7(nn.Module):
 
     def forward(self, V_feat, T_raw, T_phys, config_id=None, subject_ids=None,
                 T_s2m=None, V_hmr=None, mask_v=None, mask_t=None,
-                v_present=None, t_present=None, z_override=None):
+                v_present=None, t_present=None, z_override=None,
+                frame_valid=None, timestamps=None):
         """三条件 = 同一前向的三种输入组合。存在掩码默认由 config_id 决定
         （与输入置零同一决定，设计思路 §4）；v_present/t_present 允许调用
         侧覆盖（诊断/干预用）。"""
@@ -263,13 +305,17 @@ class AnySoleModelV7(nn.Module):
             z_override=z_override)
         trans_hat = torch.cumsum(v_hat, dim=1) / float(FPS)
         contact_logits = self.contact_head(t_tok)
+        z = torch.cat([z_root, z_parts], dim=2)
+        pressure = (self.pressure_readout(z, frame_valid=frame_valid,
+                                         timestamps=timestamps)["pressure_hat"]
+                    if hasattr(self, "pressure_readout") else None)
         return {
             "x0_hat": pose,                  # 单一生成器的输出（当前条件）
             "v_hat": v_hat,                  # 根速度
             "trans_hat": trans_hat,          # 根轨迹（cumsum）
             "contact_logits": contact_logits,
             "route_gate": gate,              # C：窗口级 T 信任门（监控/损失）
-            "z": torch.cat([z_root, z_parts], dim=2),  # (B,tw,1+n_parts,d) TTA 叶子
+            "z": z,                          # post-adapter (B,tw,1+n_parts,d)
             "F": m_v + m_t,                  # train.py finite check
             "v_tok": v_tok,
             "t_tok": t_tok,
@@ -277,6 +323,6 @@ class AnySoleModelV7(nn.Module):
             "m_t": m_t,
             "z_root": z_root,
             "z_parts": z_parts,
-            "pressure_hat": None,
+            "pressure_hat": pressure,
             "vfeat_hat": None,
         }

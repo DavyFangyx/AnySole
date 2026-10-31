@@ -110,8 +110,10 @@ def select_session_dirs(seq_root: Path, args: argparse.Namespace) -> List[Path]:
     return dirs
 
 
-def load_encoder(device: torch.device) -> torch.nn.Module:
-    motionpro_root = str(MOTIONPRO_ROOT)
+def load_encoder(device: torch.device, module_root: Optional[Path] = None,
+                 config_path: Optional[Path] = None,
+                 checkpoint_path: Optional[Path] = None) -> torch.nn.Module:
+    motionpro_root = str(module_root or MOTIONPRO_ROOT)
     if motionpro_root not in sys.path:
         sys.path.insert(0, motionpro_root)
 
@@ -119,14 +121,17 @@ def load_encoder(device: torch.device) -> torch.nn.Module:
     from lib.model.backbone.hrnet.hrnet_config import cfg
     from lib.model.backbone.hrnet.hrnet_config import update_config
 
-    update_config(cfg, str(HRNET_YAML))
+    cfg = cfg.clone()
+    update_config(cfg, str(config_path or HRNET_YAML))
     model = HighResolutionNet(cfg)
-    ckpt = torch.load(str(CLIFF_CKPT), map_location="cpu")
+    ckpt = torch.load(str(checkpoint_path or CLIFF_CKPT), map_location="cpu", weights_only=False)
     state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
     enc_state = {}
     for key, value in state.items():
-        if key.startswith(ENCODER_PREFIX):
-            enc_state[key[len(ENCODER_PREFIX):]] = value
+        for prefix in (ENCODER_PREFIX, "encoder."):
+            if key.startswith(prefix):
+                enc_state[key[len(prefix):]] = value
+                break
     if not enc_state:
         raise KeyError("CLIFF checkpoint missing %s weights: %s" % (ENCODER_PREFIX, CLIFF_CKPT))
     model.load_state_dict(enc_state, strict=True)

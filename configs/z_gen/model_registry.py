@@ -1405,3 +1405,14 @@ def _drop_all_but_current() -> None:
 
 
 _drop_all_but_current()
+
+# E3 shares Cv5's builder and current public defaults. Concrete data identity,
+# paired seed and physical-update budgets are frozen by its run manifest.
+for _recipe in ("U0", "UP_G1", "UC_G1"):
+    MODELS["E3_" + _recipe] = {
+        **MODELS["V7_Cv5"], "label": "E3-" + _recipe, "name": "V7_Cv5",
+        "e3_recipe": _recipe, "e3_phase": "G1_original",
+        "train_args": {**MODELS["V7_Cv5"]["train_args"], "wandb_mode": "offline",
+                       "wandb_project": "Anysole-E3",
+                       "wandb_entity": "foundary-f-beijing-institute-of-technology",
+                       "final_eval_split": "none"}}

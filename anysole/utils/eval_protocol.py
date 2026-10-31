@@ -283,6 +283,68 @@ def _pa_align(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return aligned.view_as(pred)
 
 
+def score_e3_prediction(prediction, target_joints, target_frame_ids, *, target_times=None):
+    """Score already finalized GT-free predictions on unique source frames.
+
+    A single rigid SE(3) fit over all joints/frames of each contiguous segment
+    is used for the explicitly named aligned metrics, with scale fixed to one.
+    GT enters only this function, after prediction has finished. No per-frame,
+    per-window or root-specific alignment enters GlobalMPJPE/ATE.
+    """
+    from anysole.utils.metrics import similarity_align
+    predicted = np.asarray(prediction["joints"].detach().cpu(), dtype=np.float64)
+    frames = np.asarray(prediction["frame_ids"].detach().cpu(), dtype=np.int64)
+    segment_ids = np.asarray(prediction["segment_ids"].detach().cpu(), dtype=np.int64)
+    targets = np.asarray(target_joints, dtype=np.float64)
+    target_ids = np.asarray(target_frame_ids, dtype=np.int64)
+    if targets.shape != (len(target_ids), N_JOINTS, 3) or predicted.shape != (len(frames), N_JOINTS, 3):
+        raise ValueError("E3 scoring expects SMPL24 joints on explicit frame grids")
+    if len(frames) == 0 or np.any(np.diff(frames) <= 0) or np.any(np.diff(target_ids) <= 0):
+        raise ValueError("scoring source frames must be sorted and unique")
+    indices = np.searchsorted(target_ids, frames)
+    if (indices >= len(target_ids)).any() or not np.array_equal(target_ids[indices], frames):
+        raise ValueError("prediction frames missing from GT scoring grid")
+    target = targets[indices]
+    if not np.isfinite(predicted).all() or not np.isfinite(target).all():
+        raise ValueError("non-finite scoring coordinates")
+    times = frames / float(FPS) if target_times is None else np.asarray(target_times, dtype=np.float64)[indices]
+    if times.shape != frames.shape or not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
+        raise ValueError("invalid scoring timestamps")
+    aligned = np.empty_like(predicted)
+    sliding_sum, sliding_count = 0., 0
+    segment_rows = []
+    for segment in np.unique(segment_ids):
+        select = segment_ids == segment
+        p, gt = predicted[select], target[select]
+        # One sample contains every joint/frame, hence exactly one rigid fit.
+        a = similarity_align(p.reshape(1, -1, 3), gt.reshape(1, -1, 3), fixed_scale=True).reshape(p.shape)
+        aligned[select] = a
+        sliding, count = foot_sliding_joints(a[:, ANKLE_FOOT_JOINTS], gt[:, ANKLE_FOOT_JOINTS], times[select])
+        if count:
+            sliding_sum += sliding * count
+            sliding_count += count
+        segment_rows.append({"segment_id": int(segment), "frames": int(select.sum()),
+                             "alignment": "one_SE3_scale_1_scoring_only",
+                             "GlobalMPJPE_segment_SE3": float(mean_point_error(a, gt, scale=1000).mean())})
+    local_pred, _ = pelvis_align(predicted)
+    local_gt, _ = pelvis_align(target)
+    floor = float(np.percentile(target[..., 1], 5))
+    penetration = ground_penetration(aligned, floor)
+    error = np.linalg.norm((aligned - target) * 1000, axis=-1)
+    return {"schema": "e3_scores.v1", "unique_scored_frames": len(frames), "segments": segment_rows,
+            "metrics": {"MPJPE": float(mean_point_error(local_pred, local_gt, scale=1000).mean()),
+                        "PA-MPJPE": float(pa_mpjpe(predicted, target).mean()),
+                        "GlobalMPJPE_unaligned": float(mean_point_error(predicted, target, scale=1000).mean()),
+                        "GlobalMPJPE_segment_SE3": float(error.mean()),
+                        "ATE_segment_SE3": float(np.linalg.norm(aligned[:, 0] - target[:, 0], axis=-1).mean() * 1000),
+                        "FootMPJPE_segment_SE3": float(error[:, ANKLE_FOOT_JOINTS].mean()),
+                        "LowerMPJPE_segment_SE3": float(error[:, JOINT_HIERARCHY["lower"]].mean()),
+                        "FootSliding": sliding_sum / sliding_count if sliding_count else None,
+                        "GroundPen_segment_SE3": penetration["ground_pen_mean_mm"]},
+            "floor_source": "GT_joint_height_percentile_5_SCORING_ONLY",
+            "foot_sliding_samples": sliding_count}
+
+
 def _root_rotmats(pose: torch.Tensor) -> torch.Tensor:
     """(T, POSE_DIM) native SMPL pose -> world root rotations."""
     return rot6d_to_rotmat(pose[None].reshape(1, -1, N_JOINTS, 6))[0, :, 0]

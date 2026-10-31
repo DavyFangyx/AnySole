@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from scipy.spatial.transform import Rotation as SciRotation
 
-from anysole.types import FPS, N_JOINTS
+from anysole.types import FOOT_JOINTS, FPS, N_JOINTS
 
 # F2a: the standard SMPL pelvis local forward axis.  Dataset-level locomotion
 # statistics in z_note/probes/smoke_f2_roundtrip.py also favor +Z over +X.  Movement
@@ -100,6 +100,24 @@ def fk_pose6d(
         global_rot.append(joint_rot)
         global_pos.append(joint_pos)
     return torch.stack(global_pos, dim=2) + trans.unsqueeze(2)
+
+
+def e3_support_points(pose_6d, trans, offsets, parents, support_offsets=None):
+    """G1 regions are SMPL left/right terminal foot joints (10,11).
+
+    Optional fixed [2,3] offsets are expressed in world Y-up meters. Zero
+    offsets select foot centers and require a *foot-center ground proxy*,
+    not a claim that these points lie on a physical sole. Both offsets and
+    any training ground must come from the declared train-only artifact.
+    Geometry remains differentiable through pose and root translation.
+    """
+    points = fk_pose6d(pose_6d, trans, offsets, parents)[..., list(FOOT_JOINTS), :]
+    if support_offsets is not None:
+        offset = torch.as_tensor(support_offsets, device=points.device, dtype=points.dtype)
+        if offset.shape != (2, 3) or not torch.isfinite(offset).all():
+            raise ValueError("support_offsets must be finite world [left,right,xyz] = [2,3]")
+        points = points + offset.detach()
+    return points
 
 
 def _normalize_np(v: np.ndarray, eps: float = 1e-8) -> np.ndarray:

@@ -269,6 +269,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Also write per-window and per-session metric detail JSONs next to the "
         "protocol file (window_detail_<split>.json / session_detail_<split>.json).",
     )
+    parser.add_argument("--e3-observations", type=Path, default=None,
+                        help="GT-free tensor bundle: observations/train template/tta_config; requires --ckpt.")
+    parser.add_argument("--e3-output", type=Path, default=None,
+                        help="Explicit prediction tensor archive for --e3-observations (no scoring GT is read).")
+    parser.add_argument("--e3-path", choices=("direct", "0step", "C0", "C_original"), default="direct",
+                        help="Prediction path for a canonical E3 extractor observation archive.")
+    parser.add_argument("--e3-steps", type=int, default=None,
+                        help="Frozen TTA iteration budget; default30 for C0/C_original, zero otherwise.")
+    parser.add_argument("--e3-initialization", choices=("V", "VT"), default="V")
     return parser.parse_args(argv)
 
 
@@ -502,6 +511,10 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    if args.e3_observations is not None:
+        return _evaluate_e3_observations(args)
+    if args.e3_output is not None:
+        raise ValueError("--e3-output requires --e3-observations")
     config_values = _parse_config_values(args.config_id)
     config = load_config(args.config)
     if args.modal is not None:
@@ -550,6 +563,78 @@ def main(argv: Optional[List[str]] = None) -> int:
     device = resolve_device(args.device)
     for modal, contact_method, ckpt in targets:
         _evaluate_one(args, config, config_values, modal, contact_method, ckpt, device, multi=multi)
+    return 0
+
+
+def _evaluate_e3_observations(args):
+    """Separate deployment prediction entrypoint; native compatibility is untouched.
+
+    Bundle construction is the data/extractor boundary. It must provide real
+    same-image detector outputs and one train-only template; an unavailable
+    detector is an explicit missing input, never replaced by GT projections.
+    """
+    from hashlib import sha256
+    from anysole.tta import E3Observations, TrainTemplate, TTAConfig, adapt_multiview
+    from anysole.utils.evaluation_contract import e3_evaluation_contract
+    if args.ckpt is None or args.e3_output is None:
+        raise ValueError("E3 prediction requires explicit --ckpt and --e3-output")
+    device = resolve_device(args.device)
+    checkpoint = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    saved = checkpoint.get("config", {})
+    recipe = saved.get("e3_recipe")
+    if recipe not in ("U0", "UP_G1", "UC_G1"):
+        raise ValueError("checkpoint must identify its actual e3_recipe")
+    config = load_config(args.config)
+    model = _load_model(checkpoint, config, device)
+    bundle = torch.load(args.e3_observations, map_location=device, weights_only=True)
+    if set(bundle) != {"observations", "template", "tta_config"}:
+        # Native extractor archives carry source identities but no optimizer
+        # targets. Convert only this exact allowlist; GT fields fail closed.
+        required = {"V_feat", "frame_ids", "target_time_s", "detected_2d", "confidence", "intrinsics",
+                    "joint_indices", "T_raw", "T_phys", "camera_ids", "valid", "source_frame_ids",
+                    "source_time_s", "degradation"}
+        if set(bundle) != required or not bool(bundle["valid"].all()):
+            raise ValueError("E3 bundle permits only GT-free extractor fields or observations/template/tta_config")
+        stats_path = Path(saved["data_root"]) / "stats.json"
+        actual_template_hash = sha256(stats_path.read_bytes()).hexdigest()
+        if actual_template_hash != saved.get("e3_template_sha256"):
+            raise ValueError("train template source file hash differs from frozen checkpoint")
+        stats = json.loads(stats_path.read_text())
+        if stats.get("fit_split") != "train":
+            raise ValueError("template statistics must have been fit on train only")
+        observation_fields = {key: bundle[key] for key in (
+            "V_feat", "frame_ids", "detected_2d", "confidence", "intrinsics", "joint_indices", "T_raw", "T_phys")}
+        observation_fields.update(frame_times=bundle["target_time_s"], visual_condition=bundle["degradation"],
+                                  detection_condition=bundle["degradation"],
+                                  tactile_source=str(args.e3_observations.resolve()) + ":actual_pressure")
+        path = args.e3_path
+        steps = args.e3_steps if args.e3_steps is not None else (30 if path in ("C0", "C_original") else 0)
+        bundle = {"observations": observation_fields,
+                  "template": {"offsets": torch.tensor(stats["mean_offsets"], device=device),
+                               "parents": torch.tensor(stats["parents"], device=device),
+                               "support_offsets": torch.tensor(stats["support_offsets"], device=device),
+                               "sha256": actual_template_hash},
+                  "tta_config": {"path": path, "steps": steps, "initialization": args.e3_initialization,
+                                 "use_contact": path == "C_original"}}
+    observations = E3Observations(**bundle["observations"])
+    template = TrainTemplate(**bundle["template"])
+    template_hash = saved.get("e3_template_sha256")
+    if not template_hash or template.sha256 != template_hash:
+        raise ValueError("frozen train template hash missing or mismatches checkpoint provenance")
+    tta_config = dict(bundle["tta_config"])
+    if "recipe" in tta_config and tta_config["recipe"] != recipe:
+        raise ValueError("bundle recipe differs from checkpoint; UP cannot opt into TTA")
+    tta_config["recipe"] = recipe
+    prediction = adapt_multiview(model, observations, template, TTAConfig(**tta_config))
+    prediction["evaluation_contract"] = e3_evaluation_contract(prediction, template_sha256=template.sha256)
+    prediction["checkpoint_sha256"] = sha256(args.ckpt.read_bytes()).hexdigest()
+    prediction["observation_sha256"] = sha256(args.e3_observations.read_bytes()).hexdigest()
+    prediction["recipe"] = recipe
+    args.e3_output.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(prediction, args.e3_output)
+    print("E3 %s %s: %d optimizer steps, %d unique frames -> %s" % (
+        recipe, tta_config.get("path", "C0"), prediction["optimizer_steps"],
+        len(prediction["frame_ids"]), args.e3_output))
     return 0
 
 

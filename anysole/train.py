@@ -7,6 +7,10 @@ import json
 import math
 import os
 import random
+import hashlib
+import time
+import traceback
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -466,6 +470,10 @@ def warn_legacy_output_checkpoint(out_dir: Path) -> None:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train AnySole V1.")
+    parser.add_argument("--e3-run-config", type=Path, default=None,
+                        help="Frozen grouped E3 run contract; uses the same V7 model/loss/evaluator")
+    parser.add_argument("--resume", type=Path, default=None,
+                        help="Exact E3 optimizer/scaler/RNG/sample-position checkpoint")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -1218,8 +1226,416 @@ def _occ_a3_monitor(model, loader, config, device):
     }
 
 
+def validate_e3_config(config):
+    """Reject unsupported scientific recipes before touching output files."""
+    recipe = config.get("recipe")
+    if recipe not in ("U0", "UP_G1", "UC_G1") or config.get("phase_id") != "G1_original":
+        raise ValueError("E3 launch supports only U0/UP_G1/UC_G1 in G1_original")
+    if config.get("condition_sampling") != "enum" or config.get("final_eval_split") != "none":
+        raise ValueError("E3 requires enum conditions and no automatic test evaluation")
+    if config.get("wandb_mode") not in ("offline", "disabled"):
+        raise ValueError("E3 never initiates cloud upload")
+    if config.get("formal", False) and config.get("wandb_mode") != "offline":
+        raise ValueError("Formal E3 requires local offline W&B")
+    if config.get("formal", False) and config.get("pilot_max_steps"):
+        raise ValueError("Formal E3 cannot use a pilot step limit")
+    pressure = recipe == "UP_G1"
+    geometry = recipe != "U0"
+    if (config.get("pressure_head", "none") == "query_factorized") != pressure:
+        raise ValueError("QFACT must be enabled exactly for UP_G1")
+    for key, active in (("lambda_pressure", pressure), ("lambda_pressure_pair", pressure),
+                        ("lambda_contact_geometry", geometry)):
+        value = float(config.get(key, 0))
+        if not math.isfinite(value) or value < 0 or (value > 0) != active:
+            raise ValueError("Invalid E3 recipe coefficient " + key)
+    if pressure and config.get("inference_mode") != "direct":
+        raise ValueError("UP is direct-only")
+    if any(float(config.get(k, 0)) != 0 for k in ("lambda_foot", "lambda_cs", "lambda_chs", "lambda_penetration")):
+        raise ValueError("E3 does not enable additional foot losses")
+    probs = config.get("config_probs", [])
+    if len(probs) != 3 or not all(math.isfinite(float(p)) and float(p) > 0 for p in probs):
+        raise ValueError("All three E3 modality conditions must be present")
+    for key in ("batch_size", "microbatch_size", "epochs", "tw"):
+        if int(config[key]) <= 0:
+            raise ValueError("Invalid positive E3 setting " + key)
+    if int(config["microbatch_size"]) > int(config["batch_size"]):
+        raise ValueError("microbatch exceeds physical effective batch")
+    if config.get("precision", "fp32") not in ("fp32", "bf16", "fp16"):
+        raise ValueError("Unsupported precision")
+
+
+def e3_epoch_indices(length, seed, epoch):
+    """A private sampler stream makes exact mid-epoch continuation possible."""
+    generator = torch.Generator().manual_seed(int(seed) + 1000003 * int(epoch))
+    return torch.randperm(length, generator=generator).tolist()
+
+
+def e3_rng_state():
+    return {"python": random.getstate(), "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}
+
+
+def e3_restore_rng(state):
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch"].cpu())
+    if state["cuda"] is not None:
+        torch.cuda.set_rng_state_all([x.cpu() for x in state["cuda"]])
+
+
+def e3_atomic_checkpoint(path, payload):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp%d" % os.getpid())
+    with temporary.open("wb") as handle:
+        torch.save(payload, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def e3_model_hash(model, common_only=False):
+    digest = hashlib.sha256()
+    for name, value in sorted(model.state_dict().items()):
+        if common_only and name.startswith("pressure_readout."):
+            continue
+        digest.update(name.encode())
+        digest.update(value.detach().contiguous().cpu().numpy().tobytes())
+    return digest.hexdigest()
+
+
+def backward_e3_grouped(model, group, config, scaler, scale=1.0):
+    """V/VT views average; T once; only pressure pair uses restricted gradients."""
+    from anysole.utils.losses import pressure_supervision, pressure_pair_loss, contact_height_original, hf_motion_parameters
+    from anysole.utils.geometry import e3_support_points
+    physical, views = group["physical"], group["views"]
+    device = physical["pose_gt"].device
+    bsz = physical["pose_gt"].shape[0]
+    probs = [float(p) / sum(config["config_probs"]) for p in config["config_probs"]]
+    mode_config = dict(config)
+    mode_config["lambda_contact"] = float(config.get("lambda_contact", 0)) / (probs[0] + probs[2])
+    # Optional E3 losses are added below once; base V7 remains unchanged.
+    mode_config["lambda_pressure"] = 0.0
+    mode_config["lambda_pressure_pair"] = 0.0
+    mode_config["lambda_contact_geometry"] = 0.0
+    contact = None
+    if float(config["lambda_contact_geometry"]) > 0:
+        was_training = model.training
+        model.eval()
+        # A no_grad forward inside the caller's autocast context can cache
+        # detached lower-precision weights and reuse them in the subsequent
+        # supervised graph. Compute this fixed teacher in FP32 so encoders
+        # retain their ordinary training gradients under AMP.
+        with torch.no_grad(), torch.autocast(device_type=device.type, enabled=False):
+            cid = torch.full((bsz,), CONFIG_T, device=device, dtype=torch.long)
+            v, t, p, s = condition_inputs(physical, cid)
+            contact = model(v, t, p, cid, physical.get("session_id"), T_s2m=s)["contact_logits"].sigmoid().detach()
+        model.train(was_training)
+    metrics = {}
+    pressure_predictions = []
+    timestamps = group.get("meta", {}).get("target_time_s")
+    if timestamps is not None:
+        timestamps = timestamps.to(device)
+    for mode in (CONFIG_VT, CONFIG_V, CONFIG_T):
+        batches = [physical] if mode == CONFIG_T else views
+        for batch in batches:
+            cid = torch.full((bsz,), mode, dtype=torch.long, device=device)
+            v, t, p, s = condition_inputs(batch, cid)
+            out = model(v, t, p, cid, batch.get("session_id"), T_s2m=s, timestamps=timestamps)
+            losses = compute_losses(out, batch, cid, mode_config)
+            objective = losses["loss"]
+            logs = {k: value for k, value in losses.items() if torch.is_tensor(value) and value.numel() == 1}
+            if contact is not None:
+                points = e3_support_points(out["x0_hat"].float(),
+                    out["trans_hat"].float() + batch["trans_anchor"][:, None],
+                    batch["offsets"], batch["parents"],
+                    support_offsets=out["x0_hat"].new_tensor(config["support_offsets"]))
+                geo = contact_height_original(points, contact, physical["floor_y"])
+                objective = objective + float(config["lambda_contact_geometry"]) * geo["loss"]
+                logs["L_contact_geometry"] = geo["loss"]
+                # Convert to a physical-row mean until the effective batch is
+                # assembled; the lifecycle restores its true raw sum below.
+                logs["contact_geometry_raw_sum"] = geo["raw_sum"] / bsz
+            pair_graph = mode == CONFIG_V and config["recipe"] == "UP_G1"
+            if pair_graph:
+                pressure = out["pressure_hat"]
+                supervised = pressure_supervision(pressure, physical["T_raw"])
+                # Helpers expose a scalar loss (or a diagnostic mapping).
+                supervised = supervised["loss"] if isinstance(supervised, dict) else supervised
+                objective = objective + float(config["lambda_pressure"]) * supervised
+                logs["L_pressure"] = supervised
+                pressure_predictions.append(pressure)
+            if not bool(torch.isfinite(objective)) or not bool(torch.isfinite(out["F"]).all()):
+                raise FloatingPointError("Nonfinite E3 forward/loss")
+            weight = probs[mode] / len(batches)
+            scaler.scale(objective * (weight * scale)).backward(retain_graph=pair_graph)
+            logs["loss"] = objective
+            for key, value in logs.items():
+                metrics[key] = metrics.get(key, 0.0) + float(value.detach()) * weight
+    if pressure_predictions:
+        pair = pressure_pair_loss(torch.stack(pressure_predictions, dim=1))
+        pair = pair["loss"] if isinstance(pair, dict) else pair
+        if not bool(torch.isfinite(pair)):
+            raise FloatingPointError("Nonfinite pressure pair")
+        restricted = tuple(hf_motion_parameters(model))
+        grads = torch.autograd.grad(scaler.scale(pair * (float(config["lambda_pressure_pair"]) * probs[CONFIG_V] * scale)),
+                                    restricted, allow_unused=True)
+        for parameter, gradient in zip(restricted, grads):
+            if gradient is not None:
+                if parameter.grad is None:
+                    parameter.grad = gradient.detach()
+                else:
+                    parameter.grad.add_(gradient.detach())
+        metrics["L_pressure_pair"] = float(pair.detach())
+        metrics["loss"] += float(pair.detach()) * float(config["lambda_pressure_pair"]) * probs[CONFIG_V]
+    return metrics
+
+
+def run_e3(config_path, device_name="cuda", resume=None):
+    """Grouped lifecycle inside the existing trainer, with explicit frozen identity."""
+    from anysole.data.e3_grouped import E3GroupedDataset, e3_grouped_collate, FlatViewDataset
+    from anysole.utils.checkpoint_policy import atomic_json
+    config_path = Path(config_path).resolve(strict=True)
+    config_bytes = config_path.read_bytes()
+    contract = json.loads(config_bytes)
+    config_hash = hashlib.sha256(config_bytes).hexdigest()
+    config = {**DEFAULT_CONFIG, **contract}
+    validate_e3_config(config)
+    config.update(motion_protocol=MOTION_PROTOCOL, motion_n_joints=int(N_JOINTS),
+                  motion_pose_dim=int(POSE_DIM), joint_protocol_checksum=JOINT_PROTOCOL_CHECKSUM,
+                  e3_recipe=config["recipe"], e3_template_sha256=config["stats_hash"])
+    run_dir = Path(config["run_dir"]).resolve()
+    run_dir.relative_to(Path("/private/Tactile"))
+    run_dir.mkdir(parents=True, exist_ok=True)
+    # File locks prevent two attempts from writing the same run/checkpoint.
+    import fcntl
+    lock = (run_dir / "writer.lock").open("a")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    if resume is None and (run_dir / "status.json").exists():
+        raise FileExistsError("E3 run already exists; use explicit exact resume")
+    started = time.time()
+    proc_start = Path("/proc/self/stat").read_text().split(") ", 1)[1].split()[19]
+    status = {"run_id": config["run_id"], "phase_id": config["phase_id"],
+              "attempt_id": config["attempt_id"], "config_hash": config_hash,
+              "pid": os.getpid(), "process_start_ticks": proc_start,
+              "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+              "status": "initializing", "successful_steps": 0, "started_unix": started}
+    def publish(**updates):
+        status.update(updates, heartbeat_unix=time.time())
+        atomic_json(run_dir / "status.json", status)
+    publish()
+    wb = None
+    try:
+        for path, expected in config.get("source_hashes", {}).items():
+            if sha256_file(Path(path)) != expected:
+                raise ValueError("Frozen source drift: " + path)
+        torch.set_num_threads(int(config.get("cpu_threads", 2)))
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cuda.matmul.allow_tf32 = False
+        seed = int(config["seed"])
+        random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        device = resolve_device(device_name)
+        data_root = Path(config["data_root"])
+        stats_path = data_root / "stats.json"
+        if sha256_file(stats_path) != config["stats_hash"]:
+            raise ValueError("E3 training statistics hash mismatch")
+        stats = json.loads(stats_path.read_text())
+        config.update(pressure_cell_mean=stats["pressure_cell_mean"],
+                      support_offsets=stats["support_offsets"], pressure_seed=seed)
+        dataset = E3GroupedDataset(data_root, split="train", window_length=int(config["tw"]), stride=int(config["tw"]))
+        val_dataset = E3GroupedDataset(data_root, split="val", window_length=int(config["tw"]), stride=int(config["tw"]))
+        if dataset.manifest["data_hash"] != config["data_hash"] or val_dataset.manifest["data_hash"] != config["data_hash"]:
+            raise ValueError("Frozen E3 data identity differs")
+        if not len(dataset) or not len(val_dataset):
+            raise ValueError("E3 train and val both require real complete windows")
+        if len(dataset) != int(config["train_windows"]):
+            raise ValueError("Frozen E3 training support changed")
+        entry = get_builder(config["model_name"])
+        config.update(entry.STRUCTURE)
+        model = entry.build(config).to(device)
+        model.pose_head.set_stats(torch.tensor(stats["pose_mean"], device=device),
+                                  torch.tensor(stats["pose_std"], device=device))
+        initial_common_hash = e3_model_hash(model, common_only=True)
+        if config.get("initial_common_hash") and initial_common_hash != config["initial_common_hash"]:
+            raise ValueError("Paired initialization hash differs")
+        atomic_json(run_dir / "initialization.json", {"common_hash": initial_common_hash,
+                    "full_hash": e3_model_hash(model), "config_hash": config_hash, "seed": seed})
+        optimizer = torch.optim.Adam(model.parameters(), lr=float(config["lr"]))
+        scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and config.get("precision") == "fp16")
+        batch_size = int(config["batch_size"])
+        steps_per_epoch = math.ceil(len(dataset) / batch_size)
+        total_steps = steps_per_epoch * int(config["epochs"])
+        if total_steps != int(config["successful_update_budget"]):
+            raise ValueError("Successful-update budget differs from grouped support")
+        step, epoch_start, cursor, best = 0, 0, 0, None
+        pending_validation = False
+        if resume is not None:
+            saved = torch.load(resume, map_location=device, weights_only=False)
+            if saved["config_hash"] != config_hash:
+                raise ValueError("Resume contract/config mismatch")
+            model.load_state_dict(saved["model"], strict=True)
+            optimizer.load_state_dict(saved["optimizer"])
+            scaler.load_state_dict(saved["scaler"])
+            step, epoch_start, cursor = saved["successful_steps"], saved["epoch_index"], saved["sample_cursor"]
+            best = saved["best_vt"]
+            pending_validation = saved.get("pending_validation", False)
+        publish(status="ready", successful_steps=step, expected_steps=total_steps,
+                train_windows=len(dataset), val_windows=len(val_dataset), initial_common_hash=initial_common_hash)
+        if config["wandb_mode"] == "offline":
+            import wandb
+            wb_root = run_dir / "wandb"
+            wb_root.mkdir(exist_ok=True)
+            wb = wandb.init(mode="offline", entity="foundary-f-beijing-institute-of-technology",
+                            project="Anysole-E3", id=config["run_id"], name=config["run_id"],
+                            group=config["experiment_id"], dir=str(wb_root),
+                            config={**config, "config_hash": config_hash},
+                            settings=wandb.Settings(init_timeout=120))
+            publish(wandb_dir=wb.dir)
+        # DataLoader owns a private RNG, so iterator creation cannot perturb model dropout.
+        val_loader = DataLoader(FlatViewDataset(val_dataset), batch_size=int(config.get("val_batch_size", 32)),
+                                shuffle=False, num_workers=0, collate_fn=collate_windows,
+                                generator=torch.Generator().manual_seed(9182))
+        diffusion = GaussianDiffusion(n_train_steps=int(config["diffusion_train_steps"]))
+        metrics_path = run_dir / "metrics.jsonl"
+        def snapshot(epoch_index, sample_cursor, pending=False):
+            return {"model": model.state_dict(), "optimizer": optimizer.state_dict(),
+                    "scaler": scaler.state_dict(), "rng": e3_rng_state(), "config": dict(config),
+                    "config_hash": config_hash, "successful_steps": step, "epoch": epoch_index,
+                    "epoch_index": epoch_index, "sample_cursor": sample_cursor, "best_vt": best,
+                    "pending_validation": pending}
+        def validate_epoch(completed_epoch):
+            nonlocal best
+            publish(status="validating", validation_started_unix=time.time())
+            model.eval()
+            validation = _evaluate(model, diffusion, val_loader, config, device)
+            score = validation["val/tau0_mpjpe/VT"]
+            if not math.isfinite(score):
+                raise FloatingPointError("Nonfinite full validation score")
+            if best is None or score < best:
+                best = score
+                e3_atomic_checkpoint(run_dir / "checkpoints" / "ckpt_best.pt", snapshot(completed_epoch,0))
+            e3_atomic_checkpoint(run_dir / "checkpoints" / ("epoch_%06d.pt" % completed_epoch), snapshot(completed_epoch,0))
+            # Replay after a crash is explicit and idempotent at checkpoint level.
+            with (run_dir / "validation.jsonl").open("a") as handle:
+                handle.write(json.dumps({"epoch":completed_epoch,"successful_step":step,**validation},allow_nan=False)+"\n")
+            if wb is not None: wb.log(validation, step=step)
+            e3_atomic_checkpoint(run_dir / "checkpoints" / "ckpt_last.pt", snapshot(completed_epoch,0))
+            publish(status="running", best_vt=best, validation_finished_unix=time.time())
+        if resume is not None:
+            # SDK/DataLoader initialization must not alter continuation randomness.
+            e3_restore_rng(saved["rng"])
+            if pending_validation:
+                validate_epoch(epoch_start)
+        if resume is None:
+            e3_atomic_checkpoint(run_dir / "checkpoints" / "ckpt_initial.pt", snapshot(0, 0))
+        for epoch in range(epoch_start, int(config["epochs"])):
+            indices = e3_epoch_indices(len(dataset), seed, epoch)
+            start = cursor if epoch == epoch_start else 0
+            model.train()
+            for offset in range(start, len(indices), batch_size):
+                tick = time.monotonic()
+                selected = indices[offset:offset + batch_size]
+                items = [dataset[index] for index in selected]
+                # Freeze batch-level contact weighting before splitting for memory.
+                full = e3_grouped_collate(items)
+                pos = full["physical"]["contact_gt"].float().mean().clamp(1e-4, 1-1e-4)
+                update_config = {**config, "contact_pos_weight": float(((1-pos)/pos).clamp(.05,20)),
+                    "contact_weight_mean": float((1 + float(config.get("lambda_air", 0)) *
+                                                  (1-full["physical"]["contact_gt"].float())).mean())}
+                warmup = max(1, int(float(config.get("lr_warmup_frac", .05)) * total_steps))
+                lr = float(config["lr"]) * min(1.0, (step + 1) / warmup)
+                if config.get("lr_schedule") == "cosine":
+                    lr *= .5 * (1 + math.cos(math.pi * step / total_steps))
+                for param_group in optimizer.param_groups:
+                    param_group["lr"] = lr
+                optimizer.zero_grad(set_to_none=True)
+                aggregates = {}
+                micro = int(config["microbatch_size"])
+                for micro_start in range(0, len(items), micro):
+                    part = items[micro_start:micro_start+micro]
+                    group = e3_grouped_collate(part)
+                    group["physical"] = move_batch(group["physical"], device)
+                    group["views"] = [move_batch(view, device) for view in group["views"]]
+                    dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(config.get("precision"))
+                    context = torch.autocast(device_type=device.type, dtype=dtype) if dtype is not None else nullcontext()
+                    with context:
+                        metrics = backward_e3_grouped(model, group, update_config, scaler, len(part)/len(items))
+                    for key, value in metrics.items():
+                        aggregates[key] = aggregates.get(key, 0.) + value * len(part)/len(items)
+                if "contact_geometry_raw_sum" in aggregates:
+                    aggregates["contact_geometry_raw_sum"] *= len(items)
+                scaler.unscale_(optimizer)
+                required_names = ("encoders.v_enc.proj.weight", "encoders.t_enc.conv.0.weight",
+                                  "v_temporal.layers.0.self_attn.in_proj_weight",
+                                  "pose_head.layers.0.xattn_v.in_proj_weight")
+                named = dict(model.named_parameters())
+                if any(named[name].grad is None for name in required_names):
+                    raise RuntimeError("E3 supervised graph lost a required encoder/decoder gradient")
+                if step == 0 or (step + 1) % int(config.get("checkpoint_interval_steps",25)) == 0:
+                    gradient_probe = {name: float(named[name].grad.norm()) for name in required_names}
+                    publish(gradient_probe=gradient_probe,
+                            active_gradient_parameters=sum(p.grad is not None for p in model.parameters()))
+                norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float(config.get("grad_clip", 5)), error_if_nonfinite=True)
+                old_scale = scaler.get_scale()
+                scaler.step(optimizer); scaler.update()
+                if scaler.get_scale() < old_scale:
+                    raise FloatingPointError("AMP overflow: update not counted; recovery required")
+                step += 1
+                next_cursor = offset + len(items)
+                next_epoch = epoch + 1 if next_cursor == len(indices) else epoch
+                next_cursor = 0 if next_cursor == len(indices) else next_cursor
+                row = {"successful_step": step, "epoch": epoch+1, "physical_windows": len(items),
+                       "rgb_windows": len(items)*len(full["views"]), "grad_norm": float(norm),
+                       "lr": lr, "step_seconds": time.monotonic()-tick, "unix": time.time(), **aggregates}
+                if device.type == "cuda":
+                    row.update(peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(device),
+                               peak_cuda_reserved_bytes=torch.cuda.max_memory_reserved(device))
+                with metrics_path.open("a") as handle:
+                    handle.write(json.dumps(row, allow_nan=False)+"\n")
+                if wb is not None:
+                    wb.log({"train/"+k:v for k,v in row.items()}, step=step)
+                publish(status="running", successful_steps=step, epoch=epoch+1,
+                        sample_cursor=next_cursor, last_update_unix=time.time(), last_metrics=row)
+                print(json.dumps(row, allow_nan=False), flush=True)
+                save_every = int(config.get("checkpoint_interval_steps", 25))
+                if step == 1 or step % save_every == 0 or next_cursor == 0:
+                    publish(status="checkpointing")
+                    checkpoint_started = time.monotonic()
+                    pending = next_cursor == 0 and (next_epoch % int(config.get("wandb_eval_interval",5)) == 0 or next_epoch == int(config["epochs"]))
+                    e3_atomic_checkpoint(run_dir / "checkpoints" / "ckpt_last.pt", snapshot(next_epoch,next_cursor,pending))
+                    publish(status="running", checkpoint_step=step,
+                            checkpoint_seconds=time.monotonic()-checkpoint_started)
+                if config.get("pilot_max_steps") and step >= int(config["pilot_max_steps"]):
+                    e3_atomic_checkpoint(run_dir / "checkpoints" / "ckpt_last.pt", snapshot(next_epoch,next_cursor))
+                    if wb is not None: wb.finish(); wb = None
+                    publish(status="pilot_completed", successful_steps=step)
+                    return 0
+            if (epoch+1) % int(config.get("wandb_eval_interval", 5)) == 0 or epoch+1 == int(config["epochs"]):
+                validate_epoch(epoch+1)
+        if step != total_steps:
+            raise RuntimeError("E3 terminated with incorrect successful-update count")
+        if wb is not None: wb.finish(); wb = None
+        publish(status="completed", successful_steps=step, completed_unix=time.time())
+        return 0
+    except BaseException as exc:
+        publish(status="failed", exception=repr(exc), traceback=traceback.format_exc(), failed_unix=time.time())
+        if wb is not None: wb.finish(exit_code=1)
+        raise
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    if args.e3_run_config is not None:
+        return run_e3(args.e3_run_config, args.device, args.resume)
+    if args.resume is not None:
+        raise ValueError("--resume currently requires a frozen E3 run contract")
     config = load_config(args.config)
     config["input_adapter"] = "AnySole"
     config["adapter_version"] = ADAPTER_VERSION

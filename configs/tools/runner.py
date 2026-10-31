@@ -153,6 +153,8 @@ def _update_manifest(path: Path, **updates: Any) -> None:
 def _train_command(registry: dict[str, Any], model_id: str,
                    train_overrides: dict[str, Any] | None = None) -> list[str]:
     spec = _merge_model_spec(registry, model_id)
+    if spec.get("e3_recipe"):
+        raise ValueError("E3 recipes require TASK=e3_train with a frozen E3_RUN_CONFIG; ordinary model_run would lose grouped semantics")
     if train_overrides:
         # V6_Av1 occ_mix：conf 直写开关（OCC_MIX/P_OCC/P_NULLV/P_NULLT）
         # 注入 train_args（MODELS 表默认不带 = 默认关）。
@@ -468,7 +470,25 @@ def _run_task(
         "1", "true", "yes", "on"
     }
     task = str(values.get("TASK", "")).strip()
-    if task == "model_run":
+    if task == "e3_train":
+        config_path_e3 = Path(str(values.get("E3_RUN_CONFIG", ""))).resolve(strict=True)
+        payload = json.loads(config_path_e3.read_text())
+        if payload.get("experiment_id") != experiment_id:
+            raise ValueError("E3 experiment identity differs from task conf")
+        command = [PYTHON, "-m", "anysole.train", "--e3-run-config", str(config_path_e3),
+                   "--device", str(values.get("DEVICE", "cuda"))]
+        if values.get("E3_RESUME"):
+            command += ["--resume", str(values["E3_RESUME"])]
+        if dry_run:
+            print(subprocess.list2cmdline(command))
+            return
+        root_e3 = Path(payload["run_dir"])
+        code = _command_log(command, root_e3 / "trainer.log", env=dict(os.environ))
+        write_json(root_e3 / "process_exit.json", {"returncode": code, "command": command,
+                   "finished_unix": time.time(), "run_id": payload["run_id"]})
+        if code:
+            raise RuntimeError("E3 trainer exited %d; see %s" % (code, root_e3 / "trainer.log"))
+    elif task == "model_run":
         model_id = str(values.get("MODEL_ID", "")).strip()
         if not model_id:
             raise ValueError("TASK=model_run without MODEL_ID")
