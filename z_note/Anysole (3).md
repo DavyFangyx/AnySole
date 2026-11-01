@@ -1,182 +1,194 @@
-# Anysole
-
-摘要：
-基于视觉的人体运动捕捉受限于相机覆盖范围与遮挡，当人在较大范围内移动时，难以持续获得完整的视觉观测。足底压力不依赖外部视线，能够直接记录足地交互，却难以约束上半身姿态，两者构成互补的运动证据~~（~~**~~你是从视觉与触觉之间的模态互补开始讲解这一故事的，但是这种写法：足底压力能够提供不依赖外部视线的运动线索，但依赖固定输入配置的重建方法，难以灵活利用不同模态与视角组合下的可用信息。你觉得怎么样~~**~~）~~。然而，这种互补性是有条件的，随着人的移动与运动阶段的变化，两类证据是否可用、是否有效都在改变。~~然而，现有视触重建方法通常绑定固定的输入配置，无法随观测条件变化利用当前可用的信息；并且，直接融合压力并不总是有益，在部分运动阶段会干扰视觉已能可靠估计的姿态~~依赖固定输入配置的方法无法应对可用性的变化，无条件的融合则会在压力信息不足的运动阶段干扰视觉已能可靠估计的姿态。本文构建了一个包含四路同步 RGB、双足压力和光学动捕真值的多模态人体运动数据集（\[N\] 名被试、\[M\] 类动作、\[K\] 帧），并提出 AnySole，一个统一的视触人体运动重建框架，以同一套模型权重支持单视角视觉、足底压力及其联合输入，无需针对不同输入配置重新训练。AnySole 通过**~~独立的~~**时序编码器提取视觉与压力信息，由共享运动解码器预测人体姿态与根运动，并通过门控机制分别调节压力对两类预测的贡献。进一步地，我们通过测试时优化融合未标定的多视角预测，使同一模型无需重新训练即可扩展至数量与布置可变的相机；并在此基础上，用压力提供的接触证据构成共享地面约束，减轻仅依赖跨视角一致性难以消除的足地几何误差。实验表明，AnySole 在不同输入配置下均具有竞争力的姿态与轨迹重建性能；视觉观测受限时，触觉融合改善了足部运动与足地物理一致性，而门控机制能够减轻不恰当融合造成的性能退化。同一模型还能利用随时间变化的模态与视角输入（这一句话写的很笼统 基本上没有任何信息），降低运动捕捉对固定传感配置与持续完整视觉覆盖的依赖。
-
-
-
-基于视觉的人体运动捕捉受限于相机覆盖范围与遮挡，当人在较大范围内移动时，难以持续获得完整的视觉观测。足底压力不依赖外部视线，能够直接记录足地交互，却难以约束上半身姿态，与视觉构成互补的运动证据。然而，这种互补性是有条件的：随着人的移动与运动阶段的变化，两类证据是否可用、是否有效都在改变。依赖固定输入配置的方法无法应对可用性的变化，无条件的融合则会在压力信息不足的运动阶段干扰视觉已能可靠估计的姿态。为此，我们提出 AnySole，一个统一的视触人体运动重建框架，以同一套模型权重支持单视角视觉、足底压力及其联合输入，无需针对不同输入配置重新训练。AnySole 分别对视觉与压力进行时序编码，由共享运动解码器预测人体姿态与根运动，并通过门控机制分别调节压力对两类预测的贡献。进一步地，我们通过测试时优化融合未标定的多视角预测，使同一模型无需重新训练即可扩展至数量与布置可变的相机；在此基础上，压力提供的接触证据构成共享地面约束，减轻仅依赖跨视角一致性难以消除的足地几何误差。我们采集了同步的穿戴式压力鞋垫、四路 RGB 与光学动捕数据用于评估。实验表明，AnySole 在不同输入配置下均取得具有竞争力的姿态与轨迹重建精度；视觉受遮挡时，压力融合改善了足部运动与足地物理一致性，门控机制则减轻了不恰当融合造成的性能退化。在人物逐步走出相机视野、可用视角与模态随时间变化的连续序列中，包括真实采集的场景，同一模型无需切换权重即可持续完成重建，降低了运动捕捉对固定传感配置与持续完整视觉覆盖的依赖。
-
-
-
-### 贡献
-
-1. **统一的视触运动建模：**将不同可用条件下的视觉与压力观测纳入同一运动解码器，通过覆盖多种模态条件的训练，以一套权重支持单视角视觉、足底压力及其组合，无需针对输入配置重新训练。
-
-2. **目标相关的选择性融合：**揭示无条件融合会在部分运动阶段干扰视觉已能可靠估计的姿态，并提出分别作用于姿态与根运动的门控，根据当前证据调节压力。
-
-3. **接触约束的多视角扩展：**在免重训、免标定的测试时优化中，利用压力提供的接触证据构建共享地面约束，减轻仅依赖视觉一致性难以消除的足地几何误差；并在视角与模态随时间变化的条件下验证同一模型。
-
-> 注意：多视角部分论述的分寸上，把它定位为“压力在多视角重建中的一种新用法”，比定位为“解决了多视角的某个根本问题”更合适。实验能支撑多少，就主张多少。
-> 
-> 
-
-列表之后一句：
-
-> 为研究这一问题，我们采集了同步的穿戴式压力鞋垫、四路 RGB 与光学动捕数据，并将与代码一同开源。
-> 
-> 
-
-
-
-另外一版
-
-1. 同步数据与系统评估：穿戴式压力、多视角 RGB 与光学动捕的同步数据，以及基于该数据集进行的覆盖遮挡、接触阶段、视角数量、动态输入的评估。
-
-> 当前数据集在数量（采集者，以及 Task 数量上，全都弱于 MotionPro 数据集（70人，400动作），以及维度上实际上也没有 MotionPro ），但是好在 地垫固定在地面，人只有站在垫子上才有压力信号，它和相机一样受“覆盖范围”限制。也是可以讲这一点的。
-> 
-> - 不把数据集列为独立贡献。 贡献列表中写成“我们采集了同步的穿戴式压力、多视角 RGB 与光学动捕数据，用于系统评估”，与评估合并为一点。
-> 
-> - 数据集小节第一句就讲为什么需要它：现有数据集使用地垫或缺少多视角／光学真值，无法研究穿戴式压力与多视角的结合。不要列表格和 MotionPRO 比较人数与动作数。
-> 
-> - 摘要中只用一个分句交代，放在实验句之前，并点明“穿戴式”。
-> 
-> 
-
-2. 统一视触重建框架：同一套权重覆盖单视角视觉、压力及其组合。我们指出直接融合会产生干扰，并通过分目标门控与多条件训练加以处理。
-
-3. 免训练、免标定的多视角扩展：利用压力与视角无关、锚定于世界坐标系的性质，校正多视角一致性无法消除的共有误差。
-
-**还有将数据集放进第一点，作为“统一建模”的基础与条件行不行呢？**
-
-
-
----
-
-### 篇幅分配（正文 8 页）
-
-
-
-### Introduction
-
-1. **问题来源**：视觉运动捕捉受覆盖范围与遮挡限制，人的移动会使有效观测随时间变化。
-
-2. **互补证据**：穿戴式压力不依赖视线，直接反映足地交互，但对上半身欠约束。地垫同样受场地范围限制，因此穿戴式传感是关键。
-
-3. **困难**：然而，这种互补性是有条件的：随着人的移动与运动阶段变化，各类证据是否可用、是否有效都在变化。依赖固定输入配置的方法无法应对可用性的变化，而无条件的融合会在压力信息不足的运动阶段干扰视觉已能可靠估计的姿态。
-
-4. **方法概述**：统一解码 \+ 分目标门控 \+ 多条件训练；多视角通过 TTA 扩展，压力作为世界系锚点。
-
-5. **主要发现与贡献列表。**
-
-Teaser（图 1）：真实采集序列，人自然走出部分机位视野、下肢被物体遮挡。下方是可用输入随时间变化的时间轴，以及 AnySole 的连续重建。
-
-
-
-### Related Work
-
-- **视觉人体运动重建**：单目、全局运动、标定与免标定多视角，以及测试时优化。**明确本文的 TTA 框架沿用自哪项工作。**
-
-> **2\.1 Vision\-based Human Motion Reconstruction**
-> 
-> - **单目重建**：逐帧网格回归、视频时序建模以及世界系全局运动估计。结尾指出两个问题：受相机覆盖范围与遮挡限制；缺少直接的足地约束，容易出现滑动与穿透。
-> 
-> - **多视角重建**：一类是标定后三角化再拟合（EasyMocap），另一类是学习型多视角网络（Learnable Triangulation、HeatFormer），二者都依赖标定或固定机位的训练。最后介绍免训练、免标定的测试时优化\(TTA\)：在推理阶段把单视角模型的预测联合优化为多视角结果。本文的多视角扩展沿用这一框架，区别在于引入压力作为不依赖视觉的世界系约束。
-> 
-> 
-
-- **基于压力的运动估计与视触融合**：鞋垫类（SolePoser、Step2Motion、FoRM 等）、地垫类（MotionPRO），以及 MMVP。
-
-> **2\.2 Pressure\-based and Visuo\-tactile Motion Reconstruction**
-> 
-> - **仅压力的运动估计**：鞋垫类（SolePoser、PressInPose、FoRM、Step2Motion）与地垫类。压力能较好地约束下肢与轨迹，但上半身存在歧义。
-> 
-> - **视触融合**：按融合机制介绍。一类是优化拟合，把压力或接触作为约束项（MMVP 的 RGBD\-P 拟合、基于接触的优化方法）；另一类是特征层融合（MotionPRO 的交叉注意力）。
-> 
-> 
-
-> - **本段结尾点出两点不足**：这些方法都假设测试时传感配置固定（无论是视觉还是触觉还是其他）、传感器流恒定并且信号始终存在；视触融合则设计为压力的融合是无条件的，没有根据当前状态调节压力的贡献。
-> 
-> 最后加一句：**通用的模态 dropout 只能让模型在输入缺失时仍可运行，无法解决两种输入同时存在时的相互干扰。**这一句用来预先回应审稿人的“这不就是 modality dropout 吗”，不需要单独成节。
-> 
-> 
-
-
-
-### Method
-
-**3\.1 Problem Formulation and Overview（0\.35 页）**
- 输入、可用性掩码与输出的定义。观测编码只用一段：视觉采用冻结的预训练骨干，压力由原始信号和派生物理量构成，各经时序编码，细节放补充材料。配架构图（图 2）。
-
-**3\.2 Gated Visuo\-tactile Decoding（0\.5 页）**
- 共享解码器读取两路证据，缺失模态通过掩码关闭。给出门控公式：以什么为条件、作用于何处。论证根运动和姿态为何需要不同的压力贡献。接触头作为辅助输出，为 3\.4 铺垫。
-
-**3\.3 Training across Modality Conditions（0\.3 页）**
- 三种条件的枚举训练，与随机 dropout 的区别，以及损失函数。
-
-**3\.4 Training\-free Multi\-view Extension（0\.6 页）**
-
-- 优化变量：各视角的人体运动、相机外参，以及共享地面高度。
-
-- 损失：L\_2D、L\_con、L\_reg。
-
-- 共有误差的论证：跨视角一致性只能消除视角特有的误差，所有视角共有的偏差（足部悬空或穿地、地面高度、整体漂移）不产生梯度。
-
-- 接触约束 L\_contact：压力是相机系统之外的观测，提供独立的世界系锚点。说明它只在压力可用时启用。
-
-- 配一张小示意图：多视角预测彼此一致却整体浮离地面，接触约束将其拉回（可并入图 2）。
-
-
-
-### Data and Evaluation Protocol
-
-- **为什么需要这份数据**：地垫与鞋垫的取舍（如实写出地垫的接触覆盖优势），以及现有数据中缺少穿戴式压力、多视角 RGB 与光学真值的组合（需先核实 MMVP 的视角数与真值来源）。
-
-- **采集**：设备、同步、被试与动作（10 人 × 10 个动作，投稿时以实际规模为准），真实采集片段单独说明。
-
-- **划分**：按被试分 fold，报告均值与波动。
-
-- **指标**：姿态（PA\-MPJPE、MPJPE）、世界系（GlobalMPJPE、ATE、根部漂移）、足地物理（FootSliding、GroundPen）。
-
-
-
-### Experiments
-
-小节	回答的问题	实验	产物
-5.1 Reconstruction across Input Configurations	同一模型在各配置下有多强？	E2	表 1：V / T / VT 三块，每块外部基线 + U，表注说明三块为同一 checkpoint
-5.2 Complementarity under Visual Occlusion	视觉受限时，压力补充了什么？	E5	图 3：遮挡等级曲线（姿态、世界系、物理各选代表指标）；至少一种纹理或真实物体遮挡
-5.3 Gated Interaction and Training Design	为什么不能直接融合？训练方式是否必要？	E4 + E6	表 2：无门控、单门控、双门控、随机 dropout、无模态缺失训练；图 4：接触阶段的增益曲线（有门控 vs 无门控）
-5.4 Multi-view Extension	同一模型能否利用额外视角？压力锚点校正了什么？	E3	表 3
-5.5 Dynamic Inputs and Real Captures	观测条件连续变化时表现如何？（也是视触融合、触觉扩展多视角的会师）	E7	图 6：输入时间轴 + 分段误差；真实采集序列的定性结果
-
-**5\.4 的组织方式：**
-
-- 对比线：EasyMocap（标定参考）、原 TTA 方法、U@V\{i\}（TTA）、U@V\{i\}T \+ 接触约束。
-
-- 视角数 i = 1–4，报告组合均值与波动。
-
-- **指标按论证来选**：主报 GlobalMPJPE、足部误差和物理指标，PA\-MPJPE 作为补充。
-
-- **验证共有误差的预测**：在所有视角都施加下肢遮挡的条件下，接触约束的收益应该更大；同时做融合残差分解，展示接触约束主要减少的是共有成分。
-
-
-
-### Limitations and Conclusion
-
-以未来工作为主。建议每个方向都**从当前工作的一个局限出发**，这样既诚实，又不会显得是在罗列愿景。
-
-- **压力的多视角一致性**：本文只把它用作测试时的约束。它还可以作为可学习多视角模型的训练监督，甚至作为无需动捕真值的自监督信号，用于多视角学习，以及多视角HMR精度提升的方案。
-
-- **全身接触**：鞋垫只记录足地交互，而躺、俯卧撑等动作涉及全身与地面的接触。将触觉感知扩展到更多身体部位，是下一步的方向。这一点正好呼应第 4 节中如实写出的地垫覆盖优势，前后一致。
-
-- **人形机器人应用**：模型在遮挡下仍能工作，又能接受随时间变化的传感输入，适合用于人形机器人的运动示范与控制。本文尚未在机器人任务上验证，作为应用方向提出。
-
-结论用两三句话回到“同一模型如何利用不同的可用证据”。
-
-
-
-### 补充材料
-
-完整的十项指标、E1、E8 探针、E3实验对应的多视角的图（图 X），逐动作结果、观测编码细节、TTA 超参、数据采集与清理细节、更多定性结果，以及补充视频。
-
-
+\section{Experiments}
+\label{sec:exp}
+We organize evaluation around five questions: (i) How well does one checkpoint reconstruct motion under distinct inputs? (ii) When does pressure help under occlusion? (iii) Does selective fusion prevent negative transfer? (iv) Can predicted contact improve test-time multi-view fitting? (v) Can one checkpoint handle temporal changes of available sensors? The numerical results reported in this section are \emph{preliminary values transcribed from the internal experimental summary}. They require re-export from saved predictions and a final split, version and unit audit before any submission.
+
+\subsection{Reconstruction across Input Configurations}
+\label{sec:mainresults}
+Table~\ref{tab:main} gives selected initial results for the unified model (configuration \texttt{V7\_Cv5}) and external reference systems. Values in the source table were reported as point estimates, without confidence intervals. Not all baselines share identical input modalities or training protocols; fair re-training and evaluation on a fixed split are necessary before making a state-of-the-art claim. In particular, the RGB-D and pressure optimization baseline cannot be treated as a direct input-matched comparator to a monocular RGB model.
+
+\begin{table*}[t]
+\centering
+\caption{\textbf{Main reconstruction results across input configurations.} One \method checkpoint (\texttt{V7\_Cv5}, \texttt{ckpt\_last}) is evaluated under V-only, T-only and VT inference against external baselines matched to each input block; the three \texttt{U} rows share identical weights with no retraining or fine-tuning. \texttt{---} marks metrics unavailable for a baseline. Point estimates without confidence intervals.}
+\label{tab:main}
+\setlength{\tabcolsep}{2.5pt}\small
+\begin{tabular}{llrrrrrrrrrr}
+\toprule
+Block & Method & PA$\downarrow$ & MPJPE$\downarrow$ & G-MPJPE$\downarrow$ & W-MPJPE$\downarrow$ & MPJRE$\downarrow$ & ATE$\downarrow$ & RotDrift$\downarrow$ & FootSlid$\downarrow$ & GroundPen$\downarrow$ & Jitter$\downarrow$ \\
+\midrule
+V & U@V & 37.50 & 53.67 & 70.92 & 87.05 & 10.87 & 41.02 & 5.11 & 9.17 & 23.40 & 704.52 \\
+ & GVHMR 2024 & 50.46 & 65.46 & --- & 229.12 & 17.20 & 2271.01 & 3.84 & 32.13 & --- & 4462.11 \\
+ & SAM3DB & 51.14 & 74.80 & --- & 141.01 & 15.42 & 557.54 & 4.80 & 26.76 & --- & 3901.02 \\
+ & WHAM & 47.09 & 64.27 & --- & 266.77 & 13.55 & 2509.19 & 10.43 & 22.49 & --- & 2467.84 \\
+\midrule
+T & U@T & 89.40 & 152.49 & 185.38 & 293.46 & 20.39 & 84.84 & 33.44 & 16.43 & 42.13 & 1784.27 \\
+ & Step2Motion & 81.34 & 149.84 & --- & 317.96 & --- & 1285.06 & 22.11 & 5.76 & --- & 360.55 \\
+\midrule
+VT & U@VT & 40.53 & 56.37 & 73.68 & 89.09 & 11.84 & 41.31 & 4.88 & 9.37 & 20.29 & 728.69 \\
+ & MotionPRO & 59.09 & 77.97 & --- & 149.57 & 14.32 & 184.30 & 18.20 & 18.20 & --- & 4055.17 \\
+ & VP-MoCap (FPP+PoseTransOpt) & 60.95 & 88.35 & --- & 237.91 & 13.94 & 199.19 & 5.30 & 19.17 & --- & 915.81 \\
+ & MMVP pressure-toolkit & 112.24 & 225.99 & --- & 321.63 & 21.50 & 652.49 & 33.34 & 3.15 & --- & 4183.04 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The current data reveal an important trade-off. Relative to \(\unif@V\), \(\unif@VT\) has higher PA-MPJPE (40.53 versus 37.50) and MPJPE (56.37 versus 53.67) and slightly higher foot sliding (9.37 versus 9.17), while reducing ground penetration (20.29 versus 23.40). Thus, plantar evidence can improve physical plausibility without improving every pose metric. The preliminary tactile-only variant is also weaker than its specialist on some world-space and physical metrics (see supplementary comparison), so a universal \emph{no-regret} claim would be premature. This motivates the targeted fusion study instead of assuming that more modalities must yield better accuracy.
+
+\subsection{Complementarity under Visual Occlusion}
+\label{sec:occlusion}
+We progressively mask lower-body image content at occlusion settings \texttt{occ000}, \texttt{occ010}, \texttt{occ020}, \texttt{occ030} and \texttt{occ050}, holding network weights constant. The initial study uses a bottom-of-person-bounding-box mask, and later experiments should replace the uniform mask with silhouette-aware and naturalistic occluders. Both \(\unif@V\) and \(\unif@VT\) are evaluated at identical occlusion levels; the tactile-only mode provides an occlusion-invariant input reference.
+
+Table~\ref{tab:occlusion} gives \texttt{V7\_Cv5} results: PA-MPJPE 37.50/40.53 (V/VT) at \texttt{occ000}, 38.52/40.87 at \texttt{occ010}, and 40.35/42.87 at \texttt{occ020}. These numbers establish increasing visual difficulty but do not yet demonstrate an improvement in absolute pose accuracy from pressure. Subtracting each mode's own \texttt{occ000} error gives smaller \emph{occlusion-induced degradation} for VT than V at the severe levels---PA-MPJPE at \texttt{occ050} rises by $+19.55$\,mm for V versus $+16.88$\,mm for VT---and VT keeps lower ground penetration than V at every level ($54.90$ versus $59.16$\,mm at \texttt{occ050}). Because this comparison subtracts each mode's \texttt{occ000} error, it cannot establish the lowest absolute error. Subject-level uncertainty intervals and a finalized-split re-export remain pending before statistical reliability claims.
+
+\begin{table*}[t]
+\centering
+\caption{\textbf{E5 occlusion study (\texttt{V7\_Cv5}, absolute errors per level).} Bottom-of-bounding-box masking at five levels with weights held fixed. VT degrades less than V at the severe levels (PA-MPJPE at \texttt{occ050}: $+19.55$ versus $+16.88$\,mm relative to each mode's \texttt{occ000}) and keeps lower ground penetration at every level, while absolute pose error stays slightly higher for VT. Point estimates without confidence intervals.}
+\label{tab:occlusion}
+\setlength{\tabcolsep}{2.5pt}\small
+\begin{tabular}{llrrrrrrrrrr}
+\toprule
+Level & Input & PA$\downarrow$ & MPJPE$\downarrow$ & G-MPJPE$\downarrow$ & W-MPJPE$\downarrow$ & MPJRE$\downarrow$ & ATE$\downarrow$ & RotDrift$\downarrow$ & FootSlid$\downarrow$ & GroundPen$\downarrow$ & Jitter$\downarrow$ \\
+\midrule
+occ000 & V & 37.50 & 53.67 & 70.92 & 87.05 & 10.87 & 41.02 & 5.11 & 9.17 & 23.40 & 704.52 \\
+ & VT & 40.53 & 56.37 & 73.68 & 89.09 & 11.84 & 41.31 & 4.88 & 9.37 & 20.29 & 728.69 \\
+occ010 & V & 38.52 & 55.09 & 73.85 & 87.84 & 11.55 & 42.92 & 6.14 & 9.31 & 30.00 & 700.55 \\
+ & VT & 40.87 & 57.41 & 76.30 & 90.32 & 12.18 & 42.31 & 5.82 & 9.49 & 24.71 & 732.29 \\
+occ020 & V & 40.35 & 57.30 & 77.81 & 93.39 & 11.66 & 46.05 & 6.41 & 9.78 & 30.98 & 723.76 \\
+ & VT & 42.87 & 59.67 & 80.15 & 95.42 & 12.40 & 45.19 & 6.16 & 9.85 & 25.28 & 749.58 \\
+occ030 & V & 43.42 & 60.83 & 85.27 & 103.33 & 12.27 & 52.26 & 6.48 & 10.38 & 35.33 & 744.61 \\
+ & VT & 45.12 & 63.97 & 88.10 & 104.49 & 13.06 & 51.52 & 6.24 & 10.32 & 29.04 & 772.75 \\
+occ050 & V & 57.05 & 80.14 & 109.17 & 135.56 & 14.43 & 64.49 & 8.39 & 11.44 & 59.16 & 730.19 \\
+ & VT & 57.41 & 82.81 & 111.21 & 134.96 & 15.38 & 63.00 & 7.37 & 11.03 & 54.90 & 776.01 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Gated Interaction and Training Design}
+\label{sec:ablation}
+The ablation isolates (a) ungated fusion, (b) one shared gate, (c) separate pose/root gates, (d) enumerated three-condition training, (e) random modality dropout, and (f) full-input-only training, with all other training choices matched. Table~\ref{tab:ablate} reports the trained \texttt{V7} variant family: gating reduces U@VT PA-MPJPE from $44.55$\,mm (no gate) to $39.46$--$40.53$\,mm, enumerated three-condition training keeps U@V sharp ($37.50$ versus $43.00$\,mm under VT-only training), and the dual gate stays within $1.1$\,mm of the shared gate. Seed replication and the finalized split audit remain pending. We will additionally plot the effective gates by contact phase to test whether their values correspond to measurable improvements rather than merely varying numerically.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{E4: controlled fusion ablations (\texttt{V7} variant family, 740 epochs, one seed each).} U@V and U@VT PA-MPJPE (mm, \texttt{ckpt\_last}); the VT-only model is also evaluated under V to expose cross-condition generalization. Seed replication and the finalized split audit remain pending.}
+\label{tab:ablate}
+\setlength{\tabcolsep}{4pt}\small
+\begin{tabular}{llllrr}
+\toprule
+Configuration & Model & Gate & Training & U@V & U@VT \\
+\midrule
+Unconditional fusion & V7\_Cv7 & none & enumerated & 37.01 & 44.55 \\
+Single shared gate & V7\_Cv4 & shared & enumerated & 36.99 & 39.46 \\
+\method (proposed) & V7\_Cv5 & dual & enumerated & 37.50 & 40.53 \\
+Random modality dropout & V7\_Cv2 & dual & random & 37.35 & 40.09 \\
+Always VT during training & V7\_Cv6 & dual & VT only & 43.00 & 41.35 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For the motion-phase study, each foot is labeled as stance, swing, touchdown vicinity, or lift-off vicinity from synchronized contact measurements. For error \(E\), we define \(G=E(V)-E(VT)\), so positive \(G\) means that tactile fusion helps. The source document uses a conflicting sign convention in some exploratory tables; all plots and statistics must be regenerated from raw errors with this single definition. Table~\ref{tab:e6phase} reports running (session S13082): the ungated model suffers a large negative-fusion event at left stance ($G=-14.1$\,mm) and only recovers gains at swing and lift-off, while the dual gate keeps left stance positive ($G=+2.5$\,mm) and preserves the lift-off gain ($+12.2$\,mm). Across all 36 clear-view sessions (Table~\ref{tab:e6headroom}), the dual-gate model keeps VT within $3.4$\,mm of V-only, the per-frame oracle bounds the remaining headroom at $5.7$\,mm, and at moderate occlusion (\texttt{occ020}/\texttt{occ030}) VT improves ankle-foot error over V-only by $1.7$/$2.5$\,mm. Per-phase means with confidence intervals and gate calibration remain to be added.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{E6: running session S13082, per-phase ankle-foot errors (mm).} Cells give V error / VT error / $G$, with $G=E(V)-E(VT)$; positive $G$ means pressure helps. Phases come from synchronized contact labels with $\pm 0.1$\,s windows.}
+\label{tab:e6phase}
+\setlength{\tabcolsep}{6pt}\small
+\begin{tabular}{llcccc}
+\toprule
+Model & Foot & Stance & Swing & Touchdown & Lift-off \\
+\midrule
+\method dual gate (V7\_Cv5) & left & 55.1/52.6/$+2.5$ & 129.6/135.0/$-5.4$ & 100.4/103.6/$-3.2$ & 149.9/137.7/$+12.2$ \\
+ & right & 63.1/64.1/$-1.0$ & 105.7/107.2/$-1.5$ & 90.5/95.7/$-5.2$ & 154.1/151.3/$+2.8$ \\
+No gate (V7\_Cv7) & left & 56.7/70.8/$-14.1$ & 131.3/117.4/$+13.9$ & 89.9/82.8/$+7.1$ & 157.6/143.5/$+14.1$ \\
+ & right & 67.8/63.6/$+4.2$ & 105.6/113.7/$-8.1$ & 87.1/96.3/$-9.2$ & 154.6/156.4/$-1.8$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{\textbf{E6: clear-view gating headroom (ankle-foot MPJPE, mm, pelvis-aligned; 36 test sessions).} $\Delta = $ VT$-$V (negative helps). The per-frame oracle selects the better of V and VT at each frame; per-session likewise per session. Ranges cover the three T/LR/Q granularity variants and the four explicit-gain-supervision seeds.}
+\label{tab:e6headroom}
+\setlength{\tabcolsep}{4pt}\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & V & VT & $\Delta$ & Per-frame oracle & Per-session oracle & Sessions VT$<$V \\
+\midrule
+B (V7\_Cv5\_s1, dual gate) & 74.70 & 78.11 & $+3.41$ & 68.95 & 73.73 & 9/36 \\
+V7\_Cv5TLR\_s1 (foot$\times$time gates) & 74.94 & 78.13 & $+3.19$ & 68.08 & 73.19 & 13/36 \\
+T/LR/Q gate variants & 73.6--75.4 & 78.3--83.1 & $+4.3$ to $+7.7$ & --- & --- & 6--11/36 \\
+Explicit-gain supervision (4 seeds) & 74.9--79.7 & 84.6--86.1 & $+6.1$ to $+9.6$ & --- & --- & 7--12/36 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Contact-Guided Multi-View Extension}
+\label{sec:mvexperiments}
+For \(K\in\{1,2,3,4\}\), we evaluate all available synchronized camera subsets, using a known-calibration triangulation-and-fitting reference, uncalibrated late fusion, the underlying test-time fitting baseline, \(\unif@V_K\), \(\unif@V_KT\) without the contact term, and \(\unif@V_KT\) with Eq.~\eqref{eq:contact}. An optional vision-only contact variant, if implemented, will be reported separately from insole-assisted contact. We will report the exact camera-subset variation (for \(K=4\), one full-camera subset). Primary metrics are Global-MPJPE, foot-joint error and ground penetration. To test the shared-error mechanism, we will occlude lower limbs in every available view and decompose errors into per-view residual and common displacement. \textbf{AnySole TTA rows are pending;} the calibrated reference (2--4 views) and the single-view TTA baseline are filled in Table~\ref{tab:multiview}. Results will be reported with their computation budget and any required camera calibration assumptions.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{E3: multi-view study.} Cells give MPJPE / Global-MPJPE (mean $\pm$ std over camera subsets; the single 4-view subset has no std). PA-MPJPE is available in the exported table.}
+\label{tab:multiview}
+\setlength{\tabcolsep}{3pt}\small
+\begin{tabular}{lcccc}
+\toprule
+Method & 1 view & 2 views & 3 views & 4 views \\
+\midrule
+\shortstack[l]{Calibrated triangulation\\ + fitting (EasyMocap)} & \todoresult &
+\shortstack{$68.94 \pm 12.80$\\ $104.29 \pm 42.73$} &
+\shortstack{$51.96 \pm 4.05$\\ $60.79 \pm 8.72$} &
+\shortstack{$48.47$\\ $52.60$} \\
+\shortstack[l]{Test-time fitting\\ baseline (HMR 2.0)} &
+\shortstack{$106.99 \pm 8.94$\\ $101.38 \pm 8.18$} & \todoresult & \todoresult & \todoresult \\
+\shortstack[l]{\method TTA,\\ no contact} & \todoresult & \todoresult & \todoresult & \todoresult \\
+\shortstack[l]{\method +\\ contact constraint} & \todoresult & \todoresult & \todoresult & \todoresult \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Dynamic Inputs and Real Captures}
+\label{sec:dynamic}
+For E7, we apply an identical sequence of availability masks to a continuous ground-truth motion, including transitions among tactile-only, monocular, joint visuo-tactile, and multi-view input. A single \method checkpoint is compared with a specialist ensemble that switches models at each configuration transition. We measure overall reconstruction error, transition-local discontinuity and acceleration jitter within a fixed time neighborhood, and recovery after vision returns. All systems receive identical observed inputs and are evaluated after consistent trajectory alignment; simply keeping one checkpoint is not sufficient to guarantee smooth motion across mask changes. The current implementation switches availability at temporal-window boundaries.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{E7: one checkpoint versus specialist ensemble on representative motions (ankle-foot MPJPE, mm, pelvis-aligned).} Stages switch at window boundaries: V $\to$ T $\to$ VT $\to$ Vi $\to$ ViT. Ensemble: V=WHAM, T=Step2Motion, VT=MotionPRO, Vi/ViT=EasyMocap (4 views). \method Vi/ViT rows remain pending.}
+\label{tab:dynamic}
+\setlength{\tabcolsep}{6pt}\small
+\begin{tabular}{llrrrrr}
+\toprule
+Motion & System & V & T & VT & Vi & ViT \\
+\midrule
+Squat (6 sessions) & \method (V7\_Cv5) & 50.2 & 294.8 & 62.6 & --- & --- \\
+ & Ensemble & 83.6 & 354.3 & 68.1 & 70.5 & 48.0 \\
+Sit-stand (5 sessions) & \method (V7\_Cv5) & 50.2 & 170.3 & 56.6 & --- & --- \\
+ & Ensemble & 88.5 & 404.3 & 59.1 & 86.0 & 67.0 \\
+Lateral shift (5 sessions) & \method (V7\_Cv5) & 95.9 & 245.2 & 85.9 & --- & --- \\
+ & Ensemble & 121.7 & 242.3 & 134.1 & 66.9 & 50.1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:dynamic} reports the three motions with the largest session counts (squat 6, sit-stand 5, lateral 5; the remaining six per-action tables are exported under \texttt{results\_display/Etest/E7\_*}). The single checkpoint wins every V and VT stage shown, wins the T stage for squat and sit-stand, and stays within $2.9$\,mm of the T specialist for lateral; its Vi/ViT rows remain pending. The continuous real-capture teaser, timing protocol and baseline transitions remain pending.
+
+\subsection{Complementary Information Probe}
+We fit a frozen-feature linear probe comparing visual memory \(\mathbf M_V\), tactile memory \(\mathbf M_T\), and concatenated \([\mathbf M_V,\mathbf M_T]\). All use the same ridge-regression protocol to predict pelvis-relative ankle/foot targets; regularization is selected on validation subjects. Table~\ref{tab:probe} reports test errors on seven targets. The concatenated representation beats \(\mathbf M_V\) on the two vertical components (position-y $60.14$ versus $68.89$\,mm; stance-y $60.15$ versus $68.67$\,mm), so the extra linearly decodable tactile information concentrates in the vertical component, without claiming that the downstream motion decoder necessarily exploits it. The original position criterion (joint better than both memories) held on validation but did not replicate on test. These E8 measurements will appear in the supplementary material.
+
+\begin{table}[t]
+\centering
+\caption{\textbf{E8: frozen-feature ridge probe (\texttt{V7\_Cv5}).} Predicting pelvis-relative ankle/foot targets from visual memory $\mathbf M_V$, tactile memory $\mathbf M_T$, and their concatenation; $\lambda$ selected on validation. Errors in mm (velocity in mm/s; contact accuracy in \%, higher is better).}
+\label{tab:probe}
+\setlength{\tabcolsep}{5pt}\small
+\begin{tabular}{lrrrrrrr}
+\toprule
+Probe input & Position & Position-y & Stance-y & Velocity & Global & Ground & Contact $\uparrow$ \\
+\midrule
+$\mathbf M_V$ & 116.78 & 68.89 & 68.67 & 427.56 & 348.50 & 33.93 & 90.12 \\
+$\mathbf M_T$ & 204.46 & 116.75 & 116.60 & 496.58 & 530.24 & 50.54 & 84.98 \\
+$[\mathbf M_V, \mathbf M_T]$ & 122.05 & 60.14 & 60.15 & 459.60 & 409.87 & 43.93 & 85.25 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Internal Data Provenance}
+\label{sec:suppdata}
+The tables above transcribe the exported files under \texttt{results\_display/Etest}: E1 experts \texttt{E1\_CleanPerformance/Full\_Table1\_E1\_Experts.csv} (variant family \texttt{V7\_Cv1}--\texttt{Cv7}; the \texttt{V7\_Cv5} rows appear in Table~\ref{tab:main}); E2 \texttt{E2\_MainPerformance/Full\_Table1--4\_E2\_*}; E3 \texttt{E3\_MultiViewConsistency/Full\_Table1\_E3\_MultiView.csv} (includes PA-MPJPE); E4 \texttt{E4\_ComponentAblation/Full\_Table1\_E4\_Ablation\_AllMetrics.csv} (all ten metrics plus $\Delta$(VT$-$V) rows); E5 \texttt{E5\_OcclusionRobustness/Full\_Table1\_E5\_Occlusion.csv} (includes $\Delta$ rows); E6 per-action phase tables and paired statistics under \texttt{E6\_ContactPhaseAnalysis/} (\texttt{E6\_接触相位分析.md}, \texttt{e6\_paired\_stats\_*.json}); E7 all nine motions \texttt{E7\_DynamicModalityInputs/Full\_Table1\_E7\_DynamicStages.csv}; E8 \texttt{E8\_ComplementarityProbe/Full\_Table1\_E8\_Probe.csv} (test/val/$\lambda$ per target).

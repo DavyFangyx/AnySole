@@ -77,6 +77,22 @@ def load_calibration(date: str) -> tuple[dict, str, str]:
         f"calibration for {date} not found under {candidates[0]} or {candidates[1]}")
 
 
+def load_translation(date: str, model: str) -> np.ndarray:
+    """Per-date fitted world translation for a visual baseline (2026-11-01：
+    标定链世界端与动捕原点存在常数差，与 MMVP 漂移点 m/n 同机制，由
+    ``fit_translation.py`` 拟合落盘）。无 artifact 的日期 = 零修正。
+
+    artifact 中的 b 为 z-up display 系（与 npz/GT 同系）；导出链工作于
+    mocap y-up，消费时转回 y-up：display(x,z,y) → yup(x,y,z) 即
+    b_yup = (bx, bz, −by)。"""
+    path = WORKSPACE / "protocol/calibration" / f"{date}.{model}_native_to_mocap.json"
+    if not path.is_file():
+        return np.zeros(3, dtype=np.float64)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    b = np.asarray(payload["b"], dtype=np.float64)
+    return np.asarray([b[0], b[2], -b[1]], dtype=np.float64)
+
+
 def load_unit(package_root: str | Path, baseline: str, date: str, session: str, cam: int,
               manifest_override: str | Path | None = None) -> dict:
     """Read the package unit manifest entry for one method-camera unit.

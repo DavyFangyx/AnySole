@@ -57,10 +57,12 @@ METRIC_UNITS = {
 MOTION_METRIC_NAMES = (
     "mpjpe_mm",
     "pa_mpjpe_mm",
+    "global_mpjpe_mm",
     "mpjae_deg",
     "pve_mm",
     "pve_t_mm",
     "root_ate_mm",
+    "root_ate_seg20_mm",
     "root_rte_percent",
     "w_mpjpe100_mm",
     "wa_mpjpe100_mm",
@@ -70,6 +72,7 @@ MOTION_METRIC_NAMES = (
     "jitter_pred_m_s3",
     "jitter_gt_m_s3",
     "foot_sliding_mm",
+    "ground_pen_mm",
 )
 
 
@@ -379,6 +382,34 @@ def root_trajectory_metrics(predicted: np.ndarray, target: np.ndarray) -> dict[s
         "root_rte_percent": float(residual.mean() / path * 100.0) if path > 1e-9 else float("nan"),
         "root_path_length_m": path,
     }
+
+
+def root_trajectory_segmented_error(
+    predicted: np.ndarray,
+    target: np.ndarray,
+    *,
+    segment: int = 20,
+) -> float:
+    """Symmetric short-range root trajectory error (``root_ate_seg20_mm``).
+
+    The main model's window protocol anchors each 20-frame window at the GT
+    root position; this metric applies the same start-frame translation
+    alignment to every method so the comparison is fair without retraining.
+    Segments shorter than 2 frames are dropped; the mean is frame-weighted.
+    """
+    predicted = np.asarray(predicted, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    n = min(len(predicted), len(target))
+    errors: list[np.ndarray] = []
+    for start in range(0, n, segment):
+        stop = min(start + segment, n)
+        if stop - start < 2:
+            continue
+        shift = target[start] - predicted[start]
+        errors.append(np.linalg.norm(predicted[start:stop] + shift - target[start:stop], axis=-1))
+    if not errors:
+        return float("nan")
+    return float(np.concatenate(errors).mean() * 1000.0)
 
 
 def foot_sliding_joints(

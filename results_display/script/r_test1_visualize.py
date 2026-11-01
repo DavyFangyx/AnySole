@@ -246,6 +246,20 @@ def models_of_mode(models: list[dict], mode: str) -> list[dict]:
 
 # ---- 单独生成：输入 | 预测 | GT 三面板动画（仅 gif/mp4） ----
 
+def _t2m_yaw_of(joints: np.ndarray) -> np.ndarray:
+    """(T,J,3) 显示帧（Z 上）→ 骨盆横轴（左右髋）在 XY 平面的方位角。"""
+    axis = joints[:, 1] - joints[:, 2]
+    return np.arctan2(axis[:, 1], axis[:, 0])
+
+
+def _t2m_rotate_yaw(joints: np.ndarray, offset: float) -> np.ndarray:
+    """绕 Z 轴（过骨盆中心）旋转 offset 弧度——仅显示层，不进指标。"""
+    c, s = np.cos(offset), np.sin(offset)
+    R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    pelvis = joints[:, [1, 2], :].mean(axis=1, keepdims=True)
+    return (joints - pelvis) @ R.T + pelvis
+
+
 def render_single(model: dict, mode: str, session_id: str, row: dict,
                   seq_dir: Path, args: argparse.Namespace, out_base: Path) -> str:
     anim_path = cli_common.media_path(out_base / model["label"] / mode, session_id, args.gen)
@@ -306,6 +320,33 @@ def render_single(model: dict, mode: str, session_id: str, row: dict,
     else:
         cli_common.write_mp4(out_frames, anim_path, frame_fps)
     log.info(f"Wrote {anim_path} ({len(out_frames)} frames)")
+
+    if getattr(args, "gt_align_t", False) and mode == "T2M" and pred is not None:
+        # 显示层 GT 航向对齐（ground_truth_fallback 语义，仅可视化）：
+        # 按会话恒定 yaw 对齐 → 独立文件夹 T2M_gtalign/，指标不受影响。
+        off = float(np.median(np.angle(np.exp(1j * (
+            _t2m_yaw_of(gt_joints[:n]) - _t2m_yaw_of(pred["joints"][:n]))))))
+        aligned = _t2m_rotate_yaw(pred["joints"][:n], off)
+        aligned_mpjpe = native_frame_mpjpe_mm(aligned, gt_joints[:n], protocol=protocol)
+        out_aligned = []
+        for t in frame_ids:
+            input_panel = render_foot_panel(
+                np.rot90(pressure[t, 0], k=1), np.rot90(pressure[t, 1], k=1),
+                session_id, t, n, args.fps, not bool(fake[t]))
+            panels = [input_panel, render_skeleton_panel(
+                aligned[t], f"{model['label']} — {PROTOCOL_LABELS.get(protocol, protocol)} (GT-yaw)",
+                model["color"], t, n, edges=native_edges(pred["names"]),
+                mpjpe_mm=float(aligned_mpjpe[t])),
+                render_skeleton_panel(gt_joints[t], f"GT — {PROTOCOL_LABELS.get(protocol, protocol)}",
+                                      GT_COLOR, t, n, edges=native_edges(gt_names))]
+            out_aligned.append(np.concatenate(panels, axis=1))
+        a_path = cli_common.media_path(out_base / model["label"] / "T2M_gtalign", session_id, args.gen)
+        a_path.parent.mkdir(parents=True, exist_ok=True)
+        if args.gen == "gif":
+            cli_common.write_gif(out_aligned, a_path, frame_fps)
+        else:
+            cli_common.write_mp4(out_aligned, a_path, frame_fps)
+        log.info(f"Wrote {a_path} ({len(out_aligned)} frames, yaw offset {np.degrees(off):+.1f}°)")
     return "write"
 
 
@@ -415,6 +456,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--models", type=str, default="all",
                         help="Select models: anysole and/or registry baseline names, comma-separated; default all.")
+    parser.add_argument("--gt-align-t", action="store_true",
+                        help="T2M 额外输出 GT 航向对齐变体（T2M_gtalign/ 文件夹，仅显示层）。")
     parser.add_argument("--compare", action="store_true",
                         help="One shared input column + one column per same-mode model + one GT column per protocol.")
     parser.add_argument("--modes-config", type=Path, default=DEFAULT_MODES_CONFIG, help="Mode registry.")

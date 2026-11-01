@@ -27,8 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from hmr2_tta.paths import PROJECT_ROOT  # noqa: E402
 from anysole_tta.phase_common import (CELL_ROOT, load_contact,  # noqa: E402
                                       load_pred_joints, phase_labels)
-from anysole_tta.e7_driver import (TTA_DUMP_ROOT, stage_of_frame,  # noqa: E402
-                                   STAGES)
+from anysole_tta.e7_driver import (DUMP_SUB, TTA_DUMP_ROOT,  # noqa: E402
+                                   STAGES, stage_of_frame)
 from anysole.types import JOINT_NAMES, JOINT_PARENTS  # noqa: E402
 
 SMPL_MODEL = PROJECT_ROOT / "AnysoleWorkspace/assets/third_party/smpl/SMPL_NEUTRAL.pkl"
@@ -161,7 +161,8 @@ def main():
                 cond = {"V": "V2M", "T": "T2M", "VT": "VT2M"}[stage]
                 pred, _, vm = load_pred_joints(args.cell, args.session, cond)
             else:
-                dump_dir = TTA_DUMP_ROOT / f"{args.model}_{stage}"
+                dump_dir = TTA_DUMP_ROOT / f"anysole_tta_stage1_{args.model}_test" \
+                    / DUMP_SUB[stage]
                 pred = np.full((n, 24, 3), np.nan)
                 vm = np.zeros(n, dtype=bool)
                 for path in sorted(dump_dir.glob(f"{args.session}_w*.npz")):

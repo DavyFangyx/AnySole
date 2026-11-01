@@ -528,6 +528,35 @@ def _run_task(
         if rc.returncode != 0:
             raise RuntimeError("optuna_tune failed rc=%d; log: %s"
                                % (rc.returncode, log))
+    elif task == "script":
+        # 一次性诊断脚本（2026-11-01）：SCRIPT 行 = 完整命令行（shlex 拆分），
+        # 在 worker 持有的 GPU（CUDA_VISIBLE_DEVICES）上执行；日志落
+        # results/logs/script_runs/<时间戳>_<脚本名>.log。
+        import shlex as _shlex
+        script = values.get("SCRIPT", "")
+        # load_conf 的 _parse_value 会把含逗号的值拆成 list（如
+        # "--arms full,gtctx"）——join 回去还原完整命令行。
+        if isinstance(script, list):
+            script = ",".join(str(x) for x in script)
+        script = str(script).strip()
+        if not script:
+            raise ValueError("TASK=script without SCRIPT")
+        cmd = _shlex.split(script)
+        if dry_run:
+            print("# task script")
+            print("$ " + subprocess.list2cmdline(cmd))
+            return
+        root = Path(values.get("RUN_DIR", "")) if values.get("RUN_DIR") \
+            else _REPO_FOR_IMPORT / "results" / "logs" / "script_runs"
+        root.mkdir(parents=True, exist_ok=True)
+        name = Path(cmd[0]).name if cmd else "run"
+        log = root / ("%s_%s.log" % (time.strftime("%m%d_%H%M%S"), name))
+        with log.open("w") as out:
+            print("$ " + subprocess.list2cmdline(cmd), file=out, flush=True)
+            rc = subprocess.run(cmd, cwd=REPO, stdout=out, stderr=subprocess.STDOUT)
+        if rc.returncode != 0:
+            raise RuntimeError("script failed rc=%d; log: %s"
+                               % (rc.returncode, log))
     else:
         raise ValueError("Unknown TASK=%r in task conf" % task)
 

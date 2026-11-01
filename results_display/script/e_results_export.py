@@ -33,6 +33,11 @@ CELLS = REPO / "results" / "cells"
 METRICS10 = ["PA-MPJPE", "MPJPE", "GlobalMPJPE", "W-MPJPE100", "MPJRE",
              "traj_ATE", "RootOrientationDrift", "FootSliding", "GroundPen",
              "Jitter_pred"]
+# E2 主性能表轨迹列 = 双列（2026-11-01 用户裁定）：traj_ATE@0.5s（20 帧段首
+# GT 对齐，所有方法同一处理）+ traj_ATE（未对齐全局，基线已含平移修正）；
+# 其余实验表（E1/E4/E5）保留未对齐 traj_ATE 单列。
+E2_METRICS10 = [k if k != "traj_ATE" else v for k in METRICS10
+                for v in (["traj_ATE@0.5s", "traj_ATE"] if k == "traj_ATE" else [k])]
 CONTACT_NAMESPACE = "state_smpl24"  # 当前默认线（f6_soft_time_accel_state_smpl24_v1）
 EVAL_SPLIT = "test"
 CELL_MAP = {}
@@ -169,10 +174,12 @@ def seeded_metrics(model_id: str, split=None) -> dict | None:
     return agg
 
 
-def metric_row(m: dict, cond: str) -> list:
+def metric_row(m: dict, cond: str, keys: list[str] = METRICS10,
+               key_map: dict[str, str] | None = None) -> list:
+    key_map = key_map or {}
     out = []
-    for k in METRICS10:
-        v = m[cond].get(k)
+    for k in keys:
+        v = m[cond].get(key_map.get(k, k))
         if v is None:
             out.append("")
         elif isinstance(v, tuple):
@@ -231,6 +238,7 @@ BASELINE_METRIC_KEYS = {
     "W-MPJPE100": "w_mpjpe100_mm",
     "MPJRE": "mpjae_deg",
     "traj_ATE": "root_ate_mm",
+    "traj_ATE@0.5s": "root_ate_seg20_mm",
     "RootOrientationDrift": "root_orientation_drift_deg",
     "FootSliding": "foot_sliding_mm",
     "GroundPen": "ground_pen_mm",
@@ -238,9 +246,10 @@ BASELINE_METRIC_KEYS = {
 }
 
 
-def _baseline_rows() -> dict[str, list[list]]:
+def _baseline_rows(keys: list[str] = None) -> dict[str, list[list]]:
     """基线行 = 各基线公共评估产物 test_comparison.json（2026-10-31 裁定：
     数据驱动，不读 md）。mode 决定块；V2T 与无运动指标者不产出行。"""
+    keys = keys or E2_METRICS10
     rows_by_block: dict[str, list[list]] = {"V": [], "T": [], "VT": []}
     block_of = {"V2M": "V", "T2M": "T", "VT2M": "VT"}
     for path in sorted((REPO / "results" / "baselines").glob("*/metrics/test_comparison.json")):
@@ -251,7 +260,7 @@ def _baseline_rows() -> dict[str, list[list]]:
         s = payload.get("summary") or {}
         name = payload.get("display_name") or path.parents[2].name
         row = ["外部基线", name, "—"]
-        for key in BASELINE_METRIC_KEYS.values():
+        for key in (BASELINE_METRIC_KEYS[k] for k in keys):
             v = s.get(key)
             row.append(round(v, 3) if isinstance(v, (int, float)) and np.isfinite(v) else "—")
         rows_by_block[block].append(row)
@@ -264,7 +273,7 @@ def export_e2(models: list[str], ckpt: str) -> None:
     模型类型列：外部基线 = 各基线公共评估产物（mode 决定块）；U = 统一模型
     （Cv1–7，Cv6 为 S_VT 专家角色）。旧候选 A/B 不入表（2026-10-30 用户裁定）。
     """
-    header = ["类型", "模型", "口径"] + METRICS10
+    header = ["类型", "模型", "口径"] + E2_METRICS10
     # 当前线：训练 cell 即评估 cell（V7_CvN → 自动扫 _s1/_s2/_s3）；
     # legacy 线保持 _f6_statistics 旧命名（display 层只读专门测试 cell）
     last_cells = _selected(["V7_Cv%d%s%s" % (n,
@@ -273,6 +282,9 @@ def export_e2(models: list[str], ckpt: str) -> None:
                               for n in range(1, 8)], models)
     best_cells = _selected(["V7_Cv1_evalbest"], models)
     rows_by_block = {"V": [], "T": [], "VT": []}
+    # 表结构（实验计划 E2）：每块先列外部基线，最后一行 U。
+    for block, rows in _baseline_rows().items():
+        rows_by_block[block].extend(rows)
     for cond, block in (("V2M", "V"), ("T2M", "T"), ("VT2M", "VT")):
         if ckpt != "best":
             for model in last_cells:
@@ -280,17 +292,14 @@ def export_e2(models: list[str], ckpt: str) -> None:
                 if m and cond in m:
                     rows_by_block[block].append(
                         ["S_VT" if model == "V7_Cv6" else "U", "%s（%s）" % (COND_ZH[cond], display_name(model)), "last"]
-                        + metric_row(m, cond))
+                        + metric_row(m, cond, keys=E2_METRICS10))
         if ckpt != "last":
             for model in best_cells:
                 m = seeded_metrics(model)
                 if m and cond in m:
                     rows_by_block[block].append(
                         ["U", "%s（%s）" % (COND_ZH[cond], display_name(model)), "best"]
-                        + metric_row(m, cond))
-    # 基线行：公共评估产物驱动（Ours 自身模型不在此目录，天然不入表）
-    for block, rows in _baseline_rows().items():
-        rows_by_block[block].extend(rows)
+                        + metric_row(m, cond, keys=E2_METRICS10))
     out = ETEST / "E2_MainPerformance"
     for table_no, block in enumerate(("V", "T", "VT"), 1):
         write_csv(out / ("Full_Table%d_E2_Performance_%s.csv" % (table_no, block)),
@@ -372,7 +381,7 @@ def export_e5_figure(models: list[str]) -> None:
     """E5 图 1：退化曲线（2026-10-27 用户要求）。
 
     x = 遮挡档（0/10/20/30/50%），y = 相对 occ000 的退化（Δ），
-    V（蓝实线）与 VT（橙虚线）两条曲线，子图 = 六个关键指标——
+    V（蓝实线）与 VT（橙虚线）两条曲线，子图 = 全部十指标——
     判读：VT 退化应轻于 V（曲线更低/更平）。主模型缺省 V7_Cv5（last 口径）。
     图内英文（项目口径）。产物：E5_OcclusionRobustness/Full_Fig1_E5_Degradation.png
     """
@@ -384,11 +393,12 @@ def export_e5_figure(models: list[str]) -> None:
     cells = {"occ000": model}
     for occ in ("010", "020", "030", "050"):
         cells["occ%s" % occ] = "%s_evalocc%s" % (model, occ)
-    metrics = ["PA-MPJPE", "MPJPE", "GlobalMPJPE", "traj_ATE",
-               "GroundPen", "FootSliding"]
+    metrics = list(METRICS10)
+    unit_of = {"MPJRE": "deg", "RootOrientationDrift": "deg",
+               "Jitter_pred": "m/s³"}
     xs = [0, 10, 20, 30, 50]
     color_v, color_vt = "#2a78d6", "#eb6834"  # 校验过的双色（CVD 分离 24.7）
-    fig, axes = plt.subplots(2, 3, figsize=(11.5, 8.8))
+    fig, axes = plt.subplots(2, 5, figsize=(18.5, 7.2))
     for ax, metric in zip(axes.flat, metrics):
         base = seeded_metrics(cells["occ000"])
         if not base:
@@ -413,7 +423,8 @@ def export_e5_figure(models: list[str]) -> None:
                         xytext=(4, 0), textcoords="offset points", va="center")
         ax.set_title(metric, fontsize=10)
         ax.set_xlabel("Occlusion (%)", fontsize=9)
-        ax.set_ylabel("Δ vs occ000 (mm)", fontsize=9)
+        ax.set_ylabel("Δ vs occ000 (%s)" % unit_of.get(metric, "mm"),
+                      fontsize=9)
         ax.grid(alpha=0.25, lw=0.6)
         ax.margins(y=0.15)
     fig.suptitle("E5 degradation under occlusion - %s (ckpt_last)" % model,
@@ -707,6 +718,13 @@ def export_e6_group_compare(models: list[str]) -> None:
 
 # ---------------- E7：动态输入（json + PNG） ----------------
 def export_e7() -> None:
+    """统一入口（2026-10-31 用户裁定）：先跑 anysole_tta/e7_driver.py
+    生成图 + e7_table.json，再导出 CSV。TTA dump 已有时驱动自动跳过
+    （仅装配+绘图，分钟级）；缺 dump 的动作会触发 TTA 子进程。"""
+    import subprocess
+    driver = REPO / "anysole_tta" / "e7_driver.py"
+    print("[e7] run driver: %s" % driver)
+    subprocess.run([sys.executable, str(driver)], check=True, cwd=str(REPO))
     src_dir = ETEST / "E7_DynamicModalityInputs"
     dst_dir = ETEST / "E7_DynamicModalityInputs"
     data = json.loads((src_dir / "e7_table.json").read_text(encoding="utf-8"))
@@ -721,16 +739,6 @@ def export_e7() -> None:
                            if entry["stages"][st].get(sys_name) is not None else ""
                            for st in stages])
     write_csv(dst_dir / "Full_Table1_E7_DynamicStages.csv", header, rows)
-    for i, action in enumerate(("walk", "run", "squat"), 1):
-        # 新驱动直写 Full_ 命名 PNG；旧命名（e7_phase_*.png）仅作兜底
-        src_png = dst_dir / ("Full_Fig%d_E7_Stages_%s.png" % (i, action))
-        if not src_png.is_file():
-            src_png = src_dir / ("e7_phase_%s.png" % action)
-        if src_png.is_file():
-            dst_png = dst_dir / ("Full_Fig%d_E7_Stages_%s.png" % (i, action))
-            if src_png != dst_png:
-                shutil.copyfile(src_png, dst_png)
-                print("[png] %s" % dst_png)
 
 
 # ---------------- teaser（E6/E7 可见人体 SMPL） ----------------

@@ -33,7 +33,9 @@
 用法（touch_gait env）：
   python anysole_tta/run_tta.py --model V7_Cv5 --split val --lr 0.01 --device cuda:7
   python anysole_tta/run_tta.py --model V7_Cv5 --wins 10,11 --dump-kp /tmp/tta_kp  # E7
-输出：results/baselines/HMR2.0/metrics/anysole_tta_stage1_{model}_{split}_lr{lr}.json
+  python anysole_tta/run_tta.py --model V7_Cv5 --split test --gpu 4,5,6,7
+      # 全组合队列：每卡一 worker 顺序消化（重组合优先；--workers-per-gpu N 加宽）
+输出：results/baselines/HMR2.0/metrics/anysole_tta_stage1_{model}_{split}_i*_cams*_lr{lr}.json
 
 E3 四条对比线（2026-10-31 用户裁定；朴素晚融合不作数）：
 - 标定多视角（参考上限）= EasyMocap：anysole_tta/easymocap_baseline.py
@@ -60,6 +62,16 @@ E3 四条对比线（2026-10-31 用户裁定；朴素晚融合不作数）：
   z_override 注入，out_parts/root_head 前，model_v7）——V7C 消融组 TTA 管线
 """
 from __future__ import annotations
+# ---- CPU 占用控制（2026-10-31）----
+# TTA 驱动每优化步做 CPU 侧 numpy/scipy 计算（1-δ 滤波等）；numpy/torch
+# 缺省线程数 = 全核，单进程会吃 5 核以上。与 configs 系统限定运算池同思路：
+# 置单线程——并发多进程时各占 ~1 核，总 CPU 可控。
+import os as _os
+_os.environ.setdefault("OMP_NUM_THREADS", "1")
+_os.environ.setdefault("MKL_NUM_THREADS", "1")
+_os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+_os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 
 import argparse
 import json
@@ -69,6 +81,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+torch.set_num_threads(1)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # 仓库根（anysole/anysole_tta/hmr2_tta）
 from hmr2_tta.paths import RESULTS_ROOT  # noqa: E402
@@ -167,27 +180,80 @@ def build_smpl_layer(device):
                         batch_size=20, num_betas=10).to(device)
 
 
-def quat_median_filter(rotmats: np.ndarray, delta: float = 0.26) -> np.ndarray:
-    from scipy.spatial.transform import Rotation as R
-    quats = R.from_matrix(rotmats).as_quat()
-    med_q = np.median(quats, axis=0)
-    med_q = med_q / np.linalg.norm(med_q)
-    dists = np.arccos(np.clip(np.abs(quats @ med_q), -1, 1))
-    keep = dists <= delta
-    if keep.sum() == 0:
-        keep = np.ones(len(quats), dtype=bool)
-    return R.from_quat(quats[keep].mean(axis=0)).as_matrix()
+def _rotmat_to_quat_xyzw(R: torch.Tensor) -> torch.Tensor:
+    """(...,3,3) → (...,4) 四元数 [x,y,z,w]（scipy Rotation.as_quat 同口径）。
+
+    分支选择 = argmax([r00,r11,r22,trace])、首大值决胜——scipy 如此实现
+    （trace 排末位），与经典 Shepperd if/elif 不等价：分支决定四元数整体
+    符号（q 与 −q 同旋转），而下游四元数中值/均值对符号敏感（异号平均会
+    抵消）；90°/180° 整角旋转命中并列时决胜顺序即符号，必须逐分支复刻。"""
+    r00, r11, r22 = R[..., 0, 0], R[..., 1, 1], R[..., 2, 2]
+    t = r00 + r11 + r22
+    c = torch.argmax(torch.stack([r00, r11, r22, t], dim=-1), dim=-1)
+    w = torch.sqrt(t + 1.0) / 2.0
+    x = torch.sqrt(1.0 + r00 - r11 - r22) / 2.0
+    y = torch.sqrt(1.0 - r00 + r11 - r22) / 2.0
+    z = torch.sqrt(1.0 - r00 - r11 + r22) / 2.0
+    n1 = (R[..., 2, 1] - R[..., 1, 2]) / 4.0
+    n2 = (R[..., 0, 2] - R[..., 2, 0]) / 4.0
+    n3 = (R[..., 1, 0] - R[..., 0, 1]) / 4.0
+    n4 = (R[..., 0, 1] + R[..., 1, 0]) / 4.0
+    n5 = (R[..., 0, 2] + R[..., 2, 0]) / 4.0
+    n6 = (R[..., 1, 2] + R[..., 2, 1]) / 4.0
+    c0, c1, c2, c3 = (c == 0), (c == 1), (c == 2), (c == 3)  # x/y/z/trace 分支
+    qx = torch.where(c0, x, torch.where(c1, n4 / y, torch.where(c2, n5 / z, n1 / w)))
+    qy = torch.where(c0, n4 / x, torch.where(c1, y, torch.where(c2, n6 / z, n2 / w)))
+    qz = torch.where(c0, n5 / x, torch.where(c1, n6 / y, torch.where(c2, z, n3 / w)))
+    qw = torch.where(c0, n1 / x, torch.where(c1, n2 / y, torch.where(c2, n3 / z, w)))
+    return torch.stack([qx, qy, qz, qw], dim=-1)
+
+
+def _quat_xyzw_to_rotmat(q: torch.Tensor) -> torch.Tensor:
+    """(...,4) [x,y,z,w] → (...,3,3)（标准公式，不归一化；scipy from_quat
+    会内部归一化，故调用方对非单位四元数先归一化再进本函数）。"""
+    x, y, z, w = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    xw, yw, zw = x * w, y * w, z * w
+    out = torch.empty(q.shape[:-1] + (3, 3), dtype=q.dtype, device=q.device)
+    out[..., 0, 0] = 1.0 - 2.0 * (yy + zz)
+    out[..., 0, 1] = 2.0 * (xy - zw)
+    out[..., 0, 2] = 2.0 * (xz + yw)
+    out[..., 1, 0] = 2.0 * (xy + zw)
+    out[..., 1, 1] = 1.0 - 2.0 * (xx + zz)
+    out[..., 1, 2] = 2.0 * (yz - xw)
+    out[..., 2, 0] = 2.0 * (xz - yw)
+    out[..., 2, 1] = 2.0 * (yz + xw)
+    out[..., 2, 2] = 1.0 - 2.0 * (xx + yy)
+    return out
 
 
 def virtual_pose(rots: torch.Tensor) -> torch.Tensor:
-    """(V,tw,24,3,3) → 1-δ 滤波聚合 (tw,24,3,3)（detach，星形锚）。"""
-    v, tw = rots.shape[:2]
-    rots_np = rots.detach().cpu().numpy()
-    out = np.empty((tw, 24, 3, 3))
-    for t in range(tw):
-        for j in range(24):
-            out[t, j] = quat_median_filter(rots_np[:, t, j])
-    return torch.from_numpy(out.astype(np.float32)).to(rots.device)
+    """(V,tw,24,3,3) → 1-δ 滤波聚合 (tw,24,3,3)（detach，星形锚）。
+
+    全 GPU 向量化（2026-11-01）：旧实现逐步 scipy 往返 CPU + 逐关节
+    Python 循环，每优化步一次 GPU→CPU 同步停摆。语义与旧版一致：
+    np.median 偶数口径（中位两数均值）、四元数均值不做符号翻转、
+    逐 (t,j) 无保留元素时整列保留（旧版逐列口径）。
+    整段 no_grad：旧版输出经 numpy 往返天然 detach（星形锚不进梯度），
+    此处必须同语义——否则 lcon 反向会多出 ∂virt/∂rots 梯度路径。"""
+    with torch.no_grad():
+        v, tw = rots.shape[:2]
+        q = _rotmat_to_quat_xyzw(rots)                   # (V,tw,24,4) xyzw
+        if v % 2 == 0:
+            qs, _ = torch.sort(q, dim=0)
+            med_q = (qs[v // 2 - 1] + qs[v // 2]) / 2.0  # np.median 偶数口径
+        else:
+            med_q, _ = torch.median(q, dim=0)
+        med_q = med_q / med_q.norm(dim=-1, keepdim=True)
+        dists = torch.arccos(torch.clamp(torch.abs((q * med_q).sum(-1)), -1.0, 1.0))
+        keep = dists <= 0.26
+        # 旧版逐 (t,j) 口径：该 cell 无保留元素时整 cell 保留（非全局判断）
+        keep = keep | (keep.sum(0) == 0).unsqueeze(0)
+        qmean = (q * keep.unsqueeze(-1).to(q.dtype)).sum(0) \
+            / keep.sum(0).unsqueeze(-1).to(q.dtype)
+        qmean = qmean / qmean.norm(dim=-1, keepdim=True)  # scipy from_quat 内部归一化
+        return _quat_xyzw_to_rotmat(qmean)
 
 
 def project_world_to_cam_torch(joints_world: torch.Tensor, cal_t: dict,
@@ -319,8 +385,13 @@ def run_session(model, smpl_layer, leaf, sid, n_windows, steps, warmup, clip, lr
         starts = [s for s in starts
                   if win_frac[0] <= s / n_frames < win_frac[1]]
     else:
-        starts = starts[:n_windows]
+        # 2026-11-01 用户裁定：全量运行——每会话跑完整个序列的全部窗口
+        # （废弃「前 16 窗」协议）；--n-windows N>0 显式限制前 N 窗（冒烟用）
+        if n_windows > 0:
+            starts = starts[:n_windows]
     print(f"[{sid}] aligned windows: {len(starts)}")
+    if dump_dir is not None:
+        Path(dump_dir).mkdir(parents=True, exist_ok=True)
 
     res = {"pa_init": [], "pa_virt_init": [], "pa_refined": [],
            "pa_virt_refined": [], "curve": {}, "grad_diag": {}, "n": 0}
@@ -575,45 +646,106 @@ def summarize(res):
     return out
 
 
-def _combo_out_path(args) -> Path:
+def _combo_out_path(args, cams) -> Path:
     """逐组合独立产物路径（导出器按 glob 聚合）。"""
+    combo = ",".join(map(str, cams))
     return RESULTS_ROOT / "metrics" / (
         f"anysole_tta_stage1_{args.model}_{args.split}"
-        + f"_i{len(args.cams.split(',')) if args.cams else 0}"
-        + f"_cams{args.cams if args.cams else ''}"
+        + f"_i{len(cams)}_cams{combo}"
         + ("_contact" if args.contact else "")
         + f"_lr{args.lr}.json")
 
 
+def _combo_done(args, cams, sids_expected: int) -> bool:
+    """该组合的产物文件已含全部会话 → 跳过（断点续跑）。"""
+    import json as _json
+    p = _combo_out_path(args, cams)
+    if not p.is_file():
+        return False
+    try:
+        n = len(_json.loads(p.read_text(encoding="utf-8"))["sessions"])
+        if n >= sids_expected:
+            print(f"[skip] {','.join(map(str, cams))} 已完成（{n} 会话）")
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _launch_parallel(args, cams_list) -> None:
-    """--gpu 分卡：逐组合子进程并行（本进程只调度，全部完成后退出）。
-    子进程走 --cams 单组合路径，产物文件独立命名。"""
+    """--gpu 分卡：组合队列 → 每卡一 worker 顺序消化（2026-11-01 重写：
+    不再 15 组合同时拉起轮转分卡）。重组合优先入队（每步成本 ≈ 视角数
+    V 倍），LPT 装入当前负载最轻的 worker；单组合独占整卡，模型每个
+    worker 只建一次。子进程走 --combo-list 多组合路径，产物文件独立
+    命名，断点续跑逻辑同前（已完成组合不重发）。"""
+    import signal
     import subprocess
     import time
     gpus = [int(x) for x in args.gpu.split(",") if x.strip()]
+    sids_expected = (len(args.sessions.split(",")) if args.sessions
+                     else (len(VAL_SESSIONS) if args.split == "val"
+                           else len(TEST_SESSIONS)))
+    todo = [c for c in cams_list if not _combo_done(args, c, sids_expected)]
+    if not todo:
+        print("[launch] 全部组合已完成，无待跑任务")
+        return
+    n_workers = len(gpus) * max(1, args.workers_per_gpu)
+    chunks = [[] for _ in range(min(n_workers, len(todo)))]
+    loads = [0.0] * len(chunks)
+    for cams in sorted(todo, key=lambda c: (-len(c), c)):
+        k = min(range(len(chunks)), key=lambda i: loads[i])
+        chunks[k].append(cams)
+        loads[k] += len(cams) + 0.1
     procs = []
-    for k, cams in enumerate(cams_list):
+
+    def _forward_signal(signum, frame):
+        # Ctrl-C/SIGTERM 只发给本进程组；子进程在独立会话收不到——
+        # 父进程收到后转杀全部子进程再退出（2026-10-31 修复孤儿进程问题）
+        for proc in procs:
+            if proc.poll() is None:
+                proc.terminate()
+        raise SystemExit(f"interrupted (signal {signum})")
+    signal.signal(signal.SIGINT, _forward_signal)
+    signal.signal(signal.SIGTERM, _forward_signal)
+    for k, chunk in enumerate(chunks):
+        if not chunk:
+            continue
+        dev = "cuda:%d" % gpus[(k // max(1, args.workers_per_gpu)) % len(gpus)]
         cmd = [sys.executable, str(Path(__file__).resolve()),
                "--model", args.model, "--split", args.split,
                "--ckpt", args.ckpt, "--lr", str(args.lr),
-               "--cams", ",".join(map(str, cams)),
-               "--device", "cuda:%d" % gpus[k % len(gpus)]]
+               "--combo-list", ";".join(",".join(map(str, c)) for c in chunk),
+               "--device", dev]
         if args.contact:
             cmd += ["--contact", "--lcontact", str(args.lcontact)]
         if args.sessions:
             cmd += ["--sessions", args.sessions]
-        if args.n_windows != 16:
+        if args.n_windows > 0:
             cmd += ["--n-windows", str(args.n_windows)]
         if args.steps != 200:
             cmd += ["--steps", str(args.steps)]
-        print("[launch]", ",".join(map(str, cams)), "->", "cuda:%d" % gpus[k % len(gpus)])
+        # 计算语义参数原样透传（此前并行路径会静默丢弃）
+        if args.dump_kp:
+            cmd += ["--dump-kp", str(args.dump_kp)]
+        if args.wins:
+            cmd += ["--wins", args.wins]
+        if args.win_frac:
+            cmd += ["--win-frac", "%s,%s" % args.win_frac]
+        if args.grad_diag:
+            cmd += ["--grad-diag"]
+        if args.seed != 1:
+            cmd += ["--seed", str(args.seed)]
+        if args.checkpoint:
+            cmd += ["--checkpoint", str(args.checkpoint)]
+        print("[launch] worker%d %s: %s" % (
+            k, dev, " ".join(",".join(map(str, c)) for c in chunk)))
         procs.append(subprocess.Popen(cmd, start_new_session=True))
     while any(p.poll() is None for p in procs):
         time.sleep(10)
     bad = [p for p in procs if p.returncode != 0]
-    print(f"[launch] {len(procs) - len(bad)}/{len(procs)} 组合完成")
+    print(f"[launch] {len(procs) - len(bad)}/{len(procs)} worker 完成")
     if bad:
-        raise SystemExit(f"{len(bad)} 个组合失败")
+        raise SystemExit(f"{len(bad)} 个 worker 失败")
 
 
 def main():
@@ -621,10 +753,12 @@ def main():
     ap.add_argument("--model", default="V3_Bv1", choices=tuple(TTA_MODELS))
     ap.add_argument("--split", default="test", choices=("val", "test"))
     ap.add_argument("--sessions", default=None, help="逗号分隔；缺省 = split 全集")
-    ap.add_argument("--n-windows", type=int, default=16)
+    ap.add_argument("--n-windows", type=int, default=0,
+                    help="限制前 N 窗（2026-11-01 起缺省 0 = 全量：每会话"
+                         "完整序列的全部窗口）")
     ap.add_argument("--wins", default=None,
                     help="逗号分隔窗口序号（0 起，stride20 网格；E7 用，"
-                         "缺省 = 前 n-windows 窗）")
+                         "缺省 = 全部窗口）")
     ap.add_argument("--win-frac", default=None,
                     help="\"f0,f1\"：取窗口序号占比在 [f0,f1) 的窗口"
                          "（E7 五阶段时间轴用；与 --wins 互斥）")
@@ -636,16 +770,25 @@ def main():
     ap.add_argument("--n", default=None,
                     help="逗号分隔视角数（如 2,3,4；缺省 = 全部 1,2,3,4）")
     ap.add_argument("--gpu", default=None,
-                    help="逗号分隔卡号（如 1,2,3,7）：逐组合并行分卡，"
-                         "单命令跑完全部组合（缺省 = --device 单卡）")
+                    help="逗号分隔卡号（如 1,2,3,7）：组合队列分卡——每卡一个"
+                         "worker 顺序消化组合（重组合优先、单组合独占整卡），"
+                         "单命令跑完全部组合（缺省 = --device 单卡单组合）")
+    ap.add_argument("--workers-per-gpu", type=int, default=1,
+                    help="--gpu 模式下每卡 worker 数（缺省 1）")
+    ap.add_argument("--combo-list", default=None,
+                    help="内部：分号分隔的相机组合列表（父调度器 worker 用）")
     ap.add_argument("--seed", type=int, default=1,
                     help="种子（variant sdN 选多种子 ckpt；缺省 1）")
     ap.add_argument("--ckpt", default="last", choices=("best", "last"),
                     help="ckpt 选点口径（缺省 last）")
     ap.add_argument("--checkpoint", type=Path, help="Explicit frozen checkpoint; label version is read from its config")
     ap.add_argument("--dump-kp", default=None,
-                    help="目录：每窗落 {sid}_w{st}.npz（virtual 精修聚合关节/"
-                         "GT/帧号/mpjpe/gmpjpe，E7 逐帧曲线用）")
+                    help="目录：每窗落 {combo}(_contact)/{sid}_w{st}.npz"
+                         "（virtual 精修聚合关节/GT/帧号/mpjpe/gmpjpe，"
+                         "E7 逐帧曲线用；--win-frac 时指标 json 随 dump 落同树）")
+    ap.add_argument("--no-metrics", action="store_true",
+                    help="只落 dump 不写指标 json（补尾等辅助跑，"
+                         "防止尾窗口径的 json 覆盖正式口径）")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--warmup", type=int, default=20)
     ap.add_argument("--clip", type=float, default=0.1)
@@ -674,6 +817,29 @@ def main():
         raise SystemExit("--wins 与 --win-frac 互斥")
     if args.dump_kp:
         Path(args.dump_kp).mkdir(parents=True, exist_ok=True)
+    from itertools import combinations
+    if args.combo_list is not None and (args.cams or args.i is not None or args.n is not None):
+        raise SystemExit("--combo-list 与 --cams/--i/--n 互斥")
+    if args.i is not None and args.cams:
+        raise SystemExit("--i 与 --cams 互斥")
+    if args.n is not None and args.cams:
+        raise SystemExit("--n 与 --cams 互斥")
+    if args.combo_list:
+        cams_list = [tuple(int(x) for x in combo.split(",") if x.strip())
+                     for combo in args.combo_list.split(";") if combo.strip()]
+    elif args.cams:
+        cams_list = [tuple(int(x) for x in args.cams.split(",") if x.strip())]
+    elif args.i is not None:
+        cams_list = list(combinations((1, 2, 3, 4), args.i))
+    elif args.n is not None:
+        cams_list = [c for n in (int(x) for x in args.n.split(",") if x.strip())
+                     for c in combinations((1, 2, 3, 4), n)]
+    else:
+        cams_list = [c for n in (1, 2, 3, 4) for c in combinations((1, 2, 3, 4), n)]
+    if args.gpu:
+        # 父进程只调度：worker 各自建模型，父进程不占用 GPU（2026-11-01）
+        _launch_parallel(args, cams_list)
+        return
     out_path = args.out or str(RESULTS_ROOT / "metrics" / (
         f"anysole_tta_stage1_{args.model}_{args.split}"
         + (f"_i{args.i}" if args.i is not None else
@@ -693,23 +859,6 @@ def main():
     summary = {"sessions": {}, "checkpoint": str(selected_ckpt), "checkpoint_sha256": _sha256(selected_ckpt),
                "contact_method": contact_method, "contact_label_package_sha256": saved.get("contact_label_package_sha256"),
                "camera_calibration": "none", "extra_contact_loss": False}
-    from itertools import combinations
-    if args.i is not None and args.cams:
-        raise SystemExit("--i 与 --cams 互斥")
-    if args.n is not None and args.cams:
-        raise SystemExit("--n 与 --cams 互斥")
-    if args.cams:
-        cams_list = [tuple(int(x) for x in args.cams.split(",") if x.strip())]
-    elif args.i is not None:
-        cams_list = list(combinations((1, 2, 3, 4), args.i))
-    elif args.n is not None:
-        cams_list = [c for n in (int(x) for x in args.n.split(",") if x.strip())
-                     for c in combinations((1, 2, 3, 4), n)]
-    else:
-        cams_list = [c for n in (1, 2, 3, 4) for c in combinations((1, 2, 3, 4), n)]
-    if args.gpu:
-        _launch_parallel(args, cams_list)
-        return
     metric_keys = ("pa_init", "pa_virt_init", "pa_refined", "pa_virt_refined",
                    "mpjpe_virt_refined", "gmpjpe_virt_refined")
     for cams in cams_list:
@@ -720,11 +869,29 @@ def main():
                          "contact_method": summary["contact_method"],
                          "camera_calibration": summary["camera_calibration"],
                          "extra_contact_loss": summary["extra_contact_loss"]}
+        # 会话级断点续跑（2026-11-01）：环境杀进程是常态，组合级续跑
+        # 丢整个组合进度——已完成会话从 json 续读并跳过
+        done_sids: set = set()
+        if not args.no_metrics:
+            try:
+                old = json.loads(_combo_out_path(args, cams).read_text(
+                    encoding="utf-8"))
+                if isinstance(old.get("sessions"), dict):
+                    combo_summary["sessions"] = dict(old["sessions"])
+                    done_sids = set(combo_summary["sessions"])
+            except Exception:
+                pass
+        # 逐组合 dump 子目录（多组合并行时避免 {sid}_w{st}.npz 互相覆盖；
+        # _contact 后缀区分 ③/④ 两线，与 json 命名同口径）
+        combo_dir = combo_key + ("_contact" if args.contact else "")
+        dump_dir = Path(args.dump_kp) / combo_dir if args.dump_kp else None
         for sid in sids:
+            if sid in done_sids:
+                continue
             res = run_session(model, smpl_layer, TTA_MODELS[args.model]["leaf"],
                               sid, args.n_windows, args.steps,
                               args.warmup, args.clip, args.lr, args.grad_diag,
-                              args.device, wins=wins, dump_dir=args.dump_kp,
+                              args.device, wins=wins, dump_dir=dump_dir,
                               config_value=CONFIG_VT if args.contact else CONFIG_V,
                               win_frac=win_frac, contact_method=contact_method,
                               cams=cams, contact=args.contact,
@@ -732,18 +899,21 @@ def main():
             stats = summarize(res)
             combo_summary["sessions"][sid] = stats
             combo_sessions[sid] = stats
-            print(f"[{sid}] done: { {k: (round(v, 1) if v is not None else None) for k, v in stats.items() if k in ('pa_init','pa_virt_init','pa_refined','pa_virt_refined')} }")
-            combo_path = _combo_out_path(args)
-            Path(combo_path).parent.mkdir(parents=True, exist_ok=True)
-            Path(combo_path).write_text(json.dumps(combo_summary, indent=1),
-                                        encoding="utf-8")
+            print(f"[{sid}] done: { {k: (round(v, 1) if v is not None else None) for k, v in stats.items() if k in ('pa_init','pa_virt_init','pa_refined','pa_virt_refined')} }", flush=True)
+            if not args.no_metrics:
+                combo_path = _combo_out_path(args, cams)
+                Path(combo_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(combo_path).write_text(json.dumps(combo_summary, indent=1),
+                                            encoding="utf-8")
         combo_mean = {}
         for k in metric_keys:
-            vals = [s[k] for s in combo_sessions.values() if s[k] is not None]
+            vals = [s[k] for s in combo_summary["sessions"].values()
+                    if s[k] is not None]
             combo_mean[k] = float(np.mean(vals)) if vals else None
         combo_summary["combos"][combo_key] = combo_mean
-        print(f"[combo {combo_key}] { {k: (round(v, 1) if v is not None else None) for k, v in combo_mean.items()} }")
-        Path(combo_path).write_text(json.dumps(combo_summary, indent=1),
+        print(f"[combo {combo_key}] { {k: (round(v, 1) if v is not None else None) for k, v in combo_mean.items()} }", flush=True)
+        if not args.no_metrics:
+            Path(combo_path).write_text(json.dumps(combo_summary, indent=1),
                                     encoding="utf-8")
     print("→", str(RESULTS_ROOT / "metrics") +
           f"/anysole_tta_stage1_{args.model}_{args.split}_i*_cams*.json")

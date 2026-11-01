@@ -51,7 +51,7 @@ Cv 家族暂只 last）。表格数字来自 cells（评估由 conf 管线完成
 | E4 | `python results_display/script/e_results_export.py --experiment E4 --ckpt last` | 模型固定（Cv1–7 消融组）；`--ckpt` 目前仅 last |
 | E5 | `python results_display/script/e_results_export.py --experiment E5 --models V7_Cv5 --ckpt last` | 主模型 V7_Cv5 单模型（occ000-050 五档，固定一份 ckpt）；图 1 = `Full_Fig1_E5_Degradation.png`（x=遮挡档、y=相对 occ000 退化，V 蓝实线 / VT 橙虚线，子图六指标） |
 | E6 | `python anysole_tta/e6_phase_analysis.py --models V7_Cv4_s1,V7_Cv5_s1,V7_Cv7_s1 --ckpt last` | 模型固定三个；`--ckpt` 目前仅 last |
-| E7 | `python anysole_tta/e7_driver.py --actions walk,run,squat` | 模型固定（V7_Cv4/Cv5，TTA 阶段同步 `--ckpt last`） |
+| E7 | `python anysole_tta/e7_driver.py`（缺省 = canonical test 全部动作组） | 模型固定（V7_Cv5；Vi/ViT 直接读 E3 ③/④ 产物树，缺失空窗不阻断） |
 | E8 | （待做） | `--model` 可选（读冻结 ckpt 中间量 m_v/m_t + ridge 探针） |
 
 ## 数据来源与刷新
@@ -91,28 +91,28 @@ Cv 家族暂只 last）。表格数字来自 cells（评估由 conf 管线完成
 # ① 标定多视角（参考上限）= EasyMocap（touch_gait）
 conda activate touch_gait
 python anysole_tta/easymocap_baseline.py --split test --n 2,3,4 --device cuda:2
-python anysole_tta/easymocap_baseline.py --split test --aggregate
 
 # ② TTA 原方法 = HMR 2.0（hmr2 env；无标定，论文口径 200/0.1/20/0.1）
 conda activate hmr2
-python hmr2_tta/eval/eval_tta.py --split test --gpu 4,5,6,7
+python hmr2_tta/eval/eval_tta.py --split test --gpu 4,5,6,7  --dump-kp results/baselines/HMR2.0/predictions/hmr2_tta
 
 # ③ AnySole TTA = V7_Cv5（touch_gait；无标定纯视觉 V）
 conda activate touch_gait
-python anysole_tta/run_tta.py --model V7_Cv5 --split test --ckpt last --lr 0.01 --gpu 4,5,6,7
+python anysole_tta/run_tta.py --model V7_Cv5 --split test --ckpt last --lr 0.01 --gpu 4,5,6,7 --dump-kp results/baselines/HMR2.0/predictions/anysole_tta_stage1_V7_Cv5_test
 
 # ④ AnySole TTA wLcon（VT + 接触约束；--lcontact 缺省 1.0）
 conda activate touch_gait
-python anysole_tta/run_tta.py --model V7_Cv5 --split test --ckpt last --lr 0.01 --contact --gpu 1,2,3,7
+python anysole_tta/run_tta.py --model V7_Cv5 --split test --ckpt last --lr 0.01 --contact --gpu 1,2,3,7 --dump-kp results/baselines/HMR2.0/predictions/anysole_tta_stage1_V7_Cv5_test
 
 # 说明：--n 2,3,4 可限定视角数子集；--gpu 缺省时按 --device 单卡串行。
 # 会话集 = splits.csv 的 split 列（--split 参数），不手写 SIDS。
+conda activate touch_gait
 
 # E6 接触相位分析（读训练 cell 逐帧预测 + 接触标签；--ckpt 选口径）
 python anysole_tta/e6_phase_analysis.py --models V7_Cv4_s1,V7_Cv5_s1,V7_Cv7_s1 --ckpt last
 
-# E7 动态输入重建（Vi/ViT 阶段内部调 run_tta --which last）
-python anysole_tta/e6_phase_analysis.py --models V7_Cv4_s1,V7_Cv5_s1,V7_Cv7_s1 --ckpt last
+# E7 动态输入重建（Vi/ViT 读 E3 ③/④ 产物树；缺失空窗）
+python anysole_tta/e7_driver.py --models V7_Cv5
 
 # E8 模态互补探针（读冻结 ckpt 中间量 + ridge；脚本按 __file__ 定位仓库，
 # 不依赖 cwd，绝对路径在任意目录都可跑）
@@ -131,7 +131,7 @@ python results_display/script/e_results_export.py
 
 # 指定实验
 python results_display/script/e_results_export.py --experiment E2 --models V7_Cv5 --ckpt last
-python results_display/script/e_results_export.py --experiment E5
+python results_display/script/e_results_export.py --experiment E7
 python results_display/script/e_results_export.py --experiment E6 --teaser
 ```
 

@@ -61,6 +61,10 @@ def export_session(row: dict, args) -> dict:
     joints = scale[:, None, None] * np.einsum("tji,tik->tjk", joints, rotation) + translation[:, None]
     vertices_world = common.camera_chain(vertices, camera, calibration)
     joints_world = common.camera_chain(joints, camera, calibration)
+    # 2026-11-01 用户裁定：逐日期拟合平移（与 MMVP 漂移点 m/n 同机制）。
+    b = common.load_translation(date, "sam3db")
+    vertices_world = vertices_world + b
+    joints_world = joints_world + b
     rotations = Rotation.from_rotvec(poses.reshape(-1, 3)).as_matrix().reshape(
         visual.size, 24, 3, 3)
     rotations[:, 0] = np.einsum("tji,tjk->tik", rotation, rotations[:, 0])

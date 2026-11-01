@@ -22,6 +22,22 @@ import torch
 from scipy.spatial.transform import Rotation as R
 
 PELVIS = 0   # SMPL-24 原生骨盆索引（统一读出 SMPL-24，与 AnySole 协议一致）
+
+_SMPL_LAYERS = {}
+
+
+def _smpl_layer(device):
+    """按设备缓存的 SMPL-24 原生层（每进程只建一次；此前每帧集合都
+    smplx.create 一遍——17 万次模型装载是 CPU 空转、整夜卡死的根因，
+    2026-11-01 修复）。"""
+    from hmr2_tta.paths import SMPL_MODEL_PATH
+    import smplx
+    key = str(device)
+    if key not in _SMPL_LAYERS:
+        _SMPL_LAYERS[key] = smplx.create(str(SMPL_MODEL_PATH), "smpl",
+                                         gender="neutral", batch_size=1,
+                                         num_betas=10).to(device)
+    return _SMPL_LAYERS[key]
 # Halpe-26 → SMPL-24 监督子集（与 AnySole TTA 同一映射表，21 点）
 S24_BODY = [16, 17, 18, 19, 20, 21, 1, 2, 4, 5, 7, 8, 12, 0]
 J_EXTRA = [24, 29, 32, 30, 33, 31, 34]  # 鼻/L大趾/R大趾/L小趾/R小趾/L跟/R跟
@@ -85,11 +101,8 @@ class TTAFrameSet:
         """
         self.model = model
         self.head = model.smpl_head
-        # SMPL-24 原生层（不走 44 关节包装器；与 AnySole 协议同一身体模型文件）
-        from hmr2_tta.paths import SMPL_MODEL_PATH
-        import smplx
-        self.smpl = smplx.create(str(SMPL_MODEL_PATH), "smpl", gender="neutral",
-                                 batch_size=1, num_betas=10).to(tokens.device)
+        # SMPL-24 原生层（按设备缓存复用；不走 44 关节包装器）
+        self.smpl = _smpl_layer(tokens.device)
         self.l_theta, self.l_beta, self.l_mesh, self.l_reg = (
             lambda_theta, lambda_beta, lambda_mesh, lambda_reg)
         self.l_2d = lambda_2d  # 论文附录 λ2d=0.3（同一归一化 crop 坐标空间）

@@ -1417,12 +1417,173 @@ _drop_all_but_current()
 # seed 2/3 按方案 §8.4 于 val 确认后补发（条目先注册不发射）；
 # S 按 §7 硬门槛通过后另立。
 _V7_CV5_S1_CELL = MODELS["V7_Cv5_s1"]
+# V7_Cv5Ctx / V7_Cv5Ctx2（2026-11-01）：Cv5 + 上一窗姿态上下文续写
+# （续写协议方案 §1-§4）。配方与 V7_Cv5_s1 逐项一致；ctx 训练 = teacher
+# forcing（GT 窗首帧根状态），评估 = stride tw//2 重叠链式（上一窗预测）。
+# Ctx2 = 续写 v2：ctx 直连根朝向（部位 query 注入 + 输出残差，方案 §9）。
+for _gate in ("V7_Cv5Ctx", "V7_Cv5Ctx2"):
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d" % (_gate, _n)] = {
+            **_V7_CV5_S1_CELL,
+            "label": "%s-s%d" % (_gate.replace("_", "-"), _n),
+            "name": _gate, "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_gate, _n, _occ)] = {
+                **_V7_CV5_S1_CELL,
+                "label": "%s-s%d-evalocc%s" % (_gate.replace("_", "-"), _n, _occ),
+                "name": _gate, "seed": _n, "train": False,
+                "eval_splits": ["val", "test"],
+                "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+# 续写 v2 实验矩阵（2026-11-01，G1-G4）：G1 = scheduled sampling
+# （train_args ctx_ss=0.5，训练时线性增至 0.5 概率用模型预测 ctx）；
+# G2 = V 在场条件门控（入口 v7_c2ctx_vc）；G3 = 评估硬前缀（入口
+# v7_c2ctx_hp）；G4 = 三合一（v7_c2ctx_full + ctx_ss）。
+for _gate, _ta in (("V7_Cv5CtxSS", {"ctx_ss": 0.5}),
+                   ("V7_Cv5CtxVC", {}),
+                   ("V7_Cv5CtxHP", {}),
+                   ("V7_Cv5CtxFull", {"ctx_ss": 0.5})):
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d" % (_gate, _n)] = {
+            **_V7_CV5_S1_CELL,
+            "label": "%s-s%d" % (_gate.replace("_", "-"), _n),
+            "name": _gate, "seed": _n,
+            "train_args": {**_V7_CV5_S1_CELL["train_args"], **_ta}}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_gate, _n, _occ)] = {
+                **_V7_CV5_S1_CELL,
+                "label": "%s-s%d-evalocc%s" % (_gate.replace("_", "-"), _n, _occ),
+                "name": _gate, "seed": _n, "train": False,
+                "eval_splits": ["val", "test"],
+                "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+
+# v2 训练 GPU6 直发（2026-11-01 用户指定）：s1 条目注入 device=cuda:6；
+# s2/s3 不设（按常规调度器分配）。
+# 续写 v3（2026-11-01，V7_续写协议方案 §10）：T-only 硬填式重叠
+# （ctx = 重叠区 nf 帧 × 10 维，替换式注入前 nf 帧根 query 槽位；V 在场
+# 门控不注入 → V/VT 行回归 Cv5 行为）。入口 v7_c2ctx3，配方同 Cv5。
+for _gate in ("V7_Cv5Ctx3",):
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d" % (_gate, _n)] = {
+            **_V7_CV5_S1_CELL,
+            "label": "%s-s%d" % (_gate.replace("_", "-"), _n),
+            "name": _gate, "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_gate, _n, _occ)] = {
+                **_V7_CV5_S1_CELL,
+                "label": "%s-s%d-evalocc%s" % (_gate.replace("_", "-"), _n, _occ),
+                "name": _gate, "seed": _n, "train": False,
+                "eval_splits": ["val", "test"],
+                "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+
+# 续写 v4（2026-11-01，V7_续写v4残差分解方案）：ctx3 + 锚点系残差分解
+# （T 行目标/注入/出口全残差化，R_a 链式携带；V/VT 行 R_a=I 回归 Cv5）。
+# 入口 v7_c2ctx4，配方同 Cv5。
+for _gate in ("V7_Cv5Ctx4",):
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d" % (_gate, _n)] = {
+            **_V7_CV5_S1_CELL,
+            "label": "%s-s%d" % (_gate.replace("_", "-"), _n),
+            "name": _gate, "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_gate, _n, _occ)] = {
+                **_V7_CV5_S1_CELL,
+                "label": "%s-s%d-evalocc%s" % (_gate.replace("_", "-"), _n, _occ),
+                "name": _gate, "seed": _n, "train": False,
+                "eval_splits": ["val", "test"],
+                "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+
+# 续写 v5（2026-11-01）：块自回归——ctx 块扩全姿态（nf × 148），全部
+# query 槽位逐部位硬填（发射区从完整历史出发）。入口 v7_c2ctx5，配方同 Cv5。
+for _gate in ("V7_Cv5Ctx5",):
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d" % (_gate, _n)] = {
+            **_V7_CV5_S1_CELL,
+            "label": "%s-s%d" % (_gate.replace("_", "-"), _n),
+            "name": _gate, "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_gate, _n, _occ)] = {
+                **_V7_CV5_S1_CELL,
+                "label": "%s-s%d-evalocc%s" % (_gate.replace("_", "-"), _n, _occ),
+                "name": _gate, "seed": _n, "train": False,
+                "eval_splits": ["val", "test"],
+                "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+
+# 帧级双模式 AR（2026-11-01，V7 方案 §11）：V/VT 回归 + T 因果自回归，
+# 共享网络。入口 v7_c2ar，配方同 Cv5。
+# 续写 v4-b（2026-11-01，v4 方案 §10）：统一残差空间——全条件目标 =
+# 锚点系残差（锚 = GT 窗首帧，首窗绝对）；V/VT 行锚 = 锚估计头
+# （λ_anchor=1.0，CONFIG_EXTRA），T 行锚 = ctx 链。入口 v7_c2ctx4b。
+# 续写 v4-R（2026-11-01）：ctx4 + 接触根运动（B 候选挂链，λ_foot=1.0，
+# CONFIG_EXTRA）。入口 v7_c2ctx4r。
+# AR 对照格（2026-11-01）：因果掩码、无反馈支路。入口 v7_c2arm。
+for _gate in ("V7_Cv5Ctx4B", "V7_Cv5Ctx4R", "V7_Cv5ARM"):
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d" % (_gate, _n)] = {
+            **_V7_CV5_S1_CELL,
+            "label": "%s-s%d" % (_gate.replace("_", "-"), _n),
+            "name": _gate, "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_gate, _n, _occ)] = {
+                **_V7_CV5_S1_CELL,
+                "label": "%s-s%d-evalocc%s" % (_gate.replace("_", "-"), _n, _occ),
+                "name": _gate, "seed": _n, "train": False,
+                "eval_splits": ["val", "test"],
+                "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+
+# 帧级双模式 AR（2026-11-01，V7 方案 §11）：V/VT 回归 + T 因果自回归，
+# 共享网络。入口 v7_c2ar，配方同 Cv5。
+# ARSS = AR + 反馈 scheduled sampling（ar_ss 线性升至 0.3）+ 反馈收缩噪声
+# （ar_noise=0.1，只扰姿态分量）——2026-11-01 裁定：暴露偏差与 v1 ctx 同构，
+# G1 机制平移到 prev_state。
+MODELS["V7_Cv5ARSS_s1"] = {
+    **_V7_CV5_S1_CELL, "label": "V7-Cv5ARSS-s1",
+    "name": "V7_Cv5AR", "seed": 1,
+    "train_args": {**_V7_CV5_S1_CELL.get("train_args", {}),
+                   "ar_ss": 0.3, "ar_noise": 0.1}}
+for _gate in ("V7_Cv5AR",):
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d" % (_gate, _n)] = {
+            **_V7_CV5_S1_CELL,
+            "label": "%s-s%d" % (_gate.replace("_", "-"), _n),
+            "name": _gate, "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_gate, _n, _occ)] = {
+                **_V7_CV5_S1_CELL,
+                "label": "%s-s%d-evalocc%s" % (_gate.replace("_", "-"), _n, _occ),
+                "name": _gate, "seed": _n, "train": False,
+                "eval_splits": ["val", "test"],
+                "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+
+MODELS["V7_Cv5Ctx2_s1"]["device"] = "cuda:6"
+
 for _gate in ("V7_Cv5T", "V7_Cv5LR", "V7_Cv5TLR", "V7_Cv5Q"):
     for _n in (1, 2, 3):
         MODELS["%s_s%d" % (_gate, _n)] = {
             **_V7_CV5_S1_CELL,
             "label": "%s-s%d" % (_gate.replace("_", "-"), _n),
             "name": _gate, "seed": _n}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_gate, _n, _occ)] = {
+                **_V7_CV5_S1_CELL,
+                "label": "%s-s%d-evalocc%s" % (_gate.replace("_", "-"), _n, _occ),
+                "name": _gate, "seed": _n, "train": False,
+                "eval_splits": ["val", "test"],
+                "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+
+# S 显式收益监督（2026-11-01，V7_C 门控修改方案 §7）：TLR 结构（v7_c2tlr）
+# + l_s_gate BCE（四组门 vel/other/left/right 对离线相对收益标签，§7 硬门槛
+# 已全过 S_ok=true）。λ_s 扫 1.0 / 0.1（entry V7_Cv5S / V7_Cv5S01）；标签目录
+# 固定 results_display/Etest/S_GateDiag（s_gate_diag.py 产出，τ 固定，组序
+# vel/other/left/right）。种子 1/2/3 注册；发射集按卡位裁定（见发射脚本）。
+_S_LABEL_DIR = "/data/fangyuxuan/projects/gait/results_display/Etest/S_GateDiag"
+for _gate, _ls in (("V7_Cv5S", 1.0), ("V7_Cv5S01", 0.1)):
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d" % (_gate, _n)] = {
+            **_V7_CV5_S1_CELL,
+            "label": "%s-s%d" % (_gate.replace("_", "-"), _n),
+            "name": _gate, "seed": _n,
+            "train_args": {**_V7_CV5_S1_CELL.get("train_args", {}),
+                           "lambda_s": _ls, "v7_s_label": _S_LABEL_DIR}}
         for _occ in ("010", "020", "030", "050"):
             MODELS["%s_s%d_evalocc%s" % (_gate, _n, _occ)] = {
                 **_V7_CV5_S1_CELL,
@@ -1495,3 +1656,9 @@ for _fname, _fconfig in _V7_CV7_FOLDS:
         "config": _fconfig,
         "eval_splits": ["val", "test"]}
 
+# V7_Cv5_bs512（2026-11-01 训练提速实验）：同 V7_Cv5_s1 配方、batch 256→512。
+# 确定性步时基准：1.53s→1.88s/步（1.23×），步数 7→4/epoch，训练墙钟省 ~30%。
+# batch_size 走 spec 顶层（runner.py _train_command 直读），不进 train_args。
+MODELS["V7_Cv5_bs512_s1"] = {**_V7_CV5_S1_CELL, "label": "V7-Cv5-bs512-s1",
+                             "name": "V7_Cv5_bs512", "seed": 1,
+                             "batch_size": 512}

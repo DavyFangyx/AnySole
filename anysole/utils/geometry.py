@@ -46,6 +46,26 @@ def rot6d_to_rotmat(d6: torch.Tensor) -> torch.Tensor:
     return torch.stack((b1, b2, b3), dim=-1)
 
 
+def compose_rot6d(rot: torch.Tensor, d6: torch.Tensor) -> torch.Tensor:
+    """rot (...,3,3) 左乘 6D 旋转 (...,6)：返回 6D。
+
+    续写 v4 残差分解（2026-11-01）：R_world = R_a ⊙ R_res —— 残差 =
+    compose(R_a^T, 世界 6D)，出口组合 = compose(R_a, 残差 6D)。
+    rot 的 batch 维可少于 d6（右侧对齐补 singleton，如 (B,3,3) 对
+    (B,tw,24,3,3)）。
+    """
+    if d6.shape[-1] != 6:
+        # 形状守卫（2026-11-01）：(…,144) 平铺输入会被 rot6d_to_rotmat
+        # 静默只取前 6 维（丢 138 维）——链式组合曾因此丢失除根关节外的
+        # 全部姿态。调用侧必须按 (…,24,6) 展开。
+        raise ValueError("compose_rot6d expects a trailing 6D axis, got %d"
+                         % d6.shape[-1])
+    r = rot6d_to_rotmat(d6)
+    if rot.dim() < r.dim():
+        rot = rot.view(*rot.shape[:-2], *([1] * (r.dim() - rot.dim())), 3, 3)
+    return rotmat_to_6d(torch.matmul(rot, r))
+
+
 def fk_local_np(local_rotmats: np.ndarray, offsets: np.ndarray, parents: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     n_frames, n_joints, _, _ = local_rotmats.shape
     global_rot = np.zeros_like(local_rotmats)

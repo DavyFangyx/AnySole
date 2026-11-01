@@ -40,6 +40,9 @@ TRAIN_ARG_FLAG_MAP = {
     "sigma_freeze_frac": "--sigma-freeze-frac",
     "lr_warmup_frac": "--lr-warmup-frac",
     "grad_clip": "--grad-clip",
+    "ctx_ss": "--ctx-ss",
+    "ar_ss": "--ar-ss",
+    "ar_noise": "--ar-noise",
     "lr_schedule": "--lr-schedule",
     "loss_cap": "--loss-cap",
     "tw": "--tw",
@@ -89,6 +92,10 @@ TRAIN_ARG_FLAG_MAP = {
     "lambda_cond": "--lambda-cond",
     # 双阶段精调骨架学习率倍率（V4_Av4，2026-10-25；0 = 冻结口径）。
     "carrier_lr_mult": "--carrier-lr-mult",
+    # S 显式收益监督（2026-11-01，V7_C 门控修改方案 §7）：四组门对离线
+    # 相对收益标签做 BCE。lambda_s 为权重，v7_s_label 为标签目录。
+    "lambda_s": "--lambda-s",
+    "v7_s_label": "--v7-s-label",
 
     # 候选池（2026-10-25 裁定）：三门通过者全留（val PA V≤40 / T≤90 /
     # VT≤40），见 anysole/train.py --checkpoint-policy multi_metric。
@@ -177,7 +184,8 @@ def build_registry() -> dict[str, Any]:
         "device": COMMON.get("DEVICE", "cuda"),
         "modal": COMMON.get("MODAL", "anysolev2"),
         "contact_method": COMMON.get("CONTACT_METHOD", "joint_and"),
-        "train_seed": COMMON.get("TRAIN_SEED", 1),
+        # 不注入全局 train_seed 默认值：它经 `spec.get("train_seed", spec.get("seed",1))`
+        # 会盖掉每个模型条目的 "seed"，导致多种子模型全部 --seed 1、撞 sd1（2026-11-01）。
         "epochs": COMMON.get("EPOCHS", 800),
         "batch_size": COMMON.get("BATCH_SIZE", 256),
         "protocol_seed": COMMON.get("PROTOCOL_SEED", 0),

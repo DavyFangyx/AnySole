@@ -43,6 +43,7 @@ from anysole.types import (
     KNEE_ANKLE_FOOT_JOINTS,
     MOTION_PROTOCOL,
     N_JOINTS,
+    FPS,
     PART_NAMES,
     POSE_DIM,
     SEQ_ROOT,
@@ -59,7 +60,8 @@ from anysole.registry import get_builder, infer_anysole_paths
 from anysole.data.workspace_adapter import ADAPTER_VERSION, sha256_file
 from AnysoleWorkspace.tool.workspace import resolve_uri
 from anysole.ablations.insole_drift.templates import load_template_bank
-from anysole.utils.geometry import f2_to_world, fk_pose6d
+from anysole.utils.geometry import (
+    compose_rot6d, f2_to_world, fk_pose6d, rot6d_to_rotmat)
 from anysole.utils.metrics import pa_mpjpe
 from anysole.utils.constraints import apply_v3e_constraints
 from anysole.utils.constraints_g import apply_v3g_constraints
@@ -86,6 +88,7 @@ DEFAULT_CONFIG = {
     "lr": 1.0e-4,
     "epochs": 200,
     "num_workers": 4,
+    "ckpt_interval": 5,         # ckpt_last 保存间隔（epoch）；2026-11-01 训练提速：sdb 写回节流
     "smpl_support_policy": "exclude",  # new runs reject unsupported SMPL targets
     "diffusion_train_steps": 1000,
     "diffusion_sample_steps": 50,
@@ -213,7 +216,34 @@ def condition_inputs(batch: dict, config_id: torch.Tensor, t_s2m_dim: int = T_S2
     return v_feat, t_raw, t_phys, t_s2m
 
 
-def backward_v7_enum(model, batch, config):
+def _ctx4_residual_batch(batch):
+    """v4-a（2026-11-01）：T 行目标转锚点系残差（锚 = GT 窗首帧根朝向）。
+
+    残差 pose = R_aᵀ⊙pose_gt（全 24 关节）、残差 vel = R_aᵀ⊙vel_gt、
+    trans_gt 由残差 vel 重积分。V/VT 行不调用（目标保持绝对）。
+    首窗/复位（ctx flag=0）→ R_a = I：首窗训练 = 绝对模式（与评估首窗
+    R_a=I 同口径；2026-11-01 补齐 v4 方案 §4 的 flag 检查）。
+    """
+    b = dict(batch)
+    R_a = rot6d_to_rotmat(batch["pose_gt"][:, 0, :6])          # (B,3,3)
+    ctx = batch.get("ctx")
+    if ctx is not None:
+        first = ctx[..., -1].mean(dim=1) <= 0.5                # (B,) 首窗/复位
+        R_a[first] = torch.eye(3, device=R_a.device, dtype=R_a.dtype)
+    RaT = R_a.transpose(-1, -2)
+    shape = batch["pose_gt"].shape
+    b["pose_gt"] = compose_rot6d(
+        RaT[:, None, :, :],
+        batch["pose_gt"].reshape(shape[0], shape[1], N_JOINTS, 6)
+    ).reshape(shape)
+    b["vel_gt"] = torch.einsum("bij,btj->bti", RaT, batch["vel_gt"])
+    b["trans_gt"] = torch.cumsum(b["vel_gt"], dim=1) / float(FPS)
+    return b
+
+
+def backward_v7_enum(model, batch, config, ctx_ss_p: float = 0.0,
+                     ctx_cache=None, ar_ss_p: float = 0.0,
+                     ar_noise: float = 0.0, ar_cache=None):
     """Enumerate the same windows, accumulate gradients, then update once.
 
     Motion keeps config_probs weights. T-only auxiliary terms normalize over
@@ -230,6 +260,10 @@ def backward_v7_enum(model, batch, config):
     for key in ("lambda_contact", "lambda_foot"):
         if key in mode_config:
             mode_config[key] = float(config[key]) / t_probability if t_probability > 0 else 0.0
+    if ctx_ss_p > 0 and bool(getattr(model, "ctx3", False)):
+        raise ValueError("--ctx-ss requires single-frame ctx (v1/v2); "
+                         "ctx3/4/5 block ctx is unsupported")
+    ar_causal = bool(getattr(model, "ar", False))
     metrics = {}
     batch_size = batch["pose_gt"].shape[0]
     for mode, probability in enumerate(probs):
@@ -237,8 +271,58 @@ def backward_v7_enum(model, batch, config):
             continue
         cid = torch.full((batch_size,), mode, dtype=torch.long, device=batch["pose_gt"].device)
         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, cid)
-        out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m)
-        losses = compute_losses(out, batch, cid, mode_config)
+        ctx = batch.get("ctx")
+        if ctx is not None and ctx_cache is not None and ctx_ss_p > 0:
+            # G1 scheduled sampling（续写 v2 实验矩阵）：以概率 p 用上一步
+            # 缓存的「模型预测 ctx」替换 GT ctx——打破 teacher forcing 的
+            # oracle 契约（零额外前向；缓存分布 = 模型生成分布）。
+            if ctx_cache[0] is not None and torch.rand(1).item() < ctx_ss_p:
+                c = ctx_cache[0].to(ctx.dtype)
+                n = min(c.shape[0], ctx.shape[0])
+                ctx = ctx.clone()
+                ctx[:n] = c[:n]
+        prev_state = batch.get("prev_state")
+        if (prev_state is not None and ar_cache is not None
+                and ar_cache[0] is not None and torch.rand(1).item() < ar_ss_p):
+            # AR 反馈 scheduled sampling（2026-11-01）：以概率 p 用上一步
+            # 缓存的「模型自生成反馈」替换 GT 反馈（左移一格，帧 0 全零）。
+            prev_state = ar_cache[0]
+        if prev_state is not None and ar_noise > 0.0:
+            # 反馈收缩正则：只扰姿态分量（归一化空间 ~O(1)），速度分量
+            # (m/s) 不加噪。
+            prev_state = prev_state.clone()
+            prev_state[..., :144] = (
+                prev_state[..., :144]
+                + torch.randn_like(prev_state[..., :144]) * ar_noise)
+        out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m,
+                    prev_ctx=ctx, prev_state=prev_state, causal=ar_causal)
+        if ar_cache is not None and out.get("x0_hat") is not None:
+            bsz = out["x0_hat"].shape[0]
+            tail = torch.cat([out["x0_hat"][:, :-1], out["v_hat"][:, :-1]],
+                             dim=-1).detach()
+            ar_cache[0] = torch.cat([
+                out["x0_hat"].new_zeros((bsz, 1, tail.shape[-1])), tail], dim=1)
+        if ctx_cache is not None:
+            bsz = out["x0_hat"].shape[0]
+            cache_root = out["x0_hat"][:, 10, :6].detach()
+            cache_vel = out["v_hat"][:, 10, :3].detach()
+            if getattr(model, "ctx4", False) and mode == CONFIG_T:
+                # ctx4 输出是残差——缓存必须组合回世界态（锚 = GT 窗首帧）。
+                R_a = rot6d_to_rotmat(batch["pose_gt"][:, 0, :6])
+                cache_root = compose_rot6d(R_a, cache_root)
+                cache_vel = torch.einsum("bij,bj->bi", R_a, cache_vel)
+            ctx_cache[0] = torch.cat([
+                cache_root, cache_vel,
+                torch.ones(bsz, 1, device=out["x0_hat"].device)], dim=1)
+        loss_batch = batch
+        if getattr(model, "ctx4b", False):
+            # v4-b：全条件目标 = 锚点系残差（锚 = GT 窗首帧根朝向；首窗
+            # flag=0 → R_a=I 绝对模式）。
+            loss_batch = _ctx4_residual_batch(batch)
+        elif getattr(model, "ctx4", False) and mode == CONFIG_T:
+            # v4-a：T 行目标 = 锚点系残差（模型输出残差，目标同空间）。
+            loss_batch = _ctx4_residual_batch(batch)
+        losses = compute_losses(out, loss_batch, cid, mode_config)
         if not bool(torch.isfinite(losses["loss"]) & torch.isfinite(out["F"]).all()):
             # The caller discards all accumulated gradients on failure.
             return out, losses
@@ -252,7 +336,9 @@ def backward_v7_enum(model, batch, config):
     return out, metrics
 
 
-def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt") -> Tuple[torch.Tensor, torch.Tensor]:
+def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt",
+                   residual_weight: float = 0.0,
+                   first_abs_share: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     """One pass over the training loader: per-dim mean/std of the pose target.
 
     The pose head normalizes its input/output with these fixed stats (MDM/RoHM
@@ -262,7 +348,7 @@ def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt
     """
     sums = torch.zeros(POSE_DIM, dtype=torch.float64, device=device)
     sumsq = torch.zeros(POSE_DIM, dtype=torch.float64, device=device)
-    count = 0
+    count = 0.0
     with torch.no_grad():
         for raw_batch in loader:
             pose = raw_batch[key].to(device=device, dtype=torch.float64, non_blocking=True)
@@ -270,9 +356,45 @@ def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt
                 sums = torch.zeros(pose.shape[-1], dtype=torch.float64, device=device)
                 sumsq = torch.zeros(pose.shape[-1], dtype=torch.float64, device=device)
             flat = pose.reshape(-1, pose.shape[-1])
-            sums += flat.sum(dim=0)
-            sumsq += flat.square().sum(dim=0)
-            count += flat.shape[0]
+            if residual_weight > 0 or first_abs_share is not None:
+                # 统计拟合混合口径（2026-11-01）：
+                #   v4-a：绝对全窗权重 1 + 残差权重 residual_weight；
+                #   v4-b：残差全窗权重 1（首窗降为 1−first_abs_share）+ 绝对
+                #         仅首窗（T 行绝对模式）权重 first_abs_share = p_T。
+                shape = pose.shape
+                R_a = rot6d_to_rotmat(pose[:, 0, :6].float())          # (B,3,3)
+                res = compose_rot6d(
+                    R_a[:, None, :, :].double(),
+                    pose.reshape(shape[0], shape[1], N_JOINTS, 6)
+                ).reshape(shape)
+                flat_res = res.reshape(-1, res.shape[-1])
+                if first_abs_share is not None:
+                    ctx = raw_batch.get("ctx")
+                    if ctx is None:
+                        raise RuntimeError(
+                            "first_abs_share requires the ctx column "
+                            "(v7_ctx dataset)")
+                    first = (ctx[..., -1].mean(dim=1) <= 0.5).to(
+                        device).double().view(-1, 1)
+                    w_abs = first * first_abs_share
+                    w_res = 1.0 - w_abs
+                    sums += (flat * w_abs).sum(dim=0)
+                    sumsq += (flat.square() * w_abs).sum(dim=0)
+                    count += w_abs.sum()
+                    sums += (flat_res * w_res).sum(dim=0)
+                    sumsq += (flat_res.square() * w_res).sum(dim=0)
+                    count += w_res.sum()
+                else:
+                    sums += flat.sum(dim=0)
+                    sumsq += flat.square().sum(dim=0)
+                    count += flat.shape[0]
+                    sums += residual_weight * flat_res.sum(dim=0)
+                    sumsq += residual_weight * flat_res.square().sum(dim=0)
+                    count += residual_weight * flat_res.shape[0]
+            else:
+                sums += flat.sum(dim=0)
+                sumsq += flat.square().sum(dim=0)
+                count += flat.shape[0]
     if count == 0:
         raise RuntimeError("cannot fit pose stats: training loader is empty")
     mean = sums / count
@@ -643,6 +765,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="E6.7: override yaml loss weight lambda_con.")
     parser.add_argument("--lambda-contact", type=float, default=None, metavar="W",
                         help="V3_Ev1: override yaml loss weight lambda_contact (T contact head BCE).")
+    parser.add_argument("--ctx-ss", type=float, default=0.0,
+                        help="V7 续写 G1: scheduled sampling 目标概率 p"
+                        "（线性升至 p 用模型预测 ctx 替换 GT ctx；0=关）。")
+    parser.add_argument("--ar-ss", type=float, default=0.0,
+                        help="V7 AR 反馈 scheduled sampling 目标概率 p"
+                        "（线性升至 p 用模型自生成反馈替换 GT 反馈；0=关）。")
+    parser.add_argument("--ar-noise", type=float, default=0.0,
+                        help="V7 AR 反馈收缩正则：训练反馈姿态分量加高斯噪声"
+                        "标准差（0=关）。")
     parser.add_argument("--lambda-nll", type=float, default=None, metavar="W",
                         help="V3_Ev1: override yaml loss weight lambda_nll (V pose sigma NLL).")
     parser.add_argument("--lambda-prior-pose", type=float, default=None, metavar="W",
@@ -707,6 +838,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="E6.7: override yaml loss weight lambda_pose_vel (E6.2, pos mode).")
     parser.add_argument("--lambda-bone", type=float, default=None, metavar="W",
                         help="E6.7: override yaml loss weight lambda_bone (E6.2, pos mode).")
+    parser.add_argument("--lambda-s", type=float, default=None, metavar="W",
+                        help="S 显式收益监督：四组门 (vel/other/left/right) 对离线相对"
+                             "收益标签 BCE 权重（0 = 关）。")
+    parser.add_argument("--v7-s-label", type=Path, default=None,
+                        help="S 显式收益监督：s_gate_diag.py 产出目录（含 "
+                             "tlr_gate_diag.npz/.json）。")
     parser.add_argument("--device", default="auto", help="Device such as cuda, cuda:0, or cpu.")
     parser.add_argument("--modal", choices=MODEL_NAMES, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
@@ -929,7 +1066,9 @@ def _evaluate(model, diffusion, loader, config, device):
                 if regress_mode:
                     # F0b: single forward, no DDIM sampling.
                     z_kw = {"z_src": v5_1_z_src(config_value)} if v5_1_mode else {}
-                    out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw)
+                    out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw,
+                    prev_ctx=batch.get("ctx"), prev_state=batch.get("prev_state"),
+                    causal=bool(getattr(model, "ar", False)))
                     pred_pose = out["x0_hat"]
                 else:
                     warm_prior = None
@@ -949,6 +1088,39 @@ def _evaluate(model, diffusion, loader, config, device):
                 anchor = batch["trans_anchor"][:, None, :]
                 pred_trans = out["trans_hat"] + anchor
                 gt_trans = batch["trans_gt"] + anchor
+                if getattr(model, "ctx4b", False):
+                    # v4-b：val T 行 = GT 锚（teacher-forced，首窗 I）；
+                    # V/VT 行 = 锚估计头输出。
+                    if config_value == CONFIG_T:
+                        R_a = rot6d_to_rotmat(batch["pose_gt"][:, 0, :6])
+                        ctx = batch.get("ctx")
+                        if ctx is not None:
+                            first = ctx[..., -1].mean(dim=1) <= 0.5
+                            R_a[first] = torch.eye(3, device=R_a.device,
+                                                   dtype=R_a.dtype)
+                    else:
+                        R_a = out["anchor_rot"]
+                    pred_pose = compose_rot6d(
+                        R_a[:, None, :, :],
+                        out["x0_hat"].reshape(bsz, out["x0_hat"].shape[1], N_JOINTS, 6)
+                    ).reshape(bsz, out["x0_hat"].shape[1], -1)
+                    v_w = torch.einsum("bij,btj->bti", R_a, out["v_hat"])
+                    pred_trans = torch.cumsum(v_w, dim=1) / float(FPS) + anchor
+                elif getattr(model, "ctx4", False) and config_value == CONFIG_T:
+                    # v4-a：val T 行输出 = 残差，组合 R_a（GT 锚，teacher-forced
+                    # val；首窗 I——与训练目标同口径）后进 FK 指标。
+                    R_a = rot6d_to_rotmat(batch["pose_gt"][:, 0, :6])
+                    ctx = batch.get("ctx")
+                    if ctx is not None:
+                        first = ctx[..., -1].mean(dim=1) <= 0.5
+                        R_a[first] = torch.eye(3, device=R_a.device,
+                                               dtype=R_a.dtype)
+                    pred_pose = compose_rot6d(
+                        R_a[:, None, :, :],
+                        out["x0_hat"].reshape(bsz, out["x0_hat"].shape[1], N_JOINTS, 6)
+                    ).reshape(bsz, out["x0_hat"].shape[1], -1)
+                    v_w = torch.einsum("bij,btj->bti", R_a, out["v_hat"])
+                    pred_trans = torch.cumsum(v_w, dim=1) / float(FPS) + anchor
                 if v3e_mode:
                     # V3_Ev1: the three dashboard conditions are three readouts
                     # of one forward — raw V pose, constraint-processed VT,
@@ -1425,7 +1597,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "lambda_prior_nll", "lambda_prior_traj", "lambda_air",
                 "lambda_foot_res", "lambda_phase", "lambda_cop",
                 "lambda_tcop", "lambda_strike", "lambda_gtcop",
-                "lambda_cond"):
+                "lambda_cond", "lambda_s"):
         value = getattr(args, key)
         if value is not None:
             config[key] = float(value)
@@ -1445,6 +1617,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["d8_heads"] = bool(args.d8_heads)
     if args.occ_a3_monitor:
         config["occ_a3_monitor"] = True
+    if args.v7_s_label is not None:
+        config["v7_s_label"] = str(args.v7_s_label)
+    # G1 / AR 反馈配方键（2026-11-01：ctx_ss 此前缺失映射 = 死开关，已修）
+    config["ctx_ss"] = float(args.ctx_ss)
+    config["ar_ss"] = float(args.ar_ss)
+    config["ar_noise"] = float(args.ar_noise)
     for key, value in (("p_occ", args.p_occ), ("p_nullV", args.p_nullv),
                        ("p_nullT", args.p_nullt)):
         if value is not None:
@@ -1494,12 +1672,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             f2_repr=bool(config.get("f2_repr", False)),
             smpl_roots=config.get("smpl_roots"),
             cam_id=int(config.get("cam_id", 3)),
+            v7_ctx=bool(config.get("v7_prev_ctx", False)),
+            v7_ctx3=bool(config.get("v7_ctx3", False) or config.get("v7_ctx4", False) or config.get("v7_ctx5", False)),
+            v7_ctx5=bool(config.get("v7_ctx5", False)),
+            v7_ar=bool(config.get("v7_ar", False)),
             load_v5_1_gt=v5_1_mode,
             occ_mix=occ_mix_kwargs,
             t_phys_v2=bool(config.get("t_phys_v2", False)),
             d8_heads=bool(config.get("d8_heads", False)),
             tactile_aug=tactile_aug_kwargs,
             smpl_support_policy=str(config.get("smpl_support_policy", "exclude")),
+            v7_s_label=config.get("v7_s_label"),
         )
     except FileNotFoundError as exc:
         if "HRNet cache" in str(exc):
@@ -1523,7 +1706,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs, t_phys_v2=bool(config.get("t_phys_v2", False)), d8_heads=bool(config.get("d8_heads", False)), smpl_support_policy=str(config.get("smpl_support_policy", "exclude")))
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs, t_phys_v2=bool(config.get("t_phys_v2", False)), d8_heads=bool(config.get("d8_heads", False)),
+        v7_ctx=bool(config.get("v7_prev_ctx", False)),
+        v7_ctx3=bool(config.get("v7_ctx3", False) or config.get("v7_ctx4", False) or config.get("v7_ctx5", False)),
+        v7_ctx5=bool(config.get("v7_ctx5", False)),
+        v7_ar=bool(config.get("v7_ar", False)), smpl_support_policy=str(config.get("smpl_support_policy", "exclude")))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:
@@ -1686,8 +1873,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     # structure always has one, but a missing head must fail loudly elsewhere,
     # not here).
     if getattr(model, "pose_head", None) is not None:
+        _stats_res_w = 0.0
+        _stats_first_abs = None
+        if getattr(model, "ctx4", False):
+            _probs = [float(x) for x in config["config_probs"]]
+            _abs = _probs[CONFIG_VT] + _probs[CONFIG_V]
+            _stats_res_w = _probs[CONFIG_T] / _abs if _abs > 0 else 0.0
+        elif getattr(model, "ctx4b", False):
+            # v4-b：残差全窗 + 绝对仅首窗（p_T 权重，与枚举损失配比一致）。
+            _probs = [float(x) for x in config["config_probs"]]
+            _stats_first_abs = _probs[CONFIG_T]
         pose_mean, pose_std = fit_pose_stats(
-            loader, device, key="pose_gt_pos" if pos_mode else "pose_gt"
+            loader, device, key="pose_gt_pos" if pos_mode else "pose_gt",
+            residual_weight=_stats_res_w, first_abs_share=_stats_first_abs
         )
         model.pose_head.set_stats(pose_mean, pose_std)
         print("pose stats: mean %.4f +/- %.4f, std %.4f +/- %.4f (dims floored at 1e-2: %d/%d)"
@@ -1780,6 +1978,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # a fixed grouping.  Non-cluster runs keep the defaults (temp 1.0, no
     # lock) so V3-3 behavior is byte-identical.
     cluster_mode = bool(config.get("assign_cluster", False))
+    ctx_ss_cache = None  # G1 scheduled sampling 的模型预测 ctx 缓存（enum 分支也引用，须无条件初始化）
+    ar_ss_cache = None   # AR 反馈 scheduled sampling 缓存（同 ctx_ss_cache 生命周期）
     if cluster_mode:
         total_steps = int(config["epochs"]) * len(loader)
         anneal_steps = int(float(config.get("assign_anneal_frac", 0.7)) * total_steps)
@@ -1880,7 +2080,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             if sigma_freeze_steps:
                 model.pose_head.set_sigma_frozen(global_step < sigma_freeze_steps)
             if enum_mode:
-                out, losses = backward_v7_enum(model, batch, config)
+                if ctx_ss_cache is None:
+                    ctx_ss_cache = [None]
+                if ar_ss_cache is None:
+                    ar_ss_cache = [None]
+                ctx_ss_target = float(config.get("ctx_ss", 0.0))
+                p_cur = (ctx_ss_target * min(1.0, global_step / max(1, total_steps))
+                         if ctx_ss_target > 0 else 0.0)
+                ar_ss_target = float(config.get("ar_ss", 0.0))
+                ar_p_cur = (ar_ss_target * min(1.0, global_step / max(1, total_steps))
+                            if ar_ss_target > 0 else 0.0)
+                ar_noise = float(config.get("ar_noise", 0.0))
+                out, losses = backward_v7_enum(model, batch, config,
+                                               ctx_ss_p=p_cur,
+                                               ctx_cache=ctx_ss_cache,
+                                               ar_ss_p=ar_p_cur,
+                                               ar_noise=ar_noise,
+                                               ar_cache=ar_ss_cache)
             elif v3f_mode:
                 # V3_Fv1: diffuse the full normalized state [pose | trans |
                 # contact]; 10% V zeroing is the unconditional prior pass
@@ -2073,10 +2289,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             # the clip, because clip_grad_norm_ mixes one non-finite gradient
             # into every parameter (F5B_gated failure mode).  Same treatment
             # as the loss-level guard above: skip the step, drop the lr.
-            grads_ok = all(
-                p.grad is None or bool(torch.isfinite(p.grad).all())
-                for p in model.parameters()
-            )
+            grads_list = [
+                p.grad.detach().reshape(-1) for p in model.parameters() if p.grad is not None
+            ]
+            grads_flat = torch.cat(grads_list) if grads_list else torch.zeros(0, device=device)
+            grads_ok = bool(torch.isfinite(grads_flat).all())
             if not grads_ok:
                 for group in optimizer.param_groups:
                     group["lr"] = 1.0e-4
@@ -2088,10 +2305,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             grad_clip = config.get("grad_clip")
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
-            grad_sq = torch.zeros((), device=device)
-            for parameter in model.parameters():
-                if parameter.grad is not None:
-                    grad_sq = grad_sq + parameter.grad.detach().square().sum()
+            # clip 就地缩放梯度，须重建扁平列表才能读到缩放后的值。
+            grads_list = [
+                p.grad.detach().reshape(-1) for p in model.parameters() if p.grad is not None
+            ]
+            grad_sq = torch.cat(grads_list).square().sum() if grads_list else torch.zeros((), device=device)
             epoch_sums["grad_norm"] += float(torch.sqrt(grad_sq).item()) * batch_size
             if warmup_steps > 0:
                 # Per-step linear ramp over the cosine epoch LR (the epoch
@@ -2102,9 +2320,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             optimizer.step()
             n = batch_size
             epoch_sums["n"] += n
-            for key, name in loss_pairs:
-                if key in losses:  # 结构开关（如 d8 三头）未启用时该损失不存在
-                    epoch_sums[name] = epoch_sums.get(name, 0.0) + float(losses[key].detach().item()) * n
+            present_losses = [(key, name) for key, name in loss_pairs if key in losses]
+            if present_losses:
+                loss_values = torch.stack(
+                    [losses[key].detach().float() for key, _ in present_losses]
+                ).cpu().tolist()
+                for (key, name), value in zip(present_losses, loss_values):
+                    epoch_sums[name] = epoch_sums.get(name, 0.0) + value * n
             n_tmissing = int((config_id == CONFIG_T).sum().item())
             n_vmissing = int((config_id == CONFIG_V).sum().item())
             if enum_mode:
@@ -2166,9 +2388,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         ckpt_path = out_dir / "ckpt_last.pt"
         tmp_path = out_dir / ("ckpt_last.pt.tmp%d" % os.getpid())
-        torch.save(checkpoint, tmp_path)
-        os.replace(tmp_path, ckpt_path)
-        print("saved %s (epoch %d)" % (ckpt_path, epoch + 1))
+        ckpt_interval = max(int(config.get("ckpt_interval", 5)), 1)
+        if (epoch + 1) % ckpt_interval == 0 or (epoch + 1) == int(config["epochs"]):
+            torch.save(checkpoint, tmp_path)
+            os.replace(tmp_path, ckpt_path)
+            print("saved %s (epoch %d)" % (ckpt_path, epoch + 1))
         # Val eval cadence is the wall-clock knob: one _evaluate pass (3
         # condition configs x full val set, DDIM sampling) costs ~16 normal
         # epochs of wall-clock.  Triggered by --wandb_eval_interval but runs

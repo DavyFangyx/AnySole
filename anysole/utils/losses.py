@@ -8,11 +8,12 @@ from typing import Mapping
 import torch
 import torch.nn.functional as F
 
-from anysole.utils.geometry import f2_to_world, fk_pose6d
+from anysole.utils.geometry import f2_to_world, fk_pose6d, rot6d_to_rotmat
 from anysole.utils.v5_conditioning import availability_masks, conditioning_policy
 from anysole.types import (
     CONFIG_T,
     CONFIG_V,
+    CONFIG_VT,
     FPS,
     JOINT_PARENTS,
     KNEE_ANKLE_FOOT_JOINTS,
@@ -509,6 +510,7 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         "L_assign": l_assign,
         "L_sigma": l_sigma,
         "L_contact": l_contact,
+        "L_anchor": l_anchor,
         "L_nll": l_nll,
         "L_prior_pose": l_prior_pose,
         "L_prior_nll": l_prior_nll,
@@ -571,6 +573,7 @@ def compute_losses_v3f(out, x0_norm, batch, weights) -> dict:
         "L_assign": zero,
         "L_sigma": zero,
         "L_contact": l_contact,
+        "L_anchor": l_anchor,
         "L_nll": zero,
         "L_prior_pose": zero,
         "L_prior_nll": zero,
@@ -825,6 +828,7 @@ def compute_losses_v5_1(out, batch, config_id, weights, cond_tau=None) -> dict:
         "L_assign": zero,
         "L_sigma": zero,
         "L_contact": l_contact,
+        "L_anchor": l_anchor,
         "L_nll": zero,
         "L_prior_pose": l_prior_pose,
         "L_prior_nll": zero,
@@ -868,6 +872,16 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
     l_contact = _v5_1_contact_bce(out["contact_logits"], gt, t_present,
                                   air_w, pos_weight)
 
+    l_anchor = l_pose.new_zeros(())
+    if out.get("anchor_rot") is not None:
+        # v4-b 锚监督（2026-11-01）：锚估计头 R_a 对齐 GT 窗首帧根朝向
+        # （测地角，rad）；仅 V 在场行监督（T 行锚来自链/恒等，不训头）。
+        r_a = out["anchor_rot"]                                # (B,3,3)
+        r_gt = rot6d_to_rotmat(pose_gt[:, 0, :6])              # (B,3,3)
+        tr = torch.einsum("bij,bij->b", r_a.transpose(-1, -2), r_gt)
+        ang = torch.acos(((tr - 1.0) / 2.0).clamp(-1.0, 1.0))
+        l_anchor = _masked_mean(ang, config_id != CONFIG_T)
+
     l_foot = l_pose.new_zeros(())
     if out.get("z_root") is not None and bool(weights.get("v7_contact_root")):
         # B：支撑帧足-地一致性（2026-10-25 修订）。fk 出足部世界位置 →
@@ -899,12 +913,31 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
             # 无监督塌缩到 0/1 两端）。
             l_route = (gate - 0.5).square().mean()
 
+    # S 显式收益监督（V7_C门控修改方案 §7，2026-11-01）：四组门
+    # （vel/other/left/right）对离线相对收益标签做 BCE。组门从逐查询门
+    # route_gate (B,tw,10,1) 按查询下标 [0,1,6,7] 取（与 s_gate_diag.py
+    # g[...,[0,1,6,7],0] 同口径）。仅 VT 在场 + 标签有效帧监督；标签
+    # y=sigmoid(D/τ) 由 dataset 用固定 τ 预计算，本损失只做 BCE。
+    l_s_gate = l_pose.new_zeros(())
+    if gate is not None and batch.get("gate_label") is not None:
+        lambda_s = _weight(weights, "lambda_s", 0.0)
+        if lambda_s > 0.0 and gate.dim() == 4 and gate.shape[-2] == 10:
+            g4 = gate[..., [0, 1, 6, 7], 0]                 # (B, tw, 4)
+            y = batch["gate_label"].to(gate.device)          # (B, tw, 4)
+            m = batch["gate_valid"].to(gate.device)          # (B, tw) bool
+            vt = (config_id == CONFIG_VT).to(gate.device)    # (B,)
+            mask = (m & vt.view(-1, 1)).unsqueeze(-1)        # (B, tw, 1)
+            bce = F.binary_cross_entropy(g4, y, reduction="none")
+            l_s_gate = (bce * mask.float()).sum() / mask.float().sum().clamp(min=1.0)
+
     total = (
         _weight(weights, "lambda_pose", 3.0) * l_pose
         + _weight(weights, "lambda_traj", 1.0) * l_traj
         + _weight(weights, "lambda_contact", 0.0) * l_contact
+        + _weight(weights, "lambda_anchor", 0.0) * l_anchor
         + _weight(weights, "lambda_foot", 0.0) * l_foot
         + _weight(weights, "lambda_route", 0.0) * l_route
+        + _weight(weights, "lambda_s", 0.0) * l_s_gate
     )
     zero = l_pose.new_zeros(())
     return {
@@ -922,6 +955,7 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
         "L_assign": zero,
         "L_sigma": zero,
         "L_contact": l_contact,
+        "L_anchor": l_anchor,
         "L_nll": zero,
         "L_prior_pose": zero,
         "L_prior_nll": zero,
@@ -935,6 +969,7 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
         "L_cond": zero,
         "L_foot": l_foot,
         "L_route": l_route,
+        "L_s_gate": l_s_gate,
         "loss": total,
     }
 
@@ -1046,6 +1081,7 @@ def compute_losses_v4_1(out, batch, config_id, weights, cond_tau=None) -> dict:
         "L_assign": zero,
         "L_sigma": zero,
         "L_contact": l_contact,
+        "L_anchor": l_anchor,
         "L_nll": zero,
         "L_prior_pose": l_prior_pose,
         "L_prior_nll": zero,

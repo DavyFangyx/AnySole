@@ -97,7 +97,8 @@ def build_registry() -> dict[str, Any]:
         "device": COMMON.get("DEVICE", "cuda"),
         "modal": COMMON.get("MODAL", "anysolev2"),
         "contact_method": COMMON.get("CONTACT_METHOD", "joint_and"),
-        "train_seed": COMMON.get("TRAIN_SEED", 1),
+        # 不注入全局 train_seed 默认值：它经 `spec.get("train_seed", spec.get("seed",1))`
+        # 会盖掉每个模型条目的 "seed"，导致多种子模型全部 --seed 1、撞 sd1（2026-11-01）。
         "epochs": COMMON.get("EPOCHS", 800),
         "batch_size": COMMON.get("BATCH_SIZE", 256),
         "protocol_seed": COMMON.get("PROTOCOL_SEED", 0),
@@ -648,6 +649,15 @@ EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
     x + s for x in _V7_GATE_BASES for s in ("_s1", "_s2", "_s3")]
 EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
     x + s + "_evalocc" + o for x in _V7_GATE_BASES
+    for s in ("_s1", "_s2", "_s3") for o in ("010", "020", "030", "050")]
+# S 显式收益监督（2026-11-01，V7_C 门控修改方案 §7）：TLR + l_s_gate BCE，
+# λ_s 扫 1.0（V7_Cv5S）/ 0.1（V7_Cv5S01）。首轮只发 s1；s2/s3 按 val 确认
+# 后补发（条目已注册）。
+_V7_S_BASES = ("V7_Cv5S", "V7_Cv5S01")
+EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
+    x + s for x in _V7_S_BASES for s in ("_s1", "_s2", "_s3")]
+EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
+    x + s + "_evalocc" + o for x in _V7_S_BASES
     for s in ("_s1", "_s2", "_s3") for o in ("010", "020", "030", "050")]
 EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
     "V3_Bv1" + s for s in ("_s1", "_s2", "_s3")]

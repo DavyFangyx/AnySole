@@ -25,6 +25,16 @@ n = 实际成功评估的窗口数。
 输出：results/baselines/HMR2.0/metrics/zero/tta_theta_windows_i{N}.json
 """
 from __future__ import annotations
+# ---- CPU 占用控制（2026-10-31）----
+# TTA 驱动每优化步做 CPU 侧 numpy/scipy 计算（1-δ 滤波等）；numpy/torch
+# 缺省线程数 = 全核，单进程会吃 5 核以上。与 configs 系统限定运算池同思路：
+# 置单线程——并发多进程时各占 ~1 核，总 CPU 可控。
+import os as _os
+_os.environ.setdefault("OMP_NUM_THREADS", "1")
+_os.environ.setdefault("MKL_NUM_THREADS", "1")
+_os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+_os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 
 import argparse
 import csv
@@ -35,6 +45,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+torch.set_num_threads(1)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # 仓库根
 from hmr2_tta.paths import (PROJECT_ROOT, RESULTS_ROOT, calibration_json,  # noqa: E402
@@ -80,24 +91,61 @@ def window_metrics(pred_w: np.ndarray, gt_w: np.ndarray) -> dict:
     }
 
 
+def _combo_done(cams, sids_expected: int) -> bool:
+    """该组合的产物文件已含全部会话 → 跳过（断点续跑）。"""
+    import json as _json
+    combo = ",".join(map(str, cams))
+    p = RESULTS_ROOT / "metrics/zero" / \
+        f"tta_theta_windows_i{len(cams)}_cams{combo}.json"
+    if not p.is_file():
+        return False
+    try:
+        d = _json.loads(p.read_text(encoding="utf-8"))
+        n = max((len(v) for v in d.get("sessions", {}).values()), default=0)
+        if n >= sids_expected:
+            print(f"[skip] {combo} 已完成（{n} 会话）")
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _launch_parallel(args, cams_list) -> None:
     """--gpu 分卡：逐组合子进程并行（本进程只调度，全部完成后退出）。"""
+    import signal
     import subprocess
     import time
     gpus = [int(x) for x in args.gpu.split(",") if x.strip()]
     procs = []
+
+    def _forward_signal(signum, frame):
+        # Ctrl-C/SIGTERM 只发给本进程组；子进程在独立会话收不到——
+        # 父进程收到后转杀全部子进程再退出（2026-10-31 修复孤儿进程问题）
+        for proc in procs:
+            if proc.poll() is None:
+                proc.terminate()
+        raise SystemExit(f"interrupted (signal {signum})")
+    signal.signal(signal.SIGINT, _forward_signal)
+    signal.signal(signal.SIGTERM, _forward_signal)
     for k, cams in enumerate(cams_list):
         cmd = [sys.executable, str(Path(__file__).resolve()),
                "--split", args.split, "--cams", ",".join(map(str, cams)),
                "--device", "cuda:%d" % gpus[k % len(gpus)]]
         if args.sessions:
             cmd += ["--sessions", args.sessions]
-        if args.n_windows != 16:
+        if args.n_windows > 0:
             cmd += ["--n-windows", str(args.n_windows)]
         if args.steps != 200:
             cmd += ["--steps", str(args.steps)]
+        if args.dump_kp:
+            cmd += ["--dump-kp", str(args.dump_kp)]
         print("[launch]", ",".join(map(str, cams)), "->", "cuda:%d" % gpus[k % len(gpus)])
         procs.append(subprocess.Popen(cmd, start_new_session=True))
+    # 完成即跳过：per-combo 文件已含全部会话的组合不再重发（断点续跑）
+    sids_expected = len(args.sessions.split(",")) if args.sessions \
+        else len(split_sessions(args.split))
+    procs = [p for p, c in zip(procs, cams_list)
+             if not _combo_done(c, sids_expected)]
     while any(p.poll() is None for p in procs):
         time.sleep(10)
     bad = [p for p in procs if p.returncode != 0]
@@ -110,7 +158,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", default="test", choices=("val", "test"))
     ap.add_argument("--sessions", default=None, help="逗号分隔；缺省 = split 全集")
-    ap.add_argument("--n-windows", type=int, default=16, help="每会话窗口数")
+    ap.add_argument("--n-windows", type=int, default=0,
+                    help="限制前 N 窗（2026-11-01 起缺省 0 = 全量：每会话完整序列）")
     ap.add_argument("--i", type=int, default=None, choices=(1, 2, 3, 4),
                     help="视角数：跑全部 C(4,i) 组合；缺省 = 固定 4 视角")
     ap.add_argument("--cams", default=None,
@@ -126,6 +175,9 @@ def main():
     ap.add_argument("--clip", type=float, default=0.1)
     ap.add_argument("--lreg", type=float, default=1e-2)
     ap.add_argument("--device", default="cuda:2")
+    ap.add_argument("--dump-kp", default=None,
+                    help="目录：每窗落 {sid}_w{st}.npz（逐组合子目录；"
+                         "joints=世界系 virtual 精修聚合 24 关节/gt/帧号）")
     args = ap.parse_args()
 
     if args.i is not None and args.cams:
@@ -182,7 +234,10 @@ def main():
         for cam in (1, 2, 3, 4):
             cal = load_calibration_chain(calibration_json(date), cam)
             R_wc[cam] = (cal["Rc"] @ cal["Rm"]).T
-        frames = list(range(min(args.n_windows * 20, len(gt_world))))
+        # 2026-11-01 用户裁定：全量运行（废弃「前 16 窗」协议）；
+        # --n-windows N>0 显式限制前 N 窗（冒烟用）
+        max_frames = args.n_windows * 20 if args.n_windows > 0 else len(gt_world)
+        frames = list(range(min(max_frames, len(gt_world))))
 
         for cams in cams_list:
             combo_key = ",".join(map(str, cams))
@@ -285,6 +340,20 @@ def main():
                                 [w[m] for w in ref_m])))
                             combo["pa_virtual"][m].append(float(np.mean(
                                 [w[m] for w in virt_m])))
+                        if args.dump_kp:
+                            # 落盘（与 run_tta --dump-kp 同口径）：世界系
+                            # virtual 精修聚合（= pa_virtual 评估量，视角
+                            # 间均值）+ GT + 帧号；逐组合子目录防覆盖
+                            dump_dir = Path(args.dump_kp) / combo_key
+                            dump_dir.mkdir(parents=True, exist_ok=True)
+                            joints_w = np.mean(
+                                [world_a(virt_w, cams[v]) for v in range(n_views)],
+                                axis=0)
+                            np.savez_compressed(
+                                dump_dir / f"{sid}_w{st}.npz",
+                                joints=joints_w.astype(np.float32),
+                                gt=gt_w.astype(np.float32),
+                                frame_ids=np.arange(st, st + 20, dtype=np.int64))
                     combo_n += 1
                     buf = {k: [] for k in buf}
             combo_mean = {}
@@ -294,7 +363,7 @@ def main():
             combo_mean["n"] = combo_n
             summary["combos"][combo_key] = combo_mean
             summary["sessions"].setdefault(sid, {})[combo_key] = combo_mean
-            print(f"[{sid} {combo_key}] {combo_mean}")
+            print(f"[{sid} {combo_key}] {combo_mean}", flush=True)
     overall = {}
     for arm in ("pa_init", "pa_virt_init", "pa_refined", "pa_virtual"):
         overall[arm] = {}
@@ -340,11 +409,9 @@ def main():
 
 
 def _single_smpl24(model, rotmat, betas):
-    """V=1 单视角 init 用：原生 SMPL-24 正演（复用 TTA 层的构建口径）。"""
-    from hmr2_tta.paths import SMPL_MODEL_PATH
-    import smplx
-    layer = smplx.create(str(SMPL_MODEL_PATH), "smpl", gender="neutral",
-                         batch_size=1, num_betas=10).to(rotmat.device)
+    """V=1 单视角 init 用：原生 SMPL-24 正演（按设备缓存复用层）。"""
+    from hmr2_tta.models.tta import _smpl_layer
+    layer = _smpl_layer(rotmat.device)
     return layer(global_orient=rotmat[:, :1], body_pose=rotmat[:, 1:],
                  betas=betas, pose2rot=False).joints
 

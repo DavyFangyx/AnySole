@@ -4,10 +4,12 @@
   V（单相机）→ T（单触觉）→ VT（相机+触觉）→ Vi（多相机）→ ViT（多相机+触觉）
 
 两条线（同一序列、同一阶段划分）：
-- AnySole-U：V7_Cv4（单门）/ V7_Cv5（双门）同一 ckpt——V/T/VT 阶段直接读
-  {model}_stat cell 逐帧预测（V2M/T2M/VT2M，ckpt_last）；Vi 阶段 =
-  run_tta --v-only；ViT 阶段 = run_tta（CONFIG_VT）——均 --ckpt last、
-  与 cell 口径一致。
+- AnySole-U：V7_Cv5（主模型，2026-11-01 用户裁定 E7 只留 Cv5，与 E3
+  TTA 线同口径）——V/T/VT 阶段直接读 {model}_stat cell 逐帧预测
+  （V2M/T2M/VT2M，ckpt_last）；Vi/ViT 阶段读 E3 全量 TTA 产物树
+  （predictions/anysole_tta_stage1_{model}_test/：Vi = ③ 线组合
+  1,2,3,4、ViT = ④ 线组合 1,2,3,4_contact；2026-11-01 用户裁定：
+  E3 全量运行、E7 只读对应时间段，E7 不调度 TTA）。
 - 基线组合（外部基线，SMPL-24 GT 同口径）：V 阶段 = WHAM（smpl24 协议
   直出，2026-10-30 接入）；T 阶段 = Step2Motion（smpl24 协议直出，
   2026-10-28 切换，与 MotionPRO 导出同构）；VT 阶段 = MotionPRO
@@ -19,19 +21,19 @@
 一致；阶段边界不落窗口中部，无缺口）。
 
 指标：踝足 MPJPE（mm，骨盆对齐；跨骨架一致口径）。产物：
-z_note/E_Test/E7_动态输入/{e7_table.json, E7_动态输入重建.md,
-e7_phase_{walk,run,squat}.png}
+results_display/Etest/E7_DynamicModalityInputs/{e7_table.json,
+E7_动态输入重建.md, Full_FigN_E7_Stages_{action}.png}
+
+动作 = canonical test 全集（splits.csv，36 会话，按动作分组，与 E6 同口径）。
 
 用法（touch_gait env）：
-  python anysole_tta/e7_driver.py --actions walk            # 冒烟
-  python anysole_tta/e7_driver.py                           # walk+run+squat 全量
-  python anysole_tta/e7_driver.py --force-tta               # 重生成 TTA dump
-（TTA dump 已有则自动跳过）"""
+  python anysole_tta/e7_driver.py --models V7_Cv5 --actions walk   # 冒烟
+  python anysole_tta/e7_driver.py --models V7_Cv5                 # test 全部动作组
+（Vi/ViT 直接读 E3 全量 TTA 产物树，E7 不调度 TTA）"""
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -40,7 +42,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # 仓库根
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from hmr2_tta.paths import PROJECT_ROOT, RESULTS_ROOT  # noqa: E402
-from anysole_tta.phase_common import (CELL_ROOT, load_gt_joints,  # noqa: E402
+from anysole_tta.phase_common import (CELL_ROOT, action_of, load_gt_joints,  # noqa: E402
                                       load_pred_joints)
 
 OUT_DIR = PROJECT_ROOT / "results_display/Etest/E7_DynamicModalityInputs"
@@ -49,13 +51,35 @@ STAGES = ("V", "T", "VT", "Vi", "ViT")
 STAGE_ZH = {"V": "单相机", "T": "单触觉", "VT": "相机+触觉",
             "Vi": "多相机", "ViT": "多相机+触觉"}
 STAGE_FRAC = {s: (i / 5, (i + 1) / 5) for i, s in enumerate(STAGES)}
-ANYSOLE_MODELS = ["V7_Cv4", "V7_Cv5"]   # run_tta 模型名；cell = {m}_s1
-SEQUENCES = {
-    "walk": ["S14033"],
-    "run": ["S13082"],
-    "squat": ["S13061", "S13062", "S13063", "S14061", "S14062", "S14063"],
-}
-TTA_DUMP_ROOT = RESULTS_ROOT / "predictions/e7_tta"
+ANYSOLE_MODELS = ["V7_Cv5"]   # run_tta 模型名；cell = {m}_s1（E7 只留 Cv5）
+# 动作分组（与 E6 同口径：canonical test 36 会话按 manifest action 分组）
+ACTION_GROUPS = {"03": "walk", "04": "walk", "05": "run", "08": "run",
+                 "06": "squat", "01": "stand_shift", "02": "single_stand",
+                 "07": "jump_jack", "09": "lateral", "10": "sit_stand",
+                 "11": "stairs"}
+GROUP_ZH = {"walk": "走路", "run": "跑步", "squat": "深蹲",
+            "stand_shift": "站立重心移", "single_stand": "单脚站立",
+            "jump_jack": "开合跳", "lateral": "横移", "sit_stand": "坐下站起",
+            "stairs": "上楼梯"}
+
+
+def build_session_sets() -> dict[str, list[str]]:
+    """canonical test 36 会话按动作组归类（splits.csv，与 E6 同口径）。"""
+    import csv
+    test = []
+    with open(PROJECT_ROOT / "AnysoleWorkspace/protocol/splits/default/"
+              "splits.csv") as f:
+        for row in csv.DictReader(f):
+            if row["test"]:
+                test.append(row["test"])
+    sets: dict[str, list[str]] = {}
+    for sid in sorted(test):
+        a = action_of(sid)
+        sets.setdefault(ACTION_GROUPS.get(a, a), []).append(sid)
+    return sets
+TTA_DUMP_ROOT = RESULTS_ROOT / "predictions"   # E3 全量 TTA 产物树（E7 直接读）
+# run_tta 逐组合 dump 子目录（combo_key + _contact 后缀，同 run_tta 口径）
+DUMP_SUB = {"Vi": "1,2,3,4", "ViT": "1,2,3,4_contact"}
 SMPL_ANKLE_FOOT = (7, 8, 10, 11)
 S2M_ROOT = PROJECT_ROOT / "results/baselines/Step2Motion/predictions/gait_model_smpl24/eval_motion"
 MPRO_ROOT = PROJECT_ROOT / "results/baselines/MotionPRO/predictions/carpet_v2/eval_motion"
@@ -75,26 +99,6 @@ def stage_of_frame(t: np.ndarray, n: int) -> np.ndarray:
     return np.minimum(4, (5 * s // n).astype(np.int64))
 
 
-def run_tta_subprocess(model: str, stage: str, sids: list[str], device: str,
-                       force: bool = False) -> Path:
-    dump_dir = TTA_DUMP_ROOT / f"{model}_{stage}"
-    dump_dir.mkdir(parents=True, exist_ok=True)
-    if not force and any(dump_dir.glob("*.npz")):
-        print(f"[tta] skip {model} {stage}（已有 dump）")
-        return dump_dir
-    cmd = [sys.executable, str(Path(__file__).parent / "run_tta.py"),
-           "--model", model, "--sessions", ",".join(sids),
-           "--win-frac", "%s,%s" % STAGE_FRAC[stage],
-           "--dump-kp", str(dump_dir), "--ckpt", "last",
-           "--device", device,
-           "--out", str(dump_dir / f"metrics_{model}_{stage}.json")]
-    if stage == "Vi":
-        cmd.append("--v-only")
-    print("[tta]", " ".join(cmd))
-    subprocess.run(cmd, check=True, cwd=str(Path(__file__).resolve().parents[1]))
-    return dump_dir
-
-
 def load_anysole_stage(model: str, stage: str, sid: str, n: int) -> np.ndarray:
     """AnySole-U 单阶段逐帧踝足 MPJPE（mm）：cell 预测或 TTA dump。"""
     if stage in ("V", "T", "VT"):
@@ -102,7 +106,7 @@ def load_anysole_stage(model: str, stage: str, sid: str, n: int) -> np.ndarray:
         pred, _, vmask = load_pred_joints(f"{model}_s1", sid, cond)
         err = _ankle_foot_mpjpe(pred, sid, pelvis=(1, 2), n=n)
         return err, vmask[:n]
-    dump_dir = TTA_DUMP_ROOT / f"{model}_{stage}"
+    dump_dir = TTA_DUMP_ROOT / f"anysole_tta_stage1_{model}_test" / DUMP_SUB[stage]
     err = np.full(n, np.nan, dtype=np.float64)
     vmask = np.zeros(n, dtype=bool)
     for path in sorted(dump_dir.glob(f"{sid}_w*.npz")):
@@ -268,18 +272,22 @@ def render_figure(action: str, sids: list[str],
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--actions", default=",".join(SEQUENCES))
+    ap.add_argument("--actions", default=None,
+                    help="动作组逗号分隔（缺省 = canonical test 全部动作组）")
     ap.add_argument("--models", default=",".join(ANYSOLE_MODELS))
     ap.add_argument("--device", default="cuda:7")
-    ap.add_argument("--force-tta", action="store_true",
-                    help="无视已有 TTA dump 重新生成")
     ap.add_argument("--no-figure", action="store_true")
     ap.add_argument("--out-dir", default=str(OUT_DIR))
     args = ap.parse_args()
 
-    actions = [a for a in args.actions.split(",") if a.strip()]
+    session_sets = build_session_sets()
+    actions = ([a for a in args.actions.split(",") if a.strip()]
+               if args.actions else list(session_sets))
+    unknown = [a for a in actions if a not in session_sets]
+    if unknown:
+        raise SystemExit(f"unknown actions: {unknown}（可选：{list(session_sets)}）")
     models = [m for m in args.models.split(",") if m.strip()]
-    sids_all = sorted({s for a in actions for s in SEQUENCES[a]})
+    sids_all = sorted({s for a in actions for s in session_sets[a]})
     # gate：AnySole 统计 cell 逐帧预测未产出时给可读报错（等队列 v7_train
     # confs 补跑 test 评估后重跑）
     missing = []
@@ -292,17 +300,29 @@ def main():
     if missing:
         raise SystemExit("[E7 gate] AnySole 统计预测未产出（等队列补跑 test 评估后重跑）：\n"
                          + "\n".join(missing[:6]))
+    missing_bl = []
+    for sid in sids_all:
+        for root, name in ((WHAM_ROOT, f"{sid}.npz"), (S2M_ROOT, f"{sid}.npz"),
+                           (MPRO_ROOT, f"{sid}.npz"),
+                           (EMC_ROOT, f"{sid}_n4_1234.npz")):
+            if not (Path(root) / name).is_file():
+                missing_bl.append(str(Path(root) / name))
+    if missing_bl:
+        raise SystemExit("[E7 gate] 外部基线产物缺失：\n"
+                         + "\n".join(missing_bl[:6]))
     table: dict[str, dict] = {}
     curves: dict[str, dict[str, dict[str, tuple]]] = {}
 
-    # AnySole-U 的 Vi/ViT 阶段 = TTA（先统一生成 dump；已有则跳过）
+    # Vi/ViT = 读 E3 全量 TTA 产物（③/④ 落盘树）；缺失 → 该段 NaN（不阻断）
     for model in models:
         for stage in ("Vi", "ViT"):
-            run_tta_subprocess(model, stage, sids_all, args.device,
-                               force=args.force_tta)
+            d = TTA_DUMP_ROOT / f"anysole_tta_stage1_{model}_test" / DUMP_SUB[stage]
+            n_npz = len(list(d.glob("*.npz"))) if d.is_dir() else 0
+            if n_npz == 0:
+                print(f"[E7 warn] {model} {stage} dump 缺失（{d}）——该段将为空窗")
 
     for action in actions:
-        sids = SEQUENCES[action]
+        sids = session_sets[action]
         stage_agg: dict[str, dict[str, list[float]]] = {
             stage: {} for stage in STAGES}
         for sid in sids:
@@ -341,18 +361,27 @@ def main():
                          "stages": {s: {k: float(np.mean(v))
                                         for k, v in stage_agg[s].items()}
                                     for s in STAGES}}
+        print(f"[{action}] sessions={len(sids)}")
+        for sys_name in ("AnySole Cv5", "baseline_combo"):
+            cells = []
+            for s in STAGES:
+                v = table[action]["stages"][s].get(sys_name)
+                cells.append("—" if v is None else "%.1f" % v)
+            print("  %-15s %s" % (sys_name, " | ".join(
+                "%s %s" % (s, c) for s, c in zip(STAGES, cells))))
         if not args.no_figure:
-            fig_no = {"walk": 1, "run": 2, "squat": 3}[action]
-            render_figure(action, sids, curves,
-                          Path(args.out_dir) /
-                          f"Full_Fig{fig_no}_E7_Stages_{action}.png")
+            fig_no = actions.index(action) + 1
+            fig_path = (Path(args.out_dir) /
+                        f"Full_Fig{fig_no}_E7_Stages_{action}.png")
+            render_figure(action, sids, curves, fig_path)
+            print("[png] %s" % fig_path)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "e7_table.json").write_text(
         json.dumps(table, indent=1, ensure_ascii=False), encoding="utf-8")
     lines = ["# E7 动态模态可用性下的统一运动重建\n",
-             "口径：canonical test 子集（walk 1 / run 1 / squat 6，共 8 会话）；ckpt = ckpt_last（TTA 同步 --ckpt last）；"
+             "口径：canonical test（splits.csv，36 会话，按动作分组）；ckpt = ckpt_last（TTA 同步 --ckpt last）；"
              "指标 = 踝足 MPJPE（mm，骨盆对齐，跨骨架一致）；"
              "时间轴 = 序列均分 5 阶段（各 1/5，窗口边界切换）："
              "V（单相机）→ T（单触觉）→ VT（相机+触觉）→ Vi（多相机）→ "
@@ -360,10 +389,11 @@ def main():
     lines.append("| 系统 | %s |" % " | ".join("%s %s" % (s, STAGE_ZH[s])
                                              for s in STAGES))
     lines.append("|" + "---|" * (len(STAGES) + 1))
-    systems = ["AnySole Cv4", "AnySole Cv5", "baseline_combo"]
+    systems = ["AnySole Cv5", "baseline_combo"]
     for action in actions:
         lines.append("")
-        lines.append("## %s（%s）\n" % (action, "/".join(table[action]["sessions"])))
+        lines.append("## %s %s（%s）\n" % (GROUP_ZH.get(action, action), action,
+                                          "/".join(table[action]["sessions"])))
         for sys_name in systems:
             cells = []
             for stage in STAGES:
@@ -372,9 +402,16 @@ def main():
             lines.append("| %s | %s |" % (sys_name, " | ".join(cells)))
 
     lines.append("")
+    if "walk" in actions or "run" in actions:
+        lines.append("表注：走路/跑步在 canonical test 各仅 1 条会话，样本量小，"
+                     "数字作观察不作统计结论。\n")
+    lines.append("AnySole Vi/ViT 阶段 TTA 口径：Vi = CONFIG_V（默认）、"
+                 "ViT = --contact（VT 输入 + 足-地接触约束，wLcon，"
+                 "2026-11-01 用户裁定，取代旧「纯 VT 输入」临时口径）。\n")
     lines.append("基线组合（外部基线，SMPL-24 GT 同口径）：V=WHAM、"
                  "T=Step2Motion、VT=MotionPRO 均 smpl24 协议直出 vs SMPL-24 GT；"
-                 "Vi/ViT 暂无基线（—）。阶段间对比以各系统自身协议 GT 为基准。\n")
+                 "Vi/ViT=EasyMocap 标定多视角 n=4（四相机参考线）。"
+                 "阶段间对比以各系统自身协议 GT 为基准。\n")
     (out_dir / "E7_动态输入重建.md").write_text(
         "\n".join(lines), encoding="utf-8")
     print("→", out_dir)

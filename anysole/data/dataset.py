@@ -222,6 +222,11 @@ class AnySoleDataset(Dataset):
         t_phys_v2: bool = False,
         tactile_aug: Optional[dict] = None,
         smpl_support_policy: str = "legacy_clip",
+        v7_ctx: bool = False,
+        v7_ctx3: bool = False,
+        v7_ctx5: bool = False,
+        v7_ar: bool = False,
+        v7_s_label: Optional[str] = None,
     ):
         self.mode = mode
         if smpl_support_policy not in ("legacy_clip", "exclude"):
@@ -278,6 +283,25 @@ class AnySoleDataset(Dataset):
         #   gain_range [lo, hi] / bias_frac —— G-b 鞋垫增益偏置（每窗每足）
         #   frame_dropout p —— G-c 整帧 T token 置零
         self.tactile_aug = dict(tactile_aug) if tactile_aug else None
+        # 续写协议（2026-11-01，V7_续写协议方案 §3）：v7_ctx=True 时每个
+        # 窗口多一列 ctx = 窗首帧根状态 [根 6D + 根速度 3 + 有效标志 1]
+        # （teacher forcing 用 GT；评估链式用上一窗预测，见 eval.py §4）。
+        self.v7_ctx = bool(v7_ctx)
+        self.v7_ctx3 = bool(v7_ctx3)
+        self.v7_ctx5 = bool(v7_ctx5)
+        self.v7_ar = bool(v7_ar)
+        if self.v7_ctx3 and not self.v7_ctx:
+            raise ValueError("v7_ctx3 requires v7_ctx")
+        if self.v7_ctx5 and not self.v7_ctx3:
+            raise ValueError("v7_ctx5 requires v7_ctx3")
+        # S 显式收益监督（2026-11-01，V7_C 门控修改方案 §7）：v7_s_label 指向
+        # s_gate_diag.py 产出的 tlr_gate_diag.{npz,json}。标签 y=sigmoid(d/tau_k)
+        # （组序 vel/other/left/right，tau_k 取 json 固定值），按 (session,
+        # frame_start) 索引。仅 VT 在场 + valid 帧被 losses.py l_s_gate 监督。
+        self.v7_s_label = str(v7_s_label) if v7_s_label is not None else None
+        self.s_label_lookup: Dict[tuple, tuple] = {}
+        if self.v7_s_label is not None:
+            self._load_s_labels(self.v7_s_label)
 
         if session_ids is None:
             column = {"train": "train", "eval": "val", "val": "val", "test": "test"}[mode]
@@ -574,6 +598,33 @@ class AnySoleDataset(Dataset):
             t_phys = t_phys * mask
         return t_raw, t_phys
 
+    def _load_s_labels(self, label_root: str):
+        """装载 S 显式收益监督标签（s_gate_diag.py 落盘的 tlr_gate_diag）。
+
+        npz：d (N,tw,4) 相对收益 D=L_off−L_on、valid (N,tw) bool（接触标签有效
+        帧）、session (N,) <U6、frame_start (N,) int64。json：groups[k].tau_k
+        固定阈值（组序 vel/other/left/right）。y=sigmoid(d/tau_k)，逐窗存为
+        (tw,4) float + (tw,) bool，键 (session_id, frame_start)。
+        """
+        root = Path(label_root)
+        npz_path = root / "tlr_gate_diag.npz"
+        json_path = root / "tlr_gate_diag.json"
+        data = np.load(npz_path)
+        d = np.asarray(data["d"], dtype=np.float32)          # (N, tw, 4)
+        valid = np.asarray(data["valid"], dtype=bool)         # (N, tw)
+        session = data["session"]                             # (N,) <U6
+        frame_start = np.asarray(data["frame_start"], dtype=np.int64)
+        with open(json_path) as f:
+            meta = json.load(f)
+        tau = np.asarray(
+            [float(meta["groups"][k]["tau_k"])
+             for k in ("vel", "other", "left", "right")],
+            dtype=np.float32)                                 # (4,)
+        y = 1.0 / (1.0 + np.exp(-d / tau[None, None, :]))     # (N, tw, 4)
+        for i in range(d.shape[0]):
+            key = (str(session[i]), int(frame_start[i]))
+            self.s_label_lookup[key] = (y[i], valid[i])
+
     def __getitem__(self, idx: int) -> dict:
         file_index, left, right = self.valid_windows[idx]
         session = self.sessions[file_index]
@@ -605,6 +656,50 @@ class AnySoleDataset(Dataset):
             "session_id": session["session_id"],
             "frame_start": torch.tensor(left, dtype=torch.long),
         }
+        if self.v7_ar:
+            # 帧级 AR 反馈（2026-11-01）：prev_state = 上一帧 [姿态 144 +
+            # 根速度 3]，帧 0 = 全零（与推理首帧/窗口携带起点一致）。
+            _ps = item["pose_gt"][:-1]
+            _vs = item["vel_gt"][:-1]
+            item["prev_state"] = torch.cat([
+                torch.cat([torch.zeros(1, _ps.shape[1]), _ps], dim=0),
+                torch.cat([torch.zeros(1, _vs.shape[1]), _vs], dim=0)], dim=-1)
+        if self.v7_ctx:
+            # ctx = 窗首帧根状态（pose 归一化空间 / v_hat 口径）；会话首窗
+            # （left==0）全零 + flag 0，与评估首窗/跳窗复位同分布。
+            root6 = item["pose_gt"][0, :6]
+            vel3 = item["vel_gt"][0, :3]
+            flag = 0.0 if left == 0 else 1.0
+            item["ctx"] = torch.cat(
+                [root6, vel3, torch.tensor([flag], dtype=torch.float32)])
+            if self.v7_ctx3:
+                # ctx3 硬填式：ctx 扩为重叠区 nf 帧 × 10 维（GT 前 nf 帧逐帧
+                # 根状态；首窗全零 + flag 0 逐帧广播）。
+                nf = self.window_length // 2
+                if self.v7_ctx5:
+                    # ctx5 块自回归：全姿态硬填——nf 帧 × [全 24 关节 6D
+                    # (144) + 根速度 3 + flag 1]。
+                    item["ctx"] = torch.cat(
+                        [item["pose_gt"][:nf], item["vel_gt"][:nf, :3],
+                         torch.full((nf, 1), flag, dtype=torch.float32)], dim=-1)
+                else:
+                    item["ctx"] = torch.cat(
+                        [item["pose_gt"][:nf, :6], item["vel_gt"][:nf, :3],
+                         torch.full((nf, 1), flag, dtype=torch.float32)], dim=-1)
+        # S 显式收益监督标签（键缺失零填充 + valid 全 False，losses.py
+        # l_s_gate 掩码掉该窗，不参与监督）。
+        if self.v7_s_label is not None:
+            key = (session["session_id"], int(left))
+            if key in self.s_label_lookup:
+                y, valid = self.s_label_lookup[key]
+                item["gate_label"] = torch.from_numpy(
+                    np.ascontiguousarray(y)).float()
+                item["gate_valid"] = torch.from_numpy(
+                    np.ascontiguousarray(valid))
+            else:
+                item["gate_label"] = torch.zeros(self.window_length, 4)
+                item["gate_valid"] = torch.zeros(
+                    self.window_length, dtype=torch.bool)
         # 阶段 3 触觉泛化增强（训练侧；eval/val 逐位不变）。
         if self.tactile_aug is not None:
             item["T_raw"], item["T_phys"] = self._augment_tactile(

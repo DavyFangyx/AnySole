@@ -16,6 +16,7 @@ from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.data.smpl_io import pelvis_to_smpl_trans, smpl24_pose6d_to_poses, smpl_archive_metadata
 from anysole.utils.diffusion import GaussianDiffusion
 from anysole.utils.geometry import f2_to_world, fk_pose6d, positions_to_6d_np, rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np
+from anysole.utils.geometry import compose_rot6d
 from anysole.utils.constraints import apply_v3e_constraints
 from anysole.utils.constraints_g import apply_v3g_constraints
 from anysole.utils.constraints_h import apply_v3h
@@ -675,6 +676,15 @@ def _evaluate_one(
     v_hmr_mode = str(checkpoint.get("config", {}).get("v_input", "hrnet")) == "hmr_gvhmr"
     continuation = bool(config.get("continuation", False))
     warm_start = bool(config.get("warm_start", False))
+    # 续写协议 §4（V7_续写协议方案）：ckpt 带 v7_prev_ctx → 评估用
+    # stride=tw//2 重叠窗 + 逐窗链式 ctx（导出/协议两路）。
+    v7_ctx = bool(checkpoint.get("config", {}).get("v7_prev_ctx", False))
+    v7_ctx_vcond = v7_ctx and bool(checkpoint.get("config", {}).get("v7_ctx_vcond", False))
+    v7_ctx3 = bool(checkpoint.get("config", {}).get("v7_ctx3", False))
+    v7_ctx4 = bool(checkpoint.get("config", {}).get("v7_ctx4", False))
+    v7_ctx4b = bool(checkpoint.get("config", {}).get("v7_ctx4b", False))
+    v7_ctx5 = bool(checkpoint.get("config", {}).get("v7_ctx5", False))
+    v7_ar = bool(checkpoint.get("config", {}).get("v7_ar", False))
 
     # --split selects the evaluated session set even without --limit-sessions.
     # (AnySoleDataset mode="eval" otherwise defaults to the val column, which
@@ -701,10 +711,33 @@ def _evaluate_one(
         cam_id=int(config.get("cam_id", 3)),
         # E6.4: continuation eval uses overlapping windows (stride = tw/2);
         # without it the stride stays non-overlapping (E3 behavior).
-        stride=(tw // 2) if (pos_mode and continuation) else None,
+        stride=(tw // 2) if ((pos_mode and continuation) or v7_ctx) else None,
                         t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
                         d8_heads=bool(checkpoint.get("config", {}).get("d8_heads", False)),
     )
+    dataset_alt = None
+    if v7_ctx3 or v7_ctx_vcond or v7_ctx5:
+        # ctx3：V/VT 行回非重叠协议（回归 Cv5 口径），T 行走重叠链式——
+        # 双数据集按条件选用（run_protocol/导出循环同口径）。
+        dataset_alt = AnySoleDataset(
+            mode="eval",
+            seq_root=Path(config["seq_root"]),
+            split_csv=Path(config["split_csv"]),
+            cache_root=Path(config["cache_root"]),
+            window_length=tw,
+            session_ids=session_ids,
+            contact_method=contact_method,
+            smpl_support_policy=(args.smpl_support_policy or checkpoint.get("config", {}).get("smpl_support_policy", "legacy_clip")),
+            tactile_input=str(checkpoint.get("config", {}).get("tactile_input", "raw108")),
+            no_imu=no_imu,
+            v_input=str(checkpoint.get("config", {}).get("v_input", "hrnet")),
+            f2_repr=bool(checkpoint.get("config", {}).get("f2_repr", False)),
+            smpl_roots=checkpoint.get("config", {}).get("smpl_roots", config.get("smpl_roots")),
+            cam_id=int(config.get("cam_id", 3)),
+            stride=None,
+            t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
+            d8_heads=bool(checkpoint.get("config", {}).get("d8_heads", False)),
+        )
     if len(dataset) == 0:
         raise RuntimeError("Evaluation dataset contains no valid windows")
     window_session_ids = {
@@ -729,7 +762,131 @@ def _evaluate_one(
     for config_value in config_values:
         exports = {}
         with torch.inference_mode():
-            if pos_mode:
+            if v7_ctx and motion_out is not None:
+                # 续写协议 §4：逐会话逐窗链式生成（ctx = 上一窗预测在 half
+                # 处的根状态），全窗写入 exports → _pack_motion_export
+                # 同时间淡化组装（eval.py 顶部修复版）。val 不写 motion
+                # （motion_out=None）时跳过（指标走 run_protocol）。
+                half = tw // 2
+                hard_prefix = bool(checkpoint.get("config", {}).get("v7_ctx_hardprefix", False))
+                ds_for = dataset_alt if ((v7_ctx3 or v7_ctx_vcond or v7_ctx5) and config_value != CONFIG_T) else dataset
+                for session_id, idxs in _session_window_groups(ds_for).items():
+                    ctx = None
+                    prev_start = None
+                    prev_pose = None  # G3 硬前缀（与 run_protocol 同款拼接）
+                    prev_v = None
+                    R_prev = None    # v4-a：锚 R_a 链式携带
+                    for i in idxs:
+                        raw = ds_for[i]   # 2026-11-01 修复：曾恒取 dataset[i]
+                        batch = move_batch(collate_windows([raw]), device)
+                        batch_size = 1
+                        config_id = torch.full((batch_size,), config_value,
+                                               device=device, dtype=torch.long)
+                        batch["config_id"] = config_id
+                        assert_batch_shapes(batch, batch_size, tw=tw,
+                            t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
+                        v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+                        v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
+                        start = int(raw["frame_start"])
+                        if ctx is None or prev_start is None or start != prev_start + half:
+                            ctx = (torch.zeros(1, half, 148, device=device) if v7_ctx5
+                                   else torch.zeros(1, half, 10, device=device) if v7_ctx3
+                                   else torch.zeros(1, 10, device=device))
+                        out = model(v_feat, t_raw, t_phys, config_id, [session_id],
+                                    T_s2m=t_s2m, **v_kw, prev_ctx=ctx)
+                        anchor = batch["trans_anchor"][:, None, :]
+                        reset = (prev_start is None or start != prev_start + half)
+                        if v7_ctx4 or v7_ctx4b:
+                            # v4-a：残差输出组合 R_a 回世界系（首窗/复位 I）。
+                            # v4-b：T 行 = 链锚（同 v4-a）；V/VT 行 = 锚估计头。
+                            if v7_ctx4b and config_value != CONFIG_T:
+                                R_a = out["anchor_rot"][0]
+                            else:
+                                R_a = torch.eye(3, device=device) if reset else R_prev
+                            pose_w = compose_rot6d(
+                                R_a[None],
+                                out["x0_hat"][0].reshape(out["x0_hat"].shape[1], N_JOINTS, 6)
+                            ).reshape(out["x0_hat"].shape[1], -1)
+                            v_w = torch.einsum("ij,tj->ti", R_a, out["v_hat"][0])
+                            trans_w = torch.cumsum(v_w, dim=0) / float(FPS) + anchor[0]
+                            if config_value == CONFIG_T:
+                                R_prev = torch.matmul(R_a, rot6d_to_rotmat(out["x0_hat"][0, half, :6]))
+                        elif hard_prefix and prev_pose is not None:
+                            pose_w = out["x0_hat"][0].clone()
+                            v_w = out["v_hat"][0].clone()
+                            pose_w[:half] = prev_pose[half:]
+                            v_w[:half] = prev_v[half:]
+                            trans_w = torch.cumsum(v_w, dim=0) / float(FPS) + anchor[0]
+                        else:
+                            pose_w = out["x0_hat"][0]
+                            v_w = out["v_hat"][0]
+                            trans_w = (out["trans_hat"] + anchor)[0]
+                        exports.setdefault(session_id, []).append(
+                            (
+                                start,
+                                pose_w.cpu().numpy(),
+                                trans_w.cpu().numpy(),
+                                (batch["trans_gt"] + anchor)[0].cpu().numpy(),
+                            )
+                        )
+                        if v7_ctx3:
+                            if v7_ctx5:
+                                block = torch.cat([pose_w[half:, :144], v_w[half:, :3],
+                                                   torch.ones(half, 1, device=device)], dim=-1)
+                            else:
+                                block = torch.cat([pose_w[half:, :6], v_w[half:, :3],
+                                                   torch.ones(half, 1, device=device)], dim=-1)
+                            ctx = block.unsqueeze(0)
+                        else:
+                            root6 = pose_w[half, :6].detach()
+                            vel3 = v_w[half, :3].detach()
+                            ctx = torch.cat([root6, vel3, torch.ones(1, device=device)],
+                                            dim=0).unsqueeze(0)
+                        prev_start = start
+                        prev_pose = pose_w
+                        prev_v = v_w
+            elif v7_ar and motion_out is not None:
+                # 帧级 AR（全条件，2026-11-01 用户裁定）：逐帧串行生成，
+                # 整窗写入 exports（窗口间携带末帧状态）。
+                for session_id, idxs in _session_window_groups(dataset).items():
+                        prev = torch.zeros(147, device=device)
+                        prev_start = None
+                        for i in idxs:
+                            raw = dataset[i]
+                            batch = move_batch(collate_windows([raw]), device)
+                            batch_size = 1
+                            config_id = torch.full((batch_size,), config_value,
+                                                   device=device, dtype=torch.long)
+                            batch["config_id"] = config_id
+                            assert_batch_shapes(batch, batch_size, tw=tw,
+                                t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
+                            v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+                            v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
+                            start = int(raw["frame_start"])
+                            if prev_start is None or start != prev_start + tw:
+                                prev = torch.zeros(147, device=device)
+                            anchor = batch["trans_anchor"][:, None, :]
+                            ps = torch.zeros(1, tw, 147, device=device)
+                            ps[0, 0] = prev
+                            poses, vels = [], []
+                            for t in range(tw):
+                                out = model(v_feat, t_raw, t_phys, config_id,
+                                            [session_id], T_s2m=t_s2m, **v_kw,
+                                            prev_state=ps, causal=True)
+                                poses.append(out["x0_hat"][0, t].detach())
+                                vels.append(out["v_hat"][0, t].detach())
+                                if t + 1 < tw:
+                                    ps[0, t + 1] = torch.cat([poses[-1], vels[-1]])
+                            pred_pose = torch.stack(poses, dim=0)
+                            v_hat = torch.stack(vels, dim=0)
+                            pred_trans = torch.cumsum(v_hat, dim=0) / float(FPS) + anchor[0]
+                            exports.setdefault(session_id, []).append(
+                                (start, pred_pose.cpu().numpy(),
+                                 pred_trans.cpu().numpy(),
+                                 (batch["trans_gt"] + anchor)[0].cpu().numpy()))
+                            prev = torch.cat([poses[-1], vels[-1]])
+                            prev_start = start
+            elif pos_mode:
                 # E6.1 position mode: sample positions, convert to world 6D
                 # per window (R_init composition), then reuse all 6D metrics.
                 if continuation:
@@ -966,6 +1123,19 @@ def _evaluate_one(
                             else:
                                 pred_pose_w = pred_pose
                                 pred_trans_world = pred_trans + anchor
+                        elif getattr(model, "ctx4b", False):
+                            # v4-b：V/VT 行出口组合（锚估计头）；T 行走链式
+                            # 导出路径（本分支防御：GT 锚 teacher-forced）。
+                            if config_value == CONFIG_T:
+                                R_a = rot6d_to_rotmat(batch["pose_gt"][:, 0, :6])
+                            else:
+                                R_a = out["anchor_rot"]
+                            pred_pose_w = compose_rot6d(
+                                R_a[:, None, :, :],
+                                pred_pose.reshape(batch_size, pred_pose.shape[1], N_JOINTS, 6)
+                            ).reshape(batch_size, pred_pose.shape[1], -1)
+                            v_w = torch.einsum("bij,btj->bti", R_a, out["v_hat"])
+                            pred_trans_world = torch.cumsum(v_w, dim=1) / float(FPS) + anchor
                         else:
                             pred_trans_world = pred_trans + anchor
                             pred_pose_w = pred_pose
@@ -1069,6 +1239,7 @@ def _evaluate_one(
         dump_detail=args.dump_detail,
         z_src_override=z_src_override,
         null_t=null_t,
+        dataset_alt=dataset_alt,
     )
     # Bind exported scores to the actual weights and contact version.
     from anysole.data.contact_package import sha256 as _artifact_sha256
