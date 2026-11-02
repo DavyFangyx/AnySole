@@ -510,7 +510,7 @@ def compute_losses(out, batch, config_id, weights) -> dict:
         "L_assign": l_assign,
         "L_sigma": l_sigma,
         "L_contact": l_contact,
-        "L_anchor": l_anchor,
+        "L_anchor": l_pose.new_zeros(()),   # 无锚头（592f2e6 回归：误引用未定义 l_anchor，2026-11-03 修）
         "L_nll": l_nll,
         "L_prior_pose": l_prior_pose,
         "L_prior_nll": l_prior_nll,
@@ -573,7 +573,7 @@ def compute_losses_v3f(out, x0_norm, batch, weights) -> dict:
         "L_assign": zero,
         "L_sigma": zero,
         "L_contact": l_contact,
-        "L_anchor": l_anchor,
+        "L_anchor": zero,   # 无锚头（592f2e6 回归：误引用未定义 l_anchor，2026-11-03 修）
         "L_nll": zero,
         "L_prior_pose": zero,
         "L_prior_nll": zero,
@@ -828,7 +828,7 @@ def compute_losses_v5_1(out, batch, config_id, weights, cond_tau=None) -> dict:
         "L_assign": zero,
         "L_sigma": zero,
         "L_contact": l_contact,
-        "L_anchor": l_anchor,
+        "L_anchor": zero,   # v5_1 无锚头（此前误引用未定义 l_anchor）
         "L_nll": zero,
         "L_prior_pose": l_prior_pose,
         "L_prior_nll": zero,
@@ -1081,7 +1081,7 @@ def compute_losses_v4_1(out, batch, config_id, weights, cond_tau=None) -> dict:
         "L_assign": zero,
         "L_sigma": zero,
         "L_contact": l_contact,
-        "L_anchor": l_anchor,
+        "L_anchor": zero,   # 无锚头（592f2e6 回归：误引用未定义 l_anchor，2026-11-03 修）
         "L_nll": zero,
         "L_prior_pose": l_prior_pose,
         "L_prior_nll": zero,
