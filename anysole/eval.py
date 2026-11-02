@@ -16,7 +16,7 @@ from anysole.data.dataset import AnySoleDataset, collate_windows, load_split_ids
 from anysole.data.smpl_io import pelvis_to_smpl_trans, smpl24_pose6d_to_poses, smpl_archive_metadata
 from anysole.utils.diffusion import GaussianDiffusion
 from anysole.utils.geometry import f2_to_world, fk_pose6d, positions_to_6d_np, rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np
-from anysole.utils.geometry import compose_rot6d
+from anysole.utils.geometry import compose_rot6d, rot_root6d
 from anysole.utils.constraints import apply_v3e_constraints
 from anysole.utils.constraints_g import apply_v3g_constraints
 from anysole.utils.constraints_h import apply_v3h
@@ -59,13 +59,18 @@ def _smpl_yup_to_display(points: np.ndarray) -> np.ndarray:
     return np.stack((points[..., 0], -points[..., 2], points[..., 1]), axis=-1)
 
 
-def _pack_motion_export(session: dict, windows: list[tuple], pos_mode: bool) -> dict:
+def _pack_motion_export(session: dict, windows: list[tuple], pos_mode: bool,
+                        overlap_blend: bool = False) -> dict:
     """Place window predictions back on the original session frame grid.
 
     Dataset windows are intentionally skipped when they contain fake frames.
     Concatenating those windows would silently shift every later prediction in
     time.  The unified archive therefore always has the original ``n_frames``
     length and carries ``valid_mask``/``frame_indices`` explicitly.
+
+    ``overlap_blend``（修改 02，2026-11-03）：重叠窗先按三角权重混合
+    （协议同口径 blend_overlap_windows_np），再散回帧网格——npz 与指标
+    同源；单覆盖帧直接拷贝，stride=tw 时与现导出逐位一致。
     """
     n_frames = int(np.asarray(session["V_feat"]).shape[0])
     pose_dim = int(windows[0][1].shape[-1]) if windows else POSE_DIM
@@ -80,53 +85,64 @@ def _pack_motion_export(session: dict, windows: list[tuple], pos_mode: bool) -> 
     seen = np.zeros((n_frames,), dtype=bool)
     ordered = sorted(windows, key=lambda item: int(item[0]))
 
-    # Crossfade only across genuinely overlapping time ranges (continuation
-    # evals), blending same-time frames.  Back-to-back or gapped windows are
-    # stitched directly: the historical 4-frame crossfade blended predictions
-    # of different frames, which amplified per-window root-orientation
-    # differences (e.g. T2M heading flips) after 6D re-orthonormalization.
-    fade = 0 if pos_mode else 4
-    if fade > 0:
-        for previous, current in zip(ordered, ordered[1:]):
-            previous_start = int(previous[0])
-            current_start = int(current[0])
-            previous_len = int(np.asarray(previous[1]).shape[0])
-            current_len = int(np.asarray(current[1]).shape[0])
-            if current_start >= previous_start + previous_len:
-                continue  # back-to-back or gapped: nothing to blend
-            overlap = previous_start + previous_len - current_start
-            fade_n = min(fade, overlap)
-            if fade_n < 1:
-                continue
-            previous_pose = np.asarray(previous[1])
-            current_pose = np.asarray(current[1])
-            previous_trans = np.asarray(previous[2])
-            current_trans = np.asarray(current[2])
-            for j in range(fade_n):
-                alpha = (j + 1) / (fade_n + 1)
-                a = previous_len - fade_n + j
-                b = j + overlap - fade_n
-                if b < 0 or b >= current_len:
+    if overlap_blend and ordered:
+        from anysole.utils.eval_protocol import blend_overlap_windows_np
+        pose_b, trans_b, frames_b = blend_overlap_windows_np(
+            [(int(s), np.asarray(p), np.asarray(t), np.asarray(g))
+             for s, p, t, g in ordered], tw=ordered[0][1].shape[0])
+        for t, f in enumerate(frames_b):
+            if 0 <= f < n_frames:
+                pose[f] = pose_b[t]
+                trans[f] = trans_b[t]
+                seen[f] = True
+    else:
+        # Crossfade only across genuinely overlapping time ranges (continuation
+        # evals), blending same-time frames.  Back-to-back or gapped windows are
+        # stitched directly: the historical 4-frame crossfade blended predictions
+        # of different frames, which amplified per-window root-orientation
+        # differences (e.g. T2M heading flips) after 6D re-orthonormalization.
+        fade = 0 if pos_mode else 4
+        if fade > 0:
+            for previous, current in zip(ordered, ordered[1:]):
+                previous_start = int(previous[0])
+                current_start = int(current[0])
+                previous_len = int(np.asarray(previous[1]).shape[0])
+                current_len = int(np.asarray(current[1]).shape[0])
+                if current_start >= previous_start + previous_len:
+                    continue  # back-to-back or gapped: nothing to blend
+                overlap = previous_start + previous_len - current_start
+                fade_n = min(fade, overlap)
+                if fade_n < 1:
                     continue
-                old_a, old_b = previous_pose[a].copy(), current_pose[b].copy()
-                previous_pose[a] = (1 - alpha) * old_a + alpha * old_b
-                current_pose[b] = (1 - alpha) * old_b + alpha * old_a
-                old_a, old_b = previous_trans[a].copy(), current_trans[b].copy()
-                previous_trans[a] = (1 - alpha) * old_a + alpha * old_b
-                current_trans[b] = (1 - alpha) * old_b + alpha * old_a
+                previous_pose = np.asarray(previous[1])
+                current_pose = np.asarray(current[1])
+                previous_trans = np.asarray(previous[2])
+                current_trans = np.asarray(current[2])
+                for j in range(fade_n):
+                    alpha = (j + 1) / (fade_n + 1)
+                    a = previous_len - fade_n + j
+                    b = j + overlap - fade_n
+                    if b < 0 or b >= current_len:
+                        continue
+                    old_a, old_b = previous_pose[a].copy(), current_pose[b].copy()
+                    previous_pose[a] = (1 - alpha) * old_a + alpha * old_b
+                    current_pose[b] = (1 - alpha) * old_b + alpha * old_a
+                    old_a, old_b = previous_trans[a].copy(), current_trans[b].copy()
+                    previous_trans[a] = (1 - alpha) * old_a + alpha * old_b
+                    current_trans[b] = (1 - alpha) * old_b + alpha * old_a
 
-    for start, window_pose, window_trans, _window_gt_trans in ordered:
-        start = int(start)
-        window_pose = np.asarray(window_pose, dtype=np.float32)
-        window_trans = np.asarray(window_trans, dtype=np.float32)
-        if start >= n_frames:
-            continue
-        length = min(len(window_pose), len(window_trans), n_frames - start)
-        if length <= 0:
-            continue
-        pose[start:start + length] = window_pose[:length]
-        trans[start:start + length] = window_trans[:length]
-        seen[start:start + length] = True
+        for start, window_pose, window_trans, _window_gt_trans in ordered:
+            start = int(start)
+            window_pose = np.asarray(window_pose, dtype=np.float32)
+            window_trans = np.asarray(window_trans, dtype=np.float32)
+            if start >= n_frames:
+                continue
+            length = min(len(window_pose), len(window_trans), n_frames - start)
+            if length <= 0:
+                continue
+            pose[start:start + length] = window_pose[:length]
+            trans[start:start + length] = window_trans[:length]
+            seen[start:start + length] = True
 
     fake_mask = np.asarray(
         session.get("fake_mask", np.zeros(n_frames, dtype=np.uint8))
@@ -270,6 +286,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="F0a: skip the protocol robustness rows (contiguous 20-40%% V / T frame "
         "dropout under VT2M).",
+    )
+    parser.add_argument(
+        "--overlap-stride",
+        type=int,
+        default=None,
+        metavar="N",
+        help="修改 02（2026-11-03，接缝归因与重叠拼接推理）：声明口径的重叠窗评估。"
+        "N ∈ [1, tw]（默认 None = 现协议，行为逐位不变）；N < tw 时协议与导出改走"
+        "三角权重混合组装（锚点网格保持原非重叠网格，n_gt_anchors_used 与现协议"
+        "逐位相同）；N = tw 为等价性对照（新代码路径须与现协议逐位一致）。",
     )
     parser.add_argument(
         "--dump-detail",
@@ -417,6 +443,13 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
                 "checkpoints must record it (train --model-name writes it)"
             )
         entry = get_builder(model_name)
+        # 2026-11-01 回填：Ctx4/Ctx5 旧 ckpt 的 STRUCTURE 曾漏 v7_ctx3
+        # （隐含键——模型 build 侧 ctx3 已生效，权重语义正确；entry 补键
+        # 后旧 ckpt 校验不匹配）。回填后再比较。
+        if saved_config.get("v7_ctx5") and saved_config.get("v7_ctx3") is None:
+            saved_config["v7_ctx3"] = True
+        if saved_config.get("v7_ctx4") and saved_config.get("v7_ctx3") is None:
+            saved_config["v7_ctx3"] = True
         saved_struct = {k: saved_config.get(k) for k in entry.STRUCTURE}
         if saved_config.get("part_joints") is not None and "pose_parts" in saved_struct:
             # V4B: pose_parts is derived from the partition at build time.
@@ -440,6 +473,7 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         build_cfg.update(entry.STRUCTURE)
         build_cfg["d_model"] = d_model
         build_cfg["tw"] = tw
+        build_cfg["obs_context"] = int(saved_config.get("obs_context", tw))
         build_cfg["dropout"] = dropout
         build_cfg["pose_layers"] = pose_layers
         # V3_Fv1: the denoiser depth is a hyperparameter — read it from the
@@ -678,13 +712,28 @@ def _evaluate_one(
     warm_start = bool(config.get("warm_start", False))
     # 续写协议 §4（V7_续写协议方案）：ckpt 带 v7_prev_ctx → 评估用
     # stride=tw//2 重叠窗 + 逐窗链式 ctx（导出/协议两路）。
-    v7_ctx = bool(checkpoint.get("config", {}).get("v7_prev_ctx", False))
-    v7_ctx_vcond = v7_ctx and bool(checkpoint.get("config", {}).get("v7_ctx_vcond", False))
-    v7_ctx3 = bool(checkpoint.get("config", {}).get("v7_ctx3", False))
-    v7_ctx4 = bool(checkpoint.get("config", {}).get("v7_ctx4", False))
-    v7_ctx4b = bool(checkpoint.get("config", {}).get("v7_ctx4b", False))
-    v7_ctx5 = bool(checkpoint.get("config", {}).get("v7_ctx5", False))
-    v7_ar = bool(checkpoint.get("config", {}).get("v7_ar", False))
+    # 续写结构标志一律读模型属性（2026-11-01：Ctx4/Ctx5 entry STRUCTURE
+    # 曾漏 v7_ctx3——checkpoint config 缺失导致导出走 v1 平铺 ctx 分支
+    # IndexError + V/VT 行误用重叠数据集；模型属性才是真值）。
+    v7_ctx = bool(getattr(model, "prev_ctx", False))
+    v7_ctx_vcond = v7_ctx and bool(getattr(model, "ctx_vcond", False))
+    v7_ctx3 = bool(getattr(model, "ctx3", False))
+    v7_ctx4 = bool(getattr(model, "ctx4", False))
+    v7_ctx4b = bool(getattr(model, "ctx4b", False))
+    v7_ctx5 = bool(getattr(model, "ctx5", False))
+    v7_ar = bool(getattr(model, "ar", False))
+    v7_ar2 = bool(getattr(model, "ar2", False))
+
+    # 修改 02（2026-11-03）：声明口径的重叠窗评估（--overlap-stride）。
+    # N = tw 为等价性对照（走同一新代码路径，须与现协议逐位一致）。
+    overlap_assemble = args.overlap_stride is not None
+    if overlap_assemble:
+        if not 1 <= args.overlap_stride <= tw:
+            raise ValueError("--overlap-stride must be in [1, tw] (tw=%d)" % tw)
+        if v7_ctx or v7_ar or pos_mode or f2_repr:
+            raise NotImplementedError(
+                "--overlap-stride 目前支持标准路径与 AR2 模型（不支持续写"
+                "链式/帧级 AR/位置模态/f2 表示）")
 
     # --split selects the evaluated session set even without --limit-sessions.
     # (AnySoleDataset mode="eval" otherwise defaults to the val column, which
@@ -702,6 +751,8 @@ def _evaluate_one(
         window_length=tw,
         session_ids=session_ids,
         contact_method=contact_method,
+        v7_ar2=v7_ar2,
+        obs_context=getattr(model, "obs_context", tw),
         smpl_support_policy=(args.smpl_support_policy or checkpoint.get("config", {}).get("smpl_support_policy", "legacy_clip")),
         tactile_input=str(checkpoint.get("config", {}).get("tactile_input", "raw108")),
         no_imu=no_imu,
@@ -711,9 +762,13 @@ def _evaluate_one(
         cam_id=int(config.get("cam_id", 3)),
         # E6.4: continuation eval uses overlapping windows (stride = tw/2);
         # without it the stride stays non-overlapping (E3 behavior).
-        stride=(tw // 2) if ((pos_mode and continuation) or v7_ctx) else None,
+        # 修改 02：--overlap-stride 声明的重叠窗（协议/导出同口径）。
+        stride=(args.overlap_stride if overlap_assemble
+                else ((tw // 2) if ((pos_mode and continuation) or v7_ctx)
+                      else None)),
                         t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
                         d8_heads=bool(checkpoint.get("config", {}).get("d8_heads", False)),
+                        tactile_weight_norm=bool(checkpoint.get("config", {}).get("tactile_weight_norm", False)),
     )
     dataset_alt = None
     if v7_ctx3 or v7_ctx_vcond or v7_ctx5:
@@ -737,9 +792,20 @@ def _evaluate_one(
             stride=None,
             t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
             d8_heads=bool(checkpoint.get("config", {}).get("d8_heads", False)),
+            tactile_weight_norm=bool(checkpoint.get("config", {}).get("tactile_weight_norm", False)),
         )
     if len(dataset) == 0:
         raise RuntimeError("Evaluation dataset contains no valid windows")
+    if overlap_assemble and dataset.stride != tw:
+        # GT 泄漏硬约束（修改 02 §B4）：锚点网格 = 现协议非重叠窗网格。
+        # tile 首窗无效时该 tile 的平移重叠窗一并剔除——否则会引入现协议
+        # 从未消费的 GT 锚（n_gt_anchors_used 不再逐位相同）并扩大评分
+        # 帧集（2026-11-03 s5 扫描发现）。
+        from anysole.utils.eval_protocol import prune_overlap_windows
+        before = len(dataset.valid_windows)
+        dataset.valid_windows = prune_overlap_windows(dataset.valid_windows, tw)
+        print("overlap-stride %d: prune %d -> %d valid windows (tile grid)"
+              % (dataset.stride, before, len(dataset.valid_windows)))
     window_session_ids = {
         dataset.sessions[file_index]["session_id"]
         for file_index, _left, _right in dataset.valid_windows
@@ -759,6 +825,10 @@ def _evaluate_one(
         pin_memory=device.type == "cuda",
     )
 
+    if overlap_assemble:
+        # 导出侧 tile 锚覆盖（修改 02 §B4）需要会话级 trans_global 查询；
+        # 打包段会再次构建同名查询（覆盖前值，无副作用）。
+        session_by_id = {s["session_id"]: s for s in loader.dataset.sessions}
     for config_value in config_values:
         exports = {}
         with torch.inference_mode():
@@ -803,10 +873,7 @@ def _evaluate_one(
                                 R_a = out["anchor_rot"][0]
                             else:
                                 R_a = torch.eye(3, device=device) if reset else R_prev
-                            pose_w = compose_rot6d(
-                                R_a[None],
-                                out["x0_hat"][0].reshape(out["x0_hat"].shape[1], N_JOINTS, 6)
-                            ).reshape(out["x0_hat"].shape[1], -1)
+                            pose_w = rot_root6d(R_a[None], out["x0_hat"][0])
                             v_w = torch.einsum("ij,tj->ti", R_a, out["v_hat"][0])
                             trans_w = torch.cumsum(v_w, dim=0) / float(FPS) + anchor[0]
                             if config_value == CONFIG_T:
@@ -845,6 +912,32 @@ def _evaluate_one(
                         prev_start = start
                         prev_pose = pose_w
                         prev_v = v_w
+            elif v7_ar2 and motion_out is not None:
+                # AR2 自由生成（2026-11-01，V7_AR方案 §6）：与协议同源的
+                # ar2_session_chunks 组装（同一序列口径，§6.5），世界姿态
+                # + 自由积分轨迹写入 exports；无每窗 GT 锚。
+                # ar2_regression（2026-11-02）：窗口并行前向（V7_Cv5AR2R）。
+                from anysole.utils.eval_protocol import ar2_session_chunks
+                ar2_reg = (bool(getattr(model, "ar2_regression", False))
+                            or bool(checkpoint.get("config", {}).get(
+                                "ar2_regression", False)))
+                # 与评分同口径的增益下限（run_protocol 同键同默认）。
+                ar2_gain_floor = float(config.get("ar2_vis_gain_floor", 0.0))
+                for session_id, idxs in _session_window_groups(dataset).items():
+                    v_kw = ({"V_hmr": dataset[idxs[0]].get("V_hmr")}
+                            if v_hmr_mode else {})
+                    chunks, _meta = ar2_session_chunks(
+                        dataset, model, session_id, idxs, config_value,
+                        device, tw, v_kw, regression=ar2_reg,
+                        gain_floor=ar2_gain_floor,
+                        dyaw_base=str(checkpoint.get("config", {}).get(
+                            "ar2_dyaw_base", "zero")))
+                    for chunk in chunks:
+                        start = chunk["start"]
+                        exports.setdefault(session_id, []).append(
+                            (start, chunk["pred_pose"].numpy(),
+                             chunk["pred_trans"].numpy(),
+                             chunk["gt_trans"].numpy()))
             elif v7_ar and motion_out is not None:
                 # 帧级 AR（全条件，2026-11-01 用户裁定）：逐帧串行生成，
                 # 整窗写入 exports（窗口间携带末帧状态）。
@@ -1043,6 +1136,18 @@ def _evaluate_one(
                                     batch.get("session_id"), T_s2m=t_s2m, **v_kw)
                     pred_trans = out["trans_hat"]
                     anchor = batch["trans_anchor"][:, None, :]
+                    if overlap_assemble:
+                        # GT 泄漏硬约束（修改 02 §B4）：导出与协议同口径——
+                        # 锚点网格保持原非重叠网格，重叠窗继承所属 tile 的
+                        # 锚（stride=tw 时与现导出逐位相同）。
+                        tile_anchors = []
+                        for j in range(batch_size):
+                            s = session_by_id[batch["session_id"][j]]
+                            left = int(batch["frame_start"][j])
+                            tile_anchors.append(np.asarray(s["trans_global"])[
+                                max((left // tw) * tw - 1, 0)])
+                        anchor = torch.from_numpy(
+                            np.stack(tile_anchors)).float().to(device)[:, None, :]
                     if f2_repr:
                         # F2a: world pose/trans from the tilt pose + heading
                         # trajectory; the GT world pose is recovered the same
@@ -1130,10 +1235,7 @@ def _evaluate_one(
                                 R_a = rot6d_to_rotmat(batch["pose_gt"][:, 0, :6])
                             else:
                                 R_a = out["anchor_rot"]
-                            pred_pose_w = compose_rot6d(
-                                R_a[:, None, :, :],
-                                pred_pose.reshape(batch_size, pred_pose.shape[1], N_JOINTS, 6)
-                            ).reshape(batch_size, pred_pose.shape[1], -1)
+                            pred_pose_w = rot_root6d(R_a[:, None, :, :], pred_pose)
                             v_w = torch.einsum("bij,btj->bti", R_a, out["v_hat"])
                             pred_trans_world = torch.cumsum(v_w, dim=1) / float(FPS) + anchor
                         else:
@@ -1165,7 +1267,8 @@ def _evaluate_one(
             }
             for session_id, windows in exports.items():
                 session = session_by_id[session_id]
-                packed = _pack_motion_export(session, windows, pos_mode)
+                packed = _pack_motion_export(session, windows, pos_mode,
+                                             overlap_blend=overlap_assemble)
                 pose = packed["pose"]
                 trans = packed["trans"]
                 gt_trans = packed["gt_trans"]
@@ -1240,6 +1343,7 @@ def _evaluate_one(
         z_src_override=z_src_override,
         null_t=null_t,
         dataset_alt=dataset_alt,
+        overlap_assemble=overlap_assemble,
     )
     # Bind exported scores to the actual weights and contact version.
     from anysole.data.contact_package import sha256 as _artifact_sha256

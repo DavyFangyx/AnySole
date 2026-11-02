@@ -313,6 +313,30 @@ class V7Ctx4SmokeTests(unittest.TestCase):
         # trans 由残差 vel 重积分
         want = torch.cumsum(rb["vel_gt"], dim=1) / 40.0
         self.assertLess(float((rb["trans_gt"] - want).abs().max()), 1e-6)
+        # 非根关节原样通过（父相对局部旋转不含绝对航向——2026-11-01 修正）
+        self.assertLess(
+            float((rb["pose_gt"][..., 6:] - b["pose_gt"][..., 6:]).abs().max()),
+            1e-7)
+
+    def test_residual_invariant_under_global_rotation(self):
+        # 90° 不变性（评审实证的逆检验，2026-11-01）：仅转全局根朝向、
+        # 局部动作不变 → 残差目标整体不变（非根局部关节 + 根残差
+        # R_aᵀ⊙R 都抵消全局旋转）。
+        from anysole.train import _ctx4_residual_batch
+        b = {
+            "pose_gt": torch.randn(2, 4, 144),
+            "vel_gt": torch.randn(2, 4, 3),
+            "trans_gt": torch.randn(2, 4, 3),
+        }
+        rot90 = torch.tensor([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        root6 = b["pose_gt"][:, :, :6].reshape(2, 4, 2, 3)
+        rotated = torch.einsum("ij,btkj->btki", rot90, root6).reshape(2, 4, 6)
+        b2 = {**b,
+              "pose_gt": torch.cat([rotated, b["pose_gt"][..., 6:]], dim=-1),
+              "vel_gt": torch.einsum("ij,btj->bti", rot90, b["vel_gt"])}
+        rb, rb2 = _ctx4_residual_batch(b), _ctx4_residual_batch(b2)
+        self.assertLess(float((rb2["pose_gt"] - rb["pose_gt"]).abs().max()), 1e-5)
+        self.assertLess(float((rb2["vel_gt"] - rb["vel_gt"]).abs().max()), 1e-5)
 
     def test_dataset_ctx4_column(self):
         from anysole.data.dataset import AnySoleDataset
@@ -576,6 +600,46 @@ class V7Ctx4BSmokeTests(unittest.TestCase):
             AnySoleModelV7(d=16, tw=4, ctx4b=True, prev_ctx=True)
 
 
+class V7ArSSCacheTests(unittest.TestCase):
+    def test_cache_keeps_first_frame_carry(self):
+        # 帧 0 反馈 = batch 携带原样（不置零——2026-11-01 修正：此前
+        # 缓存帧 0 置零会覆盖连续首帧携带）；帧 1..tw-1 = 模型自生成。
+        from anysole.train import _ar_ss_cache
+        out = {"x0_hat": torch.randn(2, 4, 144), "v_hat": torch.randn(2, 4, 3)}
+        prev = torch.randn(2, 4, 147)
+        c = _ar_ss_cache(out, prev)
+        self.assertLess(float((c[:, 0] - prev[:, 0]).abs().max()), 1e-7)
+        want_tail = torch.cat([out["x0_hat"][:, :-1], out["v_hat"][:, :-1]],
+                              dim=-1)
+        self.assertLess(float((c[:, 1:] - want_tail).abs().max()), 1e-7)
+        # 无 batch 携带时帧 0 = 全零（首窗/推理 reset 口径）
+        c0 = _ar_ss_cache(out, None)
+        self.assertLess(float(c0[:, 0].abs().max()), 1e-7)
+
+
+class V7ArDatasetTests(unittest.TestCase):
+    def test_prev_state_carry(self):
+        # 非首窗帧 0 反馈 = session 前一帧 GT（连续窗口携带，2026-11-01
+        # 修正）；会话首窗帧 0 反馈 = 全零（与推理 reset 同口径）。
+        from anysole.data.dataset import AnySoleDataset
+        import torch as _t
+        ds = AnySoleDataset(mode="train", window_length=20,
+                            session_ids=["S14072"], v7_ar=True)
+        first = ds[0]
+        self.assertLess(float(first["prev_state"][0].abs().max()), 1e-7)
+        checked = 0
+        for i in range(1, min(len(ds), 6)):
+            fi, left, _right = ds.valid_windows[i]
+            sess = ds.sessions[fi]
+            expect = _t.cat([
+                _t.from_numpy(sess["pose_gt"][left - 1]).float(),
+                _t.from_numpy(sess["vel_gt"][left - 1]).float()])
+            self.assertLess(
+                float((ds[i]["prev_state"][0] - expect).abs().max()), 1e-6)
+            checked += 1
+        self.assertGreater(checked, 0)
+
+
 class V7ArMaskSmokeTests(unittest.TestCase):
     """ARM 对照格（因果掩码、无反馈）冒烟（2026-11-01）。"""
 
@@ -599,3 +663,70 @@ class V7ArMaskSmokeTests(unittest.TestCase):
                   prev_state=torch.zeros(2, 4, 147), causal=False)["x0_hat"]
         self.assertAlmostEqual(float((a - c).abs().max()), 0.0, places=6)
         self.assertGreater(float((d - c).abs().max()), 0.0)
+
+
+class V7ArProtocolTests(unittest.TestCase):
+    def test_protocol_generates_from_predicted_history_across_windows(self):
+        from unittest.mock import patch
+        from anysole.utils.eval_protocol import _evaluate_config
+
+        class Dataset:
+            stride = window_length = 2
+            sessions = [{"session_id": "S", "V_feat": torch.zeros(8, 2051)}]
+            valid_windows = [(0, start, start + 2) for start in range(0, 8, 2)]
+
+            def __len__(self):
+                return len(self.valid_windows)
+
+            def __getitem__(self, index):
+                return {
+                    "session_id": "S", "frame_start": torch.tensor(index * 2),
+                    "V_feat": torch.zeros(2, 2051),
+                    "T_raw": torch.ones(2, 96), "T_phys": torch.zeros(2, 12),
+                    "T_s2m": torch.zeros(2, 50),
+                    "pose_gt": torch.full((2, 144), 999.),
+                    "prev_state": torch.full((2, 147), 999.),
+                    "trans_anchor": torch.zeros(3), "trans_gt": torch.zeros(2, 3),
+                    "kp_gt": torch.zeros(2, 24, 3),
+                    "contact_gt": torch.zeros(2, 2), "floor_y": torch.tensor(0.),
+                    "offsets": torch.zeros(24, 3),
+                    "parents": torch.tensor([-1] + [0] * 23),
+                    "betas": torch.zeros(10),
+                }
+
+        class Model(torch.nn.Module):
+            ar = v7 = True
+
+            def forward(self, v, tr, tp, cid, session_ids, *, T_s2m,
+                        prev_state=None, causal=False):
+                if prev_state is None or not causal:
+                    raise AssertionError("AR scoring must use causal predicted feedback")
+                pose = (prev_state[..., :1] + 1 + tr[..., :1]).expand(-1, -1, 144).clone()
+                return {"x0_hat": pose, "v_hat": torch.zeros(1, 2, 3),
+                        "contact_logits": torch.zeros(1, 2, 2)}
+
+        for detailed, degrade in ((False, None), (True, None),
+                                  (False, "t"), (True, "t")):
+            scored = []
+
+            def collect(seq, tw, forward_axis, condition, accum, contact):
+                scored.append(seq["pred_pose"][:, 0].tolist())
+                accum.add_scalar("pa_mpjpe_mm", 1., 8)
+
+            with self.subTest(dump_detail=detailed, degrade=degrade), patch(
+                    "anysole.utils.eval_protocol._session_metrics", side_effect=collect):
+                result, _, rows, _n_anchors = _evaluate_config(
+                    Dataset(), Model().eval(), torch.device("cpu"),
+                    2, True, None, 50, False, 2, 2, dump_detail=detailed,
+                    degrade=degrade)
+            self.assertEqual(len(scored), 1)
+            if degrade is None:
+                self.assertEqual(scored, [[float(x) for x in range(2, 17, 2)]])
+            else:
+                values = [0.] + scored[0]
+                increments = [b - a for a, b in zip(values, values[1:])]
+                self.assertTrue(all(step in (1., 2.) for step in increments))
+                self.assertIn(1., increments)
+            self.assertEqual(result["pa_mpjpe_mm"], 1.)
+            if detailed:
+                self.assertEqual(rows[0]["frame_ids"], list(range(8)))

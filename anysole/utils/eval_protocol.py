@@ -41,6 +41,11 @@ Inference is session-level: eval windows of one session are non-overlapping
 (stride == window_length), so their concatenation is the full-session
 prediction.  The protocol skips itself when the dataset uses overlapping
 windows (E6.4 continuation eval) — those are covered again from F3 on.
+
+修改 02（2026-11-03，接缝归因与重叠拼接推理）：eval.py ``--overlap-stride
+N`` 声明的重叠窗评估不再跳过，改走重叠组装分支（assemble_overlap_seq：
+三角权重混合 + 6D→rotmat→6D 投影；锚点网格保持原非重叠网格），见
+assemble_overlap_seq / run_protocol(overlap_assemble=...)。
 """
 
 from __future__ import annotations
@@ -69,7 +74,9 @@ from anysole.models.common.model_v3h import apply_foot_residual
 from anysole.models.common.model_v3f import sample_v3f
 from anysole.models.common.model_v5_1 import v5_1_z_src
 from anysole.utils.geometry import (
-    compose_rot6d, f2_to_world, fk_pose6d, rot6d_to_rotmat)
+    ar2_to_world, compose_rot6d, f2_to_world, fk_pose6d, heading_from_root_np,
+    rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np,
+    rot_root6d, yaw_rotmat, yaw_rotmat_np)
 from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.utils.metrics import (
     foot_sliding_joints,
@@ -87,7 +94,7 @@ from anysole.utils.metrics import (
     temporal_metrics,
     windowed_world_mpjpe,
 )
-from anysole.train import condition_inputs, move_batch
+from anysole.train import condition_inputs, model_observation_kwargs, move_batch
 from anysole.types import (
     ANKLE_FOOT_JOINTS,
     CONFIG_MODE_NAMES,
@@ -159,6 +166,7 @@ METRIC_DISPLAY_NAMES = {
     "global_mpjpe_mm": "GlobalMPJPE",
     "ground_pen_mm": "GroundPen",
     "ground_pen_frac": "GroundPenFrac",
+    "traj_rel_ate_mm": "trajRelATE",
 }
 INVERSE_DISPLAY_NAMES = {
     display: internal for internal, display in METRIC_DISPLAY_NAMES.items()
@@ -168,7 +176,7 @@ INVERSE_DISPLAY_NAMES = {
 BRIEF_MOTION_KEYS = (
     "pa_mpjpe_mm", "mpjpe_mm", "global_mpjpe_mm", "mpjae_deg", "w_mpjpe100_mm",
     "root_ate_seg20_mm", "root_ate_unanchored_mm",
-    "root_orientation_drift_deg",
+    "root_orientation_drift_deg", "traj_rel_ate_mm",
     "foot_sliding_mm",
     "ground_pen_mm", "jitter_gt_m_s3", "jitter_pred_m_s3",
 )
@@ -403,6 +411,19 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
         accum.add_scalar(
             "root_ate_unanchored_mm",
             float(np.linalg.norm(unanchored - gt_anchors, axis=-1).mean() * 1000.0), T)
+    # AR2 片段首帧航向系相对轨迹（2026-11-01，V7_AR方案 §4）：p_rel(t) =
+    # Y(ψ_gt(t0))ᵀ [p(t) − p(t0)]，pred 与 gt 同变换后比对——自由积分
+    # 轨迹的段首对齐口径（与每窗 GT 锚指标语义不同，只作声明过的相对
+    # 评分）。航向相对误差 = RootOrientationDrift（自身首帧差分口径）。
+    if T >= 2:
+        psi0 = heading_from_root_np(
+            _root_rotmats(seq["gt_pose"])[:1].cpu().numpy())
+        r0_t = yaw_rotmat_np(-psi0)[0]                        # (3,3) R(ψ0)ᵀ
+        p_rel_pred = (pred_np[:, 0] - pred_np[0, 0]) @ r0_t.T
+        p_rel_gt = (gt_np[:, 0] - gt_np[0, 0]) @ r0_t.T
+        accum.add_scalar(
+            "traj_rel_ate_mm",
+            float(np.linalg.norm(p_rel_pred - p_rel_gt, axis=-1).mean() * 1000.0), T)
     temporal = temporal_metrics(pred_aligned, gt_aligned, times_np)
     for key in ("accel_error_m_s2", "jitter_pred_m_s3", "jitter_gt_m_s3"):
         accum.add_scalar(key, float(temporal[key]), T)
@@ -644,15 +665,29 @@ def _evaluate_config(
     z_src_override: Optional[str] = None,
     null_t: bool = False,
     checkpoint: Optional[dict] = None,
-) -> Tuple[Dict[str, float], dict, List[dict]]:
+    gain_floor: float = 0.0,
+    overlap_assemble: bool = False,
+) -> Tuple[Dict[str, float], dict, List[dict], int]:
     """Full-session inference for one conditioning config, then all protocol
     metrics.  ``degrade`` in ("v", "t") adds the robustness span dropout.
+
+    ``overlap_assemble``（修改 02，2026-11-03）：重叠 stride 下改走三角
+    权重混合组装（assemble_overlap_seq），锚点网格保持原非重叠网格
+    （_tile_anchor_index）。返回 ``(result, window_rows, session_rows,
+    n_gt_anchors_used)``——n_gt_anchors_used 为预测侧消费的 GT 锚点数
+    （标准路径 = 覆盖 tile 数 = 现协议窗数；AR2 自由积分为 0）。
 
     With ``dump_detail`` the per-session rows and per-window pose errors are
     collected alongside the pooled result (the pooled accumulation sequence is
     unchanged, so the pooled numbers are bit-identical either way).  Returns
     ``(result, window_rows, session_rows)``.
     """
+    if overlap_assemble and (getattr(model, "prev_ctx", False)
+                             or getattr(model, "ar", False)
+                             or getattr(model, "f2_repr", False)):
+        raise NotImplementedError(
+            "--overlap-stride 目前支持标准路径与 AR2 模型（不支持 ctx/帧级"
+            "AR/f2 表示）")
     # F1: hmr_gvhmr checkpoints consume the GVHMR channel.
     v_hmr_mode = str(getattr(model, "v_input", "hrnet")) == "hmr_gvhmr"
     # F2a: heading/tilt representation.
@@ -685,11 +720,19 @@ def _evaluate_config(
     v7_ctx = (bool(getattr(model, "prev_ctx", False))
               and dataset.stride != dataset.window_length)
     ar_mode = bool(getattr(model, "ar", False))
+    ar2_mode = bool(getattr(model, "ar2", False))
+    ar2_regression = (bool(getattr(model, "ar2_regression", False))
+                      or bool((checkpoint or {}).get("config", {}).get(
+                          "ar2_regression", False)))
+    ar2_dyaw_base = str((checkpoint or {}).get("config", {}).get(
+        "ar2_dyaw_base", "zero"))
     half = tw // 2
+    n_gt_anchors = 0
     with torch.inference_mode():
         for session_id, idxs in groups.items():
             if v7_ctx:
                 # 续写协议 §4：逐窗链式生成 + 发射组装（十指标口径不变）。
+                n_gt_anchors += len(idxs)   # 每窗 left−1 GT 锚（链式协议）
                 seq, seq_frame_ids = _v7_ctx_session_seq(
                     dataset, model, session_id, idxs, config_value, device,
                     half, {"V_hmr": dataset[idxs[0]].get("V_hmr")} if v_hmr_mode else {},
@@ -706,11 +749,35 @@ def _evaluate_config(
                 else:
                     _session_metrics(seq, tw, forward_axis, config_value, accum, contact)
                 continue
+            if ar2_mode:
+                # AR2 自由生成（2026-11-01，V7_AR方案 §6）：逐帧串行 +
+                # 外部航向状态/视觉校正 + 自由积分轨迹（无每窗 GT 锚）。
+                # ar2_regression（2026-11-02）：窗口并行前向，组装同源。
+                # 修改 02：overlap_assemble 时窗口间重叠 → 三角权重混合。
+                # 预测侧无 GT 平移锚（自由积分）→ n_gt_anchors 不增。
+                seq, ar2_frame_ids = _v7_ar2_session_seq(
+                    dataset, model, session_id, idxs, config_value, device, tw,
+                    {"V_hmr": dataset[idxs[0]].get("V_hmr")} if v_hmr_mode else {},
+                    degrade=degrade, seed=seed, regression=ar2_regression,
+                    gain_floor=gain_floor, dyaw_base=ar2_dyaw_base,
+                    overlap_assemble=overlap_assemble)
+                if dump_detail:
+                    _merge_sess_detail(
+                        seq, tw, forward_axis, config_value, accum, contact,
+                        session_rows, window_rows, session_id=session_id,
+                        frame_ids=(ar2_frame_ids if ar2_frame_ids is not None
+                                   else [int(dataset[i]["frame_start"]) + o
+                                         for i in idxs for o in range(tw)]),
+                        window_starts=None)
+                else:
+                    _session_metrics(seq, tw, forward_axis, config_value, accum, contact)
+                continue
             if ar_mode:
-                # 帧级 AR（全条件）：逐帧串行生成（整窗发射，非重叠窗口）。
+                n_gt_anchors += len(idxs)   # 每窗 left−1 GT 锚（帧级 AR）
                 seq = _v7_ar_session_seq(
                     dataset, model, session_id, idxs, config_value, device, tw,
-                    {"V_hmr": dataset[idxs[0]].get("V_hmr")} if v_hmr_mode else {})
+                    {"V_hmr": dataset[idxs[0]].get("V_hmr")} if v_hmr_mode else {},
+                    degrade=degrade, seed=seed)
                 if dump_detail:
                     _merge_sess_detail(
                         seq, tw, forward_axis, config_value, accum, contact,
@@ -724,6 +791,21 @@ def _evaluate_config(
             raw = [dataset[i] for i in idxs]
             batch = move_batch(collate_windows(raw), device)
             bsz = batch["pose_gt"].shape[0]
+            # 预测侧 GT 平移锚点消费数（登记口径）：非重叠协议每窗一个
+            # （left−1）；重叠协议保持 tile 网格 → 覆盖 tile 数，两者逐位
+            # 相同（修改 02 §B4）。
+            n_gt_anchors += len({int(r["frame_start"]) // tw for r in raw})
+            if overlap_assemble:
+                # GT 泄漏硬约束（修改 02 §B4）：锚点网格保持原非重叠网格
+                # （仅 tile*tw 处取锚），重叠窗继承所属 tile 的锚；
+                # stride=tw 时 tile = 窗序号 → 与现协议逐位相同。
+                tile_anchors = []
+                for r in raw:
+                    s = session_by_id[r["session_id"]]
+                    tile_anchors.append(np.asarray(s["trans_global"])[
+                        _tile_anchor_index(int(r["frame_start"]), tw)])
+                batch["trans_anchor"] = torch.from_numpy(
+                    np.stack(tile_anchors)).float().to(device)
             config_id = torch.full((bsz,), config_value, device=device, dtype=torch.long)
             v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
             if v3f_mode:
@@ -793,10 +875,7 @@ def _evaluate_config(
                     R_a = rot6d_to_rotmat(batch["pose_gt"][:, 0, :6])
                 else:
                     R_a = out["anchor_rot"]
-                pred_pose = compose_rot6d(
-                    R_a[:, None, :, :],
-                    out["x0_hat"].reshape(bsz, out["x0_hat"].shape[1], N_JOINTS, 6)
-                ).reshape(bsz, out["x0_hat"].shape[1], -1)
+                pred_pose = rot_root6d(R_a[:, None, :, :], out["x0_hat"])
                 v_w = torch.einsum("bij,btj->bti", R_a, out["v_hat"])
                 pred_trans_w = torch.cumsum(v_w, dim=1) / float(FPS) + anchor
                 v4_1_corr = None
@@ -938,6 +1017,26 @@ def _evaluate_config(
                     "parents": batch["parents"][0],
                     "betas": batch["betas"][0],
                 }
+            if overlap_assemble:
+                # 修改 02 §B3：seq 逐帧键按窗拆回 → 三角权重混合组装
+                # （单覆盖帧直接拷贝 → stride=tw 与现协议逐位一致）。
+                per_frame = {key: seq[key] for key in (
+                    "pred_pose", "pred_trans", "gt_pose", "gt_trans",
+                    "pos_corr", "contact_pred", "kp_gt", "contact_gt",
+                    "pressure_gt", "pressure_pred")}
+                parts = []
+                for b in range(bsz):
+                    parts.append((int(raw[b]["frame_start"]), {
+                        key: (val.view(bsz, tw, *val.shape[1:])[b]
+                              if val is not None else None)
+                        for key, val in per_frame.items()}))
+                seq, seq_frame_ids = assemble_overlap_seq(parts, tw)
+                seq.update({"floor_y": batch["floor_y"][0],
+                            "offsets": batch["offsets"][0],
+                            "parents": batch["parents"][0],
+                            "betas": batch["betas"][0]})
+            else:
+                seq_frame_ids = None
             if dump_detail:
                 # Per-session accumulation, merged into the pooled accum in the
                 # same summation sequence as the direct path, so the pooled
@@ -945,9 +1044,11 @@ def _evaluate_config(
                 _merge_sess_detail(
                     seq, tw, forward_axis, config_value, accum, contact,
                     session_rows, window_rows, session_id=session_id,
-                    frame_ids=[int(sample["frame_start"]) + offset
-                               for sample in raw for offset in range(tw)],
-                    window_starts=[int(sample["frame_start"]) for sample in raw])
+                    frame_ids=(seq_frame_ids if seq_frame_ids is not None else
+                               [int(sample["frame_start"]) + offset
+                                for sample in raw for offset in range(tw)]),
+                    window_starts=None if overlap_assemble else
+                    [int(sample["frame_start"]) for sample in raw])
             else:
                 _session_metrics(seq, tw, forward_axis, config_value, accum, contact)
             if (config_value == CONFIG_V and v2t_out_dir is not None
@@ -968,20 +1069,30 @@ def _evaluate_config(
                 contact_pred_full = np.zeros((n_frames, 2), dtype=np.uint8)
                 contact_gt_full = np.zeros_like(contact_pred_full)
                 seen = np.zeros((n_frames,), dtype=bool)
-                cursor = 0
-                for sample in raw:
-                    start = int(sample["frame_start"])
-                    length = min(tw, n_frames - start)
-                    if length <= 0:
+                if overlap_assemble:
+                    # 修改 02：组装后的逐帧值按 frame id 散回会话网格
+                    # （与逐窗散回等价；重叠帧已混合）。
+                    for t, f in enumerate(seq_frame_ids):
+                        pressure_pred[f] = seq["pressure_pred"][t].detach().cpu().numpy()
+                        pressure_gt[f] = seq["pressure_gt"][t].detach().cpu().numpy()
+                        contact_pred_full[f] = pred_contact[t].astype(np.uint8)
+                        contact_gt_full[f] = gt_contact[t].astype(np.uint8)
+                        seen[f] = True
+                else:
+                    cursor = 0
+                    for sample in raw:
+                        start = int(sample["frame_start"])
+                        length = min(tw, n_frames - start)
+                        if length <= 0:
+                            cursor += tw
+                            continue
+                        end = start + length
+                        pressure_pred[start:end] = seq["pressure_pred"][cursor:cursor + length].detach().cpu().numpy()
+                        pressure_gt[start:end] = seq["pressure_gt"][cursor:cursor + length].detach().cpu().numpy()
+                        contact_pred_full[start:end] = pred_contact[cursor:cursor + length].astype(np.uint8)
+                        contact_gt_full[start:end] = gt_contact[cursor:cursor + length].astype(np.uint8)
+                        seen[start:end] = True
                         cursor += tw
-                        continue
-                    end = start + length
-                    pressure_pred[start:end] = seq["pressure_pred"][cursor:cursor + length].detach().cpu().numpy()
-                    pressure_gt[start:end] = seq["pressure_gt"][cursor:cursor + length].detach().cpu().numpy()
-                    contact_pred_full[start:end] = pred_contact[cursor:cursor + length].astype(np.uint8)
-                    contact_gt_full[start:end] = gt_contact[cursor:cursor + length].astype(np.uint8)
-                    seen[start:end] = True
-                    cursor += tw
                 fake_mask = np.asarray(session.get("fake_mask", np.zeros(n_frames, dtype=np.uint8))).reshape(-1)
                 valid = seen & ((fake_mask == 0) if len(fake_mask) == n_frames else True)
                 v2t_out_dir.mkdir(parents=True, exist_ok=True)
@@ -1018,11 +1129,351 @@ def _evaluate_config(
         result["accel_dist_err_upper_ms2"] = abs(
             result["accel_mag_upper_ms2"] - result["accel_mag_upper_gt_ms2"]
         )
-    return result, window_rows, session_rows
+    return result, window_rows, session_rows, n_gt_anchors
+
+
+def _wrap_angle(a):
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _triangle_window_weights(tw: int) -> list:
+    """修改 02（2026-11-03）三角权重：w(k) = 1 − |k − (tw−1)/2| / (tw/2)。
+
+    标准偶数长三角窗：窗中心 0.95、窗缘 1/tw > 0（窗缘非零保证会话首尾
+    单覆盖帧权重合法）；每帧按覆盖窗权重归一化，峰值绝对值不影响结果。
+    对称 w(k) = w(tw−1−k)、从窗缘到中心单调增。
+    """
+    half = (tw - 1) / 2.0
+    return [1.0 - abs(k - half) / (tw / 2.0) for k in range(tw)]
+
+
+def _tile_anchor_index(left: int, tw: int) -> int:
+    """GT 泄漏硬约束（修改 02 §B4）：锚点网格保持原非重叠网格——仅 tile
+    首帧 tw*t 处取锚（索引 max(tw*t−1, 0)），重叠窗继承所属 tile 的锚。
+    stride=tw 时 left = tile*tw → 与现协议 per-window 锚（left−1）逐位
+    相同；n_gt_anchors_used = 覆盖 tile 数 = 现协议窗数。"""
+    return max((left // tw) * tw - 1, 0)
+
+
+def prune_overlap_windows(valid_windows, tw: int) -> list:
+    """GT 泄漏硬约束（修改 02 §B4，2026-11-03 s5 扫描发现并修正）：只保留
+    tile 非重叠窗本身有效的窗口。
+
+    问题：tile 首窗（left = t*tw）因 fake/监督缺口无效时，同 tile 的平移
+    窗（left = t*tw+k）可能有效——直接使用会 (a) 引入现协议从未消费的
+    GT 锚（tile 锚 trans_global[t*tw−1]），n_gt_anchors_used 不再逐位
+    相同；(b) 扩大评分帧集（覆盖基线未评分的帧）。剔除后：覆盖帧集 =
+    现协议覆盖帧集、锚点集 = 现协议锚点集，逐位一致。stride=tw 时恒等
+    （每个窗即其 tile 窗）。"""
+    tile_ok = {(fi, left) for fi, left, _r in valid_windows if left % tw == 0}
+    return [w for w in valid_windows
+            if (w[0], (w[1] // tw) * tw) in tile_ok]
+
+
+_FRAME_PROJ6D_KEYS = ("pred_pose",)
+_FRAME_LINEAR_KEYS = ("pred_trans", "pos_corr", "pressure_pred")
+_FRAME_FIRST_WIN_KEYS = ("gt_pose", "gt_trans", "kp_gt", "contact_gt",
+                         "pressure_gt", "contact_pred")
+
+
+def assemble_overlap_seq(parts, tw):
+    """修改 02 §B3：重叠窗组装为会话级 seq（覆盖帧升序）。
+
+    parts = [(start, {key: tensor (tw, ...) 或 None})]，start 升序。
+    返回 (seq, frame_ids)：
+    - 单覆盖帧直接拷贝（stride=tw 时输出与现协议 reshape 拼接逐位一致
+      ——等价性硬门的基础）；
+    - 多覆盖帧：pred_pose（6D）按三角权重加权平均后经 6D→rotmat→6D 往返
+      投影回 SO(3)（geometry.py 助手，不自写正交化）；pred_trans /
+      pos_corr / pressure_pred 线性加权；
+    - GT 键与 contact_pred：取首覆盖窗的值（标准路径同帧跨窗逐位一致；
+      AR2 的窗口相对积分 GT 按声明取首覆盖窗）。
+    meta 键（floor_y/offsets/parents/betas）由调用方补入。
+    """
+    weights = _triangle_window_weights(tw)
+    coverage: Dict[int, list] = {}
+    for i, (start, _d) in enumerate(parts):
+        for k in range(tw):
+            coverage.setdefault(start + k, []).append((i, k))
+    frames = sorted(coverage)
+    if not frames:
+        raise ValueError("assemble_overlap_seq: no covered frames")
+    first = parts[0][1]
+    out: Dict[str, Optional[torch.Tensor]] = {}
+    for key, val0 in first.items():
+        if val0 is None:
+            out[key] = None
+            continue
+        tail_shape = val0.shape[1:]
+        rows = []
+        for f in frames:
+            cov = coverage[f]
+            i0, k0 = cov[0]
+            if len(cov) == 1 or key in _FRAME_FIRST_WIN_KEYS:
+                rows.append(parts[i0][1][key][k0])
+                continue
+            vals = torch.stack([parts[i][1][key][k] for i, k in cov], dim=0)
+            w = torch.tensor([weights[k] for _, k in cov],
+                             dtype=torch.float64, device=vals.device)
+            wv = w.view(-1, *([1] * len(tail_shape)))
+            mean = (vals.to(torch.float64) * wv).sum(0) / w.sum()
+            if key in _FRAME_PROJ6D_KEYS:
+                # 6D 加权平均 → 投影回 SO(3)（rotmat 列正交化 + 取前两列）
+                rows.append(rotmat_to_6d(rot6d_to_rotmat(
+                    mean.reshape(-1, 6).float())).reshape(tail_shape))
+            else:
+                rows.append(mean.to(vals.dtype))
+        out[key] = torch.stack(rows, dim=0)
+    return out, frames
+
+
+def blend_overlap_windows_np(windows, tw):
+    """修改 02：导出侧重叠窗混合（npz 口径 = 协议口径）。
+
+    windows = [(start, pose (tw,144) f32, trans (tw,3) f32, gt_trans (tw,3)
+    f32)]，start 升序。返回 (pose (T,144), trans (T,3), frames (T,) int64)
+    覆盖帧升序；单覆盖帧直接拷贝（stride=tw 逐位 = 现导出），多覆盖帧
+    三角权重线性平均 + pose 6D→rotmat→6D 投影（numpy 助手，与
+    geometry.py 同口径）。gt_trans 取首覆盖窗（与协议 seq 一致）。
+    """
+    weights = _triangle_window_weights(tw)
+    coverage: Dict[int, list] = {}
+    for i, (start, _pose, _trans, _gt) in enumerate(windows):
+        for k in range(tw):
+            coverage.setdefault(start + k, []).append((i, k))
+    frames = sorted(coverage)
+    if not frames:
+        raise ValueError("blend_overlap_windows_np: no covered frames")
+    pose = np.empty((len(frames), windows[0][1].shape[-1]), dtype=np.float32)
+    trans = np.empty((len(frames), 3), dtype=np.float32)
+    for t, f in enumerate(frames):
+        cov = coverage[f]
+        i0, k0 = cov[0]
+        if len(cov) == 1:
+            pose[t] = windows[i0][1][k0]
+            trans[t] = windows[i0][2][k0]
+            continue
+        w = np.asarray([weights[k] for _, k in cov], dtype=np.float64)
+        w = w / w.sum()
+        pose_t = (np.stack(
+            [windows[i][1][k].astype(np.float64) for i, k in cov])
+            * w[:, None]).sum(0)
+        trans_t = (np.stack(
+            [windows[i][2][k].astype(np.float64) for i, k in cov])
+            * w[:, None]).sum(0)
+        pose[t] = rotmat_to_6d_np(rot6d_to_rotmat_np(
+            pose_t.reshape(-1, 6))).reshape(-1).astype(np.float32)
+        trans[t] = trans_t.astype(np.float32)
+    return pose, trans, np.asarray(frames, dtype=np.int64)
+
+
+def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
+                       device, tw, v_kw, *, degrade=None, seed=0,
+                       regression=False, gain_floor=0.0, dyaw_base="zero"):
+    """AR2 自由生成（2026-11-01，V7_AR方案 §4/§6）：逐窗逐帧串行。
+
+    外部状态：ψ（累计航向）、p（自由积分位置）、vis_ema（视觉航向观测
+    的 EMA，0.5 平滑防注入 V 帧级抖动）、prev（148 维相对反馈）。
+    V/VT 行：ψ += Δψ̂ 后应用视觉校正 ψ += g·wrap(vis_ema − ψ)（g 只读
+    运行时证据）；T 行：纯积分 ψ += Δψ̂，会话首帧 ψ=0（坐标约定）。
+    世界组装逐帧：R_root = Y(ψ) @ tilt、v_world = Y(ψ) @ v_head、
+    p += v_world/FPS——无每窗 GT 锚（§3.4）。会话开始/跳窗复位。
+    返回 (chunks, meta)：chunks 逐窗含 world pred_pose/pred_trans 与
+    GT（供评分与导出共用，方案 §6.5 同一序列口径）。
+
+    regression（2026-11-02，V7_Cv5AR2R）：整窗一次并行前向（双向注意
+    力、无反馈、无因果掩码），逐帧几何组装与串行完全同源（同一积分
+    公式、同一外部状态与复位规则）——差异只在 Δyaw/tilt/v_head 的来
+    源：一次并行输出 vs 逐帧依赖上一帧反馈。
+    """
+    chunks = []
+    prev = torch.zeros(148, device=device)
+    psi = torch.zeros((), device=device, dtype=torch.float64)
+    pos = torch.zeros(3, device=device, dtype=torch.float64)
+    vis_ema = None
+    prev_start = None
+    meta = None
+    use_vis = config_value != CONFIG_T
+    dropped = set()
+    if degrade is not None:
+        rng = np.random.RandomState((seed * 1000003) ^ zlib.crc32(str(session_id).encode()))
+        frame_ids = [int(dataset[i]["frame_start"]) + t for i in idxs for t in range(tw)]
+        span = int(float(rng.uniform(0.2, 0.4)) * len(frame_ids))
+        left = int(rng.uniform(0., max(len(frame_ids) - span, 1)))
+        dropped = set(frame_ids[left:left + span])
+    for i in idxs:
+        raw = dataset[i]
+        batch = move_batch(collate_windows([raw]), device)
+        start = int(raw["frame_start"])
+        if prev_start is None or start != prev_start + tw:
+            prev = torch.zeros(148, device=device)
+            psi = torch.zeros((), device=device, dtype=torch.float64)
+            pos = torch.zeros(3, device=device, dtype=torch.float64)
+            vis_ema = None
+        config_id = torch.full((1,), config_value, device=device, dtype=torch.long)
+        v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+        obs_kw = model_observation_kwargs(batch)
+        if dropped:
+            mask = torch.tensor([start + t in dropped for t in range(tw)], device=device)
+            if degrade == "v":
+                v_feat = v_feat.clone()
+                v_feat[:, mask] = 0
+            else:
+                t_raw, t_phys, t_s2m = t_raw.clone(), t_phys.clone(), t_s2m.clone()
+                t_raw[:, mask], t_phys[:, mask], t_s2m[:, mask] = 0, 0, 0
+            if obs_kw:
+                history = {key: value.clone() for key, value in batch["obs_history"][0].items()}
+                length = history["V_feat"].shape[0]
+                past_mask = torch.tensor([start - length + t in dropped for t in range(length)],
+                                         dtype=torch.bool)
+                for key in (("V_feat",) if degrade == "v" else ("T_raw", "T_phys")):
+                    history[key][past_mask] = 0
+                obs_kw = {"obs_history": [history]}
+        anchor = batch["trans_anchor"][:, None, :]
+        ps = torch.zeros(1, tw, 148, device=device)
+        ps[0, 0] = prev
+        poses, trans = [], []
+        if regression:
+            # 纯回归（2026-11-02）：一次并行前向，逐帧几何组装与串行
+            # 同源（同一积分公式与外部状态），无逐帧模型前向。
+            out = model(v_feat, t_raw, t_phys, config_id, [session_id],
+                        T_s2m=t_s2m, **v_kw, prev_state=None, causal=False,
+                        **obs_kw)
+            dyaw_all = out["dyaw_hat"][0, :, 0].detach().double()   # (tw,)
+            rel_all = out["x0_hat"][0].detach().float()             # (tw,144)
+            v_all = out["v_hat"][0].detach().float()                # (tw,3)
+            vis_yaw_all = (out["vis_yaw"][0, :, 0].detach().double()
+                           if use_vis else None)
+            gain_all = (out["vis_gain"][0, :, 0].detach().double()
+                        if use_vis else None)
+            # 正面 Δψ 结构（2026-11-02）：Δψ_total = 历史延续基线（帧 0 =
+            # 上一窗末帧 Δψ_total、会话首帧 0，帧 t>0 = Δψ_total(t−1)）+
+            # 修正项；dyaw_base != "history" 时基线为零（旧 ckpt 语义）。
+            d_prev = (prev[0].double() if dyaw_base == "history"
+                      else torch.zeros((), dtype=torch.float64, device=device))
+            for t in range(tw):
+                dyaw_t = dyaw_all[t]
+                d_total = dyaw_t + d_prev
+                d_prev = d_total
+                rel_pose_t = rel_all[t]
+                v_head_t = v_all[t]
+                psi = psi + d_total
+                if use_vis:
+                    vis_yaw_t = vis_yaw_all[t]
+                    # 增益下限（2026-11-02 诊断钩子）：训练增益中位数仅
+                    # 0.005（L_yawcorr 旧口径最优解 = 0），下限压住后量化
+                    # 「校正若真生效」的 drift/PA 上限；默认 0 = 关。
+                    gain_t = gain_all[t].clamp(min=gain_floor)
+                    vis_ema = (vis_yaw_t if vis_ema is None
+                               else 0.5 * vis_ema + 0.5 * vis_yaw_t)
+                    psi = psi + gain_t * _wrap_angle(vis_ema - psi)
+                r_yaw = yaw_rotmat(psi.reshape(1))[0].float()      # (3,3)
+                r_root = torch.matmul(r_yaw, rot6d_to_rotmat(rel_pose_t[:6]))
+                v_world = torch.matmul(r_yaw, v_head_t)
+                pos = pos + v_world.double() / float(FPS)
+                poses.append(torch.cat([rotmat_to_6d(r_root), rel_pose_t[6:]]))
+                trans.append(pos.float().clone())
+        else:
+            for t in range(tw):
+                out = model(v_feat, t_raw, t_phys, config_id, [session_id],
+                            T_s2m=t_s2m, **v_kw, prev_state=ps, causal=True,
+                            **obs_kw)
+                dyaw_t = out["dyaw_hat"][0, t, 0].detach().double()
+                d_total = (dyaw_t + ps[0, t, 0].double()
+                           if dyaw_base == "history" else dyaw_t)
+                rel_pose_t = out["x0_hat"][0, t].detach().float()
+                v_head_t = out["v_hat"][0, t].detach().float()
+                psi = psi + d_total
+                if use_vis:
+                    vis_yaw_t = out["vis_yaw"][0, t, 0].detach().double()
+                    gain_t = out["vis_gain"][0, t, 0].detach().double().clamp(
+                        min=gain_floor)
+                    vis_ema = (vis_yaw_t if vis_ema is None
+                               else 0.5 * vis_ema + 0.5 * vis_yaw_t)
+                    psi = psi + gain_t * _wrap_angle(vis_ema - psi)
+                r_yaw = yaw_rotmat(psi.reshape(1))[0].float()      # (3,3)
+                r_root = torch.matmul(r_yaw, rot6d_to_rotmat(rel_pose_t[:6]))
+                v_world = torch.matmul(r_yaw, v_head_t)
+                pos = pos + v_world.double() / float(FPS)
+                poses.append(torch.cat([rotmat_to_6d(r_root), rel_pose_t[6:]]))
+                trans.append(pos.float().clone())
+                if t + 1 < tw:
+                    ps[0, t + 1] = torch.cat([d_total.float().reshape(1),
+                                              rel_pose_t, v_head_t])
+        pred_pose = torch.stack(poses, dim=0)                  # (tw, 144) 世界
+        pred_trans = torch.stack(trans, dim=0)                 # (tw, 3) 自由积分
+        world_gt_pose, _ = ar2_to_world(
+            batch["pose_gt"], batch["dyaw_gt"], batch["v_head_gt"],
+            batch["psi_base"], batch["trans_anchor"])
+        chunks.append({
+            "pred_pose": pred_pose.cpu(),
+            "pred_trans": pred_trans.cpu(),
+            "gt_pose": world_gt_pose[0].cpu(),
+            "gt_trans": (batch["trans_gt"] + anchor)[0].cpu(),
+            "kp_gt": batch["kp_gt"][0].cpu(),
+            "contact_gt": batch["contact_gt"][0].cpu(),
+            "contact_pred": (torch.sigmoid(out["contact_logits"]) > 0.5)[0].detach().cpu()
+                             if config_value != CONFIG_V else None,
+            "pressure_gt": batch["T_raw"][0].cpu(),
+            "start": start,
+        })
+        prev = torch.cat([d_total.double().float().reshape(1),
+                          rel_pose_t, v_head_t])
+        prev_start = start
+        meta = (batch["floor_y"][0].cpu(), batch["offsets"][0].cpu(),
+                batch["parents"][0].cpu(), batch["betas"][0].cpu())
+    return chunks, meta
+
+
+def _v7_ar2_session_seq(dataset, model, session_id, idxs, config_value,
+                        device, tw, v_kw, *, degrade=None, seed=0,
+                        regression=False, gain_floor=0.0, dyaw_base="zero",
+                        overlap_assemble=False):
+    """AR2 协议会话序列：ar2_session_chunks 的 seq 组装（评分口径）。
+
+    regression：V7_Cv5AR2R 纯回归格（窗口并行前向，组装公式同源）。
+    修改 02：overlap_assemble 时窗口重叠 → 三角权重混合组装
+    （assemble_overlap_seq），返回 (seq, frame_ids)。"""
+    chunks, meta = ar2_session_chunks(dataset, model, session_id, idxs,
+                                      config_value, device, tw, v_kw,
+                                      degrade=degrade, seed=seed,
+                                      regression=regression,
+                                      gain_floor=gain_floor,
+                                      dyaw_base=dyaw_base)
+    floor_y, offsets, parents, betas = meta
+    if overlap_assemble:
+        parts = []
+        for c in chunks:
+            parts.append((int(c["start"]), {
+                "pred_pose": c["pred_pose"], "pred_trans": c["pred_trans"],
+                "gt_pose": c["gt_pose"], "gt_trans": c["gt_trans"],
+                "kp_gt": c["kp_gt"], "contact_gt": c["contact_gt"],
+                "contact_pred": c["contact_pred"],
+                "pressure_gt": c["pressure_gt"]}))
+        seq, frame_ids = assemble_overlap_seq(parts, tw)
+        seq.update({"pressure_pred": None, "pos_corr": None,
+                    "floor_y": floor_y, "offsets": offsets,
+                    "parents": parents, "betas": betas})
+        return seq, frame_ids
+    seq = {
+        "pred_pose": torch.cat([c["pred_pose"] for c in chunks], dim=0),
+        "pred_trans": torch.cat([c["pred_trans"] for c in chunks], dim=0),
+        "gt_pose": torch.cat([c["gt_pose"] for c in chunks], dim=0),
+        "gt_trans": torch.cat([c["gt_trans"] for c in chunks], dim=0),
+        "kp_gt": torch.cat([c["kp_gt"] for c in chunks], dim=0),
+        "contact_gt": torch.cat([c["contact_gt"] for c in chunks], dim=0),
+        "contact_pred": (torch.cat([c["contact_pred"] for c in chunks], dim=0)
+                         if config_value != CONFIG_V else None),
+        "pressure_gt": torch.cat([c["pressure_gt"] for c in chunks], dim=0),
+        "pressure_pred": None,
+        "pos_corr": None,
+        "floor_y": floor_y, "offsets": offsets, "parents": parents, "betas": betas,
+    }
+    return seq, None
 
 
 def _v7_ar_session_seq(dataset, model, session_id, idxs, config_value,
-                       device, tw, v_kw):
+                       device, tw, v_kw, *, degrade=None, seed=0):
     """帧级 AR（2026-11-01，V7 方案 §11）：逐窗逐帧串行生成——反馈 =
     上一帧预测输出 [姿态 144 + 根速度 3]（ps 槽位逐帧填充，因果掩码下
     帧 t 只依赖 ≤t）；窗口间携带上一窗末帧状态；首窗/跳窗起点 = 全零
@@ -1032,7 +1483,15 @@ def _v7_ar_session_seq(dataset, model, session_id, idxs, config_value,
     prev = torch.zeros(147, device=device)
     prev_start = None
     meta = None
-    for i in idxs:
+    degraded = None
+    if degrade is not None:
+        # Sample one session-wide dropout span, as in the non-AR protocol.
+        whole = move_batch(collate_windows([dataset[i] for i in idxs]), device)
+        cid = torch.full((len(idxs),), config_value, device=device, dtype=torch.long)
+        streams = condition_inputs(whole, cid)
+        rng = np.random.RandomState((seed * 1000003) ^ zlib.crc32(str(session_id).encode()))
+        degraded = _degrade_inputs(*streams, tw, degrade, rng)
+    for window_index, i in enumerate(idxs):
         raw = dataset[i]
         batch = move_batch(collate_windows([raw]), device)
         start = int(raw["frame_start"])
@@ -1040,6 +1499,9 @@ def _v7_ar_session_seq(dataset, model, session_id, idxs, config_value,
             prev = torch.zeros(147, device=device)
         config_id = torch.full((1,), config_value, device=device, dtype=torch.long)
         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+        if degraded is not None:
+            v_feat, t_raw, t_phys, t_s2m = (
+                stream[window_index:window_index + 1] for stream in degraded)
         anchor = batch["trans_anchor"][:, None, :]
         ps = torch.zeros(1, tw, 147, device=device)
         ps[0, 0] = prev
@@ -1125,10 +1587,7 @@ def _v7_ctx_session_seq(dataset, model, session_id, idxs, config_value,
             # （首窗/复位 R_a=I，模型在 flag=0 下输出绝对——组合为恒等）。
             # R_a 沿链携带：下一窗锚 = R_a ⊙ 残差根朝向 @ 帧 half。
             R_a = torch.eye(3, device=device) if reset else R_prev
-            pose_w = compose_rot6d(
-                R_a[None],
-                out["x0_hat"][0].reshape(out["x0_hat"].shape[1], N_JOINTS, 6)
-            ).reshape(out["x0_hat"].shape[1], -1)   # (tw,144)
+            pose_w = rot_root6d(R_a[None], out["x0_hat"][0])   # (tw,144)
             v_w = torch.einsum("ij,tj->ti", R_a, out["v_hat"][0])
             trans_w = torch.cumsum(v_w, dim=0) / float(FPS) + anchor[0]
             pred_pose_w, pred_trans_w = pose_w, trans_w
@@ -1259,19 +1718,29 @@ def run_protocol(
     z_src_override: Optional[str] = None,
     null_t: bool = False,
     dataset_alt=None,
+    overlap_assemble: bool = False,
 ) -> Dict[str, Dict[str, float]]:
     """Run the full F0a protocol and write metrics/<split>.json (detail) and,
     when brief_out is given, metrics/<split>_brief.json (whole-body brief).
+
+    ``overlap_assemble``（修改 02，2026-11-03）：eval.py --overlap-stride 声明
+    的重叠窗评估改走三角权重混合组装分支（不再跳过）；stride=tw 时新分支
+    与现协议逐位一致（等价性硬门）。
 
     ``dump_detail`` additionally writes the per-window pose errors and
     per-session metric rows next to ``out_path``
     (window_detail_<split>.json / session_detail_<split>.json, snake_case keys);
     the pooled files are bit-identical either way.
     """
+    # AR2 视觉校正增益下限（2026-11-02 诊断钩子）：eval 配置 yaml 单键，
+    # 默认 0 = 关（不改既有 cell 行为）。
+    ar2_gain_floor = float(config.get("ar2_vis_gain_floor", 0.0))
     if (dataset.stride != dataset.window_length
-            and not getattr(model, "prev_ctx", False)):
+            and not getattr(model, "prev_ctx", False)
+            and not overlap_assemble):
         # 续写协议（2026-11-01）：V7_Cv5Ctx 的重叠窗评估走 _evaluate_config
-        # 的链式分支，不属于 E6.4 扩散续写短路范围。
+        # 的链式分支，不属于 E6.4 扩散续写短路范围；修改 02 的声明口径
+        # 重叠评估（--overlap-stride）同样不跳过。
         print("protocol skipped: dataset stride %d != window %d (E6.4 continuation eval)"
               % (dataset.stride, dataset.window_length))
         return {}
@@ -1279,6 +1748,7 @@ def run_protocol(
     metrics: Dict[str, Dict[str, float]] = {}
     window_conditions: Dict[str, dict] = {}
     session_conditions: Dict[str, dict] = {}
+    anchor_counts: Dict[str, int] = {}
     # Deterministic protocol runs.  Sigma-seed for diffusion models comes from
     # three runs with --protocol-seed 0/1/2; regression models have no
     # sampling randomness (dropout is off in eval mode).
@@ -1294,15 +1764,18 @@ def run_protocol(
                                           or getattr(model, "ctx_vcond", False))
                                      and config_value != CONFIG_T) else dataset
             name = CONFIG_MODE_NAMES[config_value]
-            metrics[name], window_rows, session_rows = _evaluate_config(
-                ds_for, model, device, config_value, regress_mode, diffusion,
-                sample_steps, warm_start, tw, forward_axis,
-                v2t_out_dir=v2t_out_dir,
-                dump_detail=dump_detail,
-                z_src_override=z_src_override,
-                null_t=null_t,
-                checkpoint=checkpoint,
-            )
+            metrics[name], window_rows, session_rows, anchor_counts[name] = \
+                _evaluate_config(
+                    ds_for, model, device, config_value, regress_mode, diffusion,
+                    sample_steps, warm_start, tw, forward_axis,
+                    v2t_out_dir=v2t_out_dir,
+                    dump_detail=dump_detail,
+                    z_src_override=z_src_override,
+                    null_t=null_t,
+                    checkpoint=checkpoint,
+                    gain_floor=ar2_gain_floor,
+                    overlap_assemble=overlap_assemble,
+                )
             if dump_detail:
                 window_conditions[name] = window_rows
                 session_conditions[name] = session_rows
@@ -1312,19 +1785,23 @@ def run_protocol(
         if robustness and CONFIG_VT in config_values:
             ds_rob = dataset_alt if (dataset_alt is not None
                                      and getattr(model, "ctx3", False)) else dataset
-            metrics["robust_vdrop"], _, _ = _evaluate_config(
+            metrics["robust_vdrop"], _, _, anchor_counts["robust_vdrop"] = _evaluate_config(
                 ds_rob, model, device, CONFIG_VT, regress_mode, diffusion,
                 sample_steps, warm_start, tw, forward_axis, degrade="v", seed=seed,
                 z_src_override=z_src_override,
                 null_t=null_t,
                 checkpoint=checkpoint,
+                gain_floor=ar2_gain_floor,
+                overlap_assemble=overlap_assemble,
             )
-            metrics["robust_tdrop"], _, _ = _evaluate_config(
+            metrics["robust_tdrop"], _, _, anchor_counts["robust_tdrop"] = _evaluate_config(
                 ds_rob, model, device, CONFIG_VT, regress_mode, diffusion,
                 sample_steps, warm_start, tw, forward_axis, degrade="t", seed=seed,
                 z_src_override=z_src_override,
                 null_t=null_t,
                 checkpoint=checkpoint,
+                gain_floor=ar2_gain_floor,
+                overlap_assemble=overlap_assemble,
             )
             print("protocol robust_vdrop: mpjpe=%.3fmm pa_mpjpe=%.3fmm"
                   % (metrics["robust_vdrop"]["mpjpe_mm"], metrics["robust_vdrop"]["pa_mpjpe_mm"],
@@ -1358,6 +1835,11 @@ def run_protocol(
         # (one representative per level); their values live in the detail
         # V2M tactile row.
         "v2t_leaf_keys": sorted(V2T_LEAF_NAMES),
+        # 修改 02（2026-11-03）：预测侧 GT 平移锚点消费数（每条件）。标准
+        # 路径 = 覆盖 tile 数（重叠 stride 下锚点网格保持非重叠网格 → 与
+        # 现协议每窗一锚逐位相同）；AR2 自由积分 = 0；ctx/帧级 AR = 窗数
+        # （每窗 left−1 锚，仅登记信息）。
+        "n_gt_anchors_used": anchor_counts,
         "metrics": display_metrics(metrics),
     }
     payload = order_payload(payload)
