@@ -32,9 +32,9 @@ sys.path.insert(0, str(REPO))
 from anysole_tta.e6_phase_analysis import build_session_sets, load_session  # noqa: E402
 
 OUT = REPO / "results_display/Etest/E5_OcclusionRobustness/detail/e5_contact_kin.json"
-OCC_CELLS = {"occ000": "V7_Cv5_s1", "occ010": "V7_Cv5_s1_evalocc010",
-             "occ020": "V7_Cv5_s1_evalocc020", "occ030": "V7_Cv5_s1_evalocc030",
-             "occ050": "V7_Cv5_s1_evalocc050"}
+OCC_CELLS = {"occ000": "V7_Cv5_s1"}
+for _o in ("010", "020", "030", "040", "050", "060", "070", "080", "090", "100"):
+    OCC_CELLS["occ" + _o] = "V7_Cv5_s1_evalocc" + _o
 
 
 def pooled(sessions: list[str], cell: str) -> dict[str, dict]:

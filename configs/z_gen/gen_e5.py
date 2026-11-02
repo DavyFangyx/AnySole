@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import argparse
 
+from model_registry import OCC_LEVELS_10
 from common import (add_gen_args, ckpt_models, concat_models,
                     emit_subset, parse_bool, parse_seeds, seed_models)
 
-DEFAULT_MODELS = ['V7_Cv5_evalocc010', 'V7_Cv5_evalocc020', 'V7_Cv5_evalocc030', 'V7_Cv5_evalocc050']
+DEFAULT_MODELS = ['V7_Cv5_evalocc' + o for o in OCC_LEVELS_10]
 
 
 def main() -> int:
@@ -33,7 +34,7 @@ def main() -> int:
         if "_evalocc" in m or "_evalbest" in m:
             expanded.append(m)
         else:
-            expanded += [m + "_evalocc" + o for o in ("010", "020", "030", "050")]
+            expanded += [m + "_evalocc" + o for o in OCC_LEVELS_10]
     models = expanded
     wandb = parse_bool(args.wandb, "--wandb")
     checkpoint_all = parse_bool(args.checkpoint_all, "--checkpoint-all")

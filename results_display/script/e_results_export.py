@@ -6,7 +6,7 @@
 - E2：cells（Cv1–7 last / V7_Cv1_evalbest）+ 基线公共评估产物（results/baselines/*/metrics/test_comparison.json）→ Full_Table1_E2_Performance.csv
 - E3：Etest/10_21/e3_multiview.json → Full_Table1_E3_MultiView.csv
 - E4：cells（Cv1–7 stat，三条件十指标 + Δ）→ Full_Table1_E4_Ablation_AllMetrics.csv
-- E5：主模型 V7_Cv5（last/best × occ000-050 五档）→ Full_Table1_E5_Occlusion.csv
+- E5：主模型 V7_Cv5（last/best × occ000-100 十一档）→ Full_Table1_E5_Occlusion.csv
 - E6：E6_接触相位/e6_table.json + PNG → Full_Table1_E6_PhaseGain.csv
   （+ 9 行简表 Full_Table1_E6_PhaseGain_Simple.csv，四相位 × 双门/无门）
   + Full_FigN_E6_Phase_{g}.png；--best-sessions → 门控最佳完整会话合并图
@@ -59,6 +59,11 @@ E5_TACTILE_METRICS = [("traj_ATE@0.5s", "↓"), ("GroundPenFrac", "↓"),
                       ("PA-MPJPE_r_foot", "↓"), ("MPJPE_anklefoot", "↓"),
                       ("PA-MPJPE_upper", "↓")]
 E5_TACTILE_KEYS = [k for k, _ in E5_TACTILE_METRICS]
+# E5 遮挡档位（2026-11-02 用户裁定：occ010–100 步长 10，occ100 = 视觉全无；
+# occ000 = 无遮挡基线）
+E5_OCC_LEVELS = ("010", "020", "030", "040", "050", "060", "070", "080",
+                 "090", "100")
+E5_OCCS = ("occ000",) + tuple("occ" + o for o in E5_OCC_LEVELS)
 CONTACT_NAMESPACE = "state_smpl24"  # 当前默认线（f6_soft_time_accel_state_smpl24_v1）
 EVAL_SPLIT = "test"
 CELL_MAP = {}
@@ -374,10 +379,10 @@ def export_e5(models: list[str], ckpt: str) -> None:
     model = models[0] if models else "V7_Cv5"
     last_cells = {"occ000": [model]}
     best_cells = {"occ000": ["%s_evalbest" % model]}
-    for occ in ("010", "020", "030", "050"):
+    for occ in E5_OCC_LEVELS:
         last_cells["occ%s" % occ] = ["%s_evalocc%s" % (model, occ)]
         best_cells["occ%s" % occ] = ["%s_evalbest_occ%s" % (model, occ)]
-    for occ in ("occ000", "occ010", "occ020", "occ030", "occ050"):
+    for occ in E5_OCCS:
         last_ids = _selected(last_cells[occ], models)
         best_ids = _selected(best_cells.get(occ, []), models)
         for model in last_ids if ckpt != "best" else []:
@@ -464,7 +469,7 @@ def export_e5(models: list[str], ckpt: str) -> None:
     def _scalar(x):
         return x[0] if isinstance(x, tuple) else x
 
-    for occ in ("occ010", "occ020", "occ030", "occ050"):
+    for occ in ("occ" + o for o in E5_OCC_LEVELS):
         m = seeded_metrics(last_cells[occ][0])
         base = seeded_metrics(last_cells["occ000"][0])
         if not m or not base:
@@ -508,9 +513,9 @@ def _e5_degradation_figure(models: list[str], metrics: list[str],
 
     model = models[0] if models else "V7_Cv5"
     cells = {"occ000": model}
-    for occ in ("010", "020", "030", "050"):
+    for occ in E5_OCC_LEVELS:
         cells["occ%s" % occ] = "%s_evalocc%s" % (model, occ)
-    xs = [0, 10, 20, 30, 50]
+    xs = [0] + [int(o) for o in E5_OCC_LEVELS]
     color_v, color_vt = "#2a78d6", "#eb6834"  # 校验过的双色（CVD 分离 24.7）
     ncol = 4 if len(metrics) >= 6 else len(metrics)
     nrow = int(np.ceil(len(metrics) / ncol))

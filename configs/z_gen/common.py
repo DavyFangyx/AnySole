@@ -13,7 +13,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from configs.z_gen.model_registry import COMMON, MODELS
+from configs.z_gen.model_registry import COMMON, MODELS, OCC_LEVELS_10
 
 
 CONFIG_DIR = Path(__file__).resolve().parents[1]
@@ -638,7 +638,7 @@ for _kind in ("tafix", "statefix"):
         "REQUIRES": []}
     EXPERIMENTS[_prefix + "_eval_occ"] = {"KIND": "model_suite",
         "MODEL_IDS": [x + "_evalocc" + o for x in _seeded
-                      for o in ("010", "020", "030", "050")],
+                      for o in OCC_LEVELS_10],
         "REQUIRES": []}
 
 # V7 C 门控修改方案（2026-10-30）：T/LR/TLR 训练格与 occ 四档交叉评估格；

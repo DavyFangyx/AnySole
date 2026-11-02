@@ -10,6 +10,9 @@ hyperparameters.  ``part_json`` (V4B structural input) and
 
 from __future__ import annotations
 
+# E5 遮挡十档（2026-11-02 用户裁定：occ010–100 步长 10，occ100 = 视觉全无）
+OCC_LEVELS_10 = ("010", "020", "030", "040", "050", "060", "070", "080", "090", "100")
+
 from pathlib import Path
 
 from anysole.types import variant_from_config
@@ -1273,7 +1276,7 @@ for _suffix, _contact in _SMPL24_PACKAGES.items():
         # 训练 cell 即正式统计 cell（2026-10-29 用户裁定：_statistics 后缀作废，
         # 评估本身就是要 test——train 格 val+test 一次跑齐，test 逐帧预测落
         # predictions/eval_motion，E2/E5/E6/E7 直接读训练 cell）
-        for _occ in ("010", "020", "030", "050"):
+        for _occ in OCC_LEVELS_10:
             MODELS[_new + "_evalocc" + _occ] = {
                 **MODELS[_new], "train": False,
                 "eval_splits": ["val", "test"],
@@ -1316,7 +1319,7 @@ for _base in _SEED_BASES:
             **MODELS[_base],
             "label": "%s-s%d" % (MODELS[_base]["label"], _n),
             "name": MODELS[_base]["name"], "seed": _n}
-        for _occ in ("010", "020", "030", "050"):
+        for _occ in OCC_LEVELS_10:
             MODELS["%s_s%d_evalocc%s" % (_base, _n, _occ)] = {
                 **MODELS["%s_evalocc%s" % (_base, _occ)],
                 "label": "%s-s%d-evalocc%s" % (MODELS[_base]["label"], _n, _occ),
@@ -1331,7 +1334,7 @@ for _base in _CKPT_BASES:
         **MODELS[_base], "label": MODELS[_base]["label"] + "-evalbest",
         "name": MODELS[_base]["name"], "train": False, "which": "best",
         "eval_splits": ["val", "test"]}
-    for _occ in ("010", "020", "030", "050"):
+    for _occ in OCC_LEVELS_10:
         MODELS["%s_evalbest_occ%s" % (_base, _occ)] = {
             **MODELS[_base], "label": "%s-evalbest-occ%s" % (MODELS[_base]["label"], _occ),
             "name": MODELS[_base]["name"], "train": False, "which": "best",
@@ -1391,7 +1394,7 @@ def _drop_all_but_current() -> None:
             for _sd in ("_s1", "_s2", "_s3"):
                 keep.add(_base + _sd)
                 keep.add(_base + _sd + "_evalbest")
-                for _o in ("010", "020", "030", "050"):
+                for _o in OCC_LEVELS_10:
                     keep.add(_base + _sd + "_evalocc" + _o)
                     keep.add(_base + _sd + "_evalbest_occ" + _o)
     for _lr in ("5e-05", "0.0001", "0.0002"):
@@ -1537,7 +1540,14 @@ for _gate in ("V7_Cv5Ctx4B", "V7_Cv5Ctx4R", "V7_Cv5ARM"):
 # G1 机制平移到 prev_state。
 MODELS["V7_Cv5ARSS_s1"] = {
     **_V7_CV5_S1_CELL, "label": "V7-Cv5ARSS-s1",
-    "name": "V7_Cv5AR", "seed": 1,
+    "name": "V7_Cv5ARSS", "seed": 1,
+    "train_args": {**_V7_CV5_S1_CELL.get("train_args", {}),
+                   "ar_ss": 0.3, "ar_noise": 0.1}}
+
+# ARSS2 = 结果目录绕过的同名临时注册（2026-11-02，见 anysole/registry.py 注释）
+MODELS["V7_Cv5ARSS2_s1"] = {
+    **_V7_CV5_S1_CELL, "label": "V7-Cv5ARSS2-s1",
+    "name": "V7_Cv5ARSS2", "seed": 1,
     "train_args": {**_V7_CV5_S1_CELL.get("train_args", {}),
                    "ar_ss": 0.3, "ar_noise": 0.1}}
 for _gate in ("V7_Cv5AR",):
@@ -1553,6 +1563,47 @@ for _gate in ("V7_Cv5AR",):
                 "name": _gate, "seed": _n, "train": False,
                 "eval_splits": ["val", "test"],
                 "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+
+# V7_Cv5AR2（2026-11-01，V7_AR相对运动与航向状态方案）：Cv5 + AR 相对
+# 运动（Δyaw/tilt/body/v_head）+ 航向状态分离 + 视觉航向观测校正。
+# 入口 v7_c2ar2，配方同 Cv5。AR2 损失默认权重随 train_args 发射：
+# λ_dyaw/λ_cumyaw = 1.0（mrad 口径）、λ_dyaw_td/λ_pose_vel/λ_visyaw/
+# λ_yawcorr = 0.5（v1.yaml 的 lambda_pose_vel=0.0 会覆盖函数默认，须显式带出）。
+for _gate in ("V7_Cv5AR2",):
+    for _n in (1, 2, 3):
+        MODELS["%s_s%d" % (_gate, _n)] = {
+            **_V7_CV5_S1_CELL,
+            "label": "%s-s%d" % (_gate.replace("_", "-"), _n),
+            "name": _gate, "seed": _n,
+            "train_args": {**_V7_CV5_S1_CELL.get("train_args", {}),
+                           "lambda_dyaw": 1.0, "lambda_cumyaw": 1.0,
+                           "lambda_dyaw_td": 0.5, "lambda_pose_vel": 0.5,
+                           "lambda_visyaw": 0.5, "lambda_yawcorr": 0.5}}
+        for _occ in ("010", "020", "030", "050"):
+            MODELS["%s_s%d_evalocc%s" % (_gate, _n, _occ)] = {
+                **_V7_CV5_S1_CELL,
+                "label": "%s-s%d-evalocc%s" % (_gate.replace("_", "-"), _n, _occ),
+                "name": _gate, "seed": _n, "train": False,
+                "eval_splits": ["val", "test"],
+                "config": "anysole/configs/v1_cam3_occ%s.yaml" % _occ}
+
+# Strict context matrix: observed 20/40/80, output/stride 20, batch 64.
+# Keep the existing *_tw40/*_tw80 cell IDs; they now label observation length.
+# Existing AR2_s1-3 runs remain separate references with batch 256.
+for _gate, _context in (("V7_Cv5AR2M", 20), ("V7_Cv5AR2M", 40),
+                        ("V7_Cv5AR2M", 80), ("V7_Cv5AR2", 20),
+                        ("V7_Cv5AR2", 40), ("V7_Cv5AR2", 80)):
+    _suf = ("_ctx20" if _gate == "V7_Cv5AR2" and _context == 20
+            else "" if _context == 20 else "_tw%d" % _context)
+    MODELS["%s%s_s1" % (_gate, _suf)] = {
+        **_V7_CV5_S1_CELL,
+        "label": "%s-obs%d-out20-s1" % (_gate.replace("_", "-"), _context),
+        "name": _gate, "seed": 1, "batch_size": 64,
+        "train_args": {**_V7_CV5_S1_CELL.get("train_args", {}),
+                       "tw": 20, "stride": 20, "obs_context": _context,
+                       "lambda_dyaw": 1.0, "lambda_cumyaw": 1.0,
+                       "lambda_dyaw_td": 0.5, "lambda_pose_vel": 0.5,
+                       "lambda_visyaw": 0.5, "lambda_yawcorr": 0.5}}
 
 MODELS["V7_Cv5Ctx2_s1"]["device"] = "cuda:6"
 
