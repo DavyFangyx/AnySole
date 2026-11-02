@@ -64,6 +64,12 @@ E5_TACTILE_KEYS = [k for k, _ in E5_TACTILE_METRICS]
 E5_OCC_LEVELS = ("010", "020", "030", "040", "050", "060", "070", "080",
                  "090", "100")
 E5_OCCS = ("occ000",) + tuple("occ" + o for o in E5_OCC_LEVELS)
+# Main_Fig2 / Main_Table2 = 论文主图/主表（2026-11-02 用户裁定：occ 20–90
+# 八点 × 7 精选指标；必选 PA-MPJPE/traj_ATE@0.5s/GroundPen/FootSliding，
+# 可选 GlobalMPJPE/RootOrientationDrift，另加 PA-MPJPE_anklefoot）
+E5_MAIN_LEVELS = ("020", "030", "040", "050", "060", "070", "080", "090")
+E5_MAIN_METRICS = ["PA-MPJPE", "traj_ATE@0.5s", "GroundPen", "FootSliding",
+                   "GlobalMPJPE", "RootOrientationDrift", "PA-MPJPE_anklefoot"]
 CONTACT_NAMESPACE = "state_smpl24"  # 当前默认线（f6_soft_time_accel_state_smpl24_v1）
 EVAL_SPLIT = "test"
 CELL_MAP = {}
@@ -463,40 +469,47 @@ def export_e5(models: list[str], ckpt: str) -> None:
     # traj_ATE@0.5s（与图 3 子图口径一致）。
     E5_FIG_METRICS = [("traj_ATE@0.5s" if k == "traj_ATE" else k)
                       for k in METRICS10]
-    header4 = ["模型", "口径", "档位", "行"] + E5_FIG_METRICS
-    rows4 = []
 
     def _scalar(x):
         return x[0] if isinstance(x, tuple) else x
 
-    for occ in ("occ" + o for o in E5_OCC_LEVELS):
-        m = seeded_metrics(last_cells[occ][0])
-        base = seeded_metrics(last_cells["occ000"][0])
-        if not m or not base:
-            continue
-        for row_key, cond in (("V2M", "V2M"), ("VT2M", "VT2M")):
-            cells = []
-            for k in E5_FIG_METRICS:
-                v = m[cond].get(k)
-                b = base[cond].get(k)
-                cells.append("" if v is None or b is None
-                             else round(float(_scalar(v)) - float(_scalar(b)), 3))
-            rows4.append([display_name(last_cells[occ][0]), "last", occ, row_key]
-                         + cells)
-        deg = []
-        for k in E5_FIG_METRICS:
-            vv = m["VT2M"].get(k)
-            v = m["V2M"].get(k)
-            bv = base["VT2M"].get(k)
-            b = base["V2M"].get(k)
-            if None in (vv, v, bv, b):
-                deg.append("")
-            else:
-                deg.append(round((float(_scalar(vv)) - float(_scalar(bv)))
-                                 - (float(_scalar(v)) - float(_scalar(b))), 3))
-        rows4.append([display_name(last_cells[occ][0]), "last", occ, "Δ退化(VT−V)"]
-                     + deg)
+    def _degradation_table(metrics: list[str], levels: tuple[str, ...]
+                           ) -> tuple[list[str], list[list]]:
+        header = ["模型", "口径", "档位", "行"] + list(metrics)
+        rows = []
+        for occ in ("occ" + o for o in levels):
+            m = seeded_metrics(last_cells[occ][0])
+            base = seeded_metrics(last_cells["occ000"][0])
+            if not m or not base:
+                continue
+            for row_key, cond in (("V2M", "V2M"), ("VT2M", "VT2M")):
+                cells = []
+                for k in metrics:
+                    v = m[cond].get(k)
+                    b = base[cond].get(k)
+                    cells.append("" if v is None or b is None
+                                 else round(float(_scalar(v)) - float(_scalar(b)), 3))
+                rows.append([display_name(last_cells[occ][0]), "last", occ, row_key]
+                            + cells)
+            deg = []
+            for k in metrics:
+                vv = m["VT2M"].get(k)
+                v = m["V2M"].get(k)
+                bv = base["VT2M"].get(k)
+                b = base["V2M"].get(k)
+                if None in (vv, v, bv, b):
+                    deg.append("")
+                else:
+                    deg.append(round((float(_scalar(vv)) - float(_scalar(bv)))
+                                     - (float(_scalar(v)) - float(_scalar(b))), 3))
+            rows.append([display_name(last_cells[occ][0]), "last", occ,
+                         "Δ退化(VT−V)"] + deg)
+        return header, rows
+
+    header4, rows4 = _degradation_table(E5_FIG_METRICS, E5_OCC_LEVELS)
     write_csv(E5_DIR / "Full_Table4_E5_Degradation.csv", header4, rows4)
+    main_header, main_rows = _degradation_table(E5_MAIN_METRICS, E5_MAIN_LEVELS)
+    write_csv(E5_DIR / "Main_Table2_E5_Degradation.csv", main_header, main_rows)
     export_e5_figure(models)
 
 
@@ -603,15 +616,13 @@ def export_e5_figure(models: list[str]) -> None:
                 "contact_f1": "contact_f1 (V: kinematic / VT: head)",
                 "contact_balanced_acc": "contact_balanced_acc (V: kinematic / VT: head)"})
     # Main_Fig2 = 论文主图（2026-11-02 用户裁定：occ 20–90 八点 × 7 精选指标，
-    # 必选 = PA-MPJPE / traj_ATE@0.5s / GroundPen / FootSliding，
-    # 可选 = GlobalMPJPE / RootOrientationDrift，另加 PA-MPJPE_anklefoot）。
+    # 与 Main_Table2_E5_Degradation.csv 同指标同切点，常量见模块头）。
     _e5_degradation_figure(
-        models, ["PA-MPJPE", "traj_ATE@0.5s", "GroundPen", "FootSliding",
-                 "GlobalMPJPE", "RootOrientationDrift", "PA-MPJPE_anklefoot"],
+        models, list(E5_MAIN_METRICS),
         units, scales,
         "E5 degradation under occlusion - %s (ckpt_last)",
         "Main_Fig2_E5_Degradation.png",
-        levels=("020", "030", "040", "050", "060", "070", "080", "090"),
+        levels=E5_MAIN_LEVELS,
         titles={"PA-MPJPE_anklefoot": "PA-MPJPE (ankle-foot)"})
 
 
