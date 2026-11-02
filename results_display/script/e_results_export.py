@@ -503,19 +503,22 @@ def export_e5(models: list[str], ckpt: str) -> None:
 def _e5_degradation_figure(models: list[str], metrics: list[str],
                            units: dict[str, str], scales: dict[str, float],
                            suptitle: str, fname: str,
-                           titles: dict[str, str] | None = None) -> None:
+                           titles: dict[str, str] | None = None,
+                           levels: tuple[str, ...] | None = None) -> None:
     """E5 退化曲线通用绘图：x = 遮挡档、y = 相对 occ000 的 Δ（×scale），
     V 蓝实线 / VT 橙虚线，子图 = metrics。判读：VT 退化应轻于 V。
-    titles = 子图标题覆盖（接触类标注两套机制口径）。"""
+    titles = 子图标题覆盖（接触类标注两套机制口径）；
+    levels = 档位子集（缺省 = E5_OCC_LEVELS 全部十档）。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    levels = tuple(levels) if levels is not None else E5_OCC_LEVELS
     model = models[0] if models else "V7_Cv5"
     cells = {"occ000": model}
-    for occ in E5_OCC_LEVELS:
+    for occ in levels:
         cells["occ%s" % occ] = "%s_evalocc%s" % (model, occ)
-    xs = [0] + [int(o) for o in E5_OCC_LEVELS]
+    xs = [0] + [int(o) for o in levels]
     color_v, color_vt = "#2a78d6", "#eb6834"  # 校验过的双色（CVD 分离 24.7）
     ncol = 4 if len(metrics) >= 6 else len(metrics)
     nrow = int(np.ceil(len(metrics) / ncol))
@@ -564,12 +567,16 @@ def _e5_degradation_figure(models: list[str], metrics: list[str],
 
 
 def export_e5_figure(models: list[str]) -> None:
-    """E5 图 1 + 图 2（2026-11-02 用户裁定：图 2 = 触觉有利指标退化曲线）。
+    """E5 图 1 + 图 2 + Main_Fig2（2026-11-02 用户裁定）。
 
-    x = 遮挡档（0/10/20/30/50%），y = 相对 occ000 的退化（Δ），
-    V（蓝实线）与 VT（橙虚线）两条曲线——判读：VT 退化应轻于 V
-    （曲线更低/更平）。图 1 = 十指标；图 2 = contact / 地面 / 轨迹 /
-    踝足 vs 上肢对照。主模型缺省 V7_Cv5（last 口径）。图内英文。
+    x = 遮挡档，y = 相对 occ000 的退化（Δ），V（蓝实线）与 VT（橙虚线）
+    两条曲线——判读：VT 退化应轻于 V（曲线更低/更平）。
+    - 图 1 = 十指标完整面板（occ000–100 十一档，工作视图）
+    - 图 2 = contact / 地面 / 轨迹 / 踝足 vs 上肢对照（十一档）
+    - Main_Fig2 = 论文主图（2026-11-02 用户裁定：occ 20–90 八点，
+      7 精选指标 = PA-MPJPE / traj_ATE@0.5s / GroundPen / FootSliding /
+      GlobalMPJPE / RootOrientationDrift / PA-MPJPE_anklefoot）。
+    主模型缺省 V7_Cv5（last 口径）。图内英文。
     """
     units = {"MPJRE": "deg", "RootOrientationDrift": "deg", "Jitter_pred": "m/s³",
              "contact_acc": "%", "contact_f1": "%", "contact_balanced_acc": "%",
@@ -595,6 +602,17 @@ def export_e5_figure(models: list[str]) -> None:
         titles={"contact_acc": "contact_acc (V: kinematic / VT: head)",
                 "contact_f1": "contact_f1 (V: kinematic / VT: head)",
                 "contact_balanced_acc": "contact_balanced_acc (V: kinematic / VT: head)"})
+    # Main_Fig2 = 论文主图（2026-11-02 用户裁定：occ 20–90 八点 × 7 精选指标，
+    # 必选 = PA-MPJPE / traj_ATE@0.5s / GroundPen / FootSliding，
+    # 可选 = GlobalMPJPE / RootOrientationDrift，另加 PA-MPJPE_anklefoot）。
+    _e5_degradation_figure(
+        models, ["PA-MPJPE", "traj_ATE@0.5s", "GroundPen", "FootSliding",
+                 "GlobalMPJPE", "RootOrientationDrift", "PA-MPJPE_anklefoot"],
+        units, scales,
+        "E5 degradation under occlusion - %s (ckpt_last)",
+        "Main_Fig2_E5_Degradation.png",
+        levels=("020", "030", "040", "050", "060", "070", "080", "090"),
+        titles={"PA-MPJPE_anklefoot": "PA-MPJPE (ankle-foot)"})
 
 
 # ---------------- E3：多视角（表 4 骨架：落地的填数、未落地的填 —） ----------------
