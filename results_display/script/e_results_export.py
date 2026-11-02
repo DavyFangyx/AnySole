@@ -7,7 +7,10 @@
 - E3：Etest/10_21/e3_multiview.json → Full_Table1_E3_MultiView.csv
 - E4：cells（Cv1–7 stat，三条件十指标 + Δ）→ Full_Table1_E4_Ablation_AllMetrics.csv
 - E5：主模型 V7_Cv5（last/best × occ000-050 五档）→ Full_Table1_E5_Occlusion.csv
-- E6：E6_接触相位/e6_table.json + PNG → Full_Table1_E6_PhaseGain.csv + Full_FigN_E6_Phase_{g}.png
+- E6：E6_接触相位/e6_table.json + PNG → Full_Table1_E6_PhaseGain.csv
+  （+ 9 行简表 Full_Table1_E6_PhaseGain_Simple.csv，四相位 × 双门/无门）
+  + Full_FigN_E6_Phase_{g}.png；--best-sessions → 门控最佳完整会话合并图
+  Full_Fig_E6_BestSessions.png + e6_best_sessions.json（滤伤害+保增益双条件）
 - E7：E7_动态输入/e7_table.json + PNG → Full_Table1_E7_DynamicStages.csv + Full_FigN_E7_Stages_{a}.png
 
 表 = CSV（utf-8-sig）；十指标固定列序与实验计划一致。幂等可重复执行。
@@ -27,6 +30,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 ETEST = REPO / "results_display" / "Etest"
+# 2026-11-02 用户裁定终版：根层 = 论文级主产物（主图 + 主干表 + 各指标表）；
+# supplementary/ = 逐运动图与完整表；detail/ = json 源/缓存/报告 md。
+E5_DIR = ETEST / "E5_OcclusionRobustness"
+E5_SUPP = E5_DIR / "supplementary"
+E5_DETAIL = E5_DIR / "detail"
+E6_DIR = ETEST / "E6_ContactPhaseAnalysis"
+E6_SUPP = E6_DIR / "supplementary"
+E6_DETAIL = E6_DIR / "detail"
+RECEIPTS = ETEST / "receipts"
 # z_note/E_Test 已并入 E 目录（2026-10-27）；下方源路径全部指向 E 目录
 CELLS = REPO / "results" / "cells"
 
@@ -38,6 +50,15 @@ METRICS10 = ["PA-MPJPE", "MPJPE", "GlobalMPJPE", "W-MPJPE100", "MPJRE",
 # 其余实验表（E1/E4/E5）保留未对齐 traj_ATE 单列。
 E2_METRICS10 = [k if k != "traj_ATE" else v for k in METRICS10
                 for v in (["traj_ATE@0.5s", "traj_ATE"] if k == "traj_ATE" else [k])]
+# E5 表 2 = 触觉有利指标表（2026-11-02 用户裁定：A 层 cells 已落盘指标，
+# 零重算；箭头 = 更优方向，Δ 列同向为正即触觉有帮助）。接触类指标已移出
+# （cell 级混两套机制），统一入表 3（Full_Table3_E5_ContactFair.csv）。
+E5_TACTILE_METRICS = [("traj_ATE@0.5s", "↓"), ("GroundPenFrac", "↓"),
+                      ("ground_pen_foot_mm", "↓"),
+                      ("PA-MPJPE_anklefoot", "↓"), ("PA-MPJPE_l_foot", "↓"),
+                      ("PA-MPJPE_r_foot", "↓"), ("MPJPE_anklefoot", "↓"),
+                      ("PA-MPJPE_upper", "↓")]
+E5_TACTILE_KEYS = [k for k, _ in E5_TACTILE_METRICS]
 CONTACT_NAMESPACE = "state_smpl24"  # 当前默认线（f6_soft_time_accel_state_smpl24_v1）
 EVAL_SPLIT = "test"
 CELL_MAP = {}
@@ -153,7 +174,7 @@ def seeded_metrics(model_id: str, split=None) -> dict | None:
 
     cands = sorted(
         p.name for p in (CELLS).iterdir()
-        if p.name in {key, _variant(1), _variant(2), _variant(3)})
+        if p.name in {key, _variant(1)})
     ms = [cell_metrics(c, split) for c in cands]
     ms = [m for m in ms if m]
     if not ms:
@@ -189,10 +210,10 @@ def metric_row(m: dict, cond: str, keys: list[str] = METRICS10,
     return out
 
 
-def delta_row(m: dict) -> list:
+def delta_row(m: dict, keys: list[str] = METRICS10) -> list:
     """Δ(VT−V) 行：多 seed 按 seed 对先算 Δ 再聚合（误差传播）。"""
     out = []
-    for k in METRICS10:
+    for k in keys:
         vv = m["VT2M"].get(k)
         v = m["V2M"].get(k)
         if vv is None or v is None:
@@ -344,6 +365,11 @@ def export_e4(models: list[str], ckpt: str) -> None:
 def export_e5(models: list[str], ckpt: str) -> None:
     header = ["模型", "口径", "档位", "行"] + METRICS10
     rows = []
+    # 表 2 行同表 1 结构，列为触觉有利指标（↑=越高越好 / ↓=越低越好；
+    # Δ(VT−V) 同向为正 = 触觉有帮助，2026-11-02 用户裁定）
+    header2 = ["模型", "口径", "档位", "行"] + \
+        [k + d for k, d in E5_TACTILE_METRICS]
+    rows2 = []
     # E5 = 单一主模型（2026-10-30 用户裁定）：U = V7_Cv5 一份 ckpt × occ 五档
     model = models[0] if models else "V7_Cv5"
     last_cells = {"occ000": [model]}
@@ -361,8 +387,12 @@ def export_e5(models: list[str], ckpt: str) -> None:
             for row_key, cond in (("V2M", "V2M"), ("VT2M", "VT2M")):
                 rows.append([display_name(model), "last", occ, row_key]
                             + metric_row(m, cond))
+                rows2.append([display_name(model), "last", occ, row_key]
+                             + metric_row(m, cond, keys=E5_TACTILE_KEYS))
             rows.append([display_name(model), "last", occ, "Δ(VT−V)"]
                         + delta_row(m))
+            rows2.append([display_name(model), "last", occ, "Δ(VT−V)"]
+                         + delta_row(m, keys=E5_TACTILE_KEYS))
         for model in best_ids if ckpt != "last" else []:
             m = seeded_metrics(model)
             if not m:
@@ -370,21 +400,108 @@ def export_e5(models: list[str], ckpt: str) -> None:
             for row_key, cond in (("V2M", "V2M"), ("VT2M", "VT2M")):
                 rows.append([display_name(model), "best", occ, row_key]
                             + metric_row(m, cond))
+                rows2.append([display_name(model), "best", occ, row_key]
+                             + metric_row(m, cond, keys=E5_TACTILE_KEYS))
             rows.append([display_name(model), "best", occ, "Δ(VT−V)"]
                         + delta_row(m))
-    write_csv(ETEST / "E5_OcclusionRobustness" / "Full_Table1_E5_Occlusion.csv",
-              header, dedupe(rows))
+            rows2.append([display_name(model), "best", occ, "Δ(VT−V)"]
+                         + delta_row(m, keys=E5_TACTILE_KEYS))
+    write_csv(E5_SUPP / "Full_Table1_E5_Occlusion.csv", header, dedupe(rows))
+    write_csv(E5_DIR / "Full_Table2_E5_TactileGain.csv", header2, dedupe(rows2))
+    # 表 3 = 接触口径统一表（2026-11-02 用户裁定「接触指标口径统一且公平」）：
+    # 足高判据行 = V/VT 同机制（e5_contact_kin.json 离线池化，两脚两条件）；
+    # 接触头行 = 仅 VT 推理有触觉 token 驱动，V-only 无触觉通道故无接触头。
+    # 「V=足高判据 vs VT=接触头」即各条件最强接触感知方式的对比，
+    # Δ(头−V足高判据) = 触觉通道本身的贡献；足高判据 Δ(VT−V) ≈ 0 排除
+    # 「骨骼修正副产物」质疑。
+    # balanced（类别平衡口径）：V 的 acc/f1 在 occ030 有回升假象（脚部全遮
+    # → 预测塌缩到地面先验，recall↑/air_recall↓），balanced 单调退化——
+    # 趋势判读用 balanced 列。
+    kin_path = E5_DETAIL / "e5_contact_kin.json"
+    if kin_path.is_file():
+        kin = json.loads(kin_path.read_text(encoding="utf-8"))
+        header3 = ["档位", "足高判据acc(V)", "足高判据acc(VT)", "Δacc(VT−V)",
+                   "足高判据f1(V)", "足高判据f1(VT)", "Δf1(VT−V)",
+                   "足高判据balanced(V)", "足高判据balanced(VT)",
+                   "Δbalanced(VT−V)", "接触头acc(VT)", "接触头f1(VT)",
+                   "接触头balanced(VT)", "Δacc(头−V足高判据)",
+                   "Δbalanced(头−V足高判据)"]
+        rows3 = []
+
+        def _bal(cell: dict) -> float:
+            return 0.5 * (cell["recall"] + cell["air_recall"])
+
+        for occ, ids in last_cells.items():
+            m = seeded_metrics(ids[0])
+            if not m or occ not in kin:
+                continue
+            k = kin[occ]
+            kv, kvt = k["V2M"], k["VT2M"]
+            head_acc = m["VT2M"].get("contact_acc", float("nan"))
+            head_f1 = m["VT2M"].get("contact_f1", float("nan"))
+            head_bal = m["VT2M"].get("contact_balanced_acc", float("nan"))
+            rows3.append([occ,
+                          round(kv["acc"], 3), round(kvt["acc"], 3),
+                          round(kvt["acc"] - kv["acc"], 3),
+                          round(kv["f1"], 3), round(kvt["f1"], 3),
+                          round(kvt["f1"] - kv["f1"], 3),
+                          round(_bal(kv), 3), round(_bal(kvt), 3),
+                          round(_bal(kvt) - _bal(kv), 3),
+                          round(head_acc, 3), round(head_f1, 3),
+                          round(head_bal, 3),
+                          round(head_acc - kv["acc"], 3),
+                          round(head_bal - _bal(kv), 3)])
+        write_csv(E5_SUPP / "Full_Table3_E5_ContactFair.csv", header3, rows3)
+    # 表 4 = 图 3 的对应数值表（2026-11-02 用户裁定：主干表，根层）：
+    # 各指标随 occ 的退化 = 值 − occ000 基线；行 V2M / VT2M /
+    # Δ退化(VT−V)。Δ退化 为负 = VT 退化更轻 = 触觉有帮助；traj 列 =
+    # traj_ATE@0.5s（与图 3 子图口径一致）。
+    E5_FIG_METRICS = [("traj_ATE@0.5s" if k == "traj_ATE" else k)
+                      for k in METRICS10]
+    header4 = ["模型", "口径", "档位", "行"] + E5_FIG_METRICS
+    rows4 = []
+
+    def _scalar(x):
+        return x[0] if isinstance(x, tuple) else x
+
+    for occ in ("occ010", "occ020", "occ030", "occ050"):
+        m = seeded_metrics(last_cells[occ][0])
+        base = seeded_metrics(last_cells["occ000"][0])
+        if not m or not base:
+            continue
+        for row_key, cond in (("V2M", "V2M"), ("VT2M", "VT2M")):
+            cells = []
+            for k in E5_FIG_METRICS:
+                v = m[cond].get(k)
+                b = base[cond].get(k)
+                cells.append("" if v is None or b is None
+                             else round(float(_scalar(v)) - float(_scalar(b)), 3))
+            rows4.append([display_name(last_cells[occ][0]), "last", occ, row_key]
+                         + cells)
+        deg = []
+        for k in E5_FIG_METRICS:
+            vv = m["VT2M"].get(k)
+            v = m["V2M"].get(k)
+            bv = base["VT2M"].get(k)
+            b = base["V2M"].get(k)
+            if None in (vv, v, bv, b):
+                deg.append("")
+            else:
+                deg.append(round((float(_scalar(vv)) - float(_scalar(bv)))
+                                 - (float(_scalar(v)) - float(_scalar(b))), 3))
+        rows4.append([display_name(last_cells[occ][0]), "last", occ, "Δ退化(VT−V)"]
+                     + deg)
+    write_csv(E5_DIR / "Full_Table4_E5_Degradation.csv", header4, rows4)
     export_e5_figure(models)
 
 
-def export_e5_figure(models: list[str]) -> None:
-    """E5 图 1：退化曲线（2026-10-27 用户要求）。
-
-    x = 遮挡档（0/10/20/30/50%），y = 相对 occ000 的退化（Δ），
-    V（蓝实线）与 VT（橙虚线）两条曲线，子图 = 全部十指标——
-    判读：VT 退化应轻于 V（曲线更低/更平）。主模型缺省 V7_Cv5（last 口径）。
-    图内英文（项目口径）。产物：E5_OcclusionRobustness/Full_Fig1_E5_Degradation.png
-    """
+def _e5_degradation_figure(models: list[str], metrics: list[str],
+                           units: dict[str, str], scales: dict[str, float],
+                           suptitle: str, fname: str,
+                           titles: dict[str, str] | None = None) -> None:
+    """E5 退化曲线通用绘图：x = 遮挡档、y = 相对 occ000 的 Δ（×scale），
+    V 蓝实线 / VT 橙虚线，子图 = metrics。判读：VT 退化应轻于 V。
+    titles = 子图标题覆盖（接触类标注两套机制口径）。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -393,16 +510,17 @@ def export_e5_figure(models: list[str]) -> None:
     cells = {"occ000": model}
     for occ in ("010", "020", "030", "050"):
         cells["occ%s" % occ] = "%s_evalocc%s" % (model, occ)
-    metrics = list(METRICS10)
-    unit_of = {"MPJRE": "deg", "RootOrientationDrift": "deg",
-               "Jitter_pred": "m/s³"}
     xs = [0, 10, 20, 30, 50]
     color_v, color_vt = "#2a78d6", "#eb6834"  # 校验过的双色（CVD 分离 24.7）
-    fig, axes = plt.subplots(2, 5, figsize=(18.5, 7.2))
-    for ax, metric in zip(axes.flat, metrics):
-        base = seeded_metrics(cells["occ000"])
+    ncol = 4 if len(metrics) >= 6 else len(metrics)
+    nrow = int(np.ceil(len(metrics) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.6 * ncol, 4.1 * nrow))
+    base = seeded_metrics(cells["occ000"])
+    for ax, metric in zip(np.asarray(axes).flat, metrics):
+        scale = scales.get(metric, 1.0)
         if not base:
             continue
+
         def _val(v):
             return v[0] if isinstance(v, tuple) else float(v)
 
@@ -410,8 +528,8 @@ def export_e5_figure(models: list[str]) -> None:
             vals = []
             for occ, cell in cells.items():
                 m = seeded_metrics(cell)
-                vals.append(_val(m[cond][metric]) - _val(base[cond][metric])
-                            if m else float("nan"))
+                vals.append((_val(m[cond][metric]) - _val(base[cond][metric]))
+                            * scale if m else float("nan"))
             return vals
         v, vt = series("V2M"), series("VT2M")
         ax.plot(xs, v, color=color_v, lw=2, marker="o", ms=5, label="V")
@@ -421,21 +539,57 @@ def export_e5_figure(models: list[str]) -> None:
                         xytext=(4, 0), textcoords="offset points", va="center")
             ax.annotate("VT", (xs[-1], vt[-1]), color=color_vt, fontweight="bold",
                         xytext=(4, 0), textcoords="offset points", va="center")
-        ax.set_title(metric, fontsize=10)
+        ax.set_title((titles or {}).get(metric, metric), fontsize=10)
         ax.set_xlabel("Occlusion (%)", fontsize=9)
-        ax.set_ylabel("Δ vs occ000 (%s)" % unit_of.get(metric, "mm"),
+        ax.set_ylabel("Δ vs occ000 (%s)" % units.get(metric, "mm"),
                       fontsize=9)
         ax.grid(alpha=0.25, lw=0.6)
         ax.margins(y=0.15)
-    fig.suptitle("E5 degradation under occlusion - %s (ckpt_last)" % model,
-                 fontsize=12)
-    fig.legend(handles=axes.flat[0].lines, labels=["V", "VT"],
+    for ax in np.asarray(axes).flat[len(metrics):]:
+        ax.set_visible(False)
+    fig.suptitle(suptitle % model, fontsize=12)
+    fig.legend(handles=np.asarray(axes).flat[0].lines, labels=["V", "VT"],
                loc="lower center", ncol=2, frameon=False, fontsize=10)
-    out = ETEST / "E5_OcclusionRobustness" / "Full_Fig1_E5_Degradation.png"
+    out = (E5_DIR if "/" not in fname else ETEST / "E5_OcclusionRobustness") / fname
     out.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout(rect=(0, 0.03, 1, 0.97))
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("[png] %s" % out)
+
+
+def export_e5_figure(models: list[str]) -> None:
+    """E5 图 1 + 图 2（2026-11-02 用户裁定：图 2 = 触觉有利指标退化曲线）。
+
+    x = 遮挡档（0/10/20/30/50%），y = 相对 occ000 的退化（Δ），
+    V（蓝实线）与 VT（橙虚线）两条曲线——判读：VT 退化应轻于 V
+    （曲线更低/更平）。图 1 = 十指标；图 2 = contact / 地面 / 轨迹 /
+    踝足 vs 上肢对照。主模型缺省 V7_Cv5（last 口径）。图内英文。
+    """
+    units = {"MPJRE": "deg", "RootOrientationDrift": "deg", "Jitter_pred": "m/s³",
+             "contact_acc": "%", "contact_f1": "%", "contact_balanced_acc": "%",
+             "contact_recall": "%", "air_recall": "%", "GroundPenFrac": "frac"}
+    scales = {k: 100.0 for k in ("contact_acc", "contact_f1",
+                                 "contact_balanced_acc", "contact_recall",
+                                 "air_recall")}
+    # traj 子图 = traj_ATE@0.5s（20 帧段首对齐全方法同一处理，11-01 裁定；
+    # occ 四档 11-02 重评后五 cell 齐列）；表 1 保留未对齐 traj_ATE 单列。
+    _e5_degradation_figure(
+        models, [("traj_ATE@0.5s" if k == "traj_ATE" else k)
+                 for k in METRICS10], units, scales,
+        "E5 degradation under occlusion - %s (ckpt_last)",
+        "Full_Fig1_E5_Degradation.png")
+    _e5_degradation_figure(
+        models, ["contact_acc", "contact_f1", "contact_balanced_acc",
+                 "traj_ATE@0.5s", "GroundPenFrac", "ground_pen_foot_mm",
+                 "RootOrientationDrift", "PA-MPJPE_anklefoot",
+                 "PA-MPJPE_upper"],
+        units, scales,
+        "E5 tactile-gain metrics under occlusion - %s (ckpt_last)",
+        "Full_Fig2_E5_TactileGain.png",
+        titles={"contact_acc": "contact_acc (V: kinematic / VT: head)",
+                "contact_f1": "contact_f1 (V: kinematic / VT: head)",
+                "contact_balanced_acc": "contact_balanced_acc (V: kinematic / VT: head)"})
 
 
 # ---------------- E3：多视角（表 4 骨架：落地的填数、未落地的填 —） ----------------
@@ -660,12 +814,12 @@ E6_GROUP_ORDER = ["walk", "run", "squat", "stand_shift", "single_stand",
 E6_ACTION_VALUES = ["walk", "walk", "run", "run", "squat", "stand_shift",
                     "single_stand", "jump_jack", "lateral", "sit_stand", "stairs"]
 E6_PHASE_ZH = {"0": "稳定支撑", "1": "摆动", "2": "落脚附近", "3": "离地附近"}
+E6_METRIC_ZH = {"vert": "足垂直误差(mm)", "pen": "地面穿透(mm)",
+                "contact": "足高判据接触准确率(%)"}
 
 
 def export_e6() -> None:
-    src_dir = ETEST / "E6_ContactPhaseAnalysis"
-    dst_dir = ETEST / "E6_ContactPhaseAnalysis"
-    data = json.loads((src_dir / "e6_table.json").read_text(encoding="utf-8"))
+    data = json.loads((E6_DETAIL / "e6_table.json").read_text(encoding="utf-8"))
     header = ["动作", "模型", "脚", "相位"] + ["V误差", "VT误差", "G(V−VT)"]
     rows = []
     for group in E6_GROUP_ORDER:
@@ -680,15 +834,68 @@ def export_e6() -> None:
                         continue
                     rows.append([group, model, foot, E6_PHASE_ZH[phase],
                                  round(v["V"], 3), round(v["VT"], 3), round(v["G"], 3)])
-    write_csv(dst_dir / "Full_Table1_E6_PhaseGain.csv", header, rows)
+    write_csv(E6_SUPP / "Full_Table1_E6_PhaseGain.csv", header, rows)
+    # 简表 = 论文主干表（每动作一行，四相位 × 双门/无门，G=V−VT 论文口径）
+    # → 根层；162 行完整表与多指标表进 supplementary
+    write_csv(E6_DIR / "Full_Table1_E6_PhaseGain_Simple.csv",
+              *e6_simple_csv(data))
+    # 表 2 = 多指标相位表（2026-11-02 用户裁定）：足垂直误差 / 地面穿透 /
+    # 接触准确率，逐相位 V / VT / Δ(VT−V)。误差与穿透 Δ 为负 = 触觉有帮助；
+    # 接触准确率 Δ 为正 = 触觉有帮助（方向随指标，见指标名）。
+    metrics_src = E6_DETAIL / "e6_table_metrics.json"
+    if metrics_src.is_file():
+        mdata = json.loads(metrics_src.read_text(encoding="utf-8"))
+        header2 = ["动作", "模型", "脚", "相位", "指标", "V", "VT", "Δ(VT−V)"]
+        rows2 = []
+        for group in E6_GROUP_ORDER:
+            if group not in mdata:
+                continue
+            mtable = mdata[group]["table"]
+            for model in sorted(mtable):
+                for foot in ("left", "right"):
+                    for phase in ("0", "1", "2", "3"):
+                        row = mtable[model][foot].get(phase)
+                        if not row:
+                            continue
+                        for mk, zh in E6_METRIC_ZH.items():
+                            d = row.get(mk)
+                            if not d:
+                                continue
+                            rows2.append([group, model, foot, E6_PHASE_ZH[phase],
+                                          zh, round(d["V"], 3),
+                                          round(d["VT"], 3), round(d["G"], 3)])
+        write_csv(E6_SUPP / "Full_Table2_E6_PhaseMetrics.csv", header2, rows2)
     # 新版口径（2026-10-31 用户裁定）：驱动直写逐会话 1×2 上下分布图
     # Full_Fig_{action}_{sid}.png（上左脚/下右脚，分脚不合并不平均）；
     # group_compare/{curves,scatter}/ 由 results_display/script/
     # e6_group_compare.py 生成。旧合并双足命名
     # （Full_FigN_E6_Phase_{group}.png / e6_phase_*.png）已废止，不再复制。
-    n_figs = len(list(dst_dir.glob("Full_Fig_*.png")))
+    n_figs = len(list((E6_DETAIL / "per_session").glob("Full_Fig_*.png")))
     print("[png] E6 per-session figures: %d (Full_Fig_{action}_{sid}.png)"
           % n_figs)
+
+
+def e6_simple_csv(data: dict) -> tuple[list[str], list[list[str]]]:
+    """E6 简表（2026-11-02 用户裁定）：每动作一行，四相位 × 双门/无门。
+    口径 = 论文 G = V − VT（正=触觉有帮助），左右脚均值（缺相位留空）；
+    注意完整表 G 列为 Δ=VT−V（正=伤害），两者互为反号。"""
+    simple_models = ("V7_Cv5_s1", "V7_Cv7_s1")
+    header = ["动作", "会话数"] + [
+        f"{zh}G_{m}" for zh in E6_PHASE_ZH.values() for m in simple_models]
+    rows = []
+    for group in E6_GROUP_ORDER:
+        if group not in data:
+            continue
+        table = data[group]["table"]
+        line = [group, str(len(data[group]["sessions"]))]
+        for phase in ("0", "1", "2", "3"):
+            for m in simple_models:
+                vals = [table[m][foot][phase]["V"] - table[m][foot][phase]["VT"]
+                        for foot in ("left", "right")
+                        if table[m][foot].get(phase) is not None]
+                line.append(f"{sum(vals) / len(vals):+.1f}" if vals else "")
+        rows.append(line)
+    return header, rows
 
 
 def _touch_gait_python() -> str:
@@ -716,18 +923,31 @@ def export_e6_group_compare(models: list[str]) -> None:
     subprocess.run(cmd, cwd=str(REPO), check=True)
 
 
+def export_e6_best_sessions() -> None:
+    """--best-sessions（2026-11-02 用户裁定）：E6 门控最佳完整会话合并图
+    Full_Fig_E6_BestSessions.png + e6_best_sessions.json——逐会话「滤伤害
+    （H7−H5≥2mm）+保增益（A7−A5≤4mm）」双条件选会话，子图为该会话
+    Full_Fig 原图原样嵌入，无合格会话的动作红框。生成器 =
+    results_display/script/e6_best_sessions.py。"""
+    cmd = [_touch_gait_python(),
+           str(REPO / "results_display/script/e6_best_sessions.py")]
+    subprocess.run(cmd, cwd=str(REPO), check=True)
+
+
 # ---------------- E7：动态输入（json + PNG） ----------------
 def export_e7() -> None:
     """统一入口（2026-10-31 用户裁定）：先跑 anysole_tta/e7_driver.py
     生成图 + e7_table.json，再导出 CSV。TTA dump 已有时驱动自动跳过
-    （仅装配+绘图，分钟级）；缺 dump 的动作会触发 TTA 子进程。"""
+    （仅装配+绘图，分钟级）；缺 dump 的动作会触发 TTA 子进程。
+    驱动需 touch_gait（cv2），用 _touch_gait_python 显式指定
+    （2026-11-02 修复：原 sys.executable 在 base 环境缺 cv2 失败）。"""
     import subprocess
     driver = REPO / "anysole_tta" / "e7_driver.py"
     print("[e7] run driver: %s" % driver)
-    subprocess.run([sys.executable, str(driver)], check=True, cwd=str(REPO))
+    subprocess.run([_touch_gait_python(), str(driver)], check=True, cwd=str(REPO))
     src_dir = ETEST / "E7_DynamicModalityInputs"
     dst_dir = ETEST / "E7_DynamicModalityInputs"
-    data = json.loads((src_dir / "e7_table.json").read_text(encoding="utf-8"))
+    data = json.loads((src_dir / "detail" / "e7_table.json").read_text(encoding="utf-8"))
     stages = ["V", "T", "VT", "Vi", "ViT"]
     systems = sorted({s for a in data.values() for st in a["stages"].values() for s in st})
     header = ["动作", "系统"] + stages
@@ -785,6 +1005,9 @@ def main() -> int:
                          "逐会话 1×2 上下分布、左右脚分开不平滑）")
     ap.add_argument("--teaser", action="store_true",
                     help="E6/E7 生成可见人体 SMPL teaser 图（默认关闭；需 touch_gait）")
+    ap.add_argument("--best-sessions", action="store_true",
+                    help="E6 生成门控最佳完整会话合并图（Full_Fig_E6_BestSessions.png；"
+                         "滤伤害+保增益双条件选会话，无合格会话红框）")
     args = ap.parse_args()
     CONTACT_NAMESPACE, EVAL_SPLIT, STRICT_EXPORT = args.contact_version, args.split, args.strict
     if args.cell_map:
@@ -814,8 +1037,14 @@ def main() -> int:
             export_teasers(exp)
         else:
             print("[skip] --teaser 只适用于 E6/E7")
+    if args.best_sessions:
+        if exp in ("all", "e6"):
+            export_e6_best_sessions()
+        else:
+            print("[skip] --best-sessions 只适用于 E6")
     ETEST.mkdir(parents=True, exist_ok=True)
-    (ETEST / ("export_receipt_" + exp + ".json")).write_text(json.dumps({
+    RECEIPTS.mkdir(parents=True, exist_ok=True)
+    (RECEIPTS / ("export_receipt_" + exp + ".json")).write_text(json.dumps({
         "split": EVAL_SPLIT, "contact_version": CONTACT_NAMESPACE,
         "sources": SOURCE_RECEIPTS}, ensure_ascii=False, indent=2) + "\n")
     return 0

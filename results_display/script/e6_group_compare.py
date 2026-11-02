@@ -30,7 +30,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "z_note/HMR2.0/hmr2_gait"))
 from anysole_tta.e6_phase_analysis import FPS, build_session_sets, load_session  # noqa: E402
 
-OUT = REPO / "results_display/Etest/E6_ContactPhaseAnalysis" / "group_compare"
+OUT = REPO / "results_display/Etest/E6_ContactPhaseAnalysis" / "detail" / "group_compare"
 # B + 候选五组 + 对照两组（Cv4 单门 / Cv7 无门）
 MODELS = ("V7_Cv5_s1", "V7_Cv4_s1", "V7_Cv7_s1", "V7_Cv5T_s1", "V7_Cv5LR_s1",
           "V7_Cv5TLR_s1", "V7_Cv5Q_s1")

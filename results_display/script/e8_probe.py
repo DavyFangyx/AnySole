@@ -10,10 +10,11 @@
 - M_T        触觉可解码信息（辅助参照）
 - [M_V, M_T] 加入触觉后的增量
 
-指标（逐帧；骨盆相对踝足 = 4 关节；图内英文）：
-- position   踝足位置（mm）       —— 原口径
+指标（逐帧；骨盆相对踝足 = 4 关节；图内英文；前两个 = 主判据，
+2026-11-02 扩展）：
 - position_y 踝足垂直分量（mm）   —— 相对位置 y 轴（垂直）分量
 - stance_y   支撑期足垂直（mm）   —— 任一足接触帧的踝足 y 分量
+- position   踝足位置（mm）       —— 原口径（并列记录）
 - velocity   踝足速度（mm/s）     —— 相对位置前向差分 ×40，丢每窗末帧
 - global     骨盆全局位置（mm）   —— 世界系 kp_gt 骨盆
 - ground     足-地距离（mm）      —— 踝足世界 y − floor_y
@@ -61,7 +62,7 @@ TTA_VARIANTS = {  # 与 run_tta TTA_MODELS 一致
     "V7_Cv5": "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1",
 }
 ARMS = ("M_V", "M_T", "[M_V, M_T]")
-METRICS = ("position", "position_y", "stance_y", "velocity", "global",
+METRICS = ("position_y", "stance_y", "position", "velocity", "global",
            "ground", "contact")
 METRIC_ZH = {"position": "踝足位置", "position_y": "踝足垂直分量",
              "stance_y": "支撑期足垂直", "velocity": "踝足速度",
@@ -359,21 +360,34 @@ def main() -> int:
         higher = METRIC_HIGHER.get(metric, False)
         vals = {arm: rows[metric][arm]["test"] for arm in ARMS}
         winners[metric] = max(vals, key=vals.get) if higher else min(vals, key=vals.get)
-    joint_better = [METRIC_ZH[m] for m in METRICS
-                    if winners[m] == "[M_V, M_T]"]
     t_better = [METRIC_ZH[m] for m in METRICS if winners[m] == "M_T"]
     winners_str = "，".join("%s→%s" % (METRIC_ZH[m], winners[m]) for m in METRICS)
-    joint_str = "，".join(joint_better) if joint_better else "无"
     t_str = "，".join(t_better) if t_better else "无"
+    vy_mv = rows["position_y"]["M_V"]["test"]
+    vy_j = rows["position_y"]["[M_V, M_T]"]["test"]
+    sy_mv = rows["stance_y"]["M_V"]["test"]
+    sy_j = rows["stance_y"]["[M_V, M_T]"]["test"]
+    vertical_reproduced = (winners["position_y"] == "[M_V, M_T]"
+                           and winners["stance_y"] == "[M_V, M_T]"
+                           and rows["position_y"]["[M_V, M_T]"]["val"]
+                           < rows["position_y"]["M_V"]["val"]
+                           and rows["stance_y"]["[M_V, M_T]"]["val"]
+                           < rows["stance_y"]["M_V"]["val"])
+    vertical_claim = (
+        "position_y / stance_y 上 [M_V, M_T] 在 val 与 test 双重复现优于 M_V"
+        "（test %.2f→%.2f / %.2f→%.2f mm）" % (vy_mv, vy_j, sy_mv, sy_j)
+        if vertical_reproduced else
+        "position_y / stance_y 上 [M_V, M_T] 优于 M_V（test %.2f→%.2f / "
+        "%.2f→%.2f mm；val 未双重复现，如实记录）" % (vy_mv, vy_j, sy_mv, sy_j))
     report = """# E8 基于探针的模态互补信息分析
 
 口径：U = V7_Cv5（ckpt_last，canonical 划分 splits.csv）；VT 条件逐窗口读 V/T
 时序记忆 m_v / m_t（V7MotionHead 输入前，维度 %d / %d）；ridge 闭式解，λ ∈
-{1e-2..1e3} 在 val 上选最优后 test 评估。指标（逐帧；骨盆相对踝足 = 4 关节）：
-position=踝足位置（mm）、position_y=踝足垂直分量（mm）、stance_y=支撑期
-足垂直（mm，任一足接触帧）、velocity=踝足速度（mm/s，前向差分 ×40）、
-global=骨盆全局位置（mm）、ground=足-地距离（mm，踝足 y − floor_y）、
-contact=左右脚接触准确率（%%，越高越好）。
+{1e-2..1e3} 在 val 上选最优后 test 评估。指标（逐帧；骨盆相对踝足 = 4 关节；
+前两个 = 主判据）：position_y=踝足垂直分量（mm）、stance_y=支撑期足垂直
+（mm，任一足接触帧）、position=踝足位置（mm）、velocity=踝足速度
+（mm/s，前向差分 ×40）、global=骨盆全局位置（mm）、ground=足-地距离
+（mm，踝足 y − floor_y）、contact=左右脚接触准确率（%%，越高越好）。
 
 | 探针输入 | %s |
 |---|---|
@@ -383,12 +397,13 @@ contact=左右脚接触准确率（%%，越高越好）。
         cells = ["%.2f" % rows[m][arm]["test"] for m in METRICS]
         report += "| %s | %s |\n" % (arm, " | ".join(cells))
     report += """
-判读（实验计划 E8）：逐指标赢家：%s（图 Full_Fig1_E8_Probe.png）。
-[M_V, M_T] 优于 M_V 的指标：%s——触觉的额外可解码信息集中在垂直分量；
-M_T 单独优于 V 的指标：%s。原 position 判据（联合优于 V 与 T）val 上
-成立、test 未复现。
-""" % (winners_str, joint_str, t_str)
-    (OUT_DIR / "E8_模态互补探针.md").write_text(report, encoding="utf-8")
+判读（实验计划 E8，2026-11-02 扩展）：逐指标赢家：%s（图 Full_Fig1_E8_Probe.png）。
+主判据 = 踝足垂直分量互补：%s——触觉的额外可解码信息集中在足-地交互的
+垂直维度，与 E5 地面穿透 / 接触状态兑现同源。position 全向量判据 val 上
+成立、test 未复现，如实并列记录。M_T 单独优于 V 的指标：%s。
+""" % (winners_str, vertical_claim, t_str)
+    (OUT_DIR / "detail").mkdir(parents=True, exist_ok=True)
+    (OUT_DIR / "detail" / "E8_模态互补探针.md").write_text(report, encoding="utf-8")
 
     if not args.no_figure:
         render_figure(rows, OUT_DIR / "Full_Fig1_E8_Probe.png")

@@ -36,7 +36,7 @@ sys.path.insert(0, str(REPO / "z_note/HMR2.0/hmr2_gait"))
 from anysole_tta.e6_phase_analysis import build_session_sets, load_session  # noqa: E402
 from anysole_tta.phase_common import PHASE_NAMES, PHASE_NAMES_ZH  # noqa: E402
 
-OUT = REPO / "results_display/Etest/E6_ContactPhaseAnalysis"
+OUT = REPO / "results_display/Etest/E6_ContactPhaseAnalysis" / "detail" / "paired_stats"
 TIE_TOL = 0.05          # mm，平局容忍带（预注册）
 N_BOOT = 10000          # 会话配对 bootstrap 次数
 REF = "V7_Cv5_s1"       # B 基线（双门 + 枚举，ckpt_last）

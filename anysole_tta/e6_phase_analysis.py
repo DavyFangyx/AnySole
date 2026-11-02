@@ -26,10 +26,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # 仓库根
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # hmr2_gait 根（anysole_tta 命名空间包）
 from hmr2_tta.paths import PROJECT_ROOT  # noqa: E402
-from anysole_tta.phase_common import (CELL_ROOT, PHASE_NAMES, PHASE_NAMES_ZH,  # noqa: E402
-                                      foot_mpjpe_per_frame, load_contact,
-                                      load_gt_joints, load_pred_joints,
-                                      phase_labels)
+from anysole_tta.phase_common import (CELL_ROOT, LEFT_ANKLE_FOOT,  # noqa: E402
+                                      PHASE_NAMES, PHASE_NAMES_ZH,
+                                      RIGHT_ANKLE_FOOT, foot_mpjpe_per_frame,
+                                      load_contact, load_gt_joints,
+                                      load_pred_joints, phase_labels)
+from anysole.data.smpl_io import estimate_floor_y  # noqa: E402
 
 OUT_DIR = PROJECT_ROOT / "results_display/Etest/E6_ContactPhaseAnalysis"
 FPS = 40.0
@@ -47,6 +49,47 @@ GROUP_ZH = {"walk": "走路", "run": "跑步", "squat": "深蹲",
             "stand_shift": "站立重心移", "single_stand": "单脚站立",
             "jump_jack": "开合跳", "lateral": "横移", "sit_stand": "坐下站起",
             "stairs": "上楼梯"}
+
+# 多指标相位表（2026-11-02 扩展）：位置误差之外，逐相位统计足垂直误差 /
+# 地面穿透 / 接触准确率。G = VT − V；vert/pen 为负 = 触觉有帮助，
+# contact 为正 = 触觉有帮助（方向随指标）。
+METRICS_EXTRA = ("vert", "pen", "contact")
+
+
+def foot_vertical_error_per_frame(pred: np.ndarray, gt: np.ndarray,
+                                  foot_joints: tuple[int, ...]) -> np.ndarray:
+    """骨盆对齐后逐帧 |Δy|（该脚 2 关节均值，mm/帧）。"""
+    from anysole.utils.metrics import pelvis_align
+    p, _ = pelvis_align(pred)
+    g, _ = pelvis_align(gt)
+    err_y = np.abs(p[..., 1] - g[..., 1])[:, foot_joints].mean(axis=1) * 1000.0
+    return err_y
+
+
+def foot_ground_pen_per_frame(pred: np.ndarray, floor: float,
+                              foot_joints: tuple[int, ...]) -> np.ndarray:
+    """逐帧地面穿透 = max(0, floor − 该脚踝足最低点)（mm/帧）。"""
+    ys = pred[:, foot_joints, 1]
+    return np.maximum(0.0, floor - ys.min(axis=1)) * 1000.0
+
+
+def predicted_contact_per_frame(pred: np.ndarray, floor: float,
+                                fps: float = 40.0) -> np.ndarray:
+    """soft_contact_from_keypoints（losses.py）的 numpy 同口径镜像 →
+    (T,2) bool 预测接触：足高与足速 soft 概率乘积 > 0.5。"""
+    out = np.zeros((len(pred), 2), dtype=bool)
+    for fi, joints in enumerate((LEFT_ANKLE_FOOT, RIGHT_ANKLE_FOOT)):
+        foot = pred[:, joints, :]
+        height = foot[..., 1].min(axis=1) - floor
+        speed = np.zeros(len(pred), dtype=np.float64)
+        if len(pred) > 1:
+            speed = np.concatenate([
+                np.linalg.norm(foot[1:] - foot[:-1], axis=-1).mean(axis=1)[:1],
+                np.linalg.norm(foot[1:] - foot[:-1], axis=-1).mean(axis=1)]) * fps
+        h_prob = 1.0 / (1.0 + np.exp(-np.clip((0.05 - height) / 0.02, -700, 700)))
+        s_prob = 1.0 / (1.0 + np.exp(-np.clip((0.20 - speed) / 0.05, -700, 700)))
+        out[:, fi] = (h_prob * s_prob) > 0.5
+    return out
 
 
 def build_session_sets() -> dict[str, list[str]]:
@@ -85,13 +128,15 @@ def require_cells(model: str) -> list[str]:
 
 
 def load_session(model: str, sid: str) -> dict:
-    """逐帧 per 脚 V/VT 误差与相位。"""
+    """逐帧 per 脚 V/VT 误差与相位 + 多指标扩展（垂直误差/穿透/预测接触）。"""
     gt = load_gt_joints(sid)
     contact, contact_ids, label_valid = load_contact(sid)
     if not np.array_equal(contact_ids, np.arange(len(gt))):
         raise ValueError("Contact/GT frame grid mismatch: " + sid)
     phases = phase_labels(contact, fps=FPS)
-    out = {"phase": phases, "valid": label_valid.copy()}
+    floor = float(estimate_floor_y(gt))
+    out = {"phase": phases, "valid": label_valid.copy(),
+           "floor": floor, "contact_gt": contact > 0.5}
     for cond in CONDS:
         pred, ids, valid = load_pred_joints(model, sid, cond)
         ids = np.asarray(ids, dtype=np.int64)
@@ -106,6 +151,15 @@ def load_session(model: str, sid: str) -> dict:
         left, right = foot_mpjpe_per_frame(aligned, gt)
         out[cond + "_left"] = left
         out[cond + "_right"] = right
+        out[cond + "_vert"] = np.stack([
+            foot_vertical_error_per_frame(aligned, gt, LEFT_ANKLE_FOOT),
+            foot_vertical_error_per_frame(aligned, gt, RIGHT_ANKLE_FOOT)],
+            axis=1)  # (T,2) mm
+        out[cond + "_pen"] = np.stack([
+            foot_ground_pen_per_frame(aligned, floor, LEFT_ANKLE_FOOT),
+            foot_ground_pen_per_frame(aligned, floor, RIGHT_ANKLE_FOOT)],
+            axis=1)  # (T,2) mm
+        out[cond + "_cpred"] = predicted_contact_per_frame(aligned, floor)
     return out
 
 
@@ -128,6 +182,42 @@ def aggregate(sessions: dict[str, dict]) -> dict:
                               for k, vals in acc[ph].items()}
                              if acc[ph]["V"] else None)
                         for ph in range(4)}
+    return result
+
+
+def aggregate_extra(sessions: dict[str, dict]) -> dict:
+    """{sid: data} → {foot: {phase: {vert/pen/contact: {V,VT,G}|None}}}。
+    垂直误差/地面穿透 mm、接触准确率 %；会话均值再跨会话平均。
+    G = VT − V（vert/pen 为负 = 触觉有帮助，contact 为正 = 有帮助）。"""
+    result = {}
+    for foot in ("left", "right"):
+        fi = 0 if foot == "left" else 1
+        acc = {ph: {m: {"V": [], "VT": [], "G": []} for m in METRICS_EXTRA}
+               for ph in range(4)}
+        for data in sessions.values():
+            n = len(data["phase"])
+            valid = data["valid"][:n]
+            phase = data["phase"][:n, fi]
+            for ph in range(4):
+                sel = (phase == ph) & valid
+                if not sel.any():
+                    continue
+                for m in ("vert", "pen"):
+                    v = data["V2M_" + m][:n][sel, fi]
+                    vt = data["VT2M_" + m][:n][sel, fi]
+                    acc[ph][m]["V"].append(v.mean())
+                    acc[ph][m]["VT"].append(vt.mean())
+                    acc[ph][m]["G"].append((vt - v).mean())
+                gt = data["contact_gt"][:n][sel, fi]
+                cv = float((data["V2M_cpred"][:n][sel, fi] == gt).mean() * 100.0)
+                cvt = float((data["VT2M_cpred"][:n][sel, fi] == gt).mean() * 100.0)
+                acc[ph]["contact"]["V"].append(cv)
+                acc[ph]["contact"]["VT"].append(cvt)
+                acc[ph]["contact"]["G"].append(cvt - cv)
+        result[foot] = {
+            ph: ({m: {k: float(np.mean(vals)) for k, vals in acc[ph][m].items()}
+                  for m in METRICS_EXTRA} if acc[ph]["vert"]["V"] else None)
+            for ph in range(4)}
     return result
 
 
@@ -246,6 +336,7 @@ def main():
         raise SystemExit(f"unknown actions: {unknown}（可选：{list(session_sets)}）")
 
     table = {}
+    metrics_table = {}
     for action in actions:
         sids = session_sets[action]
         data = {sid: {} for sid in sids}
@@ -254,9 +345,13 @@ def main():
                 data[sid][model] = load_session(model, sid)
         agg = {model: aggregate({sid: data[sid][model] for sid in sids})
                for model in models}
+        agg_extra = {model: aggregate_extra({sid: data[sid][model]
+                                             for sid in sids})
+                     for model in models}
         table[action] = {"sessions": sids, "table": agg}
+        metrics_table[action] = {"sessions": sids, "table": agg_extra}
         if not args.no_figure:
-            render_figure(action, sids, data, Path(args.out_dir))
+            render_figure(action, sids, data, Path(args.out_dir) / "detail" / "per_session")
         print(f"[{action}] sessions={len(sids)}")
         for model in models:
             for foot in ("left", "right"):
@@ -270,11 +365,25 @@ def main():
                             PHASE_NAMES_ZH[ph], row[ph]["V"], row[ph]["VT"],
                             row[ph]["G"]))
                 print(f"  {model} {foot}: " + " | ".join(cells))
+                row2 = agg_extra[model][foot]
+                cells2 = []
+                for ph in range(4):
+                    d = row2[ph]
+                    cells2.append("%s —" % PHASE_NAMES_ZH[ph] if d is None
+                                  else "%s 接触%.0f/%.0f/Δ%+.0f%%" % (
+                                      PHASE_NAMES_ZH[ph], d["contact"]["V"],
+                                      d["contact"]["VT"], d["contact"]["G"]))
+                print(f"  {model} {foot} contact: " + " | ".join(cells2))
 
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "e6_table.json").write_text(
+    detail_dir = out_dir / "detail"
+    supp_dir = out_dir / "supplementary"
+    (detail_dir / "per_session").mkdir(parents=True, exist_ok=True)
+    supp_dir.mkdir(parents=True, exist_ok=True)
+    (detail_dir / "e6_table.json").write_text(
         json.dumps(table, indent=1, ensure_ascii=False), encoding="utf-8")
+    (detail_dir / "e6_table_metrics.json").write_text(
+        json.dumps(metrics_table, indent=1, ensure_ascii=False), encoding="utf-8")
     md_lines = ["# E6 接触相位下的触觉增益与门控效果\n",
                 "口径：canonical test（splits.csv，36 会话，按实际出现的动作分组）；ckpt = ckpt_last；"
                 "模型 = V7_Cv4（单门）/ V7_Cv5（双门）/ V7_Cv7（无门控，枚举）；"
@@ -290,7 +399,21 @@ def main():
     if "walk" in actions or "run" in actions:
         md_lines.append("表注：走路/跑步在 canonical test 各仅 1 条会话，样本量小，"
                         "数字作观察不作统计结论。\n")
-    (out_dir / "E6_接触相位分析.md").write_text(
+    md_lines.append("## 多指标相位表（2026-11-02 扩展）\n")
+    md_lines.append(
+        "除踝足位置误差外，逐相位同时统计三组指标（数字见 "
+        "Full_Table2_E6_PhaseMetrics.csv，由 e6_table_metrics.json 导出）：\n"
+        "- 足垂直误差：骨盆对齐 |Δy|（该脚 2 关节均值，mm）；\n"
+        "- 地面穿透：max(0, floor − 该脚踝足最低点)，floor = GT 全关节 y 5 分位"
+        "（estimate_floor_y 同口径，mm）；\n"
+        "- 足高判据接触准确率：预测接触 = 足高/足速 soft 概率乘积 > 0.5"
+        "（soft_contact_from_keypoints 同口径），对 f6_soft 标签（%）。"
+        "注意 cell 级 test.json 的 VT/T 接触指标用的是模型触觉接触头"
+        "（V41ContactHead，未逐帧落盘），本表 V/VT 统一用足高判据，"
+        "两者口径不同不可直接比较。\n"
+        "G = VT − V：垂直误差/地面穿透为负 = 触觉有帮助，接触准确率为正 = "
+        "触觉有帮助（方向随指标）。会话均值再跨会话平均。\n")
+    (detail_dir / "E6_接触相位分析.md").write_text(
         "\n".join(md_lines), encoding="utf-8")
     print("→", out_dir)
 

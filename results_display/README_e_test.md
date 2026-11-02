@@ -5,6 +5,12 @@
 随各自实验目录存放。本册 = 总览 `README.md` 的 E 系列逐实验说明（2026-10-29
 平级拆分）。
 
+## 目录分层（2026-11-02 用户裁定）
+
+- **根层**：论文级主产物（正图 + 主干表）
+- **`supplementary/`**：补充材料（完整表、多指标表、口径表、配套图）
+- **`detail/`**：明细/统计/缓存（逐会话图、配对统计、json 源、报告 md、缓存）
+
 ## 命名规范（2026-10-27 用户裁定）
 
 文件名 = `用途_图表编号_实验编号_内容名称.扩展名`，例：
@@ -34,7 +40,7 @@ Main_Fig1_E6_Phase_walk.png
 | `E5_OcclusionRobustness` | 遮挡退化下的触觉增益（occ 五档） |
 | `E6_ContactPhaseAnalysis` | 接触阶段与门控效果（逐帧相位分析） |
 | `E7_DynamicModalityInputs` | 动态输入配置下的运动重建（五阶段切换） |
-| `E8_ComplementarityProbe` | 模态互补信息探针（ridge 探针，待做） |
+| `E8_ComplementarityProbe` | 模态互补信息探针（ridge 探针；主判据 = 踝足垂直分量互补，全部产物进 supplementary/） |
 
 ## 运行指令（display 层：统一参数约定；不进 queue、不经过 scheduler）
 
@@ -128,6 +134,7 @@ conda activate touch_gait
 python results_display/script/e_results_export.py
 # E6 E7 生成运动的 --teaser 图   --teaser
 # E6 生成明细运动情况，左右脚分开/不平滑   --experiment E6 --detail
+# E6 生成门控最佳完整会话合并图（滤伤害+保增益双条件，无合格会话红框）   --experiment E6 --best-sessions
 
 # 指定实验
 python results_display/script/e_results_export.py --experiment E2 --models V7_Cv5 --ckpt last
