@@ -740,7 +740,8 @@ def _evaluate_config(
                     ctx3=bool(getattr(model, "ctx3", False)),
                     ctx4=bool(getattr(model, "ctx4", False)
                                  or getattr(model, "ctx4b", False)),
-                    ctx5=bool(getattr(model, "ctx5", False)))
+                    ctx5=bool(getattr(model, "ctx5", False)),
+                    null_t=null_t)
                 if dump_detail:
                     _merge_sess_detail(
                         seq, tw, forward_axis, config_value, accum, contact,
@@ -760,7 +761,7 @@ def _evaluate_config(
                     {"V_hmr": dataset[idxs[0]].get("V_hmr")} if v_hmr_mode else {},
                     degrade=degrade, seed=seed, regression=ar2_regression,
                     gain_floor=gain_floor, dyaw_base=ar2_dyaw_base,
-                    overlap_assemble=overlap_assemble)
+                    null_t=null_t, overlap_assemble=overlap_assemble)
                 if dump_detail:
                     _merge_sess_detail(
                         seq, tw, forward_axis, config_value, accum, contact,
@@ -777,7 +778,7 @@ def _evaluate_config(
                 seq = _v7_ar_session_seq(
                     dataset, model, session_id, idxs, config_value, device, tw,
                     {"V_hmr": dataset[idxs[0]].get("V_hmr")} if v_hmr_mode else {},
-                    degrade=degrade, seed=seed)
+                    degrade=degrade, seed=seed, null_t=null_t)
                 if dump_detail:
                     _merge_sess_detail(
                         seq, tw, forward_axis, config_value, accum, contact,
@@ -1269,7 +1270,8 @@ def blend_overlap_windows_np(windows, tw):
 
 def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
                        device, tw, v_kw, *, degrade=None, seed=0,
-                       regression=False, gain_floor=0.0, dyaw_base="zero"):
+                       regression=False, gain_floor=0.0, dyaw_base="zero",
+                       null_t=False):
     """AR2 自由生成（2026-11-01，V7_AR方案 §4/§6）：逐窗逐帧串行。
 
     外部状态：ψ（累计航向）、p（自由积分位置）、vis_ema（视觉航向观测
@@ -1285,6 +1287,11 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
     力、无反馈、无因果掩码），逐帧几何组装与串行完全同源（同一积分
     公式、同一外部状态与复位规则）——差异只在 Δyaw/tilt/v_head 的来
     源：一次并行输出 vs 逐帧依赖上一帧反馈。
+
+    null_t（修改 03，2026-11-03）：T 输入置零 = 当前窗 T 流（t_raw/
+    t_phys/t_s2m）+ AR 观测历史（obs_history 的 T_raw/T_phys）全部
+    置零（T2M 下 V 已由 condition_inputs 置零 → 无条件先验）。不传
+    开关（null_t=False）时行为逐位不变。
     """
     chunks = []
     prev = torch.zeros(148, device=device)
@@ -1313,6 +1320,17 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
         config_id = torch.full((1,), config_value, device=device, dtype=torch.long)
         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
         obs_kw = model_observation_kwargs(batch)
+        if null_t:
+            # 修改 03（2026-11-03）：null-T 注入（T 内容全部置零）。
+            t_raw = torch.zeros_like(t_raw)
+            t_phys = torch.zeros_like(t_phys)
+            t_s2m = torch.zeros_like(t_s2m)
+            if obs_kw:
+                history = {key: value.clone()
+                           for key, value in batch["obs_history"][0].items()}
+                history["T_raw"] = torch.zeros_like(history["T_raw"])
+                history["T_phys"] = torch.zeros_like(history["T_phys"])
+                obs_kw = {"obs_history": [history]}
         if dropped:
             mask = torch.tensor([start + t in dropped for t in range(tw)], device=device)
             if degrade == "v":
@@ -1428,18 +1446,20 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
 def _v7_ar2_session_seq(dataset, model, session_id, idxs, config_value,
                         device, tw, v_kw, *, degrade=None, seed=0,
                         regression=False, gain_floor=0.0, dyaw_base="zero",
-                        overlap_assemble=False):
+                        null_t=False, overlap_assemble=False):
     """AR2 协议会话序列：ar2_session_chunks 的 seq 组装（评分口径）。
 
     regression：V7_Cv5AR2R 纯回归格（窗口并行前向，组装公式同源）。
     修改 02：overlap_assemble 时窗口重叠 → 三角权重混合组装
-    （assemble_overlap_seq），返回 (seq, frame_ids)。"""
+    （assemble_overlap_seq），返回 (seq, frame_ids)。
+    null_t（修改 03，2026-11-03）：T 输入（当前窗 + AR 观测历史）整窗
+    置零；T2M + null-T = 无条件先验。不传开关行为逐位不变。"""
     chunks, meta = ar2_session_chunks(dataset, model, session_id, idxs,
                                       config_value, device, tw, v_kw,
                                       degrade=degrade, seed=seed,
                                       regression=regression,
                                       gain_floor=gain_floor,
-                                      dyaw_base=dyaw_base)
+                                      dyaw_base=dyaw_base, null_t=null_t)
     floor_y, offsets, parents, betas = meta
     if overlap_assemble:
         parts = []
@@ -1473,11 +1493,14 @@ def _v7_ar2_session_seq(dataset, model, session_id, idxs, config_value,
 
 
 def _v7_ar_session_seq(dataset, model, session_id, idxs, config_value,
-                       device, tw, v_kw, *, degrade=None, seed=0):
+                       device, tw, v_kw, *, degrade=None, seed=0,
+                       null_t=False):
     """帧级 AR（2026-11-01，V7 方案 §11）：逐窗逐帧串行生成——反馈 =
     上一帧预测输出 [姿态 144 + 根速度 3]（ps 槽位逐帧填充，因果掩码下
     帧 t 只依赖 ≤t）；窗口间携带上一窗末帧状态；首窗/跳窗起点 = 全零
     （与训练帧 0 一致）。整窗发射（非重叠窗口，无需 emit-half）。
+
+    null_t（修改 03，2026-11-03）：T 输入置零（与标准路径同语义）。
     """
     chunks = []
     prev = torch.zeros(147, device=device)
@@ -1489,6 +1512,8 @@ def _v7_ar_session_seq(dataset, model, session_id, idxs, config_value,
         whole = move_batch(collate_windows([dataset[i] for i in idxs]), device)
         cid = torch.full((len(idxs),), config_value, device=device, dtype=torch.long)
         streams = condition_inputs(whole, cid)
+        if null_t:
+            streams = tuple(torch.zeros_like(s) for s in streams)
         rng = np.random.RandomState((seed * 1000003) ^ zlib.crc32(str(session_id).encode()))
         degraded = _degrade_inputs(*streams, tw, degrade, rng)
     for window_index, i in enumerate(idxs):
@@ -1499,6 +1524,11 @@ def _v7_ar_session_seq(dataset, model, session_id, idxs, config_value,
             prev = torch.zeros(147, device=device)
         config_id = torch.full((1,), config_value, device=device, dtype=torch.long)
         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+        if null_t:
+            # 修改 03（2026-11-03）：null-T 注入（T 内容全部置零）。
+            t_raw = torch.zeros_like(t_raw)
+            t_phys = torch.zeros_like(t_phys)
+            t_s2m = torch.zeros_like(t_s2m)
         if degraded is not None:
             v_feat, t_raw, t_phys, t_s2m = (
                 stream[window_index:window_index + 1] for stream in degraded)
@@ -1551,11 +1581,13 @@ def _v7_ar_session_seq(dataset, model, session_id, idxs, config_value,
 
 def _v7_ctx_session_seq(dataset, model, session_id, idxs, config_value,
                         device, half, v_kw, hard_prefix=False,
-                        ctx3=False, ctx4=False, ctx5=False):
+                        ctx3=False, ctx4=False, ctx5=False, null_t=False):
     """续写协议 §4：按会话逐窗链式生成（ctx = 上一窗预测在 half 处的根
     状态 [根 6D + 根速度 3 + 有效 1]；首窗/跳窗 → 零 + flag 0），按发射
     规则组装（首窗全 20 帧、后续窗只发新 half；窗口间 fake 帧缺口不在
     评分范围，与现协议 valid_windows 评分帧一致）→ 会话级 seq + frame_ids。
+
+    null_t（修改 03，2026-11-03）：T 输入置零（与标准路径同语义）。
     """
     chunks = []
     frame_ids = []
@@ -1571,6 +1603,11 @@ def _v7_ctx_session_seq(dataset, model, session_id, idxs, config_value,
         start = int(raw["frame_start"])
         config_id = torch.full((1,), config_value, device=device, dtype=torch.long)
         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+        if null_t:
+            # 修改 03（2026-11-03）：null-T 注入（T 内容全部置零）。
+            t_raw = torch.zeros_like(t_raw)
+            t_phys = torch.zeros_like(t_phys)
+            t_s2m = torch.zeros_like(t_s2m)
         reset = (ctx is None or prev_start is None or start != prev_start + half)
         if reset:
             # ctx5：全姿态块 (1, nf, 148)；ctx3/4：根块 (1, nf, 10)；

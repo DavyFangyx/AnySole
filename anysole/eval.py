@@ -253,7 +253,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="V4_Av1 判据 ③ T 参与干预（null-T 注入）：三条件前向的 T 输入"
              "整窗置零；训练正确的修正分支应输出 ≈0 → VT2M 行读数退回"
              "V2M（两次跑——常规 vs --null-t——的 VT2M 行逐会话配对比较"
-             "= 干预实验）。非 V4_Av1 模型忽略（打印提示）。",
+             "= 干预实验）。修改 03（2026-11-03）起对 V7 家族同样生效"
+             "（T2M + null-T = 无条件先验读数）；其余模型忽略（打印提示）。",
     )
     parser.add_argument(
         "--write-motion",
@@ -698,9 +699,13 @@ def _evaluate_one(
         print("NOTE: --z-src %s ignored for non-V5_Av1 checkpoint" % z_src_override)
         z_src_override = None
     # V4_Av1 判据 ③ null-T 注入（--null-t）：同上口径，T 输入整窗置零。
+    # 修改 03（2026-11-03）：解除 v4_1 限定，V7 家族（标准/ar/ar2/ctx，
+    # model_v7 的 v7=True 属性）同样生效——T2M + null-T = 全输入为零 =
+    # 无条件先验读数。不传开关时行为逐位不变（默认 False）。
     null_t = bool(getattr(args, "null_t", False))
-    if null_t and not v4_1_mode:
-        print("NOTE: --null-t ignored for non-V4_Av1 checkpoint")
+    v7_family = bool(getattr(model, "v7", False))
+    if null_t and not (v4_1_mode or v7_family):
+        print("NOTE: --null-t ignored for non-V4_Av1/V7 checkpoint")
         null_t = False
     v3f_mode = bool(checkpoint.get("config", {}).get("v3f", False))
     # F2a: heading/tilt representation — world pose/trans recovered via
@@ -856,6 +861,12 @@ def _evaluate_one(
                         assert_batch_shapes(batch, batch_size, tw=tw,
                             t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
                         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+                        if null_t:
+                            # 修改 03（2026-11-03）：null-T 对 V7 ctx 导出
+                            # 同口径生效（与评分路径一致）。
+                            t_raw = torch.zeros_like(t_raw)
+                            t_phys = torch.zeros_like(t_phys)
+                            t_s2m = torch.zeros_like(t_s2m)
                         v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
                         start = int(raw["frame_start"])
                         if ctx is None or prev_start is None or start != prev_start + half:
@@ -929,7 +940,7 @@ def _evaluate_one(
                     chunks, _meta = ar2_session_chunks(
                         dataset, model, session_id, idxs, config_value,
                         device, tw, v_kw, regression=ar2_reg,
-                        gain_floor=ar2_gain_floor,
+                        gain_floor=ar2_gain_floor, null_t=null_t,
                         dyaw_base=str(checkpoint.get("config", {}).get(
                             "ar2_dyaw_base", "zero")))
                     for chunk in chunks:
@@ -954,6 +965,12 @@ def _evaluate_one(
                             assert_batch_shapes(batch, batch_size, tw=tw,
                                 t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
                             v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
+                            if null_t:
+                                # 修改 03（2026-11-03）：null-T 对 V7 帧级
+                                # AR 导出同口径生效（与评分路径一致）。
+                                t_raw = torch.zeros_like(t_raw)
+                                t_phys = torch.zeros_like(t_phys)
+                                t_s2m = torch.zeros_like(t_s2m)
                             v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
                             start = int(raw["frame_start"])
                             if prev_start is None or start != prev_start + tw:
