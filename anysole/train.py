@@ -61,7 +61,8 @@ from anysole.data.workspace_adapter import ADAPTER_VERSION, sha256_file
 from AnysoleWorkspace.tool.workspace import resolve_uri
 from anysole.ablations.insole_drift.templates import load_template_bank
 from anysole.utils.geometry import (
-    compose_rot6d, f2_to_world, fk_pose6d, rot6d_to_rotmat)
+    ar2_to_world, compose_rot6d, f2_to_world, fk_pose6d,
+    rot6d_to_rotmat, rot_root6d)
 from anysole.utils.metrics import pa_mpjpe
 from anysole.utils.constraints import apply_v3e_constraints
 from anysole.utils.constraints_g import apply_v3g_constraints
@@ -137,6 +138,10 @@ DEFAULT_CONFIG = {
     "wandb_entity": "davyfangyuxuan-nanjing-university-of-aeronautics-and-ast",
     "wandb_eval_interval": 5,
     "wandb_experiment_tag": "anysole_v1",
+    # 在线监控后端（2026-11-03）：WANDB 访问受限后默认改投 SwanLab；
+    # "wandb" 仍可选，行为与改造前一致。
+    "monitor_backend": "swanlab",
+    "swanlab_workspace": None,
 }
 
 # V5_Av1 z 通道监控键（epoch 均值；V5_A方案.md 判据③ 分歧审计 +
@@ -190,6 +195,10 @@ def move_batch(batch: dict, device: torch.device) -> dict:
     }
 
 
+def model_observation_kwargs(batch: dict) -> dict:
+    return {"obs_history": batch["obs_history"]} if "obs_history" in batch else {}
+
+
 def condition_inputs(batch: dict, config_id: torch.Tensor, t_s2m_dim: int = T_S2M_DIM) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Zero absent modalities without modifying reconstruction targets in batch.
 
@@ -216,6 +225,32 @@ def condition_inputs(batch: dict, config_id: torch.Tensor, t_s2m_dim: int = T_S2
     return v_feat, t_raw, t_phys, t_s2m
 
 
+def _ar_rollout_curriculum(global_step: int, total_steps: int, tw: int,
+                           l_max: int = 8, schedule_frac: float = 0.6) -> int:
+    """修改 04 改动 A（2026-11-03）：rollout 长度课程——L 从 1 线性升到
+    l_max（斜坡占 schedule_frac 总步数，其后固定 l_max），上界 tw−1
+    （帧 0 永远 batch 携带 = 推理口径，不可 rollout）。"""
+    if not 1 <= l_max < tw:
+        raise ValueError("ar_rollout_max must be in [1, tw-1]")
+    prog = min(1.0, global_step / max(1, int(total_steps * schedule_frac)))
+    return min(1 + round((l_max - 1) * prog), tw - 1)
+
+
+def _ar_ss_cache(out, prev_state):
+    """AR SS 缓存（2026-11-01 修正）：帧 1..tw-1 = 模型自生成输出（批内
+    同窗口同序列）；帧 0 = batch 携带反馈原样保留（连续窗口 = GT 前一帧、
+    首窗 = 全零，与推理口径一致）——帧 0 的模型自生成反馈需要上一窗
+    输出，批内不存在；此前帧 0 置零会覆盖连续首帧携带修复。"""
+    bsz = out["x0_hat"].shape[0]
+    tail = torch.cat([out["x0_hat"][:, :-1], out["v_hat"][:, :-1]],
+                     dim=-1).detach()
+    if prev_state is not None:
+        first0 = prev_state[:, :1].detach()
+    else:
+        first0 = out["x0_hat"].new_zeros((bsz, 1, tail.shape[-1]))
+    return torch.cat([first0, tail], dim=1)
+
+
 def _ctx4_residual_batch(batch):
     """v4-a（2026-11-01）：T 行目标转锚点系残差（锚 = GT 窗首帧根朝向）。
 
@@ -231,11 +266,9 @@ def _ctx4_residual_batch(batch):
         first = ctx[..., -1].mean(dim=1) <= 0.5                # (B,) 首窗/复位
         R_a[first] = torch.eye(3, device=R_a.device, dtype=R_a.dtype)
     RaT = R_a.transpose(-1, -2)
-    shape = batch["pose_gt"].shape
-    b["pose_gt"] = compose_rot6d(
-        RaT[:, None, :, :],
-        batch["pose_gt"].reshape(shape[0], shape[1], N_JOINTS, 6)
-    ).reshape(shape)
+    # 只转根关节 6D（世界朝向）+ 根速度；非根关节为父相对局部旋转，
+    # 不含绝对航向、不参与锚变换（2026-11-01 修正）。
+    b["pose_gt"] = rot_root6d(RaT[:, None, :, :], batch["pose_gt"])
     b["vel_gt"] = torch.einsum("bij,btj->bti", RaT, batch["vel_gt"])
     b["trans_gt"] = torch.cumsum(b["vel_gt"], dim=1) / float(FPS)
     return b
@@ -243,12 +276,18 @@ def _ctx4_residual_batch(batch):
 
 def backward_v7_enum(model, batch, config, ctx_ss_p: float = 0.0,
                      ctx_cache=None, ar_ss_p: float = 0.0,
-                     ar_noise: float = 0.0, ar_cache=None):
+                     ar_noise: float = 0.0, ar_cache=None,
+                     ar_rollout_len: int = 0):
     """Enumerate the same windows, accumulate gradients, then update once.
 
     Motion keeps config_probs weights. T-only auxiliary terms normalize over
     T-present modes, matching their masked-mean definition in sampled batches.
     Graphs are released after each backward, rather than retaining 3 batches.
+
+    ``ar_rollout_len``（修改 04 改动 A，2026-11-03）：>0 且 model.ar2 时
+    用闭环 rollout 前向替换本步模型调用（帧 1..L 反馈 = 模型自预测、
+    帧 0 保留 batch 携带 = 推理口径；损失在全部 L 帧定义、分量沿用现有
+    定义）。默认 0 = 原行为不变（改动全关 → AR2 逐位契约）。
     """
     probs = [float(x) for x in config["config_probs"]]
     if (len(probs) != 3 or not all(math.isfinite(x) and x >= 0 for x in probs)
@@ -263,7 +302,24 @@ def backward_v7_enum(model, batch, config, ctx_ss_p: float = 0.0,
     if ctx_ss_p > 0 and bool(getattr(model, "ctx3", False)):
         raise ValueError("--ctx-ss requires single-frame ctx (v1/v2); "
                          "ctx3/4/5 block ctx is unsupported")
-    ar_causal = bool(getattr(model, "ar", False))
+    if ar_rollout_len > 0 and (ar_ss_p > 0 or ar_noise > 0):
+        # 修改 04：闭环 rollout 与 scheduled sampling/收缩噪声是两种不同
+        # 训练机制（SS=逐帧概率替换、rollout=连续 L 帧闭环），混用语义
+        # 含糊——显式互斥而非静默叠加。
+        raise ValueError("--ar-rollout is incompatible with --ar-ss/--ar-noise")
+    # 纯回归收口（2026-11-02，v7_c2ar2r）：ar2_regression 下双向注意力、
+    # 无因果掩码、无反馈（ar2_fb=False 本就不消费 prev_state）——回归格
+    # 的 SS/噪声由 conf 置零，此处双保险关闭因果。
+    ar_causal = (bool(getattr(model, "ar", False) or getattr(model, "ar2", False))
+                 and not bool(config.get("ar2_regression", False)))
+    # 缓存只在同一 batch 的枚举模式间复用（同窗口、同序列——scheduled
+    # sampling 的替换来源与目标对齐）；跨 batch 必须清零（2026-11-01：
+    # 跨 minibatch 复用 = 「另一段动作的历史预测当前动作目标」，不是
+    # 当前序列上的 SS）。
+    if ctx_cache is not None:
+        ctx_cache[0] = None
+    if ar_cache is not None:
+        ar_cache[0] = None
     metrics = {}
     batch_size = batch["pose_gt"].shape[0]
     for mode, probability in enumerate(probs):
@@ -282,26 +338,66 @@ def backward_v7_enum(model, batch, config, ctx_ss_p: float = 0.0,
                 ctx = ctx.clone()
                 ctx[:n] = c[:n]
         prev_state = batch.get("prev_state")
-        if (prev_state is not None and ar_cache is not None
+        if (getattr(model, "ar2", False) and not config.get("ar2_regression", False)
+                and ar_ss_p > 0 and prev_state is not None):
+            # AR2 同序列两遍式 scheduled sampling（2026-11-01，V7_AR方案
+            # §5.1：禁无会话/帧位置匹配的 minibatch 缓存）：第一遍 GT 反馈
+            # no_grad 生成同一序列的自反馈 [Δyaw+tilt/body+v_head]；第二遍
+            # （梯度遍）以概率 p 替换（帧 0 保留 batch 携带反馈——真实前驱
+            # 或首窗全零，与 v7_ar SS 同口径）。
+            with torch.inference_mode():
+                out_det = model(v_feat, t_raw, t_phys, cid,
+                                batch.get("session_id"), T_s2m=t_s2m,
+                                prev_ctx=ctx, prev_state=prev_state,
+                                causal=True, **model_observation_kwargs(batch))
+            cache = torch.cat([out_det["dyaw_hat"] + (
+                prev_state[..., :1]
+                if str(config.get("ar2_dyaw_base", "zero")) == "history"
+                else 0.0), out_det["x0_hat"],
+                               out_det["v_hat"]], dim=-1)      # (B,tw,148)
+            if torch.rand(1).item() < ar_ss_p:
+                prev_state = torch.cat([prev_state[:, :1],
+                                        cache[:, :-1]], dim=1)
+        elif (prev_state is not None and ar_cache is not None
                 and ar_cache[0] is not None and torch.rand(1).item() < ar_ss_p):
             # AR 反馈 scheduled sampling（2026-11-01）：以概率 p 用上一步
             # 缓存的「模型自生成反馈」替换 GT 反馈（左移一格，帧 0 全零）。
             prev_state = ar_cache[0]
         if prev_state is not None and ar_noise > 0.0:
             # 反馈收缩正则：只扰姿态分量（归一化空间 ~O(1)），速度分量
-            # (m/s) 不加噪。
+            # (m/s) 不加噪。ar2：扰 tilt/body 切片 [1:145]；ar：[:144]。
             prev_state = prev_state.clone()
-            prev_state[..., :144] = (
-                prev_state[..., :144]
-                + torch.randn_like(prev_state[..., :144]) * ar_noise)
-        out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m,
-                    prev_ctx=ctx, prev_state=prev_state, causal=ar_causal)
-        if ar_cache is not None and out.get("x0_hat") is not None:
-            bsz = out["x0_hat"].shape[0]
-            tail = torch.cat([out["x0_hat"][:, :-1], out["v_hat"][:, :-1]],
-                             dim=-1).detach()
-            ar_cache[0] = torch.cat([
-                out["x0_hat"].new_zeros((bsz, 1, tail.shape[-1])), tail], dim=1)
+            sl = slice(1, 145) if getattr(model, "ar2", False) else slice(0, 144)
+            prev_state[..., sl] = (
+                prev_state[..., sl]
+                + torch.randn_like(prev_state[..., sl]) * ar_noise)
+        if ar_rollout_len > 0:
+            if not (getattr(model, "ar2", False)
+                    and getattr(model, "ar2_fb", False)
+                    and prev_state is not None):
+                # 死开关防御（2026-11-03）：rollout 要求带反馈的 ar2——
+                # AR2M 无反馈支路 TF≡rollout，静默回退 = 假实验。
+                raise ValueError("--ar-rollout requires ar2 with feedback "
+                                 "(ar2_fb=True) and prev_state in the batch")
+            # 修改 04 改动 A（2026-11-03）：闭环多步 rollout 前向——帧
+            # 1..L 反馈 = 模型自预测（同序列、逐帧闭环，与 eval
+            # ar2_session_chunks 更新式同构），帧 0 保留 batch 携带
+            # （= 推理口径，连续窗口 GT 前驱/首窗零），帧 L+1.. 保持
+            # GT 反馈（TF 尾帧）。损失在合并窗口上沿用现有分量定义。
+            out = model.rollout_forward(
+                v_feat, t_raw, t_phys, cid, batch.get("session_id"),
+                T_s2m=t_s2m, prev_state=prev_state,
+                rollout_len=ar_rollout_len,
+                detach=bool(config.get("ar_rollout_detach", True)),
+                dyaw_base=str(config.get("ar2_dyaw_base", "zero")),
+                **model_observation_kwargs(batch))
+        else:
+            out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m,
+                        prev_ctx=ctx, prev_state=prev_state, causal=ar_causal,
+                        **model_observation_kwargs(batch))
+        if (ar_cache is not None and not getattr(model, "ar2", False)
+                and out.get("x0_hat") is not None):
+            ar_cache[0] = _ar_ss_cache(out, prev_state)
         if ctx_cache is not None:
             bsz = out["x0_hat"].shape[0]
             cache_root = out["x0_hat"][:, 10, :6].detach()
@@ -361,12 +457,11 @@ def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt
                 #   v4-a：绝对全窗权重 1 + 残差权重 residual_weight；
                 #   v4-b：残差全窗权重 1（首窗降为 1−first_abs_share）+ 绝对
                 #         仅首窗（T 行绝对模式）权重 first_abs_share = p_T。
+                # 残差分量 = R_aᵀ 只转根关节（与训练目标变换同方向、同范围）。
                 shape = pose.shape
                 R_a = rot6d_to_rotmat(pose[:, 0, :6].float())          # (B,3,3)
-                res = compose_rot6d(
-                    R_a[:, None, :, :].double(),
-                    pose.reshape(shape[0], shape[1], N_JOINTS, 6)
-                ).reshape(shape)
+                res = rot_root6d(R_a.transpose(-1, -2)[:, None, :, :].double(),
+                                 pose)
                 flat_res = res.reshape(-1, res.shape[-1])
                 if first_abs_share is not None:
                     ctx = raw_batch.get("ctx")
@@ -375,14 +470,15 @@ def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt
                             "first_abs_share requires the ctx column "
                             "(v7_ctx dataset)")
                     first = (ctx[..., -1].mean(dim=1) <= 0.5).to(
-                        device).double().view(-1, 1)
-                    w_abs = first * first_abs_share
+                        device).double()                                # (B,)
+                    w_abs = (first * first_abs_share).repeat_interleave(
+                        shape[1])                                       # (B*tw,)
                     w_res = 1.0 - w_abs
-                    sums += (flat * w_abs).sum(dim=0)
-                    sumsq += (flat.square() * w_abs).sum(dim=0)
+                    sums += (flat * w_abs.view(-1, 1)).sum(dim=0)
+                    sumsq += (flat.square() * w_abs.view(-1, 1)).sum(dim=0)
                     count += w_abs.sum()
-                    sums += (flat_res * w_res).sum(dim=0)
-                    sumsq += (flat_res.square() * w_res).sum(dim=0)
+                    sums += (flat_res * w_res.view(-1, 1)).sum(dim=0)
+                    sumsq += (flat_res.square() * w_res.view(-1, 1)).sum(dim=0)
                     count += w_res.sum()
                 else:
                     sums += flat.sum(dim=0)
@@ -603,6 +699,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="Window length in frames; overrides the config tw (e.g. --tw 100).",
     )
+    parser.add_argument("--obs-context", type=int, default=None,
+                        help="AR2 maximum observed frames; output length remains --tw.")
     parser.add_argument(
         "--dropout",
         type=float,
@@ -738,7 +836,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=float,
         default=None,
         help="V3-3: fraction of total steps where sigma is frozen at 0 "
-        "(gate runs on the tau_p prior bias alone, plan §3 'first 10% sigma "
+        "(gate runs on the tau_p prior bias alone, plan §3 'first 10%% sigma "
         "fixed'). Default 0.1 with --gate sigma.",
     )
     parser.add_argument(
@@ -774,6 +872,25 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--ar-noise", type=float, default=0.0,
                         help="V7 AR 反馈收缩正则：训练反馈姿态分量加高斯噪声"
                         "标准差（0=关）。")
+    parser.add_argument("--ar-rollout", action="store_true", default=None,
+                        help="V7 AR2 修改 04 改动 A：训练期闭环多步 rollout 损失"
+                        "（rollout 长度 L 从 1 线性升到 L_max；默认关）。"
+                        "与 --ar-ss/--ar-noise 互斥。")
+    parser.add_argument("--ar-rollout-max", type=int, default=None, metavar="L",
+                        help="V7 AR2 修改 04：rollout 长度上限 L_max（默认 8）。")
+    parser.add_argument("--ar-rollout-schedule-frac", type=float, default=None,
+                        metavar="F",
+                        help="V7 AR2 修改 04：L 课程斜坡占总步数比例（默认 0.6，"
+                        "剩余步数固定 L_max）。")
+    parser.add_argument("--ar-rollout-detach", action="store_true", default=None,
+                        help="V7 AR2 修改 04：rollout 反馈梯度截断（默认开；"
+                        "只影响优化、不改反馈来源）。")
+    parser.add_argument("--v7-ar2-lowdim", action="store_true", default=None,
+                        help="V7 AR2 修改 04 改动 B：反馈降维为低维相对状态"
+                        "（Δyaw+根倾斜+body 投影+航向系速度，默认关）。")
+    parser.add_argument("--v7-ar2-fb-dim", type=int, default=None, metavar="K",
+                        help="V7 AR2 修改 04：body 投影维度 k（默认 16，"
+                        "总反馈维 10+k ≤ 32）。")
     parser.add_argument("--lambda-nll", type=float, default=None, metavar="W",
                         help="V3_Ev1: override yaml loss weight lambda_nll (V pose sigma NLL).")
     parser.add_argument("--lambda-prior-pose", type=float, default=None, metavar="W",
@@ -782,6 +899,28 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="V3_Ev1: override yaml loss weight lambda_prior_nll (T prior sigma NLL).")
     parser.add_argument("--lambda-prior-traj", type=float, default=None, metavar="W",
                         help="V3_Ev1: override yaml loss weight lambda_prior_traj (T prior trajectory).")
+    parser.add_argument("--lambda-dyaw", type=float, default=None, metavar="W",
+                        help="V7 AR2: Δyaw 帧级监督权重（mrad 口径）。")
+    parser.add_argument("--lambda-cumyaw", type=float, default=None, metavar="W",
+                        help="V7 AR2: 窗口累计 Δyaw 监督权重（mrad 口径）。")
+    parser.add_argument("--lambda-dyaw-td", type=float, default=None, metavar="W",
+                        help="V7 AR2: Δyaw 时间差分平滑权重（mrad 口径）。")
+    parser.add_argument("--lambda-visyaw", type=float, default=None, metavar="W",
+                        help="V7 AR2: 视觉航向观测监督权重（rad 口径，V 行）。")
+    parser.add_argument("--lambda-yawcorr", type=float, default=None, metavar="W",
+                        help="V7 AR2: 视觉校正链监督权重（rad 口径，V 行）。")
+    parser.add_argument("--lambda-world-traj", type=float, default=None, metavar="W",
+                        help="V7 AR2 yaw-fix: 世界系轨迹损失权重（m 口径，V/VT 行）。")
+    parser.add_argument("--v7-ar2-yaw-fix", action="store_true", default=None,
+                        help="V7 AR2 yaw-fix（2026-11-02 修订）：正面 Δψ 结构 "
+                             "（历史延续基线 + 修正项 + T 行弱监督）+ L_yawcorr "
+                             "自由生成口径 + 世界系轨迹损失。")
+    parser.add_argument("--ar2-dyaw-base", type=str, default=None,
+                        choices=("zero", "history"), metavar="MODE",
+                        help="V7 AR2 yaw-fix: Δψ 基线来源（history=历史延续，"
+                             "zero=零基线/旧语义；默认 zero）。")
+    parser.add_argument("--ar2-dyaw-t-w", type=float, default=None, metavar="W",
+                        help="V7 AR2 yaw-fix: T 行航向损失权重（默认 0.1）。")
     parser.add_argument("--lambda-air", type=float, default=None, metavar="W",
                         help="V3_Gv1: override yaml loss weight lambda_air (swing/air-frame contact BCE weight).")
     parser.add_argument("--lambda-foot-res", type=float, default=None, metavar="W",
@@ -821,10 +960,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--d8-heads", action="store_true", default=None,
                         help="维度 3：足-地监督三头（tcop 自重建 + 着地模式 + GT CoP）")
     parser.add_argument("--tactile-gainbias", action="store_true",
-                        help="阶段 3 G-b：训练侧鞋垫增益偏置增强（每窗每足 gain[0.7,1.3] + bias±5%，"
+                        help="阶段 3 G-b：训练侧鞋垫增益偏置增强（每窗每足 gain[0.7,1.3] + bias±5%%，"
                              "默认关）。")
     parser.add_argument("--tactile-frame-dropout", type=float, default=None, metavar="P",
                         help="阶段 3 G-c：训练侧整帧 T token dropout 概率 p（默认关；建议 0.2）。")
+    parser.add_argument("--tactile-weight-norm", action="store_true",
+                        help="T_raw 会话体重代理归一（每会话总压力中位数除；跨受试者尺度对齐，默认关）。")
     parser.add_argument("--p-occ", type=float, default=None, metavar="P",
                         help="V6_Av1 occ_mix: P(occ010 source window) (default 0.2).")
     parser.add_argument("--p-nullv", type=float, default=None, metavar="P",
@@ -898,6 +1039,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                              "knob dominates total time: 10 -> 57s stall every 10 epochs (~64%% overhead), "
                              "50 -> ~26%% overhead. Runs regardless of wandb mode.")
     parser.add_argument("--wandb_experiment_tag", default=None, help="Batch tag used by Wandb_Analyzer to group runs.")
+    parser.add_argument("--monitor_backend", choices=("wandb", "swanlab"), default=None,
+                        help="Online monitoring backend used when --wandb_mode != disabled.")
+    parser.add_argument("--swanlab_workspace", default=None,
+                        help="SwanLab workspace (user or team); empty means the personal workspace.")
     parser.add_argument("--v5-conditioning", choices=("legacy", "availability_v1"), default=None,
                         help="V5 training recipe: legacy reproduces old conditioning; availability_v1 "
                              "aligns V/T/VT supervision with config and structured/random input dropout. "
@@ -1068,8 +1213,19 @@ def _evaluate(model, diffusion, loader, config, device):
                     z_kw = {"z_src": v5_1_z_src(config_value)} if v5_1_mode else {}
                     out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw,
                     prev_ctx=batch.get("ctx"), prev_state=batch.get("prev_state"),
-                    causal=bool(getattr(model, "ar", False)))
+                    causal=bool(getattr(model, "ar", False) or getattr(model, "ar2", False)),
+                    **model_observation_kwargs(batch))
                     pred_pose = out["x0_hat"]
+                    if getattr(model, "ar2", False):
+                        # ar2 val：teacher-forced 单步口径，相对表示 →
+                        # 世界组装（psi_base = GT 窗前一帧航向）。
+                        pred_pose, pred_trans_ar2 = ar2_to_world(
+                            out["x0_hat"], out["dyaw_hat"][..., 0],
+                            out["v_hat"], batch["psi_base"],
+                            batch["trans_anchor"])
+                        out = dict(out)
+                        out["trans_hat"] = pred_trans_ar2 - batch[
+                            "trans_anchor"][:, None, :]
                 else:
                     warm_prior = None
                     if bool(config.get("warm_start", False)):
@@ -1100,10 +1256,7 @@ def _evaluate(model, diffusion, loader, config, device):
                                                    dtype=R_a.dtype)
                     else:
                         R_a = out["anchor_rot"]
-                    pred_pose = compose_rot6d(
-                        R_a[:, None, :, :],
-                        out["x0_hat"].reshape(bsz, out["x0_hat"].shape[1], N_JOINTS, 6)
-                    ).reshape(bsz, out["x0_hat"].shape[1], -1)
+                    pred_pose = rot_root6d(R_a[:, None, :, :], out["x0_hat"])
                     v_w = torch.einsum("bij,btj->bti", R_a, out["v_hat"])
                     pred_trans = torch.cumsum(v_w, dim=1) / float(FPS) + anchor
                 elif getattr(model, "ctx4", False) and config_value == CONFIG_T:
@@ -1115,10 +1268,7 @@ def _evaluate(model, diffusion, loader, config, device):
                         first = ctx[..., -1].mean(dim=1) <= 0.5
                         R_a[first] = torch.eye(3, device=R_a.device,
                                                dtype=R_a.dtype)
-                    pred_pose = compose_rot6d(
-                        R_a[:, None, :, :],
-                        out["x0_hat"].reshape(bsz, out["x0_hat"].shape[1], N_JOINTS, 6)
-                    ).reshape(bsz, out["x0_hat"].shape[1], -1)
+                    pred_pose = rot_root6d(R_a[:, None, :, :], out["x0_hat"])
                     v_w = torch.einsum("bij,btj->bti", R_a, out["v_hat"])
                     pred_trans = torch.cumsum(v_w, dim=1) / float(FPS) + anchor
                 if v3e_mode:
@@ -1395,6 +1545,31 @@ def _occ_a3_monitor(model, loader, config, device):
     }
 
 
+def _grad_probe_groups(model):
+    """按模块划组的梯度范数探针（2026-11-03 分支挤压审计用）。
+
+    encoders 持有共享 embeddings 的引用，所以按 id 归组、共享块优先：
+    每个参数只属于第一个拥有它的组。
+    """
+    enc = getattr(model, "encoders", None)
+    blocks = []
+    if enc is not None:
+        for name in ("embeddings", "v_enc", "t_enc"):
+            module = getattr(enc, name, None)
+            if module is not None:
+                blocks.append(("share_enc" if name == "embeddings" else name, module))
+    if getattr(model, "pose_head", None) is not None:
+        blocks.append(("pose_head", model.pose_head))
+    seen = set()
+    groups = {}
+    for name, module in blocks:
+        params = [param for param in module.parameters() if id(param) not in seen]
+        seen.update(id(param) for param in params)
+        groups[name] = params
+    groups["other"] = [param for param in model.parameters() if id(param) not in seen]
+    return groups
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     config = load_config(args.config)
@@ -1422,6 +1597,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.tw < 1:
             raise ValueError("--tw must be positive")
         config["tw"] = int(args.tw)
+    if args.obs_context is not None:
+        config["obs_context"] = int(args.obs_context)
     if args.dropout is not None:
         config["dropout"] = float(args.dropout)
     if args.config_probs is not None:
@@ -1450,7 +1627,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["out_dir"] = str(args.out_dir)
     if args.lr_schedule is not None:
         config["lr_schedule"] = args.lr_schedule
-    for key in ("wandb_mode", "wandb_project", "wandb_entity", "wandb_eval_interval", "wandb_experiment_tag"):
+    for key in ("wandb_mode", "wandb_project", "wandb_entity", "wandb_eval_interval", "wandb_experiment_tag",
+                "monitor_backend", "swanlab_workspace"):
         value = getattr(args, key)
         if value is not None:
             config[key] = value
@@ -1486,6 +1664,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     enum_mode = config.get("condition_sampling", "sample") == "enum"
     if enum_mode and (not bool(config.get("v7")) or bool(config.get("occ_mix", False)) or args.occ_mix):
         raise ValueError("enum currently requires a V7-derived model without occ_mix")
+    if bool(config.get("ar_rollout", False)) and not enum_mode:
+        # 修改 04：rollout 只接在 backward_v7_enum（枚举路径）上——
+        # 非枚举模式静默死开关 = 假实验（2026-11-03）。
+        raise ValueError("--ar-rollout requires enum training (condition_sampling=enum)")
     if args.v5_conditioning is not None:
         config["v5_conditioning"] = args.v5_conditioning
     v5_availability = conditioning_policy(config) == "availability_v1"
@@ -1597,7 +1779,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "lambda_prior_nll", "lambda_prior_traj", "lambda_air",
                 "lambda_foot_res", "lambda_phase", "lambda_cop",
                 "lambda_tcop", "lambda_strike", "lambda_gtcop",
-                "lambda_cond", "lambda_s"):
+                "lambda_cond", "lambda_s",
+                "lambda_dyaw", "lambda_cumyaw", "lambda_dyaw_td",
+                "lambda_visyaw", "lambda_yawcorr", "lambda_world_traj",
+                "ar2_dyaw_t_w"):
         value = getattr(args, key)
         if value is not None:
             config[key] = float(value)
@@ -1623,6 +1808,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     config["ctx_ss"] = float(args.ctx_ss)
     config["ar_ss"] = float(args.ar_ss)
     config["ar_noise"] = float(args.ar_noise)
+    # 修改 04（2026-11-03）：rollout 损失（改动 A）与低维反馈（改动 B）
+    # 配置键，默认关（改动全关 → AR2 原样契约）。
+    if args.ar_rollout:
+        config["ar_rollout"] = True
+    if args.ar_rollout_max is not None:
+        config["ar_rollout_max"] = int(args.ar_rollout_max)
+    if args.ar_rollout_schedule_frac is not None:
+        config["ar_rollout_schedule_frac"] = float(args.ar_rollout_schedule_frac)
+    if args.ar_rollout_detach:
+        config["ar_rollout_detach"] = True
+    if args.v7_ar2_lowdim:
+        config["v7_ar2_lowdim"] = True
+    if args.v7_ar2_fb_dim is not None:
+        config["v7_ar2_fb_dim"] = int(args.v7_ar2_fb_dim)
     for key, value in (("p_occ", args.p_occ), ("p_nullV", args.p_nullv),
                        ("p_nullT", args.p_nullt)):
         if value is not None:
@@ -1641,9 +1840,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     # 阶段 3 触觉泛化增强（2026-10-31）：训练侧 T_raw 增强，默认关。
     # tactile_aug dict 直接传给 AnySoleDataset（train 侧），val/eval 不传。
     tactile_aug_kwargs = None
+    if args.v7_ar2_yaw_fix:
+        config["v7_ar2_yaw_fix"] = True
+    if args.ar2_dyaw_base is not None:
+        config["ar2_dyaw_base"] = str(args.ar2_dyaw_base)
     if args.tactile_gainbias:
         tactile_aug_kwargs = dict(tactile_aug_kwargs or {},
                                   gain_range=[0.7, 1.3], bias_frac=0.05)
+    if args.tactile_weight_norm:
+        config["tactile_weight_norm"] = True
     if getattr(args, "tactile_frame_dropout", None) is not None:
         tactile_aug_kwargs = dict(tactile_aug_kwargs or {},
                                   frame_dropout=float(args.tactile_frame_dropout))
@@ -1667,6 +1872,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             contact_method=str(config["contact_method"]),
             stride=config.get("stride"),
             tactile_input=str(config.get("tactile_input", "raw108")),
+            tactile_weight_norm=bool(config.get("tactile_weight_norm", False)),
             no_imu=bool(config.get("no_imu", False)),
             v_input=str(config.get("v_input", "hrnet")),
             f2_repr=bool(config.get("f2_repr", False)),
@@ -1676,6 +1882,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             v7_ctx3=bool(config.get("v7_ctx3", False) or config.get("v7_ctx4", False) or config.get("v7_ctx5", False)),
             v7_ctx5=bool(config.get("v7_ctx5", False)),
             v7_ar=bool(config.get("v7_ar", False)),
+            v7_ar2=bool(config.get("v7_ar2", False)),
+            obs_context=config.get("obs_context"),
             load_v5_1_gt=v5_1_mode,
             occ_mix=occ_mix_kwargs,
             t_phys_v2=bool(config.get("t_phys_v2", False)),
@@ -1707,10 +1915,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     val_loader = None
     try:
         val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs, t_phys_v2=bool(config.get("t_phys_v2", False)), d8_heads=bool(config.get("d8_heads", False)),
+        tactile_weight_norm=bool(config.get("tactile_weight_norm", False)),
         v7_ctx=bool(config.get("v7_prev_ctx", False)),
         v7_ctx3=bool(config.get("v7_ctx3", False) or config.get("v7_ctx4", False) or config.get("v7_ctx5", False)),
         v7_ctx5=bool(config.get("v7_ctx5", False)),
-        v7_ar=bool(config.get("v7_ar", False)), smpl_support_policy=str(config.get("smpl_support_policy", "exclude")))
+        v7_ar=bool(config.get("v7_ar", False)),
+        v7_ar2=bool(config.get("v7_ar2", False)),
+        obs_context=config.get("obs_context"),
+        smpl_support_policy=str(config.get("smpl_support_policy", "exclude")))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
     except (FileNotFoundError, RuntimeError) as exc:
@@ -1723,38 +1935,68 @@ def main(argv: Optional[List[str]] = None) -> int:
             # 面板选出；occ_mix 增强运行不允许静默退化为普通 val）。
             raise
         print("validation disabled: %s" % exc)
-    wandb_run = None
+    monitor_run = None
     if str(config.get("wandb_mode", "disabled")) != "disabled":
-        try:
-            import wandb
-            # Local run data lives under results/logs/wandb (not a repo-root wandb/).
-            os.environ.setdefault("WANDB_DIR", str(Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results"))) / "logs" / "wandb"))
-            # Identity fields consumed by Wandb_Analyzer: experiment_tag groups a
-            # training batch, run_kind/model/stage/fold decide the raw/ directory
-            # tree. Single-stage, non-cross-validation runs use stage=single,
-            # fold=fold0.
-            wandb_identity = {
-                "experiment_tag": str(config.get("wandb_experiment_tag") or "anysole_v1"),
-                "run_kind": "train",
-                # run 名称用模型编号（用户裁定 2026-10-25）——model_name 即
-                # 注册表编号（如 V7_Av1），不再是笼统的 modal（anysole_v2）。
-                "model": str(config.get("model_name")
-                             or config.get("modal", MODEL_ANYSOLEV1)),
-                "stage": "single",
-                "fold": "fold0",
-            }
-            wandb_run = wandb.init(
+        # Identity fields consumed by Wandb_Analyzer: experiment_tag groups a
+        # training batch, run_kind/model/stage/fold decide the raw/ directory
+        # tree. Single-stage, non-cross-validation runs use stage=single,
+        # fold=fold0.
+        monitor_identity = {
+            "experiment_tag": str(config.get("wandb_experiment_tag") or "anysole_v1"),
+            "run_kind": "train",
+            # run 名称用模型编号（用户裁定 2026-10-25）——model_name 即
+            # 注册表编号（如 V7_Av1），不再是笼统的 modal（anysole_v2）。
+            "model": str(config.get("model_name")
+                         or config.get("modal", MODEL_ANYSOLEV1)),
+            "stage": "single",
+            "fold": "fold0",
+        }
+        monitor_name = "%s_%s_%s" % (monitor_identity["model"], monitor_identity["stage"], monitor_identity["fold"])
+        monitor_group = "%s_%s" % (monitor_identity["experiment_tag"], monitor_identity["run_kind"])
+        monitor_tags = [monitor_identity[k] for k in
+                        ("experiment_tag", "run_kind", "model", "stage", "fold")]
+        monitor_config = {**dict(config), **monitor_identity}
+        results_root = Path(os.environ.get("ANYSOLE_RESULTS", str(GAIT_ROOT / "results")))
+        monitor_backend = str(config.get("monitor_backend") or "wandb")
+        if monitor_backend == "swanlab":
+            try:
+                import swanlab
+            except ImportError as exc:
+                raise RuntimeError("SwanLab monitoring requested but swanlab is not installed") from exc
+            # Local run data lives under results/logs/swanlab (not a repo-root
+            # swanlog/). SwanLab 0.7.x（touch_gait 是 Python 3.8）只有 mode 名
+            # 一处差异（online→cloud）；tags 在云端落成 run 的 labels。
+            monitor_mode = {"online": "cloud"}.get(
+                str(config["wandb_mode"]), str(config["wandb_mode"]))
+            monitor_run = swanlab.init(
+                mode=monitor_mode,
+                project=str(config.get("wandb_project") or "Anysole"),
+                workspace=config.get("swanlab_workspace") or None,
+                experiment_name=monitor_name,
+                group=monitor_group,
+                job_type="train",
+                tags=monitor_tags,
+                config=monitor_config,
+                logdir=str(results_root / "logs" / "swanlab"),
+            )
+        elif monitor_backend == "wandb":
+            try:
+                import wandb
+            except ImportError as exc:
+                raise RuntimeError("W&B monitoring requested but wandb is not installed") from exc
+            os.environ.setdefault("WANDB_DIR", str(results_root / "logs" / "wandb"))
+            monitor_run = wandb.init(
                 mode=str(config["wandb_mode"]),
                 project=str(config.get("wandb_project") or "Anysole"),
                 entity=config.get("wandb_entity"),
-                name="%s_%s_%s" % (wandb_identity["model"], wandb_identity["stage"], wandb_identity["fold"]),
-                group="%s_%s" % (wandb_identity["experiment_tag"], wandb_identity["run_kind"]),
+                name=monitor_name,
+                group=monitor_group,
                 job_type="train",
-                tags=[wandb_identity["experiment_tag"], wandb_identity["run_kind"], wandb_identity["model"], wandb_identity["stage"], wandb_identity["fold"]],
-                config={**dict(config), **wandb_identity},
+                tags=monitor_tags,
+                config=monitor_config,
             )
-        except ImportError as exc:
-            raise RuntimeError("W&B monitoring requested but wandb is not installed") from exc
+        else:
+            raise ValueError("unknown monitor_backend: %s" % monitor_backend)
     model_kw = {}
     modal = str(config.get("modal", MODEL_ANYSOLEV1))
     regress_mode = modal == MODEL_ANYSOLEV2 and not v3f_mode
@@ -2021,7 +2263,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             group["lr"] = epoch_lr * float(group.get("assign_mult", 1.0))
         epoch_start_step = global_step
         nonfinite_skips = 0
+        grad_probe = _grad_probe_groups(model)
+        grad_probe_counts = {name: sum(param.numel() for param in params)
+                             for name, params in grad_probe.items()}
         epoch_sums = {"loss_total": 0.0, "loss_pose": 0.0, "loss_traj": 0.0, "loss_con": 0.0, "loss_kp": 0.0, "loss_pos": 0.0, "loss_pose_vel": 0.0, "loss_bone": 0.0, "loss_assign": 0.0, "loss_sigma": 0.0, "loss_contact": 0.0, "loss_phase": 0.0, "loss_cop": 0.0, "loss_Trec_Tmissing": 0.0, "loss_Vrec_Vmissing": 0.0, "grad_norm": 0.0, "n": 0, "n_tmissing": 0, "n_vmissing": 0}
+        # 梯度探针在 GPU 上累加，每个 epoch 只回读一次：逐 batch 的
+        # float() 会强制同步、把异步流水线打散（实测 7 步/epoch 慢 ~10 倍）。
+        grad_probe_acc = {}
+        for _group in grad_probe:
+            grad_probe_acc[_group] = torch.zeros((), device=device)
+            grad_probe_acc[_group + "_rms"] = torch.zeros((), device=device)
         availability_counts = {k: 0 for k in ("windows", "V", "T", "VT", "neither")}
         # 条件契约运行阈值（V5_Av5/V4_Av2，2026-10-25）：V-only 窗口误差的
         # 批中位数 EMA（只统计 V 在场窗口；occ 窗口误差自然抬高、中位数
@@ -2084,19 +2335,36 @@ def main(argv: Optional[List[str]] = None) -> int:
                     ctx_ss_cache = [None]
                 if ar_ss_cache is None:
                     ar_ss_cache = [None]
+                # 2026-11-01 修复：total_steps 仅 V4A 聚类分支定义——
+                # SS 概率斜坡改用本处局部总量（ARSS 首跑因此崩过）。
+                _total = int(config["epochs"]) * len(loader)
                 ctx_ss_target = float(config.get("ctx_ss", 0.0))
-                p_cur = (ctx_ss_target * min(1.0, global_step / max(1, total_steps))
+                p_cur = (ctx_ss_target * min(1.0, global_step / max(1, _total))
                          if ctx_ss_target > 0 else 0.0)
                 ar_ss_target = float(config.get("ar_ss", 0.0))
-                ar_p_cur = (ar_ss_target * min(1.0, global_step / max(1, total_steps))
+                ar_p_cur = (ar_ss_target * min(1.0, global_step / max(1, _total))
                             if ar_ss_target > 0 else 0.0)
                 ar_noise = float(config.get("ar_noise", 0.0))
+                # 修改 04 改动 A（2026-11-03）：rollout 课程——L 从 1 线性
+                # 升到 L_max（斜坡占 ar_rollout_schedule_frac 总步数，其后
+                # 固定 L_max）；与 SS/噪声互斥（backward_v7_enum 内硬门）。
+                ar_rollout_len = 0
+                if bool(config.get("ar_rollout", False)):
+                    if ar_ss_target > 0 or ar_noise > 0:
+                        raise ValueError(
+                            "--ar-rollout is incompatible with --ar-ss/--ar-noise")
+                    ar_rollout_len = _ar_rollout_curriculum(
+                        global_step, _total, int(config["tw"]),
+                        l_max=int(config.get("ar_rollout_max", 8)),
+                        schedule_frac=float(
+                            config.get("ar_rollout_schedule_frac", 0.6)))
                 out, losses = backward_v7_enum(model, batch, config,
                                                ctx_ss_p=p_cur,
                                                ctx_cache=ctx_ss_cache,
                                                ar_ss_p=ar_p_cur,
                                                ar_noise=ar_noise,
-                                               ar_cache=ar_ss_cache)
+                                               ar_cache=ar_ss_cache,
+                                               ar_rollout_len=ar_rollout_len)
             elif v3f_mode:
                 # V3_Fv1: diffuse the full normalized state [pose | trans |
                 # contact]; 10% V zeroing is the unconditional prior pass
@@ -2149,7 +2417,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                                  torch.zeros_like(v_feat), v_feat)
                         batch["v_zero"] = v_drop
                 z_kw = {"z_src": "all"} if v5_1_mode else {}
-                out = model(v_feat, t_raw, t_phys, config_id, batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw)
+                out = model(v_feat, t_raw, t_phys, config_id, batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw,
+                            **model_observation_kwargs(batch))
             else:
                 # Test11 τ training-regime knobs: --tau-fixed pins every step to one
                 # noise level (0 = identity-mapping training), --tau-max narrows the
@@ -2302,6 +2571,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                 nonfinite_skips += 1
                 global_step += 1
                 continue
+            # 分支挤压探针：在 clip（就地缩放）之前取原始梯度范数，
+            # 否则所有组都被压到同一个上限，看不出相对量级。
+            for _name, _params in grad_probe.items():
+                _grads = [param.grad for param in _params if param.grad is not None]
+                if not _grads:
+                    continue
+                _norm = torch.linalg.vector_norm(
+                    torch.stack(torch._foreach_norm(_grads)))
+                grad_probe_acc[_name] += _norm * batch_size
+                grad_probe_acc[_name + "_rms"] += (
+                    _norm / math.sqrt(max(grad_probe_counts[_name], 1)) * batch_size)
             grad_clip = config.get("grad_clip")
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
@@ -2442,7 +2722,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     with (checkpoint_archive.root / "skipped_validation.jsonl").open("a", encoding="utf-8") as fh:
                         fh.write(json.dumps({"epoch": epoch + 1, "reason": str(exc)}) + "\n")
                     print("candidate pool skip epoch %d: %s" % (epoch + 1, exc))
-        if wandb_run is not None:
+        for _name in grad_probe:
+            epoch_sums["grad_" + _name] = float(grad_probe_acc[_name])
+            epoch_sums["grad_rms_" + _name] = float(grad_probe_acc[_name + "_rms"])
+        if monitor_run is not None:
             denom = max(epoch_sums["n"], 1)
             log = {"epoch": epoch + 1}
             log["train/global_step"] = global_step
@@ -2521,9 +2804,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                         log[full_key] = min(float(log[full_key]), float(loss_cap))
             if eval_results is not None:
                 log.update(eval_results)
-            wandb_run.log(log, step=epoch + 1)
-    if wandb_run is not None:
-        wandb_run.finish()
+            monitor_run.log(log, step=epoch + 1)
+    if monitor_run is not None:
+        monitor_run.finish()
     final_split = str(config.get("final_eval_split", "test"))
     if final_split == "none":
         return 0

@@ -38,7 +38,8 @@ from anysole.models.common.model_v4_1 import (
     V41ContactHead,
     _temporal_encoder,
 )
-from anysole.utils.geometry import compose_rot6d, rot6d_to_rotmat
+from anysole.utils.geometry import (
+    compose_rot6d, deyaw_rotmat, rot6d_to_rotmat, rotmat_to_6d)
 from anysole.models.common.pose_head import _part_place_idx
 from anysole.types import (
     CONFIG_T,
@@ -131,7 +132,8 @@ class V7MotionHead(nn.Module):
 
     def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8,
                  dim_feedforward=1024, dropout=0.1, n_layers=6, route=False,
-                 ctx_v2=False, ctx5=False, ar=False, ar_fb=True):
+                 ctx_v2=False, ctx5=False, ar=False, ar_fb=True, ar2=False,
+                 ar2_fb=True, ar2_lowdim=False, ar2_fb_dim=16):
         super().__init__()
         self.embeddings = embeddings
         self.dim = dim
@@ -139,8 +141,18 @@ class V7MotionHead(nn.Module):
         self.ctx_v2 = bool(ctx_v2)
         self.ctx5 = bool(ctx5)
         self.ar = bool(ar)
+        self.ar2 = bool(ar2)
         self.ar_fb = bool(ar_fb)
-        self.ar_fb = bool(ar_fb)
+        self.ar2_fb = bool(ar2_fb)
+        self.ar2_lowdim = bool(ar2_lowdim)
+        self.ar2_fb_dim = int(ar2_fb_dim)
+        if self.ar2_lowdim and not (self.ar2 and self.ar2_fb):
+            raise ValueError("ar2_lowdim requires ar2 with feedback")
+        if self.ar2_lowdim and not 1 <= self.ar2_fb_dim <= 22:
+            # 低维状态 ≤ 32 = Δyaw 1 + 根倾斜 6 + 投影 k + 航向系速度 3
+            # → k ≤ 22（修改 04 改动 B 维度上限）。
+            raise ValueError("ar2_fb_dim must be in [1, 22] "
+                             "(low-dim feedback total ≤ 32)")
         self.n_parts = len(PART_JOINTS)
         self.part_joints = tuple(tuple(int(j) for j in g) for g in PART_JOINTS)
         self.register_buffer("part_place_idx",
@@ -157,16 +169,39 @@ class V7MotionHead(nn.Module):
             [nn.Linear(dim, 6 * len(joints)) for joints in self.part_joints])
         self.root_head = nn.Sequential(
             nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 3))
-        if self.ar:
-            # 帧级双模式 AR（2026-11-01，V7 方案 §11）：T 行逐帧接续——
-            # 反馈 = 上一帧完整输出（姿态 144 + 根速度 3），共享投影加性
-            # 注入；零初始化保留 init 逐位 = Cv5 契约（RNG 存/复构造）。
-            # ar_fb=False（ARM 对照格）：只留因果掩码、无反馈支路。
+        if self.ar or self.ar2:
+            # 帧级 AR（2026-11-01，V7 方案 §11）：反馈 = 上一帧完整输出，
+            # 共享投影加性注入；零初始化保留 init 逐位 = Cv5 契约（RNG
+            # 存/复构造）。ar（V7_Cv5AR）= [姿态 144 + 根速度 3]；ar2
+            # （V7_Cv5AR2）= [Δyaw 1 + tilt/body 144 + v_head 3]。ar_fb
+            # 仅 ar 用（ARM 对照格：只留因果掩码、无反馈支路）。
             _rng = torch.get_rng_state()
-            if ar_fb:
+            if ar2 and ar2_fb:
+                # 修改 04 改动 B（2026-11-03）：ar2_lowdim 时反馈 = 低维
+                # 相对状态 [Δyaw 1 + 根倾斜 6 + body 投影 k + v_head 3]
+                # （总维 ≤ 32，k = ar2_fb_dim ≤ 22）；body 138 → k 的投影
+                # 零初始化（init 贡献严格为零 → 保留 AR2 零初始化契约）。
+                # 外部接口仍 148 维（dataset/eval 协议不感知降维）。
+                fb_in = (10 + int(ar2_fb_dim)) if ar2_lowdim else 148
+                self.ar2_fb = nn.Linear(fb_in, dim)
+                nn.init.zeros_(self.ar2_fb.weight)
+                nn.init.zeros_(self.ar2_fb.bias)
+                if ar2_lowdim:
+                    self.ar2_body_proj = nn.Linear(138, int(ar2_fb_dim))
+                    nn.init.zeros_(self.ar2_body_proj.weight)
+                    nn.init.zeros_(self.ar2_body_proj.bias)
+            elif ar and ar_fb:
                 self.ar_fb = nn.Linear(147, dim)
                 nn.init.zeros_(self.ar_fb.weight)
                 nn.init.zeros_(self.ar_fb.bias)
+            if ar2:
+                # Δyaw 头：首层正常初始化、末层零初始化（init 输出 0 →
+                # 走直，探针口径「转向不可观测，预期 ≈0」；双层全零会
+                # 死梯度——末层 W=0 截断首层梯度链，头退化成常数偏置）。
+                self.dyaw_head = nn.Sequential(
+                    nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 1))
+                nn.init.zeros_(self.dyaw_head[2].weight)
+                nn.init.zeros_(self.dyaw_head[2].bias)
             torch.set_rng_state(_rng)
             # 因果掩码：(tw*10) 序列按槽 t*10+p 展平，位置 i 只 attend
             # t_j <= t_i（同帧 10 槽互见）。float 加性掩码语义：允许=0、
@@ -206,21 +241,33 @@ class V7MotionHead(nn.Module):
         self.pose_std = pose_std.to(self.pose_std.dtype)
 
     def forward(self, m_v, m_t, v_present, t_present, gate=None,
-                t_only_mask=None, t_only_adapters=None, z_override=None,
+                t_only_mask=None, t_only_adapters=None, vt_mask=None,
+                vt_adapters=None, z_override=None,
                 gate_fn=None, ctx_vec=None, ctx_pose=None, ctx_block=None,
-                ctx_emb=None, prev_state=None, causal=False):
+                ctx_emb=None, prev_state=None, causal=False, max_frames=None):
         """→ (pose (B,tw,POSE_DIM), v_hat (B,tw,3), z_root, z_parts)
 
         ``z_override``（TTA 注入点，2026-10-27）：给定 (B, tw*(1+n_parts), d)
         时替换 decoder 输出（out_parts/root_head 前的部位表示，论文 token_out
         的对应位置；梯度只经冻结的 out_parts/root_head，不回传 decoder/
         temporal/编码器）；默认 None = 原行为不变。
+
+        ``max_frames``（修改 04 改动 A，2026-11-03）：非 None 时只解码
+        前 max_frames 帧的前缀（query/时间 PE/因果掩码/门逐帧切片——
+        因果掩码保证前缀输出与全窗解码逐位一致），供训练期闭环 rollout
+        逐帧解码省算力；默认 None = 原行为不变。
         """
         B = m_v.shape[0]
-        q_root = self.root_query.expand(B, -1, -1, -1) \
-            + self.embeddings.time_pe.to(self.root_query.dtype).view(1, self.tw, 1, self.dim)
-        q_parts = self.part_queries.expand(B, -1, -1, -1) \
-            + self.embeddings.time_pe.to(self.part_queries.dtype).view(1, self.tw, 1, self.dim)
+        frames = self.tw if max_frames is None else int(max_frames)
+        if frames > self.tw:
+            raise ValueError("max_frames must be ≤ tw")
+        q_root = self.root_query[:, :frames].expand(B, -1, -1, -1) \
+            + self.embeddings.time_pe[-self.tw:][:frames].to(self.root_query.dtype).view(1, frames, 1, self.dim)
+        q_parts = self.part_queries[:, :frames].expand(B, -1, -1, -1) \
+            + self.embeddings.time_pe[-self.tw:][:frames].to(self.part_queries.dtype).view(1, frames, 1, self.dim)
+        if ctx_block is not None and max_frames is not None:
+            raise ValueError("prefix decoding (max_frames) is unsupported "
+                             "with ctx_block (ar2 rollout never carries ctx)")
         if ctx_block is not None:
             # v3 硬填式（Level 3）：ctx = 重叠区 nf 帧 × [根 6D + 根速度 3
             # + flag]（评估链 = 上一窗后 nf 帧预测，训练 = GT 前 nf 帧）——
@@ -259,22 +306,44 @@ class V7MotionHead(nn.Module):
             if self.ctx_v2:
                 q_parts[:, :, 0:1, :] = (q_parts[:, :, 0:1, :]
                                          + ctx_bias.to(q_parts.dtype))
+        if self.ar2 and self.ar2_fb and prev_state is not None:
+            # AR2 相对运动反馈（2026-11-01，V7_AR方案 §2）：prev_state =
+            # 上一帧 [Δyaw + tilt/body + v_head]，共享投影加性注入（与
+            # ar_fb 同模式，零初始化保留 init 逐位 = Cv5 契约）。
+            ps = prev_state[:, :frames] if max_frames is not None else prev_state
+            if self.ar2_lowdim:
+                # 修改 04 改动 B（2026-11-03）：低维相对状态——Δyaw 1 +
+                # 根倾斜 6 + 身体低维投影 k（ar2_body_proj 零初始化）+
+                # 航向系速度 3；148 维外部布局不变（dataset/eval 不感知）。
+                body = self.ar2_body_proj(ps[..., 7:145])      # (B, frames, k)
+                ps = torch.cat([ps[..., :7], body, ps[..., 145:]], dim=-1)
+            fb = self.ar2_fb(ps.to(q_root.dtype))   # (B, frames, d)
+            q_root = q_root + fb.view(B, frames, 1, self.dim)
+            q_parts = q_parts + fb.view(B, frames, 1, self.dim)
         if self.ar and self.ar_fb and prev_state is not None:
             # 帧级 AR 反馈（2026-11-01 用户裁定：全条件注入——V/VT/T 都走
             # 因果 + 反馈，共享解码器语义唯一）。q += proj(上一帧输出)。
             fb = self.ar_fb(prev_state.to(q_root.dtype))      # (B, tw, d)
-            q_root = q_root + fb.view(B, self.tw, 1, self.dim)
-            q_parts = q_parts + fb.view(B, self.tw, 1, self.dim)
-        q = torch.cat([q_root, q_parts], dim=2)          # (B, tw, 1+9, d)
-        q = q.reshape(B, self.tw * (1 + self.n_parts), self.dim)
-        _mask = self.causal_mask if (causal and self.ar) else None
+            q_root = q_root + fb.view(B, frames, 1, self.dim)
+            q_parts = q_parts + fb.view(B, frames, 1, self.dim)
+        q = torch.cat([q_root, q_parts], dim=2)          # (B, frames, 1+9, d)
+        q = q.reshape(B, frames * (1 + self.n_parts), self.dim)
+        _mask = self.causal_mask if (causal and (self.ar or self.ar2)) else None
+        if _mask is not None and frames < self.tw:
+            _mask = _mask[:frames * (1 + self.n_parts),
+                          :frames * (1 + self.n_parts)]
+        if gate is not None and max_frames is not None:
+            gate = gate[:, :frames]
+        if gate_fn is not None and max_frames is not None:
+            raise ValueError("prefix decoding (max_frames) is unsupported "
+                             "with route_conditional gate_fn")
         for layer in self.layers:
-            q, gate = layer(q, m_v, m_t, v_present, t_present, self.tw,
+            q, gate = layer(q, m_v, m_t, v_present, t_present, frames,
                             gate=gate, gate_fn=gate_fn, attn_mask=_mask)
             gate_fn = None  # Q：第一层计算的同一组门供后续五层复用（§6）
         if z_override is not None:
             q = z_override  # TTA 注入点（decoder 输出 / out_parts·root_head 前）
-        q = q.reshape(B, self.tw, 1 + self.n_parts, self.dim)
+        q = q.reshape(B, frames, 1 + self.n_parts, self.dim)
         z_root = q[:, :, 0:1, :]
         z_parts = q[:, :, 1:, :]
         if t_only_adapters is not None:
@@ -283,7 +352,16 @@ class V7MotionHead(nn.Module):
             mask = t_only_mask.to(q.dtype).view(B, 1, 1, 1)
             z_root = z_root + mask * t_only_adapters[0](z_root)
             z_parts = z_parts + mask * t_only_adapters[1](z_parts)
+        if vt_adapters is not None:
+            if vt_mask is None:
+                raise ValueError("VT adapters require an explicit availability mask")
+            mask = vt_mask.to(q.dtype).view(B, 1, 1, 1)
+            z_root = z_root + mask * vt_adapters[0](z_root)
+            z_parts = z_parts + mask * vt_adapters[1](z_parts)
         v_hat = self.root_head(z_root)[:, :, 0, :]       # (B, tw, 3)
+        dyaw = None
+        if self.ar2:
+            dyaw = self.dyaw_head(z_root)[:, :, 0, :]    # (B, tw, 1) rad/帧
         pose_parts = torch.cat(
             [self.out_parts[p](z_parts[..., p, :]) for p in range(self.n_parts)],
             dim=-1)
@@ -293,7 +371,14 @@ class V7MotionHead(nn.Module):
             # init 贡献严格为零——保留 init 逐位 = Cv5 契约）。根 6D 位于
             # POSE_DIM 前 6 位（关节 0 = root，part_place_idx 正典序）。
             pose[..., :6] = pose[..., :6] + ctx_pose.to(pose.dtype).view(B, 1, 6)
-        return pose, v_hat, z_root, z_parts
+        if self.ar2:
+            # 根读出强制去航向（方案 §3.3）：输出头无法经 tilt 通道表达航向
+            # ——反归一化后的物理旋转上投影（§3.1），前向退化报错不静默。
+            root6 = pose[..., :6]
+            r_root = rot6d_to_rotmat(root6)
+            pose = torch.cat([rotmat_to_6d(deyaw_rotmat(r_root)),
+                              pose[..., 6:]], dim=-1)
+        return pose, v_hat, dyaw, z_root, z_parts
 
 
 class AnySoleModelV7(nn.Module):
@@ -318,10 +403,19 @@ class AnySoleModelV7(nn.Module):
                  ctx_v2: bool = False, ctx_vcond: bool = False,
                  ctx3: bool = False, ctx4: bool = False,
                  ctx4b: bool = False, ctx5: bool = False,
-                 ar: bool = False, ar_fb: bool = True):
+                 ar: bool = False, ar_fb: bool = True, ar2: bool = False,
+                 ar2_fb: bool = True, ar2_lowdim: bool = False,
+                 ar2_fb_dim: int = 16, ar2_regression: bool = False,
+                 vt_t_residual: bool = False,
+                 obs_context=None):
         super().__init__()
         self.d = d
         self.tw = tw
+        self.obs_context = int(obs_context if obs_context is not None else tw)
+        if self.obs_context < tw or self.obs_context % tw:
+            raise ValueError("obs_context must be a multiple of tw and at least as large")
+        if self.obs_context > tw and not ar2:
+            raise ValueError("extended observation context requires ar2")
         self.modal = "anysolev2"
         self.v7 = True
         self.v_input = "hrnet"
@@ -343,7 +437,20 @@ class AnySoleModelV7(nn.Module):
         self.ctx4b = bool(ctx4b)
         self.ctx5 = bool(ctx5)
         self.ar = bool(ar)
+        self.ar2 = bool(ar2)
         self.ar_fb = bool(ar_fb)
+        self.ar2_fb = bool(ar2_fb)
+        self.ar2_lowdim = bool(ar2_lowdim)
+        self.ar2_fb_dim = int(ar2_fb_dim)
+        # 纯回归收口（2026-11-02，v7_c2ar2r）：训练/评估两侧读本属性
+        # （模型属性 = 真值，checkpoint config 只作回退）。
+        self.ar2_regression = bool(ar2_regression)
+        self.vt_t_residual = bool(vt_t_residual)
+        if self.ar2 and self.ar:
+            raise ValueError("ar2 and ar are mutually exclusive")
+        if self.ar2 and (self.prev_ctx or self.ctx3 or self.ctx4
+                         or self.ctx4b or self.ctx5):
+            raise ValueError("ar2 replaces ctx: prev_ctx/ctx3/4/5 must be off")
         if self.task_routes and not self.reliability_route:
             raise ValueError("Task routes require tactile reliability routing")
         if self.route_temporal and not self.reliability_route:
@@ -373,7 +480,8 @@ class AnySoleModelV7(nn.Module):
                              "(block layouts differ)")
         if self.ar and (self.prev_ctx or self.ctx3):
             raise ValueError("ar mode replaces ctx: prev_ctx/ctx3 must be off")
-        self.embeddings = SharedEmbeddings(dim=d, tw=tw)
+        self.embeddings = SharedEmbeddings(
+            dim=d, tw=self.obs_context, time_offset=tw - self.obs_context)
         self.encoders = ModalEncoders(
             self.embeddings, dim=d, tw=tw, tactile_input="raw108",
             tactile_direct=False, no_imu=False, v_input="hrnet",
@@ -384,8 +492,25 @@ class AnySoleModelV7(nn.Module):
         self.pose_head = V7MotionHead(
             self.embeddings, dim=d, tw=tw, nhead=nhead, dropout=dropout,
             n_layers=pose_layers, route=reliability_route, ctx_v2=bool(ctx_v2),
-            ctx5=bool(ctx5), ar=bool(ar), ar_fb=bool(ar_fb))
+            ctx5=bool(ctx5), ar=bool(ar), ar_fb=bool(ar_fb), ar2=bool(ar2),
+            ar2_fb=bool(ar2_fb), ar2_lowdim=bool(ar2_lowdim),
+            ar2_fb_dim=int(ar2_fb_dim))
         self.contact_head = V41ContactHead(dim=d)
+        if ar2:
+            # 视觉航向观测分支（方案 §2/§4，仅 V/VT 生效；T 行 v_present=0
+            # 不消费）：vis_yaw 零初始化（0 rad）；vis_gain 零权重 + 负偏置
+            # 初始化 → 校正 ≈ 0，训练后经 L_yawcorr 学到可靠性（推理只读
+            # 运行时证据，不读 GT）。RNG 存/复：新组件不扰动共享参数序列。
+            _rng = torch.get_rng_state()
+            self.vis_yaw_head = nn.Sequential(
+                nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
+            nn.init.zeros_(self.vis_yaw_head[2].weight)
+            nn.init.zeros_(self.vis_yaw_head[2].bias)
+            self.vis_gain_head = nn.Sequential(
+                nn.Linear(d, d), nn.GELU(), nn.Linear(d, 1))
+            nn.init.zeros_(self.vis_gain_head[2].weight)
+            nn.init.constant_(self.vis_gain_head[2].bias, -4.0)
+            torch.set_rng_state(_rng)
         if reliability_route:
             # C：T 信任门（端到端学习，v1 无显式质量标签——设计思路 §3
             # 候选 C 的第一版）。输入 = V/T 编码 token（窗口均值或逐帧，
@@ -431,6 +556,13 @@ class AnySoleModelV7(nn.Module):
             with torch.random.fork_rng(devices=[]):
                 self.t_only_root_adapter = self._make_t_only_adapter(d)
                 self.t_only_pose_adapter = self._make_t_only_adapter(d)
+        if self.vt_t_residual:
+            # VT 零初始化触觉残差（2026-11-02，V7_Cv5AR2RT）：仅 V&T 同现行
+            # 生效（vt_mask）；zero-init 保证 init 时 VT ≡ V 主路径输出
+            # （RNG fork 不扰动共享参数序列）。
+            with torch.random.fork_rng(devices=[]):
+                self.vt_root_adapter = self._make_t_only_adapter(d)
+                self.vt_pose_adapter = self._make_t_only_adapter(d)
 
     @staticmethod
     def _make_t_only_adapter(dim):
@@ -509,7 +641,7 @@ class AnySoleModelV7(nn.Module):
                 T_s2m=None, V_hmr=None, mask_v=None, mask_t=None,
                 v_present=None, t_present=None, z_override=None,
                 gate_override=None, prev_ctx=None, prev_state=None,
-                causal=False):
+                causal=False, obs_history=None):
         """三条件 = 同一前向的三种输入组合。存在掩码默认由 config_id 决定
         （与输入置零同一决定，设计思路 §4）；v_present/t_present 允许调用
         侧覆盖（诊断/干预用）；gate_override（§7 干预诊断钩子）非 None 时
@@ -521,6 +653,54 @@ class AnySoleModelV7(nn.Module):
             v_present = (config_id != CONFIG_T).to(V_feat.dtype)
         if t_present is None:
             t_present = (config_id != CONFIG_V).to(V_feat.dtype)
+        if obs_history is not None:
+            if not self.ar2 or len(obs_history) != V_feat.shape[0]:
+                raise ValueError("obs_history requires one AR2 history per sample")
+            groups = {}
+            for i, history in enumerate(obs_history):
+                if set(history) != {"V_feat", "T_raw", "T_phys"}:
+                    raise ValueError("observation history must contain only V_feat, T_raw and T_phys")
+                lengths = {value.shape[0] for value in history.values()}
+                if len(lengths) != 1:
+                    raise ValueError("observation history channels have different lengths")
+                length = lengths.pop()
+                if length + self.tw > self.obs_context:
+                    raise ValueError("observation history exceeds obs_context")
+                groups.setdefault(length, []).append(i)
+            outputs, order = [], []
+            for length, indices in groups.items():
+                idx = torch.tensor(indices, device=V_feat.device)
+
+                def select(value):
+                    return value.index_select(0, idx) if value is not None else None
+
+                streams = []
+                for key, current in (("V_feat", V_feat), ("T_raw", T_raw),
+                                     ("T_phys", T_phys)):
+                    past = torch.stack([obs_history[i][key] for i in indices]).to(current)
+                    streams.append(torch.cat([past, select(current)], dim=1))
+
+                def extend_mask(value):
+                    value = select(value)
+                    if value is None:
+                        return None
+                    return torch.cat([value.new_zeros(len(indices), length), value], dim=1)
+
+                outputs.append(self.forward(
+                    *streams, config_id=select(config_id),
+                    subject_ids=([subject_ids[i] for i in indices] if subject_ids is not None else None),
+                    T_s2m=select(T_s2m), V_hmr=select(V_hmr),
+                    mask_v=extend_mask(mask_v), mask_t=extend_mask(mask_t),
+                    v_present=select(v_present), t_present=select(t_present),
+                    z_override=select(z_override), gate_override=select(gate_override),
+                    prev_ctx=select(prev_ctx), prev_state=select(prev_state), causal=causal))
+                order.extend(indices)
+            restore = torch.tensor(order, device=V_feat.device).argsort()
+            return {key: (torch.cat([out[key] for out in outputs], dim=0).index_select(0, restore)
+                          if outputs[0][key] is not None else None)
+                    for key in outputs[0]}
+        if not self.tw <= V_feat.shape[1] <= self.obs_context:
+            raise ValueError("observation length is outside [tw, obs_context]")
         T_tac = torch.cat([T_raw, T_phys], dim=-1)
         v_tok, t_tok = self.encoders(V_feat, T_tac, config_id, V_hmr=V_hmr,
                                      mask_v=mask_v, mask_t=mask_t)
@@ -584,17 +764,26 @@ class AnySoleModelV7(nn.Module):
         adapters = ((self.t_only_root_adapter, self.t_only_pose_adapter)
                     if self.t_only_adapters else None)
         t_only = (~v_present.bool()) & t_present.bool()
-        pose, v_hat, z_root, z_parts = self.pose_head(
+        vt_adapters = ((self.vt_root_adapter, self.vt_pose_adapter)
+                       if self.vt_t_residual else None)
+        vt_both = v_present.bool() & t_present.bool()
+        pose, v_hat, dyaw_hat, z_root, z_parts = self.pose_head(
             m_v, m_t, v_present, t_present, gate=gate, gate_fn=gate_fn,
             t_only_mask=t_only, t_only_adapters=adapters,
+            vt_mask=vt_both, vt_adapters=vt_adapters,
             z_override=z_override, ctx_vec=ctx_vec, ctx_pose=ctx_pose,
             ctx_block=ctx_block, ctx_emb=(self.ctx_emb if self.ctx3 else None),
             prev_state=prev_state,
-            causal=bool(causal) and self.ar)
+            causal=bool(causal) and (self.ar or self.ar2))
+        vis_yaw = None
+        vis_gain = None
+        if self.ar2:
+            vis_yaw = self.vis_yaw_head(v_tok[:, -self.tw:])
+            vis_gain = torch.sigmoid(self.vis_gain_head(v_tok[:, -self.tw:]))
         if self.route_conditional and gate_override is None:
             gate = captured.get("gate")  # 监控/损失输出用（Q 的门在解码器内计算）
         trans_hat = torch.cumsum(v_hat, dim=1) / float(FPS)
-        contact_logits = self.contact_head(t_tok)
+        contact_logits = self.contact_head(t_tok[:, -self.tw:])
         return {
             "x0_hat": pose,                  # 单一生成器的输出（当前条件）
             "v_hat": v_hat,                  # 根速度
@@ -602,12 +791,140 @@ class AnySoleModelV7(nn.Module):
             "contact_logits": contact_logits,
             "route_gate": gate,              # C：窗口级 T 信任门（监控/损失）
             "z": torch.cat([z_root, z_parts], dim=2),  # (B,tw,1+n_parts,d) TTA 叶子
-            "F": m_v + m_t,                  # train.py finite check
-            "v_tok": v_tok,
-            "t_tok": t_tok,
-            "m_v": m_v,
-            "m_t": m_t,
+            "F": (m_v + m_t)[:, -self.tw:],
+            "v_tok": v_tok[:, -self.tw:],
+            "t_tok": t_tok[:, -self.tw:],
+            "m_v": m_v[:, -self.tw:],
+            "m_t": m_t[:, -self.tw:],
             "anchor_rot": anchor_rot,
+            "dyaw_hat": dyaw_hat,          # AR2：逐帧航向增量 (B,tw,1) rad/帧
+            "vis_yaw": vis_yaw,            # AR2：视觉航向观测（V/VT 行）
+            "vis_gain": vis_gain,          # AR2：视觉校正增益 ∈ (0,1)
+            "z_root": z_root,
+            "z_parts": z_parts,
+            "pressure_hat": None,
+            "vfeat_hat": None,
+        }
+
+    def rollout_forward(self, V_feat, T_raw, T_phys, config_id=None,
+                        subject_ids=None, T_s2m=None, prev_state=None,
+                        rollout_len=1, detach=True, dyaw_base="zero"):
+        """修改 04 改动 A（2026-11-03）：训练期闭环多步 rollout 前向。
+
+        帧 0 与 >rollout_len 的尾帧 = GT 反馈 TF 解码（迭代 0 的完整前
+        向，与 forward 逐位同源）；帧 1..rollout_len = 逐帧闭环解码：
+        第 t 帧反馈 = 第 t−1 帧模型输出组装 [Δyaw_total + tilt/body +
+        v_head]（与 eval ar2_session_chunks 的逐帧更新式同构；dyaw_base
+        与训练损失侧同一规则）。因果掩码保证第 t 帧输出只依赖 ≤t 的
+        反馈槽，前缀解码（max_frames=t+1）与全窗解码逐位一致。返回与
+        forward 同构的 out dict，其中 x0_hat/v_hat/dyaw_hat 在帧
+        1..rollout_len 为闭环输出、其余为 TF 输出，trans_hat 由合并后
+        v_hat 重积分；contact/vis 头与 forward 同源（编码器侧）。
+
+        detach=True（默认）：反馈值截断梯度——只影响优化、不改反馈
+        来源（每个闭环解码的图独立，逐帧截断）。
+
+        与 --ar-ss（scheduled sampling）的区别：SS 是逐帧按概率替换
+        单帧反馈（两遍式缓存，反馈来源 = GT 条件下的输出）；本改动是
+        连续 L 帧真实闭环 rollout（反馈来源 = 自预测条件下的输出，
+        误差在段内复合——修改 03 测量靶心 0.53→0.05 的对应项）。
+        """
+        if config_id is None:
+            config_id = torch.zeros(V_feat.shape[0], dtype=torch.long,
+                                    device=V_feat.device)
+        if prev_state is None:
+            raise ValueError("rollout requires batch-carried prev_state")
+        if not (self.ar2 and self.ar2_fb):
+            raise ValueError("rollout requires ar2 with feedback (ar2_fb=True)")
+        if not 1 <= int(rollout_len) < self.tw:
+            raise ValueError("rollout_len must be in [1, tw-1]")
+        if not self.tw <= V_feat.shape[1] <= self.obs_context:
+            raise ValueError("observation length is outside [tw, obs_context]")
+        # 编码段与 forward 同源（复制面最小：ar2 前向无 ctx/适配器路径；
+        # 两段同步维护纪律见 forward 注释）。
+        v_present = (config_id != CONFIG_T).to(V_feat.dtype)
+        t_present = (config_id != CONFIG_V).to(V_feat.dtype)
+        T_tac = torch.cat([T_raw, T_phys], dim=-1)
+        v_tok, t_tok = self.encoders(V_feat, T_tac, config_id)
+        m_v = self.v_temporal(v_tok)
+        m_t = self.t_temporal(t_tok)
+        gate = self._route_gate(v_tok, t_tok) if self.reliability_route else None
+        t_only = (~v_present.bool()) & t_present.bool()
+        vt_both = v_present.bool() & t_present.bool()
+        adapters = ((self.t_only_root_adapter, self.t_only_pose_adapter)
+                    if self.t_only_adapters else None)
+        vt_adapters = ((self.vt_root_adapter, self.vt_pose_adapter)
+                       if self.vt_t_residual else None)
+
+        def decode(pstate, frames):
+            return self.pose_head(
+                m_v, m_t, v_present, t_present, gate=gate,
+                t_only_mask=t_only, t_only_adapters=adapters,
+                vt_mask=vt_both, vt_adapters=vt_adapters,
+                prev_state=pstate, causal=True, max_frames=frames)
+
+        # 迭代 0：GT 反馈 TF 解码（帧 0 与尾帧的损失来源；合并 out 骨架）。
+        pose0, v0, dyaw0, z_root, z_parts = decode(prev_state, self.tw)
+        history_base = (dyaw_base == "history")
+        # 行 1 反馈 = 帧 0 状态（帧 0 输出只依赖行 0 的 batch 携带反馈 →
+        # 该状态与 eval 的闭环帧 0 状态同构；行 1 的 GT 携带必须被模型
+        # 自身帧 0 状态替换——闭环链起点）。
+        x0_fb, v0_fb, d0_fb = pose0[:, 0], v0[:, 0], dyaw0[:, 0, 0]
+        if detach:
+            x0_fb, v0_fb, d0_fb = x0_fb.detach(), v0_fb.detach(), d0_fb.detach()
+        d_total0 = d0_fb + (prev_state[:, 0, 0] if history_base else 0.0)
+        prev_filled = torch.cat([
+            prev_state[:, :1],
+            torch.cat([d_total0[:, None], x0_fb, v0_fb], dim=-1)[:, None, :],
+            prev_state[:, 2:]], dim=1)
+        roll_pose, roll_v, roll_dyaw = [], [], []
+        for t in range(1, int(rollout_len) + 1):
+            # 前缀解码帧 0..t（因果掩码 → 与全窗解码在 ≤t 帧逐位一致）；
+            # 行 1..t 在进入本迭代前已全部替换为自预测（闭环）。
+            pose_t, v_t, dyaw_t, _, _ = decode(prev_filled, t + 1)
+            x_t, v_t_, d_t = pose_t[:, t], v_t[:, t], dyaw_t[:, t, 0]
+            if detach:
+                x_t, v_t_, d_t = x_t.detach(), v_t_.detach(), d_t.detach()
+            # 行 t+1 反馈 = 帧 t 状态（eval 更新式：d_total = Δψ̂ + 历史
+            # 延续基线；history 基线 = 反馈槽自身携带的 Δyaw_total(t−1)）。
+            d_total = d_t + (prev_filled[:, t, 0] if history_base else 0.0)
+            if t < int(rollout_len):
+                fb_t = torch.cat([d_total[:, None], x_t, v_t_],
+                                 dim=-1)[:, None, :]
+                prev_filled = torch.cat(
+                    [prev_filled[:, :t + 1], fb_t, prev_filled[:, t + 2:]],
+                    dim=1)
+            roll_pose.append(x_t)
+            roll_v.append(v_t_)
+            roll_dyaw.append(d_t)
+        # 合并：帧 1..rollout_len = 闭环输出，其余 = TF 输出。
+        pose = pose0.clone()
+        v_hat = v0.clone()
+        dyaw_hat = dyaw0.clone()
+        if roll_pose:
+            pose[:, 1:rollout_len + 1] = torch.stack(roll_pose, dim=1)
+            v_hat[:, 1:rollout_len + 1] = torch.stack(roll_v, dim=1)
+            dyaw_hat[:, 1:rollout_len + 1, 0] = torch.stack(roll_dyaw, dim=1)
+        vis_yaw = self.vis_yaw_head(v_tok[:, -self.tw:])
+        vis_gain = torch.sigmoid(self.vis_gain_head(v_tok[:, -self.tw:]))
+        trans_hat = torch.cumsum(v_hat, dim=1) / float(FPS)
+        contact_logits = self.contact_head(t_tok[:, -self.tw:])
+        return {
+            "x0_hat": pose,                  # 帧 1..L 闭环、其余 TF
+            "v_hat": v_hat,
+            "trans_hat": trans_hat,
+            "contact_logits": contact_logits,
+            "route_gate": gate,
+            "z": torch.cat([z_root, z_parts], dim=2),
+            "F": (m_v + m_t)[:, -self.tw:],
+            "v_tok": v_tok[:, -self.tw:],
+            "t_tok": t_tok[:, -self.tw:],
+            "m_v": m_v[:, -self.tw:],
+            "m_t": m_t[:, -self.tw:],
+            "anchor_rot": None,
+            "dyaw_hat": dyaw_hat,
+            "vis_yaw": vis_yaw,
+            "vis_gain": vis_gain,
             "z_root": z_root,
             "z_parts": z_parts,
             "pressure_hat": None,

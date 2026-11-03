@@ -97,6 +97,8 @@ def variant_from_config(config: dict) -> str:
         elif isinstance(value, (list, tuple)):
             value = len(value)
         parts.append(fmt % (int(value) if "d" in fmt else float(value)))
+    if int(config.get("obs_context", config.get("tw", TW))) > int(config.get("tw", TW)):
+        parts.append("oc%d" % int(config["obs_context"]))
     return "_".join(parts) if parts else "default"
 
 

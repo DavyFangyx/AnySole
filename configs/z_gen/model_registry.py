@@ -1713,3 +1713,109 @@ for _fname, _fconfig in _V7_CV7_FOLDS:
 MODELS["V7_Cv5_bs512_s1"] = {**_V7_CV5_S1_CELL, "label": "V7-Cv5-bs512-s1",
                              "name": "V7_Cv5_bs512", "seed": 1,
                              "batch_size": 512}
+
+# V7_Cv5AR2MF（2026-11-02，AR2 yaw-fix 损失）：结构同 V7_Cv5AR2M（因果掩码
+# 无反馈，v7_c2ar2m），配方差异只在损失（v7_ar2_yaw_fix=True）：
+#   ① T 行航向监督移除（probe_dyaw_observability_20261101 §4 执行；
+#      转向只从 V/VT 行学）；
+#   ② L_yawcorr 自由生成口径（ψ 从 0 起 + 推理同款 EMA 校正链——旧口径
+#      从 GT psi_base 起，gain 最优解 = 0，视觉校正从未学会启用）；
+#   ③ L_world_traj 世界系轨迹（V/VT 行，组装后位移多尺度比对）。
+# 对照 = V7_Cv5AR2M_s1（同 obs20/batch64/种子，仅损失配方差异）。
+MODELS["V7_Cv5AR2MF_s1"] = {
+    **_V7_CV5_S1_CELL,
+    "label": "V7-Cv5AR2MF-obs20-out20-s1",
+    "name": "V7_Cv5AR2MF", "seed": 1, "batch_size": 64,
+    "train_args": {**_V7_CV5_S1_CELL.get("train_args", {}),
+                   "tw": 20, "stride": 20, "obs_context": 20,
+                   "lambda_dyaw": 1.0, "lambda_cumyaw": 1.0,
+                   "lambda_dyaw_td": 0.5, "lambda_pose_vel": 0.5,
+                   "lambda_visyaw": 0.5, "lambda_yawcorr": 0.5,
+                   "v7_ar2_yaw_fix": True, "lambda_world_traj": 1.0,
+                   "ar2_dyaw_base": "history", "ar2_dyaw_t_w": 0.1}}
+
+# V7_Cv5AR2M_s1_evalgfl（2026-11-02，AR2 视觉校正增益下限诊断）：
+# 冻结 V7_Cv5AR2M_s1 ckpt_last，评估侧 g←clamp(g, min=0.5) 重评——
+# 量化「视觉校正若真生效」的 drift/PA 上限（零重训）。gain 下限经 eval
+# yaml 单键 ar2_vis_gain_floor 传入（run_protocol / 导出同键同默认）。
+MODELS["V7_Cv5AR2M_s1_evalgfl"] = {
+    **_V7_CV5_S1_CELL,
+    "label": "V7-Cv5AR2M-s1-gainfloor0.5",
+    "name": "V7_Cv5AR2M", "seed": 1, "train": False,
+    # 口径必须与 V7_Cv5AR2M_s1（obs20 格）逐项一致：epochs/batch 参与
+    # variant 目录派生（effective_variant），错位即找不到 ckpt。
+    "epochs": 740, "batch_size": 64,
+    "eval_splits": ["val", "test"],
+    "config": "anysole/configs/v1_ar2_gainfloor.yaml"}
+
+# V7_Cv5AR2MF_gb / V7_Cv5_gb（2026-11-02）：触觉增益偏置增强（G-b）上线。
+# 证据：V7_Cv7_gb（无门+gb）T2M 83.6 vs V7_Cv7 97.2（−13.6mm，ckpt_last
+# 740ep 完整训练）；LSO 裁定杠杆 = 触觉表征/跨受试者泛化，非门控。
+# AR2MF_gb = yaw-fix（00271 机制修复）× gb（表征增强）合体，对照
+# V7_Cv5AR2MF_s1；Cv5_gb = 回归骨架 + gb，隔离增强收益是否与 AR2 骨架
+# 正交（对照 V7_Cv5_s1 89.4 与 V7_Cv7_gb 83.6）。
+for _base, _name in (("V7_Cv5AR2MF_s1", "V7_Cv5AR2MF_gb"),
+                     ("V7_Cv5_s1", "V7_Cv5_gb")):
+    MODELS["%s_s1" % _name] = {
+        **MODELS[_base],
+        "label": "%s-s1" % _name.replace("_", "-"),
+        "name": _name,
+        "train_args": {**MODELS[_base].get("train_args", {}),
+                       "tactile_gainbias": True}}
+
+# 2026-11-02 补：V7_Cv5AR2R_s1（00264 因 z_gen 缺条目 KeyError 两秒失败——
+# 最小机制格：Cv5 双门回归 + AR2 相对读出，双向注意力无掩码无反馈，
+# 每窗并行前向 + 外部航向状态跨窗积分）；V7_Cv5AR2M_gb_s1（AR2M + G-b，
+# oracle 探针裁定航向非 T2M PA 瓶颈后，表征增强直接上稳定性已证骨架）。
+MODELS["V7_Cv5AR2R_s1"] = {
+    **MODELS["V7_Cv5_s1"],
+    "label": "V7-Cv5AR2R-s1", "name": "V7_Cv5AR2R", "seed": 1,
+    "train_args": {**MODELS["V7_Cv5_s1"].get("train_args", {}),
+                   "lambda_dyaw": 1.0, "lambda_cumyaw": 1.0,
+                   "lambda_dyaw_td": 0.5, "lambda_pose_vel": 0.5,
+                   "lambda_visyaw": 0.5, "lambda_yawcorr": 0.5}}
+# 2026-11-02 论文模型补格：AR2RT（AR2R + VT 零初始化触觉残差）、
+# AR2R_tw40/80（长观察窗轴，obs 40/80 输出 20 步长 20 batch 64）、
+# AR2R_wn（T_raw 会话体重代理归一，LSO 泛化杠杆）。
+MODELS["V7_Cv5AR2RT_s1"] = {
+    **MODELS["V7_Cv5AR2R_s1"],
+    "label": "V7-Cv5AR2RT-s1", "name": "V7_Cv5AR2RT", "seed": 1}
+for _suf, _context in (("_tw40", 40), ("_tw80", 80)):
+    MODELS["V7_Cv5AR2R%s_s1" % _suf] = {
+        **MODELS["V7_Cv5AR2R_s1"],
+        "label": "V7-Cv5AR2R-obs%d-out20-s1" % _context,
+        "name": "V7_Cv5AR2R", "seed": 1, "batch_size": 64,
+        "train_args": {**MODELS["V7_Cv5AR2R_s1"].get("train_args", {}),
+                       "tw": 20, "stride": 20, "obs_context": _context}}
+MODELS["V7_Cv5AR2R_wn_s1"] = {
+    **MODELS["V7_Cv5AR2R_s1"],
+    "label": "V7-Cv5AR2R-wn-s1", "name": "V7_Cv5AR2R", "seed": 1,
+    "train_args": {**MODELS["V7_Cv5AR2R_s1"].get("train_args", {}),
+                   "tactile_weight_norm": True}}
+
+MODELS["V7_Cv5AR2M_gb_s1"] = {
+    **MODELS["V7_Cv5AR2M_s1"],
+    "label": "V7-Cv5AR2M-gb-s1", "name": "V7_Cv5AR2M_gb", "seed": 1,
+    "train_args": {**MODELS["V7_Cv5AR2M_s1"].get("train_args", {}),
+                   "tactile_gainbias": True}}
+
+# 修改 04（2026-11-03，z_note/修改/04_AR训练目标与自由生成对齐.md）：
+# R = AR2 结构 + 多步自由 rollout 损失（改动 A，train_args ar_rollout 族）；
+# RD = R + 低维状态反馈（改动 B，v7_ar2_lowdim + v7_ar2_fb_dim）。
+# 基线 = V7_Cv5AR2M_s1（obs20/batch64 格，不重跑）；对照 = V7_Cv5AR2_ctx20_s1
+# （AR2 纯 TF，隔离 rollout 损失单独贡献——04 开工裁定：AR2M 无反馈支路
+# TF≡rollout，改动 A 必须伴随反馈支路开启，故 R/RD 结构基座 = AR2）。
+# 配方继承 V7_Cv5AR2M_s1（obs20 格：tw20/stride20/obs_context20/batch64 +
+# AR2 损失权重），唯一差异 = 下方 train_args 追加键。注册但未授权发射
+# （conf 未入队，待用户核验——见 z_note/修改/04_核验清单.md）。
+_RL_TA = {**MODELS["V7_Cv5AR2M_s1"].get("train_args", {}),
+          "ar_rollout": True, "ar_rollout_max": 8,
+          "ar_rollout_schedule_frac": 0.6, "ar_rollout_detach": True}
+MODELS["V7_Cv5AR2RL_s1"] = {
+    **MODELS["V7_Cv5AR2M_s1"],
+    "label": "V7-Cv5AR2RL-s1", "name": "V7_Cv5AR2RL", "seed": 1,
+    "train_args": dict(_RL_TA)}
+MODELS["V7_Cv5AR2RLD_s1"] = {
+    **MODELS["V7_Cv5AR2M_s1"],
+    "label": "V7-Cv5AR2RLD-s1", "name": "V7_Cv5AR2RLD", "seed": 1,
+    "train_args": {**_RL_TA, "v7_ar2_lowdim": True, "v7_ar2_fb_dim": 16}}

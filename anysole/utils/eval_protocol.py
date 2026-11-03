@@ -667,6 +667,7 @@ def _evaluate_config(
     checkpoint: Optional[dict] = None,
     gain_floor: float = 0.0,
     overlap_assemble: bool = False,
+    init_height: float = 0.0,
 ) -> Tuple[Dict[str, float], dict, List[dict], int]:
     """Full-session inference for one conditioning config, then all protocol
     metrics.  ``degrade`` in ("v", "t") adds the robustness span dropout.
@@ -761,7 +762,8 @@ def _evaluate_config(
                     {"V_hmr": dataset[idxs[0]].get("V_hmr")} if v_hmr_mode else {},
                     degrade=degrade, seed=seed, regression=ar2_regression,
                     gain_floor=gain_floor, dyaw_base=ar2_dyaw_base,
-                    null_t=null_t, overlap_assemble=overlap_assemble)
+                    null_t=null_t, overlap_assemble=overlap_assemble,
+                    init_height=init_height)
                 if dump_detail:
                     _merge_sess_detail(
                         seq, tw, forward_axis, config_value, accum, contact,
@@ -1271,7 +1273,7 @@ def blend_overlap_windows_np(windows, tw):
 def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
                        device, tw, v_kw, *, degrade=None, seed=0,
                        regression=False, gain_floor=0.0, dyaw_base="zero",
-                       null_t=False):
+                       null_t=False, init_height=0.0):
     """AR2 自由生成（2026-11-01，V7_AR方案 §4/§6）：逐窗逐帧串行。
 
     外部状态：ψ（累计航向）、p（自由积分位置）、vis_ema（视觉航向观测
@@ -1296,7 +1298,12 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
     chunks = []
     prev = torch.zeros(148, device=device)
     psi = torch.zeros((), device=device, dtype=torch.float64)
-    pos = torch.zeros(3, device=device, dtype=torch.float64)
+    # 先验初始高度（2026-11-03 修复）：自由积分从原点起步没有高度参照，
+    # 水平行走垂直速度均值≈0 → 骨盆恒贴地、足入地 0.8m（GroundPen 855/
+    # Global 1271/traj 10.6m 同源）。先验 = train 拟合骨盆高度常数（声明
+    # 常量，非逐会话 GT）；默认 0 = 旧口径逐位不变。
+    pos = torch.tensor([0.0, float(init_height), 0.0],
+                       device=device, dtype=torch.float64)
     vis_ema = None
     prev_start = None
     meta = None
@@ -1315,7 +1322,8 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
         if prev_start is None or start != prev_start + tw:
             prev = torch.zeros(148, device=device)
             psi = torch.zeros((), device=device, dtype=torch.float64)
-            pos = torch.zeros(3, device=device, dtype=torch.float64)
+            pos = torch.tensor([0.0, float(init_height), 0.0],
+                               device=device, dtype=torch.float64)
             vis_ema = None
         config_id = torch.full((1,), config_value, device=device, dtype=torch.long)
         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
@@ -1446,7 +1454,8 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
 def _v7_ar2_session_seq(dataset, model, session_id, idxs, config_value,
                         device, tw, v_kw, *, degrade=None, seed=0,
                         regression=False, gain_floor=0.0, dyaw_base="zero",
-                        null_t=False, overlap_assemble=False):
+                        null_t=False, overlap_assemble=False,
+                        init_height=0.0):
     """AR2 协议会话序列：ar2_session_chunks 的 seq 组装（评分口径）。
 
     regression：V7_Cv5AR2R 纯回归格（窗口并行前向，组装公式同源）。
@@ -1459,7 +1468,8 @@ def _v7_ar2_session_seq(dataset, model, session_id, idxs, config_value,
                                       degrade=degrade, seed=seed,
                                       regression=regression,
                                       gain_floor=gain_floor,
-                                      dyaw_base=dyaw_base, null_t=null_t)
+                                      dyaw_base=dyaw_base, null_t=null_t,
+                                      init_height=init_height)
     floor_y, offsets, parents, betas = meta
     if overlap_assemble:
         parts = []
@@ -1772,6 +1782,7 @@ def run_protocol(
     # AR2 视觉校正增益下限（2026-11-02 诊断钩子）：eval 配置 yaml 单键，
     # 默认 0 = 关（不改既有 cell 行为）。
     ar2_gain_floor = float(config.get("ar2_vis_gain_floor", 0.0))
+    ar2_init_height = float(config.get("ar2_init_height", 0.0))
     if (dataset.stride != dataset.window_length
             and not getattr(model, "prev_ctx", False)
             and not overlap_assemble):
@@ -1812,6 +1823,7 @@ def run_protocol(
                     checkpoint=checkpoint,
                     gain_floor=ar2_gain_floor,
                     overlap_assemble=overlap_assemble,
+                    init_height=ar2_init_height,
                 )
             if dump_detail:
                 window_conditions[name] = window_rows
@@ -1830,6 +1842,7 @@ def run_protocol(
                 checkpoint=checkpoint,
                 gain_floor=ar2_gain_floor,
                 overlap_assemble=overlap_assemble,
+                init_height=ar2_init_height,
             )
             metrics["robust_tdrop"], _, _, anchor_counts["robust_tdrop"] = _evaluate_config(
                 ds_rob, model, device, CONFIG_VT, regress_mode, diffusion,
@@ -1839,6 +1852,7 @@ def run_protocol(
                 checkpoint=checkpoint,
                 gain_floor=ar2_gain_floor,
                 overlap_assemble=overlap_assemble,
+                init_height=ar2_init_height,
             )
             print("protocol robust_vdrop: mpjpe=%.3fmm pa_mpjpe=%.3fmm"
                   % (metrics["robust_vdrop"]["mpjpe_mm"], metrics["robust_vdrop"]["pa_mpjpe_mm"],

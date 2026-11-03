@@ -9,6 +9,8 @@
 - M_V        视觉可解码信息
 - M_T        触觉可解码信息（辅助参照）
 - [M_V, M_T] 加入触觉后的增量
+- const      TRAIN 均值预测器（2026-11-03 修改 01：机会水平参照臂，
+             7 个目标全出，不进赢家判定）
 
 指标（逐帧；骨盆相对踝足 = 4 关节；图内英文；前两个 = 主判据，
 2026-11-02 扩展）：
@@ -61,7 +63,8 @@ TTA_VARIANTS = {  # 与 run_tta TTA_MODELS 一致
     "V7_Cv4": "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1",
     "V7_Cv5": "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1",
 }
-ARMS = ("M_V", "M_T", "[M_V, M_T]")
+ARMS = ("M_V", "M_T", "[M_V, M_T]", "const")
+JUDGE_ARMS = ("M_V", "M_T", "[M_V, M_T]")  # 赢家判定只在这三臂间进行
 METRICS = ("position_y", "stance_y", "position", "velocity", "global",
            "ground", "contact")
 METRIC_ZH = {"position": "踝足位置", "position_y": "踝足垂直分量",
@@ -84,7 +87,8 @@ METRIC_LABELS = {  # 图内英文（项目口径）
 METRIC_SHORT = {"position": "position", "position_y": "vertical",
                 "stance_y": "stance vert.", "velocity": "velocity",
                 "global": "global", "ground": "ground", "contact": "contact"}
-ARM_COLORS = {"M_V": "#2a78d6", "M_T": "#eb6834", "[M_V, M_T]": "#1baf7a"}
+ARM_COLORS = {"M_V": "#2a78d6", "M_T": "#eb6834", "[M_V, M_T]": "#1baf7a",
+              "const": "#8a8782"}
 COLLECT_KEYS = ("xv", "xt", "ypos", "yvel", "yglob", "yground", "ycontact")
 
 
@@ -173,6 +177,28 @@ def select_arm(metric: str, train_x, val_x, test_x,
             "val": best_val, "lam": best_lam}
 
 
+def const_arm(metric: str, ty: np.ndarray, vy: np.ndarray,
+              ey: np.ndarray) -> dict:
+    """机会水平臂（2026-11-03 修改 01）：TRAIN 均值预测器，与特征无关。
+
+    pred = mean(train 目标)（contact = 多数类），val/test 同口径评估；无
+    λ 选择（lam=None）。"""
+    mu = ty.mean(axis=0)
+
+    def err(Y: np.ndarray) -> float:
+        if metric == "contact":
+            # 每足多数类预测（mu (2,) → (N,2) 广播；(N,) 与 (N,2) 不可广播）
+            pred = np.broadcast_to(mu >= 0.5, Y.shape)
+            return float(np.mean(pred == (Y > 0.5)) * 100.0)
+        shape = {"position": (4, 3), "velocity": (4, 3), "global": (1, 3),
+                 "ground": (4, 1), "position_y": (4, 1), "stance_y": (4, 1)}[metric]
+        pred = np.broadcast_to(mu, Y.shape).reshape(-1, *shape)
+        gt = Y.reshape(-1, *shape)
+        return float(np.mean(np.linalg.norm(pred - gt, axis=-1)))
+
+    return {"test": err(ey), "val": err(vy), "lam": None}
+
+
 def arm_features(metric: str, arm: str, xv: np.ndarray, xt: np.ndarray) -> np.ndarray:
     """(nwin, tw, d) 特征 → (N, d) 样本：M_V / M_T / [M_V, M_T]；
     velocity 丢每窗末帧（与标签对齐）。"""
@@ -220,11 +246,12 @@ def render_figure(rows: dict, out_png: Path) -> None:
         ax = fig.add_subplot(gs[0, i])
         higher = METRIC_HIGHER.get(metric, False)
         vals = [rows[metric][arm]["test"] for arm in ARMS]
-        best = max(vals) if higher else min(vals)
-        for j, arm in enumerate(reversed(ARMS)):  # y 轴自上而下 M_V/M_T/[M_V,M_T]
+        judge_vals = [rows[metric][arm]["test"] for arm in JUDGE_ARMS]
+        best = max(judge_vals) if higher else min(judge_vals)
+        for j, arm in enumerate(reversed(ARMS)):  # y 轴自上而下
             v = vals[len(ARMS) - 1 - j]
             ypos = len(ARMS) - 1 - j
-            is_best = (v == best)
+            is_best = (v == best) and (arm in JUDGE_ARMS)
             ax.barh(ypos, v, height=0.58,
                     color=ARM_COLORS[arm],
                     edgecolor=ink if is_best else "none",
@@ -250,11 +277,20 @@ def render_figure(rows: dict, out_png: Path) -> None:
     for i, metric in enumerate(METRICS):
         higher = METRIC_HIGHER.get(metric, False)
         vals = [rows[metric][arm]["test"] for arm in ARMS]
-        best = max(vals) if higher else min(vals)
-        rel = [best / v if higher else v / best for v in vals]
+        judge_vals = [rows[metric][arm]["test"] for arm in JUDGE_ARMS]
+        best = max(judge_vals) if higher else min(judge_vals)
+
+        def _rel(v: float) -> float:
+            if higher:
+                return best / v if v > 0 else float("inf")
+            return v / best if best > 0 else float("inf")
+
+        rel = [_rel(v) for v in vals]
         rel_all.append(rel)
-        for j, arm in enumerate(ARMS):  # 组内自上而下 M_V/M_T/[M_V,M_T]
-            ypos = i + (j - 1) * 0.16
+        for j, arm in enumerate(ARMS):  # 组内自上而下（const 也入图，仅参照）
+            if not np.isfinite(rel[j]):
+                continue
+            ypos = i + (j - (len(ARMS) - 1) / 2.0) * 0.16
             axr.plot(rel[j], ypos, "o", ms=5, color=ARM_COLORS[arm], zorder=3)
             if rel[j] > 1.02:
                 axr.text(rel[j], ypos, " %.2f" % rel[j],
@@ -263,7 +299,8 @@ def render_figure(rows: dict, out_png: Path) -> None:
     axr.set_yticks(range(n))
     axr.set_yticklabels([METRIC_SHORT[m] for m in METRICS], fontsize=7.5, color=ink)
     axr.set_ylim(-0.55, n - 0.45)
-    axr.set_xlim(0, max(max(r) for r in rel_all) * 1.13 + 0.03)
+    finite_rels = [v for row in rel_all for v in row if np.isfinite(v)]
+    axr.set_xlim(0, (max(finite_rels) if finite_rels else 1.0) * 1.13 + 0.03)
     axr.set_xlabel("error relative to best (1.0 = best; contact = accuracy ratio inverted)",
                    fontsize=8, color=mut)
     axr.set_title("Relative gap to the best arm", fontsize=8.5, color=ink, pad=4)
@@ -276,10 +313,10 @@ def render_figure(rows: dict, out_png: Path) -> None:
     axr.xaxis.grid(True, color=gridc, lw=0.8)
     axr.set_axisbelow(True)
     fig.suptitle("E8 modality complementarity probe — decodability by input representation\n"
-                 "★ = best arm per metric (lower error is better; contact = higher accuracy)",
+                 "★ = best arm per metric (lower error is better; contact = higher accuracy; const = train-mean chance level)",
                  fontsize=10.5, color=ink, y=0.955)
     fig.legend(handles=[Patch(facecolor=ARM_COLORS[a]) for a in ARMS],
-               labels=ARMS, loc="lower center", ncol=3, frameon=False,
+               labels=ARMS, loc="lower center", ncol=4, frameon=False,
                fontsize=8, bbox_to_anchor=(0.5, 0.005))
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=150)
@@ -325,6 +362,19 @@ def main() -> int:
         y_val, m_val = metric_target(metric, splits["val"])
         y_test, m_test = metric_target(metric, splits["test"])
         for arm in ARMS:
+            if arm == "const":
+                # 机会水平臂：特征无关，直接用 train 目标的均值预测器。
+                if m_train is not None:
+                    ty = y_train[m_train]
+                    vy = y_val[m_val]
+                    ey = y_test[m_test]
+                else:
+                    ty, vy, ey = y_train, y_val, y_test
+                rows[metric][arm] = const_arm(metric, ty, vy, ey)
+                print("[E8] %-10s %-12s test=%.2f %s"
+                      % (metric, arm, rows[metric][arm]["test"],
+                         METRIC_UNIT[metric]))
+                continue
             train_x = arm_features(metric, arm, splits["train"]["xv"],
                                    splits["train"]["xt"])
             val_x = arm_features(metric, arm, splits["val"]["xv"],
@@ -353,12 +403,12 @@ def main() -> int:
             for arm in ARMS:
                 r = rows[metric][arm]
                 w.writerow([arm, metric, "%.2f" % r["test"], "%.2f" % r["val"],
-                            r["lam"]])
+                            "" if r["lam"] is None else r["lam"]])
 
     winners = {}
     for metric in METRICS:
         higher = METRIC_HIGHER.get(metric, False)
-        vals = {arm: rows[metric][arm]["test"] for arm in ARMS}
+        vals = {arm: rows[metric][arm]["test"] for arm in JUDGE_ARMS}
         winners[metric] = max(vals, key=vals.get) if higher else min(vals, key=vals.get)
     t_better = [METRIC_ZH[m] for m in METRICS if winners[m] == "M_T"]
     winners_str = "，".join("%s→%s" % (METRIC_ZH[m], winners[m]) for m in METRICS)
@@ -398,9 +448,10 @@ def main() -> int:
         report += "| %s | %s |\n" % (arm, " | ".join(cells))
     report += """
 判读（实验计划 E8，2026-11-02 扩展）：逐指标赢家：%s（图 Full_Fig1_E8_Probe.png）。
-主判据 = 踝足垂直分量互补：%s——触觉的额外可解码信息集中在足-地交互的
-垂直维度，与 E5 地面穿透 / 接触状态兑现同源。position 全向量判据 val 上
-成立、test 未复现，如实并列记录。M_T 单独优于 V 的指标：%s。
+const 臂 = TRAIN 均值预测器（机会水平），7 个目标全出，不入赢家判定、只作
+判读参照。主判据 = 踝足垂直分量互补：%s——触觉的额外可解码信息集中在
+足-地交互的垂直维度，与 E5 地面穿透 / 接触状态兑现同源。position 全向量
+判据 val 上成立、test 未复现，如实并列记录。M_T 单独优于 V 的指标：%s。
 """ % (winners_str, vertical_claim, t_str)
     (OUT_DIR / "detail").mkdir(parents=True, exist_ok=True)
     (OUT_DIR / "detail" / "E8_模态互补探针.md").write_text(report, encoding="utf-8")

@@ -133,6 +133,24 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V7_Cv5Ctx5": ModelEntry("V7_Cv5Ctx5", "v7_c2ctx5", "V7_Cv5Ctx5: Cv5 + 续写 v5（块自回归：全姿态硬填，2026-11-01）"),
     "V7_Cv5AR": ModelEntry("V7_Cv5AR", "v7_c2ar", "V7_Cv5AR: Cv5 + 帧级双模式 AR（V/VT 回归 + T 自回归，2026-11-01）"),
     "V7_Cv5ARM": ModelEntry("V7_Cv5ARM", "v7_c2arm", "V7_Cv5ARM: Cv5 + 因果掩码对照格（AR 无反馈支路，2026-11-01）"),
+    "V7_Cv5AR2": ModelEntry("V7_Cv5AR2", "v7_c2ar2", "V7_Cv5AR2: Cv5 + AR 相对运动 + 航向状态分离（2026-11-01）"),
+    "V7_Cv5AR2M": ModelEntry("V7_Cv5AR2M", "v7_c2ar2m", "V7_Cv5AR2M: AR2 对照格（因果掩码无反馈，2026-11-02）"),
+    "V7_Cv5AR2MF": ModelEntry("V7_Cv5AR2MF", "v7_c2ar2m", "V7_Cv5AR2MF: AR2M + yaw-fix（T 行无航向监督 + 自由生成航向链 + 世界轨迹损失，2026-11-02）"),
+    "V7_Cv5AR2MF_gb": ModelEntry("V7_Cv5AR2MF_gb", "v7_c2ar2m", "V7_Cv5AR2MF_gb: AR2MF + 鞋垫增益偏置增强（G-b，2026-11-02）"),
+    "V7_Cv5_gb": ModelEntry("V7_Cv5_gb", "v7_c2", "V7_Cv5_gb: Cv5 双门回归 + 鞋垫增益偏置增强（G-b，2026-11-02）"),
+    "V7_Cv5AR2M_gb": ModelEntry("V7_Cv5AR2M_gb", "v7_c2ar2m", "V7_Cv5AR2M_gb: AR2M（因果掩码无反馈）+ G-b 鞋垫增强（2026-11-02）"),
+    "V7_Cv5AR2R": ModelEntry("V7_Cv5AR2R", "v7_c2ar2r", "V7_Cv5AR2R: Cv5 + AR2 相对读出纯回归（双向无反馈无因果，2026-11-02）"),
+    "V7_Cv5AR2RT": ModelEntry("V7_Cv5AR2RT", "v7_c2ar2rt", "V7_Cv5AR2RT: AR2R + VT 零初始化触觉残差（2026-11-02）"),
+    # 修改 04（2026-11-03，z_note/修改/04_AR训练目标与自由生成对齐.md）：
+    # R = AR2 结构 + 多步自由 rollout 损失（改动 A）；RD = R + 低维状态
+    # 反馈（改动 B）。结构 = AR2（ar2_fb=True——开工裁定：AR2M 无反馈
+    # 支路 TF≡rollout，改动 A 无作用对象）；两改动配置键默认关。
+    "V7_Cv5AR2RL": ModelEntry("V7_Cv5AR2RL", "v7_c2ar2rl", "V7_Cv5AR2RL: AR2 + 多步自由 rollout 损失（修改 04 R 格，2026-11-03）"),
+    "V7_Cv5AR2RLD": ModelEntry("V7_Cv5AR2RLD", "v7_c2ar2rl", "V7_Cv5AR2RLD: AR2 + rollout 损失 + 低维状态反馈（修改 04 RD 格，2026-11-03）"),
+    "V7_Cv5ARSS": ModelEntry("V7_Cv5ARSS", "v7_c2arss", "V7_Cv5ARSS: AR + 反馈 scheduled sampling + 收缩噪声（2026-11-01）"),
+    # 2026-11-02：ARSS 正名结果目录被 huyuxuan 旧目录占用（写权限受阻）——
+    # 临时注册名开新目录；旧目录清出后本行可删、结果目录可 rename 回正名。
+    "V7_Cv5ARSS2": ModelEntry("V7_Cv5ARSS2", "v7_c2arss", "V7_Cv5ARSS2: ARSS 同名临时注册（结果目录绕过，2026-11-02）"),
     "V7_Cv5Ctx4B": ModelEntry("V7_Cv5Ctx4B", "v7_c2ctx4b", "V7_Cv5Ctx4B: Cv5 + 续写 v4-b（统一残差空间 + V/VT 锚估计头，2026-11-01）"),
     "V7_Cv5Ctx4R": ModelEntry("V7_Cv5Ctx4R", "v7_c2ctx4r", "V7_Cv5Ctx4R: Cv5 + 续写 v4-a + 接触根运动（B 候选挂链，2026-11-01）"),
     "V7_Cv5CtxSS": ModelEntry("V7_Cv5CtxSS", "v7_c2ctx", "V7_Cv5CtxSS: Ctx + scheduled sampling（G1，2026-11-01）"),

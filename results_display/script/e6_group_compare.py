@@ -15,8 +15,9 @@ Cv7（无门）。展示用途（§9：总图平滑只用于展示，验收用�
   - 汇总表：分脚分模型 mean Δ / H / A / E（会话内均值再跨会话均值）。
 
 用法（touch_gait env，仓库根）：
-  python results_display/script/e6_group_compare.py
-产物：results_display/Etest/E6_ContactPhaseAnalysis/group_compare/{curves,scatter}/
+  python results_display/script/e6_group_compare.py [--metric pa_mpjpe]
+产物（2026-11-02 起按指标子文件夹）：
+  results_display/Etest/E6_ContactPhaseAnalysis/{ankle_foot_mpjpe,pa_mpjpe}/detail/group_compare/{curves,scatter}/
 """
 from __future__ import annotations
 
@@ -29,8 +30,12 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "z_note/HMR2.0/hmr2_gait"))
 from anysole_tta.e6_phase_analysis import FPS, build_session_sets, load_session  # noqa: E402
+from anysole_tta.phase_common import METRICS  # noqa: E402
 
-OUT = REPO / "results_display/Etest/E6_ContactPhaseAnalysis" / "detail" / "group_compare"
+E6_BASE = REPO / "results_display/Etest/E6_ContactPhaseAnalysis"
+# 构图阈值随指标缩放（2026-11-02：pa_mpjpe 全身误差量级约为踝足 1/4）
+CURVE_YLIM = {"ankle_foot_mpjpe": (-45, 45), "pa_mpjpe": (-15, 15)}
+SCATTER_CLIP = {"ankle_foot_mpjpe": 30, "pa_mpjpe": 10}
 # B + 候选五组 + 对照两组（Cv4 单门 / Cv7 无门）
 MODELS = ("V7_Cv5_s1", "V7_Cv4_s1", "V7_Cv7_s1", "V7_Cv5T_s1", "V7_Cv5LR_s1",
           "V7_Cv5TLR_s1", "V7_Cv5Q_s1")
@@ -59,7 +64,10 @@ def main() -> int:
                         help="逗号分隔模型（缺省 = B/Cv4/Cv7/T/LR/TLR/Q 七模型）")
     parser.add_argument("--actions", default=None,
                         help="动作组逗号分隔（缺省 = canonical test 全部）")
+    parser.add_argument("--metric", choices=METRICS, default="ankle_foot_mpjpe",
+                        help="位置误差指标（缺省 ankle_foot_mpjpe）")
     args = parser.parse_args()
+    OUT = E6_BASE / args.metric / "detail" / "group_compare"
     MODELS = tuple(m.strip() for m in args.models.split(",") if m.strip())
     if args.actions:
         keep = {a.strip() for a in args.actions.split(",") if a.strip()}
@@ -72,7 +80,7 @@ def main() -> int:
     def data_of(model, sid):
         key = (model, sid)
         if key not in cache:
-            cache[key] = load_session(model, sid)
+            cache[key] = load_session(model, sid, args.metric)
         return cache[key]
 
     per_session = {m: {f: {} for f in ("left", "right")} for m in MODELS}
@@ -107,8 +115,9 @@ def main() -> int:
                     ax.plot(t, sma, color=MODEL_COLORS[m], lw=1.4,
                             label=MODEL_LABELS[m] if foot_i == 0 else None)
                 ax.axhline(0, color="k", lw=0.6, ls="--")
-                ax.set_ylim(-45, 45)
-                ax.set_yticks([-40, -20, 0, 20, 40])
+                ax.set_ylim(*CURVE_YLIM[args.metric])
+                ax.set_yticks([v for v in np.linspace(CURVE_YLIM[args.metric][0],
+                                                      CURVE_YLIM[args.metric][1], 5)])
                 ax.set_ylabel("%s foot\nΔ = VT - V (mm)" % foot)
             axes[-1].set_xlabel("time (s)")
             handles, labels = axes[0].get_legend_handles_labels()
@@ -132,7 +141,8 @@ def main() -> int:
                 for mi, m in enumerate(MODELS):
                     g = per_session[m][foot][sid]
                     vals = g[per_session[m][foot]["valid_" + sid]]
-                    vals = np.clip(vals, -30, 30)   # 构图阈值：±30 判定
+                    clip = SCATTER_CLIP[args.metric]   # 构图阈值：±clip 判定
+                    vals = np.clip(vals, -clip, clip)
                     x = np.full_like(vals, mi, dtype=float) + rng.uniform(
                         -0.2, 0.2, size=len(vals))
                     ax.scatter(x, vals, s=2, color=MODEL_COLORS[m], alpha=0.22,
@@ -143,8 +153,8 @@ def main() -> int:
                 ax.set_xticks(range(len(MODELS)))
                 ax.set_xticklabels([MODEL_LABELS[m] for m in MODELS],
                                    rotation=40, ha="right", fontsize=8)
-                ax.set_ylabel("%s foot\nframe Δ (mm, clipped at ±30)" % foot)
-                ax.set_ylim(-30, 30)
+                ax.set_ylabel("%s foot\nframe Δ (mm, clipped at ±%d)" % (foot, clip))
+                ax.set_ylim(-clip, clip)
             fig.suptitle("E6 group compare — %s — %s (dot = 1 valid frame, "
                          "bar = median)" % (action, sid))
             fig.tight_layout(rect=(0, 0, 1, 0.95))

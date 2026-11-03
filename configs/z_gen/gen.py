@@ -8,11 +8,12 @@
   python configs/z_gen/gen.py <条目>                 # 按该条目 MODEL_IDS 全量生成
   python configs/z_gen/gen.py <条目> --models a,b    # 只发指定模型（子集校验）
   python configs/z_gen/gen.py <条目> --wave 2        # 波次条目（wo05 / tw_scan / per_action_folds）
-  python configs/z_gen/gen.py <条目> --wandb true --checkpoint-all false
+  python configs/z_gen/gen.py <条目> --monitor swanlab --checkpoint-all false
   python configs/z_gen/gen.py <条目> --force         # 写 FORCE=true（跳过 ckpt 复用强制重训）
   python configs/z_gen/gen.py <条目> --dry-run       # 只打印将写入的 conf，不落盘
 
---wandb / --checkpoint-all / --force：覆盖 EXPERIMENTS 级默认，直写 conf。
+--monitor / --checkpoint-all / --force：覆盖 EXPERIMENTS 级默认，直写 conf。
+--monitor 取值 none/swanlab/wandb（缺省 none），写进 conf 的 MONITOR 行。
 波次实验（WAVES/WAVE_GATES/WAVE_EVAL 数据在 common.py）：--wave 指定波次，
 闸门 glob 匹配不到 done/ 即退出不发射；缺省波次 = DEFAULT_WAVE（wo05 为
 auto：波 1 + 闸门满足的后续波）。
@@ -31,7 +32,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from common import CONCAT_VERSIONS, EXPERIMENTS, concat_models, emit_waved, parse_bool
+from common import (CONCAT_VERSIONS, EXPERIMENTS, concat_models, emit_waved, parse_bool,
+                   resolve_monitor)
 
 
 def _list_experiments() -> None:
@@ -45,19 +47,19 @@ def _list_experiments() -> None:
             wave_desc = " waves=%s" % ",".join(str(k) for k in sorted(waves, key=str))
             if "WAVE_EVAL" in raw:
                 wave_desc += "+eval"
-        print("  %-24s %d model(s)  wandb=%s  checkpoint_all=%s%s"
+        print("  %-24s %d model(s)  monitor=%s  checkpoint_all=%s%s"
               % (experiment_id, n,
-                 str(raw.get("WANDB", False)).lower(),
+                 resolve_monitor(raw),
                  str(raw.get("CHECKPOINT_ALL", False)).lower(),
                  wave_desc))
 
 
 def _emit(experiment_id: str, wave: str | None, models: list[str],
-          wandb: bool | None, checkpoint_all: bool | None,
+          monitor: str | None, checkpoint_all: bool | None,
           force: bool, dry_run: bool) -> int:
     """委托 common.emit_waved（波次感知发射，与 gen_*.py 共用同一引擎）。"""
     return emit_waved(experiment_id, wave, models,
-                      wandb=wandb, checkpoint_all=checkpoint_all,
+                      monitor=monitor, checkpoint_all=checkpoint_all,
                       force=force, dry_run=dry_run)
 
 
@@ -73,7 +75,8 @@ def main() -> int:
                         help="接触标签版本（默认 f6_soft；tafix/statefix 映射到 *_tafix/*_statefix 条目）")
     parser.add_argument("--wave", default=None,
                         help="波次键（wo05 / tw_scan）")
-    parser.add_argument("--wandb", default=None, help="true/false，覆盖实验级默认")
+    parser.add_argument("--monitor", default=None, choices=("none", "swanlab", "wandb"),
+                        help="在线监控后端（none/swanlab/wandb），覆盖实验级默认")
     parser.add_argument("--checkpoint-all", default=None, help="true/false，覆盖实验级默认")
     parser.add_argument("--force", action="store_true",
                         help="写 FORCE=true（跳过 ckpt 复用检查强制重训）")
@@ -100,9 +103,9 @@ def main() -> int:
             raise SystemExit("unknown model IDs for %s: %s" %
                              (args.experiment, ",".join(unknown)))
 
-    wandb = parse_bool(args.wandb, "--wandb")
+    monitor = args.monitor
     checkpoint_all = parse_bool(args.checkpoint_all, "--checkpoint-all")
-    n = _emit(args.experiment, args.wave, selected, wandb, checkpoint_all,
+    n = _emit(args.experiment, args.wave, selected, monitor, checkpoint_all,
               args.force, args.dry_run)
     print("generated %d queue task(s)%s" % (n, " (dry-run)" if args.dry_run else ""))
     return 0

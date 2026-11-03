@@ -28,15 +28,15 @@ def main() -> int:
     seeds = parse_seeds(args.seed)
     if seeds:
         models = seed_models(models, seeds)
-    wandb = parse_bool(args.wandb, "--wandb")
+    monitor = args.monitor
     checkpoint_all = parse_bool(args.checkpoint_all, "--checkpoint-all")
     if args.ckpt == "best":
         models = ckpt_models(models, "best")
-        total = emit_subset("v7_statefix_best_eval", models, wandb=wandb,
+        total = emit_subset("v7_statefix_best_eval", models, monitor=monitor,
                             checkpoint_all=checkpoint_all, force=args.force,
                             dry_run=args.dry_run)
     else:
-        total = emit_subset("v7_train", models, wandb=wandb,
+        total = emit_subset("v7_train", models, monitor=monitor,
                             checkpoint_all=checkpoint_all, force=args.force,
                             dry_run=args.dry_run)
     print("generated %d queue task(s)%s" % (total, " (dry-run)" if args.dry_run else ""))

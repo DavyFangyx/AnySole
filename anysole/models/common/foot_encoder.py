@@ -169,7 +169,7 @@ class FootConvEncoder(nn.Module):
         seq = seq.reshape(batch, tw * 3, self.dim)
         # Frame time-PE repeats per frame across its 3 tokens; token-type
         # embedding disambiguates left/right/global.
-        pe = self.embeddings.time_pe.to(dtype=seq.dtype).unsqueeze(1)  # (tw,1,dim)
+        pe = self.embeddings.time_pe[-tw:].to(dtype=seq.dtype).unsqueeze(1)
         pe = pe.expand(tw, 3, self.dim).reshape(1, tw * 3, self.dim)
         type_emb = self.token_emb.weight.to(dtype=seq.dtype).repeat(tw, 1).unsqueeze(0)
         seq = self.temporal(seq + pe + type_emb)
@@ -195,7 +195,7 @@ class FootConvEncoder(nn.Module):
         seq = self._stream_raw(x)
         h = self.out_merge(seq.reshape(batch, tw, 3 * self.dim))
         h = self.norm(h)
-        h = h + self.embeddings.time_pe.to(dtype=h.dtype)
+        h = h + self.embeddings.time_pe[-tw:].to(dtype=h.dtype)
         modality = self.embeddings.modality(
             torch.tensor(1, device=x.device, dtype=torch.long)
         )

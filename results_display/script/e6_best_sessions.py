@@ -10,12 +10,12 @@ H = mean(max(Δ,0)) 大、双门 B 的 H 明显更小（滤除量 = H7 − H5 �
 增益损失 ≤ GAIN_TOL），该动作子图加红框。
 
 用法（touch_gait env，仓库根）：
-  python results_display/script/e6_best_sessions.py [--dry-run]
+  python results_display/script/e6_best_sessions.py [--dry-run] [--metric pa_mpjpe]
   或经统一导出管线：python results_display/script/e_results_export.py
   --experiment E6 --best-sessions
-产物：
-  results_display/Etest/E6_ContactPhaseAnalysis/Full_Fig_E6_BestSessions.png
-  results_display/Etest/E6_ContactPhaseAnalysis/e6_best_sessions.json
+产物（2026-11-02 起按指标子文件夹）：
+  results_display/Etest/E6_ContactPhaseAnalysis/{ankle_foot_mpjpe,pa_mpjpe}/Full_Fig_E6_BestSessions.png
+  …/{metric}/detail/e6_best_sessions.json
 """
 from __future__ import annotations
 import json, sys
@@ -26,11 +26,14 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "z_note/HMR2.0/hmr2_gait"))
 from anysole_tta.e6_phase_analysis import build_session_sets, load_session  # noqa: E402
+from anysole_tta.phase_common import METRICS  # noqa: E402
 
-OUT = REPO / "results_display/Etest/E6_ContactPhaseAnalysis"  # 根层 = 主产物
-DETAIL = OUT / "detail"  # 逐会话图 / json 明细
+E6_BASE = REPO / "results_display/Etest/E6_ContactPhaseAnalysis"
+# 位置误差指标文件夹（2026-11-02 裁定：逐指标同模式生成）
 GATE, NOGATE = "V7_Cv5_s1", "V7_Cv7_s1"
-HARM_MIN, REMOVE_MIN, GAIN_TOL = 5.0, 2.0, 4.0
+# 选图阈值随指标缩放（pa_mpjpe 全身误差量级约为踝足的 1/4）
+THRESHOLDS = {"ankle_foot_mpjpe": (5.0, 2.0, 4.0),
+              "pa_mpjpe": (1.25, 0.5, 1.0)}
 ACTION_ORDER = ["walk", "run", "squat", "stand_shift", "single_stand",
                 "jump_jack", "lateral", "sit_stand", "stairs"]
 ACTION_TITLE = {"walk": "Walk", "run": "Run", "squat": "Squat",
@@ -61,15 +64,20 @@ def main() -> int:
 
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--metric", choices=METRICS, default="ankle_foot_mpjpe",
+                    help="位置误差指标（缺省 ankle_foot_mpjpe）")
     args = ap.parse_args()
+    OUT = E6_BASE / args.metric
+    DETAIL = OUT / "detail"
+    HARM_MIN, REMOVE_MIN, GAIN_TOL = THRESHOLDS[args.metric]
 
     session_sets = build_session_sets()
     picks = {}
     for act in ACTION_ORDER:
         best, best_q = None, None
         for sid in session_sets[act]:
-            h7, a7 = harm(load_session(NOGATE, sid))
-            h5, a5 = harm(load_session(GATE, sid))
+            h7, a7 = harm(load_session(NOGATE, sid, args.metric))
+            h5, a5 = harm(load_session(GATE, sid, args.metric))
             removed, gain_drop = h7 - h5, a7 - a5
             qualify = h7 >= HARM_MIN and removed >= REMOVE_MIN and gain_drop <= GAIN_TOL
             key = (removed, h7)
@@ -111,8 +119,8 @@ def main() -> int:
                          fontsize=10.5, pad=4, color="#d62728")
     fig.suptitle("E6 — best full session per motion (unmodified per-session "
                  "figures); dual gate (B) vs no gate (Cv7); qualifier = "
-                 "harm removed $\\geq$2 mm with gain drop $\\leq$4 mm; "
-                 "red frame = no qualifying session",
+                 "harm removed $\\geq$%.1f mm with gain drop $\\leq$%.1f mm; "
+                 "red frame = no qualifying session" % (REMOVE_MIN, GAIN_TOL),
                  y=0.995, fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.99))
     fig.savefig(OUT / "Full_Fig_E6_BestSessions.png", dpi=130)

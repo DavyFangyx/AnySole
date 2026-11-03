@@ -475,12 +475,22 @@ def _run_task(
         # V6_Av1 occ_mix：conf 直写开关（默认关）。OCC_MIX=true 时注入
         # train_args；P_OCC/P_NULLV/P_NULLT 覆盖预注册默认 0.2/0.1/0.1。
         train_overrides: dict[str, Any] = {}
-        # wandb 开关（2026-10-25）：conf 行 WANDB=true/false 决定在线日志；
-        # true → wandb_mode=online（覆盖 train_args），false → disabled。
-        if str(values.get("WANDB", "")).strip().lower() in {"1", "true", "yes", "on"}:
-            train_overrides["wandb_mode"] = "online"
-        elif str(values.get("WANDB", "")).strip().lower() in {"0", "false", "no", "off"}:
+        # 在线监控（2026-11-03 起 conf 行 MONITOR=none/swanlab/wandb 决定后端；
+        # 历史 conf 的 WANDB=true/false 继续兼容，true 视作 swanlab）。none →
+        # wandb_mode=disabled；swanlab/wandb → wandb_mode=online + monitor_backend
+        # 覆盖 train_args。
+        monitor = str(values.get("MONITOR", "")).strip().lower()
+        if not monitor:
+            legacy = str(values.get("WANDB", "")).strip().lower()
+            if legacy in {"1", "true", "yes", "on"}:
+                monitor = "swanlab"
+            elif legacy in {"0", "false", "no", "off"}:
+                monitor = "none"
+        if monitor == "none":
             train_overrides["wandb_mode"] = "disabled"
+        elif monitor in {"swanlab", "wandb"}:
+            train_overrides["wandb_mode"] = "online"
+            train_overrides["monitor_backend"] = monitor
         if str(values.get("CHECKPOINT_ALL", "")).strip().lower() in {"1", "true", "yes", "on"}:
             train_overrides["checkpoint_all"] = True
         elif str(values.get("CHECKPOINT_ALL", "")).strip().lower() in {"0", "false", "no", "off"}:

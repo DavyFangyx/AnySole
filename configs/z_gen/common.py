@@ -206,16 +206,37 @@ def queued_model_ids() -> set[str]:
     return names
 
 
+_MONITOR_CHOICES = ("none", "swanlab", "wandb")
+
+
+def resolve_monitor(raw: dict[str, Any], monitor: str | None = None) -> str:
+    """conf 行 MONITOR 的取值（none/swanlab/wandb）。
+
+    缺省取实验级 MONITOR；没有则回落旧键 WANDB 布尔（true→swanlab）。
+    """
+    if monitor is None:
+        monitor = raw.get("MONITOR")
+        if monitor is None:
+            monitor = "swanlab" if raw.get("WANDB", False) else "none"
+    text = str(monitor).strip().lower()
+    legacy = {"true": "swanlab", "yes": "swanlab", "on": "swanlab", "1": "swanlab",
+              "false": "none", "no": "none", "off": "none", "0": "none"}
+    text = legacy.get(text, text)
+    if text not in _MONITOR_CHOICES:
+        raise SystemExit("unknown monitor %r（可选 none/swanlab/wandb）" % monitor)
+    return text
+
+
 def emit_experiment(experiment_id: str, selected_models: list[str] | None = None, *,
-                    wandb: bool | None = None,
+                    monitor: str | None = None,
                     checkpoint_all: bool | None = None,
                     force: bool | None = None,
                     dry_run: bool = False,
                     skip: bool = True) -> int:
     """把 EXPERIMENTS 条目展开成 queue conf（统一生成器 gen.py 的引擎）。
 
-    wandb/checkpoint_all/force 为 None 时取 EXPERIMENTS 级默认
-    （缺省 false/false/false）；dry_run 只打印不落盘。
+    monitor/checkpoint_all/force 为 None 时取 EXPERIMENTS 级默认
+    （缺省 none/false/false）；dry_run 只打印不落盘。
 
     skip=True（默认，2026-10-26 用户裁定「conf 与结果一一对应」）：跳过
     queue/running/done/failed 已有同名 conf、或结果目录已有 complete 产物
@@ -247,8 +268,7 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
             print("[skip] %s: nothing to emit（--force 强制重发）" % experiment_id)
             return 0
 
-    wandb_line = "WANDB=%s" % str(
-        raw.get("WANDB", False) if wandb is None else wandb).lower()
+    monitor_line = "MONITOR=%s" % resolve_monitor(raw, monitor)
     ckpt_line = "CHECKPOINT_ALL=%s" % str(
         raw.get("CHECKPOINT_ALL", False) if checkpoint_all is None else checkpoint_all).lower()
     force_line = "FORCE=%s" % str(False if force is None else force).lower()
@@ -268,10 +288,11 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
             # runner only retrains when an explicit FORCE=true is set
             # (it skips the checkpoint/grid reuse check then).
             force_line,
-            # wandb 开关（用户裁定 2026-10-25）：每个 conf 恒带一行，
-            # 实验级默认取 EXPERIMENTS[].WANDB（缺省 false）；true 时
-            # runner 注入 wandb_mode=online 覆盖 train_args。
-            wandb_line,
+            # 在线监控开关（2026-11-03 起取代 WANDB=true/false）：每个 conf
+            # 恒带一行，取值 none/swanlab/wandb，实验级默认取
+            # EXPERIMENTS[].MONITOR（缺省 none）；swanlab/wandb 时 runner 注入
+            # wandb_mode=online + monitor_backend 覆盖 train_args。
+            monitor_line,
             # checkpoint_all 开关（2026-10-26 裁定）：true=候选全留协议；
             # false=只滚存最近过线者。实验级默认取 EXPERIMENTS[].CHECKPOINT_ALL。
             ckpt_line,
@@ -418,7 +439,8 @@ def add_gen_args(parser) -> None:
     parser.add_argument("--concat-method", choices=list(CONCAT_VERSIONS),
                         default="f6_soft",
                         help="接触标签版本（默认 f6_soft；tafix/statefix 映射到 *_tafix/*_statefix 条目）")
-    parser.add_argument("--wandb", default=None, help="true/false，覆盖实验级默认")
+    parser.add_argument("--monitor", default=None, choices=("none", "swanlab", "wandb"),
+                        help="在线监控后端（none/swanlab/wandb），覆盖实验级默认")
     parser.add_argument("--checkpoint-all", default=None, help="true/false，覆盖实验级默认")
     parser.add_argument("--force", action="store_true",
                         help="绕过生成期 skip 并写 FORCE=true（强制重跑，含重训）")
@@ -456,7 +478,7 @@ def _check_wave_gates(raw: dict[str, Any], wave: Any, hard: bool) -> bool:
 
 
 def _emit_wave(raw: dict[str, Any], wave: Any, selected: list[str],
-               wandb: bool | None, checkpoint_all: bool | None,
+               monitor: str | None, checkpoint_all: bool | None,
                force: bool, dry_run: bool) -> int:
     """发射一个训练波：闸门（硬）→ --models 子集 → emit（skip 默认开）。"""
     _check_wave_gates(raw, wave, hard=True)
@@ -468,12 +490,12 @@ def _emit_wave(raw: dict[str, Any], wave: Any, selected: list[str],
         print("[skip] wave %s: no selected model in this wave" % wave)
         return 0
     return emit_experiment(str(raw["_experiment_id"]), models,
-                           wandb=wandb, checkpoint_all=checkpoint_all,
+                           monitor=monitor, checkpoint_all=checkpoint_all,
                            force=force, dry_run=dry_run)
 
 
 def _emit_eval_wave(raw: dict[str, Any], hard: bool,
-                    wandb: bool | None, checkpoint_all: bool | None,
+                    monitor: str | None, checkpoint_all: bool | None,
                     force: bool, dry_run: bool) -> int:
     """发射 WAVE_EVAL 波（wo05 波 3）：按家族闸门筛 ready 家族后发 eval 条目。"""
     eval_spec = raw["WAVE_EVAL"]
@@ -491,13 +513,13 @@ def _emit_eval_wave(raw: dict[str, Any], hard: bool,
                              % eval_spec["wave"])
         return 0
     return emit_experiment(eval_id, ready,
-                           wandb=wandb, checkpoint_all=checkpoint_all,
+                           monitor=monitor, checkpoint_all=checkpoint_all,
                            force=force, dry_run=dry_run)
 
 
 def emit_waved(experiment_id: str, wave: str | None = None,
                models: list[str] | None = None, *,
-               wandb: bool | None = None,
+               monitor: str | None = None,
                checkpoint_all: bool | None = None,
                force: bool | None = None,
                dry_run: bool = False) -> int:
@@ -519,23 +541,23 @@ def emit_waved(experiment_id: str, wave: str | None = None,
             total = 0
             for w in sorted(waves, key=str):
                 if _check_wave_gates(raw, w, hard=False):
-                    total += _emit_wave(raw, w, models or [], wandb,
+                    total += _emit_wave(raw, w, models or [], monitor,
                                         checkpoint_all, bool(force), dry_run)
             if wave_eval:
-                total += _emit_eval_wave(raw, hard=False, wandb=wandb,
+                total += _emit_eval_wave(raw, hard=False, monitor=monitor,
                                          checkpoint_all=checkpoint_all,
                                          force=bool(force), dry_run=dry_run)
             return total
         if str(wave) in {str(k) for k in waves}:
-            total = _emit_wave(raw, wave, models or [], wandb, checkpoint_all,
+            total = _emit_wave(raw, wave, models or [], monitor, checkpoint_all,
                                bool(force), dry_run)
             if wave_eval and str(wave_eval.get("wave")) == str(wave):
-                total += _emit_eval_wave(raw, hard=True, wandb=wandb,
+                total += _emit_eval_wave(raw, hard=True, monitor=monitor,
                                          checkpoint_all=checkpoint_all,
                                          force=bool(force), dry_run=dry_run)
             return total
         if wave_eval and str(wave_eval.get("wave")) == str(wave):
-            return _emit_eval_wave(raw, hard=True, wandb=wandb,
+            return _emit_eval_wave(raw, hard=True, monitor=monitor,
                                    checkpoint_all=checkpoint_all,
                                    force=bool(force), dry_run=dry_run)
         raise SystemExit("unknown wave %r for %s (waves: %s)"
@@ -543,7 +565,7 @@ def emit_waved(experiment_id: str, wave: str | None = None,
                             ",".join(str(k) for k in sorted(waves, key=str))))
 
     return emit_experiment(experiment_id, models,
-                           wandb=wandb, checkpoint_all=checkpoint_all,
+                           monitor=monitor, checkpoint_all=checkpoint_all,
                            force=force, dry_run=dry_run)
 
 

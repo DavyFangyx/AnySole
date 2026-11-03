@@ -8,10 +8,13 @@
 - E4：cells（Cv1–7 stat，三条件十指标 + Δ）→ Full_Table1_E4_Ablation_AllMetrics.csv
 - E5：主模型 V7_Cv5（last/best × occ000-100 十一档）→ Full_Table1_E5_Occlusion.csv
 - E6：E6_接触相位/e6_table.json + PNG → Full_Table1_E6_PhaseGain.csv
-  （+ 9 行简表 Full_Table1_E6_PhaseGain_Simple.csv，四相位 × 双门/无门）
+  （+ 相位简表 Full_Table1_E6_PhaseGain_Simple.csv，四相位 × 双门/无门）
   + Full_FigN_E6_Phase_{g}.png；--best-sessions → 门控最佳完整会话合并图
-  Full_Fig_E6_BestSessions.png + e6_best_sessions.json（滤伤害+保增益双条件）
+  Full_Fig_E6_BestSessions.png + e6_best_sessions.json（滤伤害+保增益双条件）；
+  2026-11-03 门控主表 = 根层两张（Full_Table1_E6_GateHarmSuppression.csv
+  退化抑制 / Full_Table2_E6_GateGainPreservation.csv 增长保留，三组门控）
 - E7：E7_动态输入/e7_table.json + PNG → Full_Table1_E7_DynamicStages.csv + Full_FigN_E7_Stages_{a}.png
+- 2026-11-02：E6/E7 产物按位置误差指标子文件夹（ankle_foot_mpjpe/pa_mpjpe）同模式生成
 
 表 = CSV（utf-8-sig）；十指标固定列序与实验计划一致。幂等可重复执行。
 用法（touch_gait env 非必需）：python results_display/script/e_results_export.py
@@ -35,9 +38,11 @@ ETEST = REPO / "results_display" / "Etest"
 E5_DIR = ETEST / "E5_OcclusionRobustness"
 E5_SUPP = E5_DIR / "supplementary"
 E5_DETAIL = E5_DIR / "detail"
-E6_DIR = ETEST / "E6_ContactPhaseAnalysis"
-E6_SUPP = E6_DIR / "supplementary"
-E6_DETAIL = E6_DIR / "detail"
+# 2026-11-02 用户裁定：E6/E7 按位置误差指标建子文件夹，同一套表/图模式
+# 逐指标生成（ankle_foot_mpjpe = 现行踝足口径；pa_mpjpe = 全身相似对齐）。
+E6_BASE = ETEST / "E6_ContactPhaseAnalysis"
+E7_BASE = ETEST / "E7_DynamicModalityInputs"
+POSITION_METRICS = ("ankle_foot_mpjpe", "pa_mpjpe")
 RECEIPTS = ETEST / "receipts"
 # z_note/E_Test 已并入 E 目录（2026-10-27）；下方源路径全部指向 E 目录
 CELLS = REPO / "results" / "cells"
@@ -299,6 +304,35 @@ def _baseline_rows(keys: list[str] = None) -> dict[str, list[list]]:
     return rows_by_block
 
 
+# E0 参照地板（2026-11-03 修改 01）：读 e0_reference_floors.py 的产物 json，
+# 与 _baseline_rows 同一数据驱动路径（读 json、不读 md）。
+E0_REFERENCE_JSON = ETEST / "E0_ReferenceFloors" / "detail" / "e0_reference_floors.json"
+
+
+def _reference_row(keys: list[str]) -> list:
+    """参照行 = E0 参照地板「常数均值姿态（train 拟合）」；json 缺失时返回
+    空行（不插入）。可定义五枚指标（PA-MPJPE/MPJPE/FootSliding/GroundPen/
+    Jitter_pred）外留 —（metric_reasons=not_applicable）。"""
+    path = E0_REFERENCE_JSON
+    if not path.is_file():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    s = (payload.get("references") or {}).get(
+        "constant_pose_train_fit", {}).get("summary") or {}
+    if not s:
+        return []
+    import hashlib
+    SOURCE_RECEIPTS.append({"cell": "E0_ReferenceFloors", "path": str(path),
+                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                            "split": EVAL_SPLIT, "checkpoint_sha256": None,
+                            "contact_label_package_sha256": None})
+    row = ["参照", "Reference / 常数均值姿态", "—"]
+    for key in (BASELINE_METRIC_KEYS[k] for k in keys):
+        v = s.get(key)
+        row.append(round(v, 3) if isinstance(v, (int, float)) and np.isfinite(v) else "—")
+    return row
+
+
 def export_e2(models: list[str], ckpt: str) -> None:
     """四张表（2026-10-27 用户裁定）：V 块 / T 块 / VT 块 / 汇总。
 
@@ -317,6 +351,11 @@ def export_e2(models: list[str], ckpt: str) -> None:
     # 表结构（实验计划 E2）：每块先列外部基线，最后一行 U。
     for block, rows in _baseline_rows().items():
         rows_by_block[block].extend(rows)
+    # 2026-11-03 修改 01：各条件块首行插入参照行（E0 参照地板，数据驱动）。
+    reference = _reference_row(E2_METRICS10)
+    if reference:
+        for block in rows_by_block:
+            rows_by_block[block].insert(0, list(reference))
     for cond, block in (("V2M", "V"), ("T2M", "T"), ("VT2M", "VT")):
         if ckpt != "best":
             for model in last_cells:
@@ -355,6 +394,11 @@ def export_e4(models: list[str], ckpt: str) -> None:
         raise SystemExit("E4 消融组目前只有 last 口径（Cv 家族 best 口径 cells 未注册）")
     header = ["模型", "条件"] + METRICS10
     rows = []
+    # 2026-11-03 修改 01：表首插入参照行（E0 参照地板，数据驱动；参照对
+    # 三条件同一值，单行即可判读）。
+    reference = _reference_row(METRICS10)
+    if reference:
+        rows.append([reference[1], "—"] + reference[3:])
     cells = _selected(["V7_Cv%d%s%s" % (n,
                                         "_f6" if CONTACT_NAMESPACE == "legacy" else "",
                                         "_statistics" if CONTACT_NAMESPACE == "legacy" else "")
@@ -851,9 +895,137 @@ E6_PHASE_ZH = {"0": "稳定支撑", "1": "摆动", "2": "落脚附近", "3": "�
 E6_METRIC_ZH = {"vert": "足垂直误差(mm)", "pen": "地面穿透(mm)",
                 "contact": "足高判据接触准确率(%)"}
 
+# ---------------- E6 门控主表（2026-11-03 用户裁定：三组门控两张主表） ----------------
+# 三组 = 无门 Cv7 / 双门 Cv5 / 单门 Cv4（同配方同枚举训练，唯一差异是门）。
+# 门控实验本质 = VT 相较于 V 的情况 → 数值全部是 Δ(VT−V)（2026-11-03 用户
+# 裁定：去掉 T2M 参照列，全 10 指标；traj 列 = traj_ATE@0.5s 口径）。
+E6_GATE_ROWS = [("V7_Cv7_s1", "无门"), ("V7_Cv5_s1", "双门"),
+                ("V7_Cv4_s1", "单门")]
+E6_GATE_METRICS = ["PA-MPJPE", "MPJPE", "GlobalMPJPE", "W-MPJPE100", "MPJRE",
+                   "traj_ATE@0.5s", "RootOrientationDrift", "FootSliding",
+                   "GroundPen", "Jitter_pred"]
+E6_SESSION_KEYS = {"PA-MPJPE": "pa_mpjpe_mm", "MPJPE": "mpjpe_mm",
+                   "GlobalMPJPE": "global_mpjpe_mm",
+                   "W-MPJPE100": "w_mpjpe100_mm", "MPJRE": "mpjae_deg",
+                   "traj_ATE@0.5s": "root_ate_seg20_mm",
+                   "RootOrientationDrift": "root_orientation_drift_deg",
+                   "FootSliding": "foot_sliding_mm",
+                   "GroundPen": "ground_pen_mm",
+                   "Jitter_pred": "jitter_pred_m_s3"}
+
+
+E6_MIN_EFFECT = 0.05          # 比例分母下限：低于此值比例失真，只报绝对量
+
+
+def _e6_gate_decomposition() -> dict:
+    """三组门控的逐会话分解 ΔE = ΔE⁺ + ΔE⁻（2026-11-03 用户裁定）。
+
+    旧表缺陷：表 1 用池化净值（cell test.json，VT−V），表 2 用会话级
+    mean(min(Δ,0))，两表混用「净值」与「分量」两种口径。新口径两表同源：
+
+        Δ_s = VT_s − V_s（正 = 触觉引入退化）
+        w_s = 该指标的聚合权重（帧数；FootSliding = GT 接触帧数）
+        ΔE   = Σ w_s Δ_s / Σ w_s      （= test.json 池化净值，逐位复核）
+        ΔE⁺ = Σ w_s max(Δ_s, 0) / Σ w_s   （有害分量，表 1）
+        ΔE⁻ = Σ w_s min(Δ_s, 0) / Σ w_s   （有益分量，表 2，负数）
+
+    故 ΔE⁺ + ΔE⁻ = ΔE 精确成立，且 ΔE 与 E2 表 1 的 VT−V 逐位吻合
+    （FootSliding 因接触帧权重 ≤0.003 差）。权重取指标自身的聚合口径，
+    不是额外统计假设：帧数权重即池化含义，FootSliding 的接触帧数来自
+    detail/session_foot_contact_counts.json（GT 足速 <0.3 m/s）。
+    """
+    weight_path = E6_BASE / "detail" / "session_foot_contact_counts.json"
+    contact_counts = {}
+    if weight_path.is_file():
+        contact_counts = json.loads(
+            weight_path.read_text(encoding="utf-8"))["counts"]
+    else:
+        print("[warn] %s 缺失；FootSliding 退回按帧数加权" % weight_path)
+    comp: dict = {}
+    for cell, _ in E6_GATE_ROWS:
+        d = json.loads((CELLS / cell / "metrics" / "session_detail_test.json")
+                       .read_text(encoding="utf-8"))["conditions"]
+        vt = {e["session_id"]: e["metrics"] for e in d["VT2M"]}
+        v = {e["session_id"]: e["metrics"] for e in d["V2M"]}
+        n_frames = {e["session_id"]: e["n_frames"] for e in d["V2M"]}
+        sids = sorted(set(v) & set(vt))
+        comp[cell] = {}
+        for m in E6_GATE_METRICS:
+            key = E6_SESSION_KEYS[m]
+            delta = np.array([vt[s][key] - v[s][key] for s in sids], dtype=float)
+            w = np.array([
+                float(contact_counts.get(s, n_frames[s]))
+                if m == "FootSliding" else float(n_frames[s])
+                for s in sids])
+            total = w.sum()
+            comp[cell][m] = {
+                "net": float((w * delta).sum() / total),
+                "plus": float((w * np.maximum(delta, 0.0)).sum() / total),
+                "minus": float((w * np.minimum(delta, 0.0)).sum() / total),
+            }
+    return comp
+
+
+def export_e6_gate_tables() -> None:
+    """E6 门控两张主表（2026-11-03 用户裁定）：三组门控 × 全 10 指标。
+
+    表 1 = 有害分量 + 抑制率（5 行）：
+        3 行模型 = ΔE⁺；2 行抑制率 = 1 − ΔE⁺_门控/ΔE⁺_无门。
+    表 2 = 有益分量 + 保留率（5 行）：
+        3 行模型 = ΔE⁻（负 = 触觉有帮助）；2 行保留率 =
+        ΔE⁻_门控/ΔE⁻_无门（两者同为负，比值 = 保留比例）。
+    两表同一总体、同一权重，故 ΔE⁺ + ΔE⁻ = ΔE（cell test.json 池化净值）；
+    净值不重复入表（见 E2 表 1），保持两表各自只讲一件事。
+    统计口径见 _e6_gate_decomposition。
+    """
+    comp = _e6_gate_decomposition()
+    nogate = E6_GATE_ROWS[0][0]
+    h1 = ["模型"] + E6_GATE_METRICS
+    rows1 = []
+    for cell, zh in E6_GATE_ROWS:
+        rows1.append(["%s（%s）" % (cell, zh)]
+                     + ["%.3f" % comp[cell][k]["plus"]
+                        for k in E6_GATE_METRICS])
+    for cell, zh in E6_GATE_ROWS[1:]:
+        rows1.append(["抑制率（%s vs 无门）" % zh]
+                     + ["%.1f%%" % (100.0 * (comp[nogate][k]["plus"]
+                                             - comp[cell][k]["plus"])
+                                    / comp[nogate][k]["plus"])
+                        if comp[nogate][k]["plus"] >= E6_MIN_EFFECT
+                        and comp[cell][k]["plus"] < comp[nogate][k]["plus"]
+                        else "—"
+                        for k in E6_GATE_METRICS])
+    write_csv(E6_BASE / "Full_Table1_E6_GateHarmSuppression.csv", h1, rows1)
+    h2 = ["模型"] + E6_GATE_METRICS
+    rows2 = []
+    for cell, zh in E6_GATE_ROWS:
+        rows2.append(["%s（%s）" % (cell, zh)]
+                     + ["%+.3f" % comp[cell][k]["minus"]
+                        for k in E6_GATE_METRICS])
+    for cell, zh in E6_GATE_ROWS[1:]:
+        rows2.append(["保留率（%s vs 无门）" % zh]
+                     + ["%.1f%%" % (100.0 * comp[cell][k]["minus"]
+                                    / comp[nogate][k]["minus"])
+                        if abs(comp[nogate][k]["minus"]) >= E6_MIN_EFFECT
+                        and abs(comp[cell][k]["minus"]) >= E6_MIN_EFFECT
+                        else "—"
+                        for k in E6_GATE_METRICS])
+    write_csv(E6_BASE / "Full_Table2_E6_GateGainPreservation.csv", h2, rows2)
+
 
 def export_e6() -> None:
-    data = json.loads((E6_DETAIL / "e6_table.json").read_text(encoding="utf-8"))
+    """E6 各位置误差指标文件夹同模式导出（2026-11-02 用户裁定）。
+    门控主表（抑制/保留）在 E6 根层，由 export_e6_gate_tables 导出。"""
+    for metric in POSITION_METRICS:
+        _export_e6_metric(metric)
+    export_e6_gate_tables()
+
+
+def _export_e6_metric(metric: str) -> None:
+    e6_dir = E6_BASE / metric
+    supp = e6_dir / "supplementary"
+    detail = e6_dir / "detail"
+    data = json.loads((detail / "e6_table.json").read_text(encoding="utf-8"))
     header = ["动作", "模型", "脚", "相位"] + ["V误差", "VT误差", "G(V−VT)"]
     rows = []
     for group in E6_GROUP_ORDER:
@@ -868,15 +1040,16 @@ def export_e6() -> None:
                         continue
                     rows.append([group, model, foot, E6_PHASE_ZH[phase],
                                  round(v["V"], 3), round(v["VT"], 3), round(v["G"], 3)])
-    write_csv(E6_SUPP / "Full_Table1_E6_PhaseGain.csv", header, rows)
-    # 简表 = 论文主干表（每动作一行，四相位 × 双门/无门，G=V−VT 论文口径）
-    # → 根层；162 行完整表与多指标表进 supplementary
-    write_csv(E6_DIR / "Full_Table1_E6_PhaseGain_Simple.csv",
+    write_csv(supp / "Full_Table1_E6_PhaseGain.csv", header, rows)
+    # 相位简表（每动作一行，四相位 × 双门/无门，G=V−VT 论文口径）：
+    # 2026-11-03 起降级进 supplementary（E6 主表 = 根层门控两表）
+    write_csv(supp / "Full_Table1_E6_PhaseGain_Simple.csv",
               *e6_simple_csv(data))
     # 表 2 = 多指标相位表（2026-11-02 用户裁定）：足垂直误差 / 地面穿透 /
     # 接触准确率，逐相位 V / VT / Δ(VT−V)。误差与穿透 Δ 为负 = 触觉有帮助；
     # 接触准确率 Δ 为正 = 触觉有帮助（方向随指标，见指标名）。
-    metrics_src = E6_DETAIL / "e6_table_metrics.json"
+    # 足类指标与位置误差指标无关，各指标文件夹内容相同（同模式复制）。
+    metrics_src = detail / "e6_table_metrics.json"
     if metrics_src.is_file():
         mdata = json.loads(metrics_src.read_text(encoding="utf-8"))
         header2 = ["动作", "模型", "脚", "相位", "指标", "V", "VT", "Δ(VT−V)"]
@@ -898,15 +1071,15 @@ def export_e6() -> None:
                             rows2.append([group, model, foot, E6_PHASE_ZH[phase],
                                           zh, round(d["V"], 3),
                                           round(d["VT"], 3), round(d["G"], 3)])
-        write_csv(E6_SUPP / "Full_Table2_E6_PhaseMetrics.csv", header2, rows2)
+        write_csv(supp / "Full_Table2_E6_PhaseMetrics.csv", header2, rows2)
     # 新版口径（2026-10-31 用户裁定）：驱动直写逐会话 1×2 上下分布图
     # Full_Fig_{action}_{sid}.png（上左脚/下右脚，分脚不合并不平均）；
     # group_compare/{curves,scatter}/ 由 results_display/script/
     # e6_group_compare.py 生成。旧合并双足命名
     # （Full_FigN_E6_Phase_{group}.png / e6_phase_*.png）已废止，不再复制。
-    n_figs = len(list((E6_DETAIL / "per_session").glob("Full_Fig_*.png")))
-    print("[png] E6 per-session figures: %d (Full_Fig_{action}_{sid}.png)"
-          % n_figs)
+    n_figs = len(list((detail / "per_session").glob("Full_Fig_*.png")))
+    print("[png] E6[%s] per-session figures: %d (Full_Fig_{action}_{sid}.png)"
+          % (metric, n_figs))
 
 
 def e6_simple_csv(data: dict) -> tuple[list[str], list[list[str]]]:
@@ -949,50 +1122,56 @@ def export_e6_group_compare(models: list[str]) -> None:
     """--detail（2026-10-31 用户裁定）：E6 明细对比图——group_compare/
     {curves,scatter}/，逐会话 1×2 上下分布（上左脚/下右脚）、左右脚分开
     不平滑。生成器 = results_display/script/e6_group_compare.py
-    （--models 缺省七模型；--actions 过滤动作）。"""
-    cmd = [_touch_gait_python(),
-           str(REPO / "results_display/script/e6_group_compare.py")]
-    if models:
-        cmd += ["--models", ",".join(models)]
-    subprocess.run(cmd, cwd=str(REPO), check=True)
+    （--models 缺省七模型；--actions 过滤动作；--metric 逐指标文件夹）。"""
+    for metric in POSITION_METRICS:
+        cmd = [_touch_gait_python(),
+               str(REPO / "results_display/script/e6_group_compare.py"),
+               "--metric", metric]
+        if models:
+            cmd += ["--models", ",".join(models)]
+        subprocess.run(cmd, cwd=str(REPO), check=True)
 
 
 def export_e6_best_sessions() -> None:
     """--best-sessions（2026-11-02 用户裁定）：E6 门控最佳完整会话合并图
     Full_Fig_E6_BestSessions.png + e6_best_sessions.json——逐会话「滤伤害
-    （H7−H5≥2mm）+保增益（A7−A5≤4mm）」双条件选会话，子图为该会话
+    +保增益」双条件选会话（阈值随指标缩放），子图为该会话
     Full_Fig 原图原样嵌入，无合格会话的动作红框。生成器 =
-    results_display/script/e6_best_sessions.py。"""
-    cmd = [_touch_gait_python(),
-           str(REPO / "results_display/script/e6_best_sessions.py")]
-    subprocess.run(cmd, cwd=str(REPO), check=True)
+    results_display/script/e6_best_sessions.py（--metric 逐指标文件夹）。"""
+    for metric in POSITION_METRICS:
+        cmd = [_touch_gait_python(),
+               str(REPO / "results_display/script/e6_best_sessions.py"),
+               "--metric", metric]
+        subprocess.run(cmd, cwd=str(REPO), check=True)
 
 
 # ---------------- E7：动态输入（json + PNG） ----------------
 def export_e7() -> None:
     """统一入口（2026-10-31 用户裁定）：先跑 anysole_tta/e7_driver.py
-    生成图 + e7_table.json，再导出 CSV。TTA dump 已有时驱动自动跳过
+    生成图 + e7_table.json，再导出 CSV（2026-11-02 起逐位置误差指标
+    子文件夹各跑一遍）。TTA dump 已有时驱动自动跳过
     （仅装配+绘图，分钟级）；缺 dump 的动作会触发 TTA 子进程。
     驱动需 touch_gait（cv2），用 _touch_gait_python 显式指定
     （2026-11-02 修复：原 sys.executable 在 base 环境缺 cv2 失败）。"""
     import subprocess
     driver = REPO / "anysole_tta" / "e7_driver.py"
-    print("[e7] run driver: %s" % driver)
-    subprocess.run([_touch_gait_python(), str(driver)], check=True, cwd=str(REPO))
-    src_dir = ETEST / "E7_DynamicModalityInputs"
-    dst_dir = ETEST / "E7_DynamicModalityInputs"
-    data = json.loads((src_dir / "detail" / "e7_table.json").read_text(encoding="utf-8"))
-    stages = ["V", "T", "VT", "Vi", "ViT"]
-    systems = sorted({s for a in data.values() for st in a["stages"].values() for s in st})
-    header = ["动作", "系统"] + stages
-    rows = []
-    for action, entry in sorted(data.items()):
-        for sys_name in systems:
-            rows.append([action, sys_name]
-                        + [round(entry["stages"][st].get(sys_name, float("nan")), 3)
-                           if entry["stages"][st].get(sys_name) is not None else ""
-                           for st in stages])
-    write_csv(dst_dir / "Full_Table1_E7_DynamicStages.csv", header, rows)
+    for metric in POSITION_METRICS:
+        dst_dir = E7_BASE / metric
+        print("[e7] run driver: %s --metric %s" % (driver, metric))
+        subprocess.run([_touch_gait_python(), str(driver), "--metric", metric],
+                       check=True, cwd=str(REPO))
+        data = json.loads((dst_dir / "detail" / "e7_table.json").read_text(encoding="utf-8"))
+        stages = ["V", "T", "VT", "Vi", "ViT"]
+        systems = sorted({s for a in data.values() for st in a["stages"].values() for s in st})
+        header = ["动作", "系统"] + stages
+        rows = []
+        for action, entry in sorted(data.items()):
+            for sys_name in systems:
+                rows.append([action, sys_name]
+                            + [round(entry["stages"][st].get(sys_name, float("nan")), 3)
+                               if entry["stages"][st].get(sys_name) is not None else ""
+                               for st in stages])
+        write_csv(dst_dir / "Full_Table1_E7_DynamicStages.csv", header, rows)
 
 
 # ---------------- teaser（E6/E7 可见人体 SMPL） ----------------

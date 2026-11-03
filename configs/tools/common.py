@@ -43,9 +43,18 @@ TRAIN_ARG_FLAG_MAP = {
     "ctx_ss": "--ctx-ss",
     "ar_ss": "--ar-ss",
     "ar_noise": "--ar-noise",
+    # 修改 04（2026-11-03）：闭环 rollout 损失（改动 A）与低维反馈（改动 B）。
+    "ar_rollout": "--ar-rollout",
+    "ar_rollout_max": "--ar-rollout-max",
+    "ar_rollout_schedule_frac": "--ar-rollout-schedule-frac",
+    "ar_rollout_detach": "--ar-rollout-detach",
+    "v7_ar2_lowdim": "--v7-ar2-lowdim",
+    "v7_ar2_fb_dim": "--v7-ar2-fb-dim",
     "lr_schedule": "--lr-schedule",
     "loss_cap": "--loss-cap",
     "tw": "--tw",
+    "obs_context": "--obs-context",
+    "tactile_weight_norm": "--tactile-weight-norm",
     "stride": "--stride",
     "dropout": "--dropout",
     "lr": "--lr",
@@ -53,6 +62,7 @@ TRAIN_ARG_FLAG_MAP = {
     "condition_sampling": "--condition-sampling",
     "final_eval_split": "--final-eval-split",
     "lambda_pose": "--lambda-pose",
+    "lambda_pose_vel": "--lambda-pose-vel",
     "lambda_kp": "--lambda-kp",
     "lambda_pos": "--lambda-pos",
     "lambda_traj": "--lambda-traj",
@@ -65,6 +75,18 @@ TRAIN_ARG_FLAG_MAP = {
     "lambda_prior_nll": "--lambda-prior-nll",
     "lambda_prior_traj": "--lambda-prior-traj",
     "lambda_air": "--lambda-air",
+    # V7 AR2 相对运动损失（2026-11-01，V7_AR方案 §5.2）。
+    "lambda_dyaw": "--lambda-dyaw",
+    "lambda_cumyaw": "--lambda-cumyaw",
+    "lambda_dyaw_td": "--lambda-dyaw-td",
+    "lambda_visyaw": "--lambda-visyaw",
+    "lambda_yawcorr": "--lambda-yawcorr",
+    "lambda_world_traj": "--lambda-world-traj",
+    # V7 AR2 yaw-fix（2026-11-02 修订）：正面 Δψ 结构（历史延续基线 +
+    # 修正项 + T 行弱监督）+ 自由生成航向链 + 世界系轨迹损失。
+    "v7_ar2_yaw_fix": "--v7-ar2-yaw-fix",
+    "ar2_dyaw_base": "--ar2-dyaw-base",
+    "ar2_dyaw_t_w": "--ar2-dyaw-t-w",
     "lambda_foot_res": "--lambda-foot-res",
     "lambda_phase": "--lambda-phase",
     "lambda_cop": "--lambda-cop",
@@ -114,9 +136,15 @@ TRAIN_ARG_FLAG_MAP = {
     "wandb_entity": "--wandb_entity",
     "wandb_experiment_tag": "--wandb_experiment_tag",
     "wandb_eval_interval": "--wandb_eval_interval",
+    # 在线监控后端（2026-11-03）：wandb（默认）或 swanlab；workspace 空 =
+    # SwanLab 个人空间。
+    "monitor_backend": "--monitor_backend",
+    "swanlab_workspace": "--swanlab_workspace",
 }
 TRAIN_STORE_TRUE = {"assign_cluster", "occ_mix", "occ_a3_monitor",
-                    "t_phys_v2", "d8_heads", "checkpoint_all", "tactile_gainbias"}
+                    "t_phys_v2", "d8_heads", "checkpoint_all", "tactile_gainbias",
+                    "v7_ar2_yaw_fix", "ar_rollout", "ar_rollout_detach",
+                    "v7_ar2_lowdim"}
 
 
 def _parse_value(raw: str) -> Any:
@@ -380,6 +408,7 @@ def effective_variant(spec: dict[str, Any]) -> str:
     args = dict(spec.get("train_args") or {})
     cfg = {
         "tw": int(args.get("tw", 20)),
+        "obs_context": int(args.get("obs_context", args.get("tw", 20))),
         "stride": args.get("stride"),
         "lr": float(args.get("lr", 1e-4)),
         "lambda_pose": float(args.get("lambda_pose", 3.0)),

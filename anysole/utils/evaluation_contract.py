@@ -32,8 +32,11 @@ def evaluation_contract(dataset, checkpoint_config=None):
         "coordinates": {"MPJPE": "pelvis_aligned", "MPJPE_parts": "pelvis_aligned",
                         "GlobalMPJPE": "world", "GlobalMPJPE_parts": "world",
                         "PA-MPJPE_parts": "one_whole_body_per_frame_similarity_alignment"},
-        "trajectory": "ground_truth_previous_frame_translation_anchor_per_window",
-        "free_integration": False, "floor": "GT_session_joint_height_percentile_5_scoring_only",
+        "trajectory": ("free_integration_heading_state_ar2_no_gt_anchor"
+                       if checkpoint_config.get("v7_ar2")
+                       else "ground_truth_previous_frame_translation_anchor_per_window"),
+        "free_integration": bool(checkpoint_config.get("v7_ar2", False)),
+        "floor": "GT_session_joint_height_percentile_5_scoring_only",
         "coverage_protocol": ("overlapping_complete_windows; unique frame coverage reported" if repeated_frames
                               else "non_overlapping_complete_windows_only; no tail padding"),
         "repeated_window_frame_instances": repeated_frames,

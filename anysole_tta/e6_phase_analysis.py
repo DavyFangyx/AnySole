@@ -7,11 +7,13 @@
 - 相位状态机：稳定支撑/摆动/落脚附近/离地附近（±0.1s 近窗）
 - 动作 = canonical test 全集（splits.csv，36 会话，按实际出现的动作分组，逐动作表）
 - 产物：z_note/E_Test/E6_接触相位/{e6_table.json, E6_接触相位分析.md,
-  e6_phase_{group}.png}
+  e6_phase_{group}.png}（2026-11-02 起按指标分子文件夹：
+  results_display/Etest/E6_ContactPhaseAnalysis/{ankle_foot_mpjpe,pa_mpjpe}/…）
 
 用法（touch_gait env）：
   python anysole_tta/e6_phase_analysis.py --models V7_Cv4_s1,V7_Cv5_s1,V7_Cv7_s1
   python anysole_tta/e6_phase_analysis.py --models V7_Cv5_s1 --actions walk
+  python anysole_tta/e6_phase_analysis.py --metric pa_mpjpe
 """
 from __future__ import annotations
 
@@ -27,13 +29,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # 仓库根
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # hmr2_gait 根（anysole_tta 命名空间包）
 from hmr2_tta.paths import PROJECT_ROOT  # noqa: E402
 from anysole_tta.phase_common import (CELL_ROOT, LEFT_ANKLE_FOOT,  # noqa: E402
-                                      PHASE_NAMES, PHASE_NAMES_ZH,
-                                      RIGHT_ANKLE_FOOT, foot_mpjpe_per_frame,
+                                      METRICS, PHASE_NAMES, PHASE_NAMES_ZH,
+                                      RIGHT_ANKLE_FOOT,
                                       load_contact, load_gt_joints,
-                                      load_pred_joints, phase_labels)
+                                      load_pred_joints, metric_error,
+                                      phase_labels)
 from anysole.data.smpl_io import estimate_floor_y  # noqa: E402
 
-OUT_DIR = PROJECT_ROOT / "results_display/Etest/E6_ContactPhaseAnalysis"
+OUT_BASE = PROJECT_ROOT / "results_display/Etest/E6_ContactPhaseAnalysis"
 FPS = 40.0
 CONDS = ("V2M", "VT2M")
 DEFAULT_MODELS = ["V7_Cv4_s1", "V7_Cv5_s1", "V7_Cv7_s1"]
@@ -127,9 +130,22 @@ def require_cells(model: str) -> list[str]:
     return missing
 
 
-def load_session(model: str, sid: str) -> dict:
-    """逐帧 per 脚 V/VT 误差与相位 + 多指标扩展（垂直误差/穿透/预测接触）。"""
-    gt = load_gt_joints(sid)
+_gt_cache: dict[str, np.ndarray] = {}
+
+
+def load_session(model: str, sid: str, metric: str = "ankle_foot_mpjpe") -> dict:
+    """逐帧 per 脚 V/VT 误差与相位 + 多指标扩展（垂直误差/穿透/预测接触）。
+
+    metric = ankle_foot_mpjpe：逐帧踝足 MPJPE（mm，左右脚各自系列）；
+    metric = pa_mpjpe：逐帧全关节相似对齐 MPJPE（mm；左右系列为同一全身
+    误差，仅相位条件不同——表/图模式与 ankle_foot_mpjpe 相同）。
+    """
+    if metric not in METRICS:
+        raise ValueError("unknown metric: " + metric)
+    gt = _gt_cache.get(sid)
+    if gt is None:
+        gt = load_gt_joints(sid)
+        _gt_cache[sid] = gt
     contact, contact_ids, label_valid = load_contact(sid)
     if not np.array_equal(contact_ids, np.arange(len(gt))):
         raise ValueError("Contact/GT frame grid mismatch: " + sid)
@@ -148,9 +164,8 @@ def load_session(model: str, sid: str) -> dict:
         frame_valid[ids] = valid
         frame_valid &= np.isfinite(aligned).all(axis=(1, 2))
         out["valid"] &= frame_valid
-        left, right = foot_mpjpe_per_frame(aligned, gt)
-        out[cond + "_left"] = left
-        out[cond + "_right"] = right
+        for series in ("left", "right"):
+            out[cond + "_" + series] = metric_error(aligned, gt, metric, series)
         out[cond + "_vert"] = np.stack([
             foot_vertical_error_per_frame(aligned, gt, LEFT_ANKLE_FOOT),
             foot_vertical_error_per_frame(aligned, gt, RIGHT_ANKLE_FOOT)],
@@ -237,16 +252,23 @@ def render_table(agg: dict[str, dict[str, dict]]) -> str:
 
 
 def render_figure(action: str, sids: list[str], data: dict[str, dict[str, dict]],
-                  out_dir: Path) -> None:
+                  out_dir: Path, metric: str = "ankle_foot_mpjpe") -> None:
     """每动作 × 每会话一张图（2026-10-31 用户裁定：1×2 上下分布，上=左脚、
     下=右脚，左右脚分开不合并不平均）：每面板 x=时间、y=该脚 Δ = VT − V、
-    各模型曲线 + 该脚相位带。图内英文（项目口径）。"""
+    各模型曲线 + 该脚相位带。图内英文（项目口径）。
+
+    metric = pa_mpjpe：曲线为全身逐帧 PA-MPJPE Δ（左右面板同一曲线），
+    面板标题注明相位条件脚。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     n_models = len(next(iter(next(iter(data.values())).values())))
     phase_colors = {0: "#d9d9d9", 1: "#ffffff", 2: "#f4a582", 3: "#92c5de"}
+    panel_titles = {"ankle_foot_mpjpe": {"left": "left foot", "right": "right foot"},
+                    "pa_mpjpe": {"left": "full body — left-foot phases",
+                                 "right": "full body — right-foot phases"}}
+    ylim = {"ankle_foot_mpjpe": (-60, 60), "pa_mpjpe": (-30, 30)}[metric]
     for sid in sids:
         fig, axes = plt.subplots(2, 1, figsize=(9, 7.2), sharex=True,
                                  squeeze=True)
@@ -272,9 +294,9 @@ def render_figure(action: str, sids: list[str], data: dict[str, dict[str, dict]]
                 ax.plot(t, sma, color=f"C{mi}", lw=1.6,
                         label=model if foot_i == 0 else None)
             ax.axhline(0, color="k", lw=0.6, ls="--")
-            ax.set_title("%s foot" % foot, fontsize=10)
+            ax.set_title(panel_titles[metric][foot], fontsize=10)
             ax.set_ylabel("Δ = VT - V (mm)")
-            ax.set_ylim(-60, 60)
+            ax.set_ylim(*ylim)
         axes[-1].set_xlabel("time (s)")
         handles, labels = axes[0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="lower center", ncol=min(7, n_models),
@@ -296,21 +318,26 @@ def main():
                     help="ckpt 口径（best 口径 stat cells 未注册，暂只支持 last）")
     ap.add_argument("--actions", default=None,
                     help="动作组逗号分隔（缺省 = canonical test 全部动作组）")
+    ap.add_argument("--metric", choices=METRICS, default="ankle_foot_mpjpe",
+                    help="位置误差指标（2026-11-02 裁定：E6 按指标建子文件夹；"
+                         "缺省 ankle_foot_mpjpe = 现行踝足口径）")
     ap.add_argument("--allow-partial", action="store_true",
                     help="跳过缺评估产物的模型（默认硬报错）")
     ap.add_argument("--contact-method", default="f6_soft_time_accel_state_smpl24_v1",
                     choices=("f6_soft", "f6_soft_time_accel_v1", "f6_soft_time_accel_state_v2",
                              "f6_soft_time_accel_state_smpl24_v1"))
     ap.add_argument("--no-figure", action="store_true")
-    ap.add_argument("--out-dir", default=str(OUT_DIR))
+    ap.add_argument("--out-dir", default=None)
     args = ap.parse_args()
+    if args.out_dir is None:
+        args.out_dir = str(OUT_BASE / args.metric)
     if args.ckpt != "last":
         raise SystemExit("E6 目前只支持 --ckpt last（best 口径 stat cells 未注册）")
 
     from anysole_tta import phase_common
     phase_common.CONTACT_METHOD = args.contact_method
-    if args.contact_method != "f6_soft_time_accel_state_smpl24_v1" and Path(args.out_dir) == OUT_DIR:
-        args.out_dir = str(OUT_DIR.parent / (OUT_DIR.name + "_" + args.contact_method))
+    if args.contact_method != "f6_soft_time_accel_state_smpl24_v1" and Path(args.out_dir) == OUT_BASE / args.metric:
+        args.out_dir = str(OUT_BASE / (args.metric + "_" + args.contact_method))
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     for model in models:
         if not (CELL_ROOT / model).is_dir():
@@ -342,7 +369,7 @@ def main():
         data = {sid: {} for sid in sids}
         for model in models:
             for sid in sids:
-                data[sid][model] = load_session(model, sid)
+                data[sid][model] = load_session(model, sid, args.metric)
         agg = {model: aggregate({sid: data[sid][model] for sid in sids})
                for model in models}
         agg_extra = {model: aggregate_extra({sid: data[sid][model]
@@ -351,7 +378,8 @@ def main():
         table[action] = {"sessions": sids, "table": agg}
         metrics_table[action] = {"sessions": sids, "table": agg_extra}
         if not args.no_figure:
-            render_figure(action, sids, data, Path(args.out_dir) / "detail" / "per_session")
+            render_figure(action, sids, data, Path(args.out_dir) / "detail" / "per_session",
+                          args.metric)
         print(f"[{action}] sessions={len(sids)}")
         for model in models:
             for foot in ("left", "right"):
@@ -384,12 +412,15 @@ def main():
         json.dumps(table, indent=1, ensure_ascii=False), encoding="utf-8")
     (detail_dir / "e6_table_metrics.json").write_text(
         json.dumps(metrics_table, indent=1, ensure_ascii=False), encoding="utf-8")
+    metric_desc = {"ankle_foot_mpjpe": "踝足 MPJPE，骨盆对齐",
+                   "pa_mpjpe": "全身逐帧相似变换对齐 PA-MPJPE（项目 pa_mpjpe 口径，"
+                              "含尺度；左右行 = 同一全身误差分别按左/右脚相位条件统计）"}[args.metric]
     md_lines = ["# E6 接触相位下的触觉增益与门控效果\n",
                 "口径：canonical test（splits.csv，36 会话，按实际出现的动作分组）；ckpt = ckpt_last；"
                 "模型 = V7_Cv4（单门）/ V7_Cv5（双门）/ V7_Cv7（无门控，枚举）；"
-                "Δ = VT 误差 − V 误差（踝足 MPJPE，骨盆对齐，mm；负值 = 触觉有帮助，"
+                "Δ = VT 误差 − V 误差（%s，mm；负值 = 触觉有帮助，"
                 "与 E2/E5 的 Δ(VT−V) 口径一致）；"
-                "相位 = f6_soft 接触标签 ±0.1s 近窗。\n"]
+                "相位 = f6_soft 接触标签 ±0.1s 近窗。\n" % metric_desc]
     for action in actions:
         sids = table[action]["sessions"]
         label = f"{GROUP_ZH.get(action, action)} {action}（{'/'.join(sids)}）"

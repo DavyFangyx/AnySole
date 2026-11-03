@@ -44,14 +44,16 @@ skip 两级（2026-10-26 用户裁定「conf 与结果一一对应」）：
   当前默认训练线的 `_s2/_s3`）
 - `--ckpt last/best`：ckpt 口径（测试层；best 映射到 `*_evalbest*` 条目——
   已注册 Cv1–7 的 `_evalbest` / `_evalbest_occ{010-050}`）
-- `--wandb` / `--checkpoint-all`：**只对训练层生效、默认 false**（训练期
-  专用开关，不写即关；测试层 conf 全部 eval-only，写了也不生效）
+- `--monitor none|swanlab|wandb` / `--checkpoint-all`：**只对训练层生效、
+  默认 none**（训练期专用的在线监控后端，不写即关；测试层 conf 全部
+  eval-only，写了也不生效）
 - `--force`：绕过生成期 skip 并写 `FORCE=true`；`--dry-run`：只打印将写入的 conf
 
 conf 通用键（生成器写入；实验级默认在 `common.py` 的 `EXPERIMENTS` 表）：
 
 - `FORCE=false`：true 绕过两级 skip + ckpt 复用检查，强制重跑（含重训）
-- `WANDB` / `CHECKPOINT_ALL`：训练期专用（同公共参数说明）
+- `MONITOR` / `CHECKPOINT_ALL`：训练期专用（同公共参数说明）；旧 conf 的
+  `WANDB=true/false` 仍兼容，等价于 `MONITOR=swanlab/none`
 
 注册位置：模型条目 `configs/z_gen/model_registry.py`（`MODELS` 表）；
 实验条目 `configs/z_gen/common.py`（`EXPERIMENTS` 表）；
@@ -87,11 +89,11 @@ conf 通用键（生成器写入；实验级默认在 `common.py` 的 `EXPERIMEN
 cd /data/fangyuxuan/projects/gait
 # ---- 训练层：模型训练（train + val）→ ckpt ----
 
-# 全量套餐：当前默认七个 U（--wandb/--checkpoint-all 默认 false，不写即关）
+# 全量套餐：当前默认七个 U（--monitor/--checkpoint-all 默认 none/false，不写即关）
 python configs/z_gen/gen_full_package.py --concat-method f6_soft --seed 1
 # 仅 U
 python configs/z_gen/gen_u_only.py --models V7_Cv5 --concat-method f6_soft --seed 1,2,3
-# --wandb true --checkpoint-all true
+# --monitor swanlab --checkpoint-all true
 # 多种子示例：--seed 1,2,3
 # --tw N
 

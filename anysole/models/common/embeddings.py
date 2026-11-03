@@ -10,9 +10,9 @@ import torch.nn as nn
 from anysole.types import D_MODEL, TW
 
 
-def sinusoidal_pe(length, dim, device=None, dtype=None):
+def sinusoidal_pe(length, dim, device=None, dtype=None, offset=0):
     """pe[t, 2i]=sin(t/10000^{2i/d}), pe[t, 2i+1]=cos(...). Output (length, dim)."""
-    position = torch.arange(length, device=device, dtype=torch.float32).unsqueeze(1)
+    position = (torch.arange(length, device=device, dtype=torch.float32) + offset).unsqueeze(1)
     div_term = torch.exp(
         torch.arange(0, dim, 2, device=device, dtype=torch.float32)
         * (-math.log(10000.0) / dim)
@@ -89,7 +89,7 @@ class TimestepEmbedding(nn.Module):
 class SharedEmbeddings(nn.Module):
     """Time PE, 2-way modality embedding, and one null token per modality."""
 
-    def __init__(self, dim=D_MODEL, tw=TW):
+    def __init__(self, dim=D_MODEL, tw=TW, time_offset=0):
         super().__init__()
         self.dim = dim
         self.tw = tw
@@ -97,7 +97,7 @@ class SharedEmbeddings(nn.Module):
         self.null_v = nn.Parameter(torch.zeros(1, 1, dim))
         self.null_t = nn.Parameter(torch.zeros(1, 1, dim))
         self.timestep = TimestepEmbedding(dim)
-        self.register_buffer("time_pe", sinusoidal_pe(tw, dim), persistent=True)
+        self.register_buffer("time_pe", sinusoidal_pe(tw, dim, offset=time_offset), persistent=True)
         nn.init.normal_(self.null_v, std=0.02)
         nn.init.normal_(self.null_t, std=0.02)
         nn.init.normal_(self.modality.weight, std=0.02)

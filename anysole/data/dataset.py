@@ -58,6 +58,7 @@ from anysole.data.workspace_adapter import (
 )
 from anysole.data.tactile_s2m import build_t_s2m, resolve_legacy_bvh_path
 from anysole.utils.geometry import (
+    deyaw_rotmat_np,
     fk_pose6d_np,
     heading_from_root_np,
     rot6d_to_rotmat_np,
@@ -190,7 +191,7 @@ def collate_windows(samples: Sequence[dict]) -> dict:
     out: Dict[str, object] = {}
     keys = samples[0].keys()
     for key in keys:
-        if key in ("session_id",):
+        if key in ("session_id", "obs_history"):
             out[key] = [sample[key] for sample in samples]
         else:
             out[key] = torch.stack([sample[key] for sample in samples], dim=0)
@@ -221,11 +222,14 @@ class AnySoleDataset(Dataset):
         occ_mix: Optional[dict] = None,
         t_phys_v2: bool = False,
         tactile_aug: Optional[dict] = None,
+        tactile_weight_norm: bool = False,
         smpl_support_policy: str = "legacy_clip",
         v7_ctx: bool = False,
         v7_ctx3: bool = False,
         v7_ctx5: bool = False,
         v7_ar: bool = False,
+        v7_ar2: bool = False,
+        obs_context: Optional[int] = None,
         v7_s_label: Optional[str] = None,
     ):
         self.mode = mode
@@ -233,7 +237,13 @@ class AnySoleDataset(Dataset):
             raise ValueError("smpl_support_policy must be legacy_clip or exclude")
         self.smpl_support_policy = str(smpl_support_policy)
         self.window_length = int(window_length)
+        self.obs_context = int(obs_context if obs_context is not None else window_length)
+        if self.obs_context < self.window_length or self.obs_context % self.window_length:
+            raise ValueError("obs_context must be a multiple of window_length and at least as large")
+        if self.obs_context > self.window_length and not v7_ar2:
+            raise ValueError("extended observation context is supported only by AR2/AR2M")
         self.tactile_input = str(tactile_input)
+        self.tactile_weight_norm = bool(tactile_weight_norm)
         self.t_phys_v2 = bool(t_phys_v2)
         self.cam_id = int(cam_id)
         # 四相机扩展 D2：cam_id 切换缓存目录——GVHMR 经 hmr_cache_path(cam)；
@@ -290,6 +300,11 @@ class AnySoleDataset(Dataset):
         self.v7_ctx3 = bool(v7_ctx3)
         self.v7_ctx5 = bool(v7_ctx5)
         self.v7_ar = bool(v7_ar)
+        self.v7_ar2 = bool(v7_ar2)
+        if self.v7_ar2 and self.v7_ar:
+            raise ValueError("v7_ar2 and v7_ar are exclusive (different prev_state)")
+        if self.v7_ar2 and self.f2_repr:
+            raise ValueError("v7_ar2 and f2_repr are exclusive (both replace root target)")
         if self.v7_ctx3 and not self.v7_ctx:
             raise ValueError("v7_ctx3 requires v7_ctx")
         if self.v7_ctx5 and not self.v7_ctx3:
@@ -351,12 +366,27 @@ class AnySoleDataset(Dataset):
                 left48 = np.asarray(shared_pressure["left48"], dtype=np.float32)
                 right48 = np.asarray(shared_pressure["right48"], dtype=np.float32)
                 t_raw_source = np.concatenate([left48, right48], axis=1)
+                left_n = normalize_raw(left48)
+                right_n = normalize_raw(right48)
+                if self.tactile_weight_norm:
+                    # 体重代理归一（2026-11-02，AR2R_wn）：归一化域每帧
+                    # 96 cell 均值的会话中位数作为体重代理 w，T_raw/T_phys
+                    # 除以 w——跨受试者尺度对齐（LSO 泛化杠杆），保留压力
+                    # 分布与左右负载比。raw 数组留在 dict 不动（derive_strike
+                    # 等下游按物理域消费）。
+                    per_frame = np.concatenate([left_n, right_n], axis=1)
+                    means = per_frame.mean(axis=1)
+                    finite = np.isfinite(means) & (means > 0)
+                    w = float(np.median(means[finite])) if finite.any() else 1.0
+                    if not np.isfinite(w) or w <= 0:
+                        w = 1.0
+                    left_n = left_n / w
+                    right_n = right_n / w
                 pressure = {
-                    "T_raw": t_raw_source,
-                    "T_phys": physical_tokens(
-                        normalize_raw(left48), normalize_raw(right48),
-                        t_phys_v2=self.t_phys_v2,
-                    ),
+                    "T_raw": (np.concatenate([left_n, right_n], axis=1)
+                              if self.tactile_weight_norm else t_raw_source),
+                    "T_phys": physical_tokens(left_n, right_n,
+                                              t_phys_v2=self.t_phys_v2),
                     "left48": left48,
                     "right48": right48,
                 }
@@ -425,7 +455,8 @@ class AnySoleDataset(Dataset):
             # contact metric/loss.  Ground-truth contact labels remain
             # precomputed by the unchanged directly exported BVH pipeline.
             floor_y = estimate_floor_y(kp)
-            t_raw_norm = normalize_raw(pressure["T_raw"])
+            t_raw_norm = (pressure["T_raw"] if self.tactile_weight_norm
+                          else normalize_raw(pressure["T_raw"]))
             # E6.6a is an explicit historical auxiliary input.  Its IMU comes
             # from the directly exported BVH-23/ToeBase chain, exactly as in
             # Step2Motion; it must never be synthesized from the SMPL target.
@@ -488,6 +519,29 @@ class AnySoleDataset(Dataset):
                 psi = None
                 traj_f2 = None
 
+            # V7 AR2（2026-11-01，V7_AR相对运动与航向状态方案 §3）：
+            # 相对运动目标——根 6D = 前向轴去航向倾斜（GT 分解同款约定）、
+            # dyaw = 逐帧航向增量（rad/帧，帧 0 无前驱 = 0）、v_head =
+            # 航向系 3D 根速度。psi（session 全帧 unwrap）供视觉 yaw 监督
+            # 与 psi_base 锚。pose_gt 整体替换为 [tilt 6 + body 138]。
+            if self.v7_ar2:
+                root_rot = rot6d_to_rotmat_np(
+                    motion["pose_6d"].reshape(n_frames, N_JOINTS, 6)[:, 0]
+                )
+                psi = heading_from_root_np(root_rot)  # (T,), unwrapped
+                tilt = deyaw_rotmat_np(root_rot)
+                pose_ar2 = motion["pose_6d"].copy()
+                pose_ar2[:, :6] = rotmat_to_6d_np(tilt)
+                dyaw = np.zeros(n_frames, dtype=np.float64)
+                if n_frames > 1:
+                    dyaw[1:] = psi[1:] - psi[:-1]
+                v_head = np.einsum(
+                    "tji,tj->ti", yaw_rotmat_np(psi), vel
+                ).astype(np.float32)
+            else:
+                dyaw = None
+                v_head = None
+
             smpl_support_valid = np.asarray(motion["query_valid"], dtype=bool)
             window_invalid_mask = fake_mask.astype(bool)
             if self.smpl_support_policy == "exclude":
@@ -504,9 +558,13 @@ class AnySoleDataset(Dataset):
                 "T_raw": t_raw_norm,
                 "T_phys": pressure["T_phys"],
                 "T_s2m": t_s2m,
-                "pose_gt": pose_f2 if self.f2_repr else motion["pose_6d"],
+                "pose_gt": (pose_ar2 if self.v7_ar2
+                            else pose_f2 if self.f2_repr
+                            else motion["pose_6d"]),
                 "pose_gt_pos": pose_pos,
                 "traj_gt_f2": traj_f2,
+                "dyaw_gt": dyaw.astype(np.float32) if dyaw is not None else None,
+                "v_head_gt": v_head,
                 "psi": psi,
                 "root_rot_init": root_rot_init,
                 "trans_global": trans.astype(np.float32),
@@ -560,6 +618,18 @@ class AnySoleDataset(Dataset):
                     continue
                 self.valid_windows.append((file_index, left, right))
             self.sessions.append(session)
+
+        if self.obs_context > self.window_length:
+            if self.stride != self.window_length:
+                raise ValueError("extended observation context requires stride=window_length")
+            valid_starts = {(fi, left) for fi, left, _ in self.valid_windows}
+            self.observation_starts = []
+            for fi, left, _ in self.valid_windows:
+                start = left
+                while (left - start + self.window_length < self.obs_context
+                       and (fi, start - self.window_length) in valid_starts):
+                    start -= self.window_length
+                self.observation_starts.append(start)
 
         print("%s sessions=%d windows=%d contact_method=%s tactile_input=%s no_imu=%s" % (
             self.mode, len(self.sessions), len(self.valid_windows), self.contact_method,
@@ -656,14 +726,56 @@ class AnySoleDataset(Dataset):
             "session_id": session["session_id"],
             "frame_start": torch.tensor(left, dtype=torch.long),
         }
+        if self.obs_context > self.window_length:
+            start = self.observation_starts[idx]
+            visual = "V_feat_occ" if (aug is not None and aug.v_src == SRC_OCC) else "V_feat"
+            item["obs_history"] = {
+                key: torch.from_numpy(np.ascontiguousarray(session[source][start:left])).float()
+                for key, source in (("V_feat", visual), ("T_raw", "T_raw"),
+                                    ("T_phys", "T_phys"))
+            }
         if self.v7_ar:
             # 帧级 AR 反馈（2026-11-01）：prev_state = 上一帧 [姿态 144 +
-            # 根速度 3]，帧 0 = 全零（与推理首帧/窗口携带起点一致）。
+            # 根速度 3]。帧 0 在窗口与前一帧连续时携带 session 前一帧 GT
+            # （2026-11-01 修正：训练首帧全零 ≠ 推理携带上一窗末帧——最
+            # 需要消除接缝的位置恰是训练未覆盖的反馈情形）；会话首帧/
+            # 无效前一帧全零（与推理 reset 同口径）。
             _ps = item["pose_gt"][:-1]
             _vs = item["vel_gt"][:-1]
+            prev_ok = bool(left > 0) and not bool(
+                session["window_invalid_mask"][left - 1])
+            first_pose = (torch.from_numpy(
+                session["pose_gt"][left - 1]).float()
+                if prev_ok else torch.zeros(_ps.shape[1]))
+            first_vel = (torch.from_numpy(
+                session["vel_gt"][left - 1]).float()
+                if prev_ok else torch.zeros(_vs.shape[1]))
             item["prev_state"] = torch.cat([
-                torch.cat([torch.zeros(1, _ps.shape[1]), _ps], dim=0),
-                torch.cat([torch.zeros(1, _vs.shape[1]), _vs], dim=0)], dim=-1)
+                torch.cat([first_pose[None], _ps], dim=0),
+                torch.cat([first_vel[None], _vs], dim=0)], dim=-1)
+        if self.v7_ar2:
+            # AR2 相对运动反馈（2026-11-01，方案 §5.1）：prev_state 行 t =
+            # 帧 t−1 的 [Δyaw 1 + tilt/body 144 + v_head 3]；帧 0 在窗口与
+            # 前一帧连续时携带 session 前一帧 GT（与 v7_ar 2026-11-01 修正
+            # 同口径），会话首帧/无效前一帧全零（与推理 reset 同口径）。
+            item["dyaw_gt"] = crop("dyaw_gt")
+            item["v_head_gt"] = crop("v_head_gt")
+            item["psi_gt"] = crop("psi")
+            item["psi_base"] = torch.tensor(
+                session["psi"][max(left - 1, 0)], dtype=torch.float32)
+            _st = torch.cat(
+                [item["dyaw_gt"][:, None], item["pose_gt"],
+                 item["v_head_gt"]], dim=-1)          # (tw,148)
+            prev_ok = bool(left > 0) and not bool(
+                session["window_invalid_mask"][left - 1])
+            first = (
+                torch.cat([
+                    torch.from_numpy(np.asarray(session["dyaw_gt"][left - 1])).float().view(1, 1),
+                    torch.from_numpy(session["pose_gt"][left - 1]).float().view(1, 144),
+                    torch.from_numpy(session["v_head_gt"][left - 1]).float().view(1, 3),
+                ], dim=-1)
+                if prev_ok else torch.zeros(1, _st.shape[1]))
+            item["prev_state"] = torch.cat([first, _st[:-1]], dim=0)
         if self.v7_ctx:
             # ctx = 窗首帧根状态（pose 归一化空间 / v_hat 口径）；会话首窗
             # （left==0）全零 + flag 0，与评估首窗/跳窗复位同分布。
@@ -702,8 +814,16 @@ class AnySoleDataset(Dataset):
                     self.window_length, dtype=torch.bool)
         # 阶段 3 触觉泛化增强（训练侧；eval/val 逐位不变）。
         if self.tactile_aug is not None:
-            item["T_raw"], item["T_phys"] = self._augment_tactile(
-                item["T_raw"], item["T_phys"])
+            history = item.get("obs_history")
+            if history is None:
+                item["T_raw"], item["T_phys"] = self._augment_tactile(
+                    item["T_raw"], item["T_phys"])
+            else:
+                raw, phys = self._augment_tactile(
+                    torch.cat([history["T_raw"], item["T_raw"]]),
+                    torch.cat([history["T_phys"], item["T_phys"]]))
+                history["T_raw"], item["T_raw"] = raw[:-self.window_length], raw[-self.window_length:]
+                history["T_phys"], item["T_phys"] = phys[:-self.window_length], phys[-self.window_length:]
         if aug is not None:
             item.update(aug.batch_fields())
         if self.v_input == "hmr_gvhmr":

@@ -505,6 +505,12 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         # 训练时结构 provenance，必须从 ckpt config 回放（yaml 缺省 False）。
         build_cfg["t_phys_v2"] = bool(saved_config.get("t_phys_v2", False))
         build_cfg["d8_heads"] = bool(saved_config.get("d8_heads", False))
+        # 修改 04 改动 B（2026-11-03）：低维反馈是训练时结构 provenance
+        # （ar2_fb 输入维 = 10+k vs 148），必须从 ckpt config 回放。
+        if saved_config.get("v7_ar2_lowdim"):
+            build_cfg["v7_ar2_lowdim"] = True
+        if saved_config.get("v7_ar2_fb_dim") is not None:
+            build_cfg["v7_ar2_fb_dim"] = int(saved_config["v7_ar2_fb_dim"])
         part_joints = saved_config.get("part_joints")
         model = entry.build(
             build_cfg,
@@ -932,8 +938,9 @@ def _evaluate_one(
                 ar2_reg = (bool(getattr(model, "ar2_regression", False))
                             or bool(checkpoint.get("config", {}).get(
                                 "ar2_regression", False)))
-                # 与评分同口径的增益下限（run_protocol 同键同默认）。
+                # 与评分同口径的增益下限/先验高度（run_protocol 同键同默认）。
                 ar2_gain_floor = float(config.get("ar2_vis_gain_floor", 0.0))
+                ar2_init_height = float(config.get("ar2_init_height", 0.0))
                 for session_id, idxs in _session_window_groups(dataset).items():
                     v_kw = ({"V_hmr": dataset[idxs[0]].get("V_hmr")}
                             if v_hmr_mode else {})
@@ -942,7 +949,8 @@ def _evaluate_one(
                         device, tw, v_kw, regression=ar2_reg,
                         gain_floor=ar2_gain_floor, null_t=null_t,
                         dyaw_base=str(checkpoint.get("config", {}).get(
-                            "ar2_dyaw_base", "zero")))
+                            "ar2_dyaw_base", "zero")),
+                        init_height=ar2_init_height)
                     for chunk in chunks:
                         start = chunk["start"]
                         exports.setdefault(session_id, []).append(

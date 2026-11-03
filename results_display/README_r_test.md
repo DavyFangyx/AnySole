@@ -23,7 +23,7 @@
 conda activate touch_gait
 # 单独生成：--models 顶层选中（anysole + 各基线名）、--model-name 选主模型
 python results_display/script/r_test1_visualize.py \
-  --model-name V7_Cv5 \
+  --model-name V7_Bv1 \
   --models anysole \
   --contact-method f6_soft_time_accel_state_smpl24_v1 \
   --split test --gen gif

@@ -50,6 +50,7 @@ from anysole.types import (
     T_RAW_DIM,
     T_S2M_DIM,
     T_S2M_NOIMU_DIM,
+    TW,
     SMPL_ROOTS,
     V_FEAT_DIM,
     V_HMR_DIM,
@@ -147,6 +148,14 @@ _MODE_TO_CONFIG = dict(zip(CONFIG_MODE_NAMES, (CONFIG_VT, CONFIG_V, CONFIG_T)))
 _CONFIG_TO_MODE = {value: key for key, value in _MODE_TO_CONFIG.items()}
 
 
+def _require_supported_inference(saved_config: dict) -> None:
+    if saved_config.get("v7_ar2") or int(saved_config.get("obs_context", 0)) > int(saved_config.get("tw", TW)):
+        raise NotImplementedError(
+            "anysole.infer does not support AR2/AR2M stateful inference or extended "
+            "observation context. Use python -m anysole.eval with motion exports; "
+            "window-only inference would produce incompatible motion.")
+
+
 def _parse_modes(value: Optional[str]) -> List[str]:
     if value is None:
         return []
@@ -223,6 +232,7 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     saved_config = checkpoint.get("config", {})
     if not isinstance(saved_config, dict):
         raise RuntimeError("checkpoint config is missing or is not a mapping")
+    _require_supported_inference(saved_config)
     checkpoint_modal = str(saved_config.get("modal", MODEL_ANYSOLEV1))
     if args.modal is not None and args.modal != checkpoint_modal:
         raise ValueError("legacy architecture override %s does not match checkpoint architecture %s" % (args.modal, checkpoint_modal))

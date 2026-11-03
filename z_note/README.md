@@ -1,32 +1,37 @@
-# z_note — 项目过程文档索引
+# z_note 目录索引
 
-结构总则：顶层只放职责目录；时间性产物（某轮审计/某次排查的证据包）一律进
-`归档/`；数据与代码不混入文档目录（活数据随 fixpipe，工具脚本在 `probes/`）；
-决策类文档唯一登记处 = `Baselines/决策/`。
+## 现在从哪里开始读
+
+| 想看什么 | 读这个 |
+|---|---|
+| **项目一句话 + 贡献** | [`项目概述.md`](项目概述.md) |
+| **实验计划（E1–E9）** | [`实验计划.md`](实验计划.md) |
+| **当前状态、可信数字、作废数字** | [`现状.md`](现状.md) |
+| **最近一轮的测量与裁定** | [`修改/00_执行顺序.md`](修改/00_执行顺序.md) |
+| **checkpoint 选点规则** | [`multimodal_fusion/ckpt规则.md`](multimodal_fusion/ckpt规则.md) |
+| **评估口径说明书** | [`评估/评估配置说明书.md`](评估/评估配置说明书.md) |
 
 ## 目录职责
 
 | 目录 | 职责 |
 |---|---|
-| `项目概述.md` | 论文视角的项目概述（数据集/机制主张/部署场景） |
-| `评估/` | 评估配置说明书（唯一现行评估说明书）、三基线模型性能与文献对照 |
-| `multimodal_fusion/` | 现行融合方案与判读（V3_3–V6_Av1、失败窗/时间窗、T 信息量探针） |
-| `data_pressure_fixpipe/` | 触觉压力数据管道：GT足底×触觉冲突审计（d_test8 口径）、压力传感器协议 |
-| （offset 修正表已提升） | → `AnysoleWorkspace/protocol/calibration/`（表+血缘+验证器，见 offset_README.md） |
+| `项目概述.md` / `实验计划.md` / `现状.md` | 论文层：动机、实验设计、当前状态 |
+| `multimodal_fusion/V7_方案/` | **现行**模型方案（V7 族：C 方案、门控、AR 相对运动、视觉热启动、技术路径全景） |
+| `multimodal_fusion/ckpt规则.md` | checkpoint 保存、候选复评、正式选点 |
+| `multimodal_fusion/实验记录/` | 专项实验记录：时间窗扫描、λ 扫描、动作组 5fold |
+| `修改/` | 2026-11-03 五步测量与修复计划（01 标尺 / 02 接缝 / 03 探针 / 04 AR 对齐 / 05 受控重跑）+ 合并报告 |
+| `评估/` | 评估配置说明书、三外部基线性能、TTA 实验报告 |
+| `data_offset_fixpipe/` | 视觉↔动捕逐 session 时钟修正表与工具 |
+| `data_pressure_fixpipe/` | 触觉压力管道：GT 足底×触觉冲突审计、传感器协议、降噪版本 |
 | `data_smpl_fixpipe/` | SMPL 足部地面审计、rgb_smpl 评估 |
-| `probes/` | 诊断探针/冒烟脚本（不入 git，机器本地；运行方式见其 README） |
-| `外界配置说明/` | 外部数据来源与采集工具（Gait-Data-Collector / MocapVideoAligner / lizhe 数据） |
-| `HMR2.0/` | HMR2.0 多视角一致性实验线文档与论文（阶段 4 搁置） |
-| `归档/` | 已完成工作与被取代版本（只进不出，入档登记见其 README） |
+| `data_spilts_fixpipe/` | 5 组受试者级 train/val/test 备选划分 |
+| `probes/` | 诊断探针脚本与报告（不入 git，机器本地） |
+| `外界配置说明/` | 外部数据来源与采集工具说明 |
+| `HMR2.0/` | E3 多视角实验的代码与文档 |
+| `_历史_已废弃/` | 已作废的方案、口径、探针报告（只读，不引用其数字） |
 
-## 活依赖（代码运行时读取，禁止移动/删除）
+## 引用纪律
 
-| 路径 | 读取方 |
-|---|---|
-| `AnysoleWorkspace/protocol/calibration/offset_correction.csv` | `AnysoleWorkspace/tool/build_shared.py` `corrected_lag()`（facts 构建时固化） |
-
-## 归档规则
-
-- 某轮审计/排查结束 → 证据目录整体入 `归档/`（README 表头登记日期）；
-- 被新版本取代的方案/文档 → 入 `归档/`（如 multimodal_fusion_backup）；
-- 数据类证据（npz/csv/jpg）可整体删除，md 留档。
+- **数字只引 [`现状.md`](现状.md) 与 `results/cells/*/metrics/`**。`_历史_已废弃/` 下的任何数字都不进论文、不进对照表。
+- 旧口径（`_offset前` 系列、V3–V6 方案、codex 对话）保留作机制参考，其绝对读数已作废。
+- 新增文档先问：它属于「论文层」「方案层」「测量层」还是「数据管道层」，放进对应目录，不要堆在顶层。

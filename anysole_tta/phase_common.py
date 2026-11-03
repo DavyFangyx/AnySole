@@ -33,6 +33,14 @@ RIGHT_ANKLE_FOOT = (ANKLE_FOOT_JOINTS[1], ANKLE_FOOT_JOINTS[3])  # 8, 11
 
 CONTACT_METHOD = "f6_soft_time_accel_state_smpl24_v1"
 
+# 位置误差指标（2026-11-02 用户裁定：E6/E7 按指标建子文件夹，同一套
+# 表/图模式逐指标生成）：
+# - ankle_foot_mpjpe = 现行口径：骨盆对齐踝足 MPJPE（逐帧 mm/帧/侧）
+# - pa_mpjpe = 全关节逐帧相似变换对齐 MPJPE（项目 pa_mpjpe 口径，
+#   与 E2/E3/E5 表一致；含尺度，逐帧 mm，无左右分脚）
+METRICS = ("ankle_foot_mpjpe", "pa_mpjpe")
+METRIC_SERIES = {"ankle_foot_mpjpe": ("left", "right"), "pa_mpjpe": ("full",)}
+
 
 def load_contact(sid: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """→ (contact (T,2) float 0/1, frame_id (T,), valid (T,))。"""
@@ -115,6 +123,40 @@ def foot_mpjpe_per_frame(pred: np.ndarray, gt: np.ndarray
     left = err[:, LEFT_ANKLE_FOOT].mean(axis=1) * 1000.0
     right = err[:, RIGHT_ANKLE_FOOT].mean(axis=1) * 1000.0
     return left, right
+
+
+def metric_error(pred: np.ndarray, gt: np.ndarray, metric: str,
+                 series: str) -> np.ndarray:
+    """(T,24,3)×2 → 该 series 逐帧误差 (T,) mm。
+
+    ankle_foot_mpjpe：骨盆对齐后踝足（series = left/right）；
+    pa_mpjpe：全关节逐帧相似对齐（series = full，项目 pa_mpjpe 口径，
+    含尺度——与 E2/E3/E5 表的 PA-MPJPE 同一实现）。
+    """
+    if metric == "ankle_foot_mpjpe":
+        left, right = foot_mpjpe_per_frame(pred, gt)
+        return {"left": left, "right": right}[series]
+    return pa_mpjpe_per_frame_safe(pred, gt)
+
+
+def pa_mpjpe_per_frame_safe(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+    """逐帧全身相似对齐 PA-MPJPE (T,) mm；NaN/退化帧（全零或常量点集）→ NaN。
+
+    基线产物存在无效帧，项目 pa_mpjpe 对退化预测点集抛 ValueError
+    （相似对齐方差 ≤1e-12），此处按帧剔除后计算，无效帧由调用方
+    valid_mask 处理。
+    """
+    from anysole.utils.metrics import pa_mpjpe
+    out = np.full(len(pred), np.nan)
+    ok = np.isfinite(pred).all(axis=(1, 2))
+    if ok.any():
+        p, q = pred[ok], gt[ok]
+        var = ((p - p.mean(axis=1, keepdims=True)) ** 2).sum(axis=(1, 2))
+        good = var > 1e-12
+        if good.any():
+            idx = np.flatnonzero(ok)[good]
+            out[idx] = pa_mpjpe(p[good], q[good])
+    return out
 
 
 def action_of(sid: str) -> str:

@@ -137,7 +137,9 @@ class ArchiveTests(unittest.TestCase):
             out = self.root / ("enabled" if enabled else "legacy")
             model = torch.nn.Linear(1, 1)
             optimizer = torch.optim.Adam(model.parameters())
-            cfg = {"wandb_eval_interval": 1}
+            # ckpt_interval=1 恢复每 epoch 保存语义（原测试写于无间隔
+            # 特性时代；默认 5 会跳过 0-2 的保存与末尾 epoch=3 的补发）。
+            cfg = {"wandb_eval_interval": 1, "epochs": 3, "ckpt_interval": 1}
             archive = CandidateArchive(out / "multi_metric", "U") if enabled else None
             namespace = {"model": model, "optimizer": optimizer, "config": cfg, "out_dir": out,
                          "torch": torch, "os": os, "json": json, "val_loader": [1], "diffusion": None,

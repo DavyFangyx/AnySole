@@ -66,6 +66,19 @@ def compose_rot6d(rot: torch.Tensor, d6: torch.Tensor) -> torch.Tensor:
     return rotmat_to_6d(torch.matmul(rot, r))
 
 
+def rot_root6d(rot: torch.Tensor, pose_6d: torch.Tensor) -> torch.Tensor:
+    """rot (...,3,3) 左乘 pose_6d (...,144) 的根关节 6D（前 6 维），
+    非根关节原样通过。
+
+    v4 修正（2026-11-01）：SMPL 非根关节为父相对局部旋转，全关节左乘
+    锚旋转会把绝对根朝向引入局部目标（评审实证：仅转全局根朝向 90°、
+    局部动作不变，非根残差目标平均改变 90°）。锚变换只作用于根朝向与
+    根速度；世界姿态由 FK 沿链传播锚——目标空间真正不含绝对航向。
+    """
+    root = compose_rot6d(rot, pose_6d[..., :6])
+    return torch.cat([root, pose_6d[..., 6:]], dim=-1)
+
+
 def fk_local_np(local_rotmats: np.ndarray, offsets: np.ndarray, parents: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     n_frames, n_joints, _, _ = local_rotmats.shape
     global_rot = np.zeros_like(local_rotmats)
@@ -324,6 +337,101 @@ def f2_to_world(pose_f2: torch.Tensor, traj_f2: torch.Tensor,
          trans_anchor[:, 2:3] + pos_rel[:, :, 1]],
         dim=-1,
     )
+    world_pose = pose.clone()
+    world_pose[:, :, 0] = rotmat_to_6d(r_root_world)
+    return world_pose.reshape(batch, time, N_JOINTS * 6), world_trans
+
+
+# ---------------------------------------------------------------------------
+# V7 AR2: relative-motion + heading-state representation
+# (z_note/multimodal_fusion/V7_方案/V7_AR相对运动与航向状态方案.md).
+#
+# pose_ar2 (..., POSE_DIM): root 6D = TILT (yaw-stripped root rotation),
+#   non-root joints = parent-local 6D (unchanged from SMPL native).
+# dyaw (..., T): per-frame heading change (rad/frame); frame 0 is the
+#   segment-true predecessor increment (session start: 0).
+# v_head (..., T, 3): root velocity in the heading frame (m/s).
+# psi_base: heading at the frame before the window (rad, unwrapped session
+#   heading); trans_anchor: world root position at that frame.
+# ---------------------------------------------------------------------------
+
+
+def heading_from_root(root_rotmats: torch.Tensor) -> torch.Tensor:
+    """Torch twin of heading_from_root_np, without unwrap (per-frame use)."""
+    forward = torch.einsum("...ij,j->...i", root_rotmats,
+                           torch.as_tensor(FORWARD_AXIS, dtype=root_rotmats.dtype,
+                                           device=root_rotmats.device))
+    return torch.atan2(forward[..., 0], forward[..., 2])
+
+
+def deyaw_rotmat(rotmats: torch.Tensor) -> torch.Tensor:
+    """Strip the yaw of each rotation in place: R_tilt = Y(psi(R))^T @ R.
+
+    Enforces the AR2 contract that the tilt head cannot express heading:
+    the de-yawed matrix's forward has exactly zero horizontal x-component
+    (heading = 0 by the paired extraction).  Degenerate (near-vertical)
+    forward directions are reported, never silently filled.
+    """
+    psi = heading_from_root(rotmats)
+    f_horiz = torch.sqrt(rotmats[..., 0, 2] ** 2 + rotmats[..., 2, 2] ** 2)
+    if bool((f_horiz < 1e-6).any()):
+        raise ValueError("deyaw_rotmat: degenerate root forward (near-vertical)")
+    return torch.matmul(yaw_rotmat(-psi), rotmats)
+
+
+def deyaw_rotmat_np(rotmats: np.ndarray) -> np.ndarray:
+    """NumPy twin of deyaw_rotmat."""
+    rotmats = np.asarray(rotmats, dtype=np.float64)
+    forward = np.einsum("...ij,j->...i", rotmats, FORWARD_AXIS)
+    f_horiz = np.sqrt(forward[..., 0] ** 2 + forward[..., 2] ** 2)
+    if np.any(f_horiz < 1e-6):
+        raise ValueError("deyaw_rotmat_np: degenerate root forward (near-vertical)")
+    psi = np.arctan2(forward[..., 0], forward[..., 2])
+    return np.einsum("...ij,...jk->...ik", yaw_rotmat_np(-psi), rotmats)
+
+
+def ar2_to_world_np(pose_ar2, dyaw, v_head, psi_base, trans_anchor):
+    """Relative-motion representation -> world native SMPL-24 pose/translation.
+
+    Integrates dyaw (rad/frame) and the 3-D heading-frame velocity from the
+    window anchors; root world = Y(psi) @ tilt.  Non-root joints are
+    untouched (yaw-invariant parent-local 6D).  Free integration: no
+    per-window GT re-anchoring downstream of trans_anchor.
+    """
+    pose_ar2 = np.asarray(pose_ar2, dtype=np.float64).reshape(-1, N_JOINTS, 6)
+    dyaw = np.asarray(dyaw, dtype=np.float64).reshape(-1)
+    v_head = np.asarray(v_head, dtype=np.float64).reshape(-1, 3)
+    psi_base = float(psi_base)
+    trans_anchor = np.asarray(trans_anchor, dtype=np.float64).reshape(3)
+    psi_rel = np.cumsum(dyaw, axis=0)
+    psi = psi_base + psi_rel
+    r_yaw = yaw_rotmat_np(psi)
+    r_root_world = np.einsum("tij,tjk->tik", r_yaw,
+                             rot6d_to_rotmat_np(pose_ar2[:, 0]))
+    v_world = np.einsum("tij,tj->ti", r_yaw, v_head)
+    world_trans = trans_anchor[None, :] + np.cumsum(v_world, axis=0) / float(FPS)
+    world_pose = pose_ar2.copy()
+    world_pose[:, 0] = rotmat_to_6d_np(r_root_world)
+    return world_pose.reshape(-1, N_JOINTS * 6).astype(np.float32), world_trans.astype(np.float32)
+
+
+def ar2_to_world(pose_ar2: torch.Tensor, dyaw: torch.Tensor,
+                 v_head: torch.Tensor, psi_base: torch.Tensor,
+                 trans_anchor: torch.Tensor):
+    """Torch twin of ar2_to_world_np; batch-aware.
+
+    pose_ar2 (B, T, POSE_DIM), dyaw (B, T), v_head (B, T, 3),
+    psi_base (B,), trans_anchor (B, 3).
+    Returns (world_pose (B, T, POSE_DIM), world_trans (B, T, 3)).
+    """
+    batch, time = pose_ar2.shape[0], pose_ar2.shape[1]
+    pose = pose_ar2.reshape(batch, time, N_JOINTS, 6)
+    psi = psi_base.view(batch, 1) + torch.cumsum(dyaw, dim=1)
+    r_yaw = yaw_rotmat(psi)  # (B, T, 3, 3)
+    r_root_world = torch.matmul(r_yaw, rot6d_to_rotmat(pose[:, :, 0]))
+    v_world = torch.einsum("btij,btj->bti", r_yaw, v_head)
+    world_trans = (trans_anchor.view(batch, 1, 3)
+                   + torch.cumsum(v_world, dim=1) / float(FPS))
     world_pose = pose.clone()
     world_pose[:, :, 0] = rotmat_to_6d(r_root_world)
     return world_pose.reshape(batch, time, N_JOINTS * 6), world_trans

@@ -56,7 +56,7 @@ class LinearTemporalEncoder(nn.Module):
 
     def forward(self, x):
         h = self.norm(self.proj(x))
-        h = h + self.embeddings.time_pe.to(dtype=h.dtype)
+        h = h + self.embeddings.time_pe[-h.shape[1]:].to(dtype=h.dtype)
         modality = self.embeddings.modality(
             torch.tensor(self.modality_id, device=x.device, dtype=torch.long)
         )
@@ -92,7 +92,7 @@ class VEncHMR(nn.Module):
         misc = x[..., -V_HMR_MISC_DIM:]
         h = self.rot_proj(rot) + self.kp_proj(kp) + self.img_proj(img) + self.misc_proj(misc)
         h = self.norm(h)
-        h = h + self.embeddings.time_pe.to(dtype=h.dtype)
+        h = h + self.embeddings.time_pe[-h.shape[1]:].to(dtype=h.dtype)
         modality = self.embeddings.modality(
             torch.tensor(0, device=x.device, dtype=torch.long)
         )
@@ -167,12 +167,13 @@ class ModalEncoders(nn.Module):
         t_tok = torch.where(drop_t, null_t, t_tok)
 
         def _apply_mask(mask, tok, null):
-            k = tok.shape[1] // self.tw
-            if tok.shape[1] != k * self.tw:
+            frames = mask.shape[1]
+            k = tok.shape[1] // frames
+            if tok.shape[1] != k * frames:
                 raise ValueError("token stream %d is not k*tw=%d; mask must be full-width"
                                  % (tok.shape[1], self.tw))
             m = mask.to(device=tok.device, dtype=torch.bool)
-            m = m.view(tok.shape[0], self.tw, 1).repeat_interleave(k, dim=1)
+            m = m.view(tok.shape[0], frames, 1).repeat_interleave(k, dim=1)
             return torch.where(m, null, tok)
 
         if mask_v is not None:

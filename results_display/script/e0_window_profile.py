@@ -27,7 +27,9 @@
 
 用法（touch_gait env）：
   python results_display/script/e0_window_profile.py \
-      --cells V3_Bv1,V7_Cv5_s1,V7_Cv5AR2M_s1,V7_Cv5AR2R_s1 --mode T2M
+      --cells V3_Bv1,V7_Cv5_s1,V7_Cv5AR2M_s1,V7_Cv5AR2R_s1 \
+      --mode T2M,V2M,VT2M
+（--mode 支持逗号分隔多模式同表输出；缺省 T2M 复现冻结五行。）
 """
 from __future__ import annotations
 
@@ -229,11 +231,11 @@ def write_table(rows: list) -> Path:
     return path
 
 
-def write_json(rows: list, cells: list, mode: str, files_by_cell: dict) -> Path:
+def write_json(rows: list, cells: list, modes: list, files_by_cell: dict) -> Path:
     payload = {
         "schema_version": "e0_window_profile_v1",
         "split": "test",
-        "mode": mode,
+        "modes": modes,
         "contact_version": CONTACT_VERSION,
         "contact_method": CONTACT_METHOD,
         "fps": float(FPS),
@@ -250,10 +252,7 @@ def write_json(rows: list, cells: list, mode: str, files_by_cell: dict) -> Path:
             {k: (v.tolist() if isinstance(v, np.ndarray) else v)
              for k, v in r.items()}
             for r in rows],
-        "sources": {cell: {"files": [
-            {"path": str(f), "sha256": _sha256(f)}
-            for f in files_by_cell.get(cell, [])]}
-            for cell in cells},
+        "sources": files_by_cell,
         "gt_sources": [{"path": str(SPLIT_CSV), "sha256": _sha256(SPLIT_CSV)}],
     }
     path = DETAIL / "e0_window_profile.json"
@@ -263,12 +262,12 @@ def write_json(rows: list, cells: list, mode: str, files_by_cell: dict) -> Path:
     return path
 
 
-def write_detail_md(rows: list, mode: str) -> Path:
+def write_detail_md(rows: list, modes: list) -> Path:
     lines = ["# E0 窗内帧号剖面说明（修改 01）", ""]
     lines.append("口径：tw=20，窗内帧号 = frame % 20；jerk 逐帧分桶、桶内帧数加权，"
                  "全帧/非接缝/接缝 = 20 桶等权均值；PA 逐有效帧（valid_mask）"
                  "pa_mpjpe(pred, gt[frame_indices]) 同桶均值。模式 = "
-                 + mode + "；GT 行必出（jerk 均匀参照，PA 恒 0）。")
+                 + ",".join(modes) + "；GT 行每模式必出（jerk 均匀参照，PA 恒 0）。")
     lines.append("")
     lines.append("jerk 冻结口径（与主会话 2026-11-03 实测逐位一致）：j[t] = "
                  "FPS³·(J[t] − 2·J[t−1] + J[t−2])（t ≥ 2）。注意：实测脚本的 "
@@ -300,10 +299,10 @@ def write_receipt(cells: list, artifacts: list[Path],
                   files_by_cell: dict) -> Path:
     sources = [{"cell": "splits.csv", "path": str(SPLIT_CSV),
                 "sha256": _sha256(SPLIT_CSV)}]
-    for cell in cells:
-        for f in files_by_cell.get(cell, []):
-            sources.append({"cell": cell, "path": str(f),
-                            "sha256": _sha256(f)})
+    for key in sorted(files_by_cell):
+        for f in files_by_cell[key]:
+            sources.append({"cell": key, "path": f["path"],
+                            "sha256": f["sha256"]})
     payload = {
         "split": "test",
         "contact_version": CONTACT_VERSION,
@@ -323,9 +322,15 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cells", default=",".join(DEFAULT_CELLS),
                     help="逗号分隔 cell 名（缺省 = 实测四模型）")
-    ap.add_argument("--mode", choices=("T2M", "V2M", "VT2M"), default="T2M")
+    ap.add_argument("--mode", default="T2M",
+                    help="逗号分隔模式 T2M|V2M|VT2M（缺省 = T2M；多模式"
+                         "同表输出）")
     args = ap.parse_args()
     cells = [c.strip() for c in args.cells.split(",") if c.strip()]
+    modes = [m.strip() for m in args.mode.split(",") if m.strip()]
+    for m in modes:
+        if m not in ("T2M", "V2M", "VT2M"):
+            raise SystemExit("未知模式 %s；可选 T2M,V2M,VT2M" % m)
 
     print("[E0-window] build GT ...")
     gt = build_gt()
@@ -333,33 +338,36 @@ def main() -> int:
     print("[E0-window] GT sessions=%d" % len(gt))
     rows = []
     files_by_cell = {}
-    # GT 行（均匀参照；PA 恒 0）
-    rows.append(profile_row("GT", [(gt[sid], None,
-                                    np.arange(len(gt[sid])), gt[sid])
-                                   for sid in sids]))
-    rows[-1]["mode"] = args.mode
-    for cell in cells:
-        sources, files = load_cell(cell, args.mode, gt)
-        if not sources:
-            print("[skip] %s: 无 %s npz" % (cell, args.mode))
-            continue
-        files_by_cell[cell] = files
-        rows.append(profile_row(cell, sources))
-        rows[-1]["mode"] = args.mode
-        r = rows[-1]
-        print("[E0-window] %-16s jerk 全帧 %.1f 非接缝 %.1f 接缝 %.1f "
-              "占总量 %.1f%% | PA 全帧 %.1f 非接缝 %.1f"
-              % (cell, r["jerk"]["all"], r["jerk"]["non_seam"],
-                 r["jerk"]["seam"], r["jerk"]["seam_share_pct"],
-                 r["pa"]["all"], r["pa"]["non_seam"]))
-        print("            第三差分对照: 全帧 %.1f 非接缝 %.1f 接缝 %.1f "
-              "占总量 %.1f%%" % (r["jerk_third_diff"]["all"],
-                                r["jerk_third_diff"]["non_seam"],
-                                r["jerk_third_diff"]["seam"],
-                                r["jerk_third_diff"]["seam_share_pct"]))
-    artifacts = [write_table(rows), write_json(rows, cells, args.mode,
+    for mode in modes:
+        # GT 行（均匀参照；PA 恒 0）
+        rows.append(profile_row("GT", [(gt[sid], None,
+                                        np.arange(len(gt[sid])), gt[sid])
+                                       for sid in sids]))
+        rows[-1]["mode"] = mode
+        for cell in cells:
+            sources, files = load_cell(cell, mode, gt)
+            if not sources:
+                print("[skip] %s: 无 %s npz" % (cell, mode))
+                continue
+            key = "%s/%s" % (cell, mode)
+            files_by_cell[key] = [{"path": str(f), "sha256": _sha256(f)}
+                                  for f in files]
+            rows.append(profile_row(cell, sources))
+            rows[-1]["mode"] = mode
+            r = rows[-1]
+            print("[E0-window] %-16s %s jerk 全帧 %.1f 非接缝 %.1f 接缝 %.1f "
+                  "占总量 %.1f%% | PA 全帧 %.1f 非接缝 %.1f"
+                  % (cell, mode, r["jerk"]["all"], r["jerk"]["non_seam"],
+                     r["jerk"]["seam"], r["jerk"]["seam_share_pct"],
+                     r["pa"]["all"], r["pa"]["non_seam"]))
+            print("            第三差分对照: 全帧 %.1f 非接缝 %.1f 接缝 %.1f "
+                  "占总量 %.1f%%" % (r["jerk_third_diff"]["all"],
+                                    r["jerk_third_diff"]["non_seam"],
+                                    r["jerk_third_diff"]["seam"],
+                                    r["jerk_third_diff"]["seam_share_pct"]))
+    artifacts = [write_table(rows), write_json(rows, cells, modes,
                                                files_by_cell),
-                 write_detail_md(rows, args.mode)]
+                 write_detail_md(rows, modes)]
     write_receipt(cells, artifacts, files_by_cell)
     print("[E0-window] done -> %s" % OUT_DIR.relative_to(REPO))
     return 0

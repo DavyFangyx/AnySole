@@ -8,7 +8,9 @@ from typing import Mapping
 import torch
 import torch.nn.functional as F
 
-from anysole.utils.geometry import f2_to_world, fk_pose6d, rot6d_to_rotmat
+from anysole.utils.geometry import (
+    ar2_to_world, f2_to_world, fk_pose6d, rot6d_to_rotmat,
+    yaw_rotmat)
 from anysole.utils.v5_conditioning import availability_masks, conditioning_policy
 from anysole.types import (
     CONFIG_T,
@@ -844,6 +846,282 @@ def compute_losses_v5_1(out, batch, config_id, weights, cond_tau=None) -> dict:
     }
 
 
+def _wrap_angle(a: torch.Tensor) -> torch.Tensor:
+    """环绕安全的角度差 → (−π, π]。"""
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _ar2_trajectory_losses(out, batch, weights):
+    """AR2 轨迹损失：航向系 v_head（m/s）+ 多尺度相对位移。
+
+    与 _trajectory_losses 同构，目标换成 batch["v_head_gt"]（航向系）；
+    trans_hat = cumsum(v_head)/FPS（航向系），位移项平移不变。
+    """
+    v_hat = out["v_hat"]
+    v_gt = batch["v_head_gt"]
+    x_hat = out["trans_hat"]
+    x_gt = torch.cumsum(v_gt, dim=1) / float(FPS)
+    l_vel = F.mse_loss(v_hat, v_gt)
+    deltas = weights.get("traj_deltas", DEFAULT_TRAJ_DELTAS)
+    if isinstance(deltas, str):
+        deltas = tuple(int(value.strip()) for value in deltas.split(",") if value.strip())
+    else:
+        deltas = tuple(int(value) for value in deltas)
+    valid = tuple(delta for delta in deltas if 1 <= delta < x_hat.shape[1])
+    if not valid:
+        raise ValueError("traj_deltas must contain an integer in [1, Tw-1]")
+    power = float(weights.get("traj_delta_weight_power", 1.0))
+    delta_terms = []
+    for delta in valid:
+        pred_delta = x_hat[:, delta:] - x_hat[:, :-delta]
+        gt_delta = x_gt[:, delta:] - x_gt[:, :-delta]
+        delta_terms.append((1.0 / (float(delta) ** power))
+                           * F.mse_loss(pred_delta, gt_delta))
+    l_delta = torch.stack(delta_terms).mean()
+    return (
+        _weight(weights, "traj_velocity_w", 1.0) * l_vel
+        + _weight(weights, "traj_delta_w", 1.0) * l_delta,
+        l_vel,
+        l_delta,
+    )
+
+
+def _ar2_heading_chain(dyaw, vis_yaw, gain, base0=None):
+    """AR2 自由生成航向链（2026-11-02 修订，正面 Δψ 结构）：
+
+    Δψ_total(t) = 历史延续基线（帧 0 = base0/真实前驱，帧 t>0 =
+    Δψ_total(t−1)）+ 零初始化修正项 dyaw(t)；ψ 从 0 起逐帧累计 total，
+    视觉在场时按推理同款 EMA 校正（vis_ema 0.5 平滑、wrap-safe）——
+    与 eval_protocol.ar2_session_chunks 的组装顺序与更新式逐位同构。
+    base0=None = 零基线（旧 ckpt 语义）。dyaw/vis_yaw/gain (B, tw)，
+    返回 (psi, dyaw_total)。"""
+    bsz, tw = dyaw.shape
+    cur = dyaw.new_zeros(bsz)
+    cur_d = (dyaw.new_zeros(bsz) if base0 is None else base0.to(dyaw))
+    psi = dyaw.new_zeros(bsz, tw)
+    total = dyaw.new_zeros(bsz, tw)
+    ema = None
+    for t in range(tw):
+        d_total = dyaw[:, t] + cur_d
+        cur = cur + d_total
+        if vis_yaw is not None:
+            v_t = vis_yaw[:, t]
+            ema = v_t if ema is None else 0.5 * ema + 0.5 * v_t
+            cur = cur + gain[:, t] * _wrap_angle(ema - cur)
+        cur_d = d_total
+        psi[:, t] = cur
+        total[:, t] = d_total
+    return psi, total
+
+
+def _compute_losses_v7_ar2(out, batch, config_id, weights):
+    """V7_Cv5AR2 损失（2026-11-01，V7_AR方案 §5.2）。
+
+    L_pose：相对空间 [tilt+body] 直接 MSE（与 v7 同式，目标空间不同）；
+    L_traj：航向系 v_head；L_dyaw：逐帧航向增量（mrad²，×1e3 对齐 6D
+    MSE 量级；帧 0 目标 = 真实前驱增量，doc §3.2）；L_cumyaw：窗口累计
+    口径（探针补遗：帧级不可学、累计口径仍无 test 信号——保留但默认
+    权重 1.0，由实验裁定）；L_dyaw_td / L_pose_vel：时间差分对齐 GT 变化
+    （减少抖动而非要求变化为零）；L_visyaw：视觉航向观测（仅 V 行，
+    wrap-safe）；L_yawcorr：校正链（ψ_pred + g·err）对齐 GT ψ（仅 V 行，
+    vis_gain 的唯一梯度源——推理时 g 只读运行时证据，不读 GT）。
+    接触/足/门/路由损失与 compute_losses_v7 同构（足损失先组装世界系）。
+    """
+    pose_gt = batch["pose_gt"]                        # ar2 形式 [tilt+body]
+    t_present = (config_id != CONFIG_V).to(pose_gt.device)
+    v_rows = (config_id != CONFIG_T).to(pose_gt.device)
+    l_pose = F.mse_loss(out["x0_hat"], pose_gt)
+    l_traj, l_traj_vel, l_traj_delta = _ar2_trajectory_losses(out, batch, weights)
+
+    dyaw_hat = out["dyaw_hat"][..., 0]                # (B, tw)
+    dyaw_gt = batch["dyaw_gt"]
+    mrad = 1e3
+    l_dyaw = mrad * F.mse_loss(dyaw_hat, dyaw_gt)
+    l_cumyaw = mrad * F.mse_loss(torch.cumsum(dyaw_hat, dim=1),
+                                 torch.cumsum(dyaw_gt, dim=1))
+    l_dyaw_td = mrad * F.mse_loss(dyaw_hat[:, 1:] - dyaw_hat[:, :-1],
+                                  dyaw_gt[:, 1:] - dyaw_gt[:, :-1])
+    l_pose_vel = F.mse_loss(out["x0_hat"][:, 1:] - out["x0_hat"][:, :-1],
+                            pose_gt[:, 1:] - pose_gt[:, :-1])
+
+    # 2026-11-02 yaw-fix（v7_ar2_yaw_fix，默认关）：
+    # ① T 行航向监督移除（probe_dyaw_observability_20261101 §4：test 无
+    #   高于机会的可学转向信号——旧配方 cumyaw 占总梯度 ~50%，压挤 L_pose；
+    #   转向只从 V/VT 行学）；② L_yawcorr 改自由生成口径（ψ 从 0 起 +
+    #   推理同款 EMA 校正链——旧口径从 GT psi_base 起，ψ_pred≈GT 时
+    #   gain 的最优解 = 0，视觉校正从未学会启用）；③ L_world 世界系轨迹
+    #   （V/VT 行，组装后 p̂ 与 GT 位移多尺度比对——yaw 误差的世界后果
+    #   此前不被任何损失直接惩罚）。
+    yaw_fix = bool(weights.get("v7_ar2_yaw_fix", False))
+    dyaw_total = dyaw_hat
+    if yaw_fix:
+        # 正面 Δψ 结构（2026-11-02 修订，用户裁定方向，替换掩损失版）：
+        # Δψ_total = 历史延续基线（帧 0 = batch prev_state 携带的真实前驱/
+        # 首窗零，帧 t>0 = Δψ_total(t−1)）+ 零初始化修正项 dyaw_hat——
+        # T 学得会就用（弱监督 ar2_dyaw_t_w，默认 0.1，给机会不封顶），
+        # 学不会自然退化到基线（历史延续 = 「不幻觉转向」由结构保证）。
+        # V/VT 行全监督。ar2_dyaw_base != history 时基线为零（旧语义）。
+        if str(weights.get("ar2_dyaw_base", "zero")) == "history" \
+                and batch.get("prev_state") is not None:
+            base0 = batch["prev_state"][:, 0, 0]
+        else:
+            base0 = None
+        gain_eff = out["vis_gain"][..., 0] * v_rows.view(-1, 1).to(
+            out["vis_gain"].dtype)
+        psi_chain, dyaw_total = _ar2_heading_chain(
+            dyaw_hat, out["vis_yaw"][..., 0], gain_eff, base0=base0)
+        t_w = float(weights.get("ar2_dyaw_t_w", 0.1))
+        wmask = (v_rows.float() + (~v_rows).float() * t_w).view(-1, 1)
+        l_dyaw = (mrad * (dyaw_total - dyaw_gt).square() * wmask).sum() \
+            / wmask.sum().clamp(min=1)
+        l_cumyaw = (mrad * (torch.cumsum(dyaw_total, dim=1)
+                            - torch.cumsum(dyaw_gt, dim=1)).square()
+                    * wmask).sum() / wmask.sum().clamp(min=1)
+        l_dyaw_td = (mrad * (dyaw_total[:, 1:] - dyaw_total[:, :-1]
+                             - (dyaw_gt[:, 1:] - dyaw_gt[:, :-1])).square()
+                     * wmask.expand(-1, dyaw_hat.shape[1] - 1)).sum() \
+            / wmask.expand(-1, dyaw_hat.shape[1] - 1).sum().clamp(min=1)
+    l_world = l_pose.new_zeros(())
+    l_visyaw = l_pose.new_zeros(())
+    l_yawcorr = l_pose.new_zeros(())
+    if bool(v_rows.any()):
+        psi_gt = batch["psi_gt"]                      # (B, tw) 绝对航向
+        vis_yaw = out["vis_yaw"][..., 0]
+        err = _wrap_angle(vis_yaw - psi_gt)
+        l_visyaw = err[v_rows].square().mean()
+        gain = out["vis_gain"][..., 0]
+        if yaw_fix:
+            # 自由生成口径：ψ 从 0 起走推理同款链（基线 + 修正 + EMA 校正
+            # 均在链内）——训练与 ar2_session_chunks 的组装同构。
+            l_yawcorr = _wrap_angle(psi_chain - psi_gt)[v_rows].square().mean()
+        else:
+            psi_pred = (batch["psi_base"].view(-1, 1)
+                        + torch.cumsum(dyaw_hat, dim=1))
+            corrected = psi_pred + gain * _wrap_angle(vis_yaw - psi_pred)
+            l_yawcorr = _wrap_angle(corrected - psi_gt)[v_rows].square().mean()
+        if yaw_fix:
+            r_yaw = yaw_rotmat(psi_chain)             # (B, tw, 3, 3)
+            v_world = torch.einsum("btij,btj->bti", r_yaw, out["v_hat"])
+            p_hat = torch.cumsum(v_world, dim=1) / float(FPS)
+            p_gt = torch.cumsum(batch["vel_gt"], dim=1) / float(FPS)
+            deltas = weights.get("traj_deltas", DEFAULT_TRAJ_DELTAS)
+            if isinstance(deltas, str):
+                deltas = tuple(int(value.strip()) for value in
+                               deltas.split(",") if value.strip())
+            else:
+                deltas = tuple(int(value) for value in deltas)
+            valid = tuple(delta for delta in deltas if 1 <= delta < p_hat.shape[1])
+            if not valid:
+                raise ValueError("traj_deltas must contain an integer in [1, Tw-1]")
+            power = float(weights.get("traj_delta_weight_power", 1.0))
+            wmask = v_rows.view(-1, 1, 1)
+            terms = []
+            for delta in valid:
+                dp = p_hat[:, delta:] - p_hat[:, :-delta]
+                dg = p_gt[:, delta:] - p_gt[:, :-delta]
+                terms.append((1.0 / (float(delta) ** power))
+                             * ((dp - dg).square().sum(dim=-1) * wmask).sum()
+                             / wmask.sum().clamp(min=1))
+            l_world = torch.stack(terms).mean()
+
+    gt = batch["contact_gt"]
+    pos = gt.float().mean().clamp(1e-4, 1.0 - 1e-4)
+    pos_weight = ((1.0 - pos) / pos).clamp(0.05, 20.0)
+    air_w = _weight(weights, "lambda_air", 0.0)
+    l_contact = _v5_1_contact_bce(out["contact_logits"], gt, t_present,
+                                  air_w, pos_weight)
+
+    l_foot = l_pose.new_zeros(())
+    if out.get("z_root") is not None and bool(weights.get("v7_contact_root")):
+        # 先组装世界系再 FK（相对表示不直接进 fk_pose6d）。
+        anchor = batch.get("trans_anchor")
+        if anchor is None:
+            anchor = pose_gt.new_zeros((pose_gt.shape[0], 3))
+        world_pose, world_trans = ar2_to_world(
+            out["x0_hat"], out["dyaw_hat"][..., 0], out["v_hat"],
+            batch["psi_base"], anchor)
+        fk = fk_pose6d(world_pose, world_trans,
+                       batch["offsets"], batch["parents"])
+        foot = fk[..., [LEFT_FOOT_JOINT, RIGHT_FOOT_JOINT], :]
+        disp = foot[:, 1:] - foot[:, :-1]
+        disp_sq = disp.square().sum(dim=-1)
+        w = torch.sigmoid(out["contact_logits"]).detach()[:, 1:]
+        w = w * t_present.view(-1, 1, 1).float()
+        l_foot = (disp_sq * w).sum() / w.sum().clamp(min=1.0)
+
+    l_route = l_pose.new_zeros(())
+    gate = out.get("route_gate")
+    if gate is not None and _weight(weights, "lambda_route", 0.0) > 0.0:
+        l_route = (gate - 0.5).square().mean()
+
+    l_s_gate = l_pose.new_zeros(())
+    if gate is not None and batch.get("gate_label") is not None:
+        lambda_s = _weight(weights, "lambda_s", 0.0)
+        if lambda_s > 0.0 and gate.dim() == 4 and gate.shape[-2] == 10:
+            g4 = gate[..., [0, 1, 6, 7], 0]
+            y = batch["gate_label"].to(gate.device)
+            m = batch["gate_valid"].to(gate.device)
+            vt = (config_id == CONFIG_VT).to(gate.device)
+            mask = (m & vt.view(-1, 1)).unsqueeze(-1)
+            bce = F.binary_cross_entropy(g4, y, reduction="none")
+            l_s_gate = (bce * mask.float()).sum() / mask.float().sum().clamp(min=1.0)
+
+    total = (
+        _weight(weights, "lambda_pose", 3.0) * l_pose
+        + _weight(weights, "lambda_traj", 1.0) * l_traj
+        + _weight(weights, "lambda_dyaw", 1.0) * l_dyaw
+        + _weight(weights, "lambda_cumyaw", 1.0) * l_cumyaw
+        + _weight(weights, "lambda_dyaw_td", 0.5) * l_dyaw_td
+        + _weight(weights, "lambda_pose_vel", 0.5) * l_pose_vel
+        + _weight(weights, "lambda_visyaw", 0.5) * l_visyaw
+        + _weight(weights, "lambda_yawcorr", 0.5) * l_yawcorr
+        + _weight(weights, "lambda_world_traj", 1.0) * l_world
+        + _weight(weights, "lambda_contact", 0.0) * l_contact
+        + _weight(weights, "lambda_foot", 0.0) * l_foot
+        + _weight(weights, "lambda_route", 0.0) * l_route
+        + _weight(weights, "lambda_s", 0.0) * l_s_gate
+    )
+    zero = l_pose.new_zeros(())
+    return {
+        "L_pose": l_pose,
+        "L_traj": l_traj,
+        "L_traj_vel": l_traj_vel,
+        "L_traj_delta": l_traj_delta,
+        "L_dyaw": l_dyaw,
+        "L_cumyaw": l_cumyaw,
+        "L_dyaw_td": l_dyaw_td,
+        "L_pose_vel": l_pose_vel,
+        "L_visyaw": l_visyaw,
+        "L_yawcorr": l_yawcorr,
+        "L_world_traj": l_world,
+        "L_Trec": zero,
+        "L_Vrec": zero,
+        "L_kp": zero,
+        "L_pos": zero,
+        "L_con": zero,
+        "L_bone": zero,
+        "L_assign": zero,
+        "L_sigma": zero,
+        "L_contact": l_contact,
+        "L_anchor": zero,
+        "L_nll": zero,
+        "L_prior_pose": zero,
+        "L_prior_nll": zero,
+        "L_prior_traj": zero,
+        "L_foot_res": zero,
+        "L_phase": zero,
+        "L_cop": zero,
+        "L_tcop": zero,
+        "L_strike": zero,
+        "L_gtcop": zero,
+        "L_cond": zero,
+        "L_foot": l_foot,
+        "L_route": l_route,
+        "L_s_gate": l_s_gate,
+        "loss": total,
+    }
+
+
 def compute_losses_v7(out, batch, config_id, weights) -> dict:
     """V7 训练损失（2026-10-25，模型设计思路 §4）。
 
@@ -857,6 +1135,8 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
       L_route λ_route（仅 C）：窗口级 T 信任门的正则（v1 = 无显式标签，
         λ_route=0 纯端到端；预留键位）。
     """
+    if out.get("dyaw_hat") is not None:
+        return _compute_losses_v7_ar2(out, batch, config_id, weights)
     if bool(weights.get("v7_contact_root")) and "lambda_foot" not in weights:
         raise ValueError("V7 contact-root training requires explicit lambda_foot in the effective config")
     pose_gt = batch["pose_gt"]

@@ -13,7 +13,7 @@ Cv5 双门结构不变。相对 ctx3 的一条核心改动（V7_续写v4残差�
 from anysole.models.common.model_v7 import AnySoleModelV7
 from anysole.models.v7_c2ctx import STRUCTURE as BASE_STRUCTURE
 
-STRUCTURE = {**BASE_STRUCTURE, "v7_ctx4": True}
+STRUCTURE = {**BASE_STRUCTURE, "v7_ctx3": True, "v7_ctx4": True}
 CONFIG_EXTRA: dict = {}
 
 
