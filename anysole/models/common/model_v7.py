@@ -407,11 +407,14 @@ class AnySoleModelV7(nn.Module):
                  ar2_fb: bool = True, ar2_lowdim: bool = False,
                  ar2_fb_dim: int = 16, ar2_regression: bool = False,
                  vt_t_residual: bool = False,
-                 obs_context=None):
+                 obs_context=None, v_cur: bool = False):
         super().__init__()
         self.d = d
         self.tw = tw
         self.obs_context = int(obs_context if obs_context is not None else tw)
+        # 按模态分窗（2026-11-03，V7_Cv5AR2MSC）：V 流在模型内裁到当前窗 tw，
+        # T 流保留 obs_context；T 信任门只池化当前窗。默认关 = 旧格逐字节不变。
+        self.v_cur = bool(v_cur)
         if self.obs_context < tw or self.obs_context % tw:
             raise ValueError("obs_context must be a multiple of tw and at least as large")
         if self.obs_context > tw and not ar2:
@@ -580,6 +583,8 @@ class AnySoleModelV7(nn.Module):
         #   门参数量与 Cv5 相同）。组 = vel（根速度 query）/ other（其余
         #   姿态）/ left（l_leg、l_foot）/ right（r_leg、r_foot）；无
         #   part_routes 时合为单一姿态门（T）。
+        if self.v_cur:
+            t_tok = t_tok[:, -v_tok.shape[1]:]   # 门只池化当前窗（V 已裁到 tw）
         x = torch.cat([v_tok, t_tok], dim=-1)               # (B, tw, 2d)
         if not self.route_temporal:
             x = x.mean(dim=1)                               # (B, 2d)
@@ -702,6 +707,9 @@ class AnySoleModelV7(nn.Module):
         if not self.tw <= V_feat.shape[1] <= self.obs_context:
             raise ValueError("observation length is outside [tw, obs_context]")
         T_tac = torch.cat([T_raw, T_phys], dim=-1)
+        if self.v_cur:
+            V_feat = V_feat[:, -self.tw:]
+            mask_v = mask_v[:, -self.tw:] if mask_v is not None else None
         v_tok, t_tok = self.encoders(V_feat, T_tac, config_id, V_hmr=V_hmr,
                                      mask_v=mask_v, mask_t=mask_t)
         m_v = self.v_temporal(v_tok)
@@ -791,7 +799,7 @@ class AnySoleModelV7(nn.Module):
             "contact_logits": contact_logits,
             "route_gate": gate,              # C：窗口级 T 信任门（监控/损失）
             "z": torch.cat([z_root, z_parts], dim=2),  # (B,tw,1+n_parts,d) TTA 叶子
-            "F": (m_v + m_t)[:, -self.tw:],
+            "F": m_v[:, -self.tw:] + m_t[:, -self.tw:],
             "v_tok": v_tok[:, -self.tw:],
             "t_tok": t_tok[:, -self.tw:],
             "m_v": m_v[:, -self.tw:],
@@ -845,6 +853,8 @@ class AnySoleModelV7(nn.Module):
         v_present = (config_id != CONFIG_T).to(V_feat.dtype)
         t_present = (config_id != CONFIG_V).to(V_feat.dtype)
         T_tac = torch.cat([T_raw, T_phys], dim=-1)
+        if self.v_cur:
+            V_feat = V_feat[:, -self.tw:]
         v_tok, t_tok = self.encoders(V_feat, T_tac, config_id)
         m_v = self.v_temporal(v_tok)
         m_t = self.t_temporal(t_tok)
@@ -916,7 +926,7 @@ class AnySoleModelV7(nn.Module):
             "contact_logits": contact_logits,
             "route_gate": gate,
             "z": torch.cat([z_root, z_parts], dim=2),
-            "F": (m_v + m_t)[:, -self.tw:],
+            "F": m_v[:, -self.tw:] + m_t[:, -self.tw:],
             "v_tok": v_tok[:, -self.tw:],
             "t_tok": t_tok[:, -self.tw:],
             "m_v": m_v[:, -self.tw:],

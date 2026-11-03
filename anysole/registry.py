@@ -134,6 +134,7 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V7_Cv5AR": ModelEntry("V7_Cv5AR", "v7_c2ar", "V7_Cv5AR: Cv5 + 帧级双模式 AR（V/VT 回归 + T 自回归，2026-11-01）"),
     "V7_Cv5ARM": ModelEntry("V7_Cv5ARM", "v7_c2arm", "V7_Cv5ARM: Cv5 + 因果掩码对照格（AR 无反馈支路，2026-11-01）"),
     "V7_Cv5AR2": ModelEntry("V7_Cv5AR2", "v7_c2ar2", "V7_Cv5AR2: Cv5 + AR 相对运动 + 航向状态分离（2026-11-01）"),
+    "V7_Cv5AR2MP": ModelEntry("V7_Cv5AR2MP", "v7_c2ar2mp", "V7_Cv5AR2MP: AR2M + 前缀继承样本（enum T 档里历史 V 真实、当前窗 V 为 null，2026-11-03）"),
     "V7_Cv5AR2M": ModelEntry("V7_Cv5AR2M", "v7_c2ar2m", "V7_Cv5AR2M: AR2 对照格（因果掩码无反馈，2026-11-02）"),
     "V7_Cv5AR2MF": ModelEntry("V7_Cv5AR2MF", "v7_c2ar2m", "V7_Cv5AR2MF: AR2M + yaw-fix（T 行无航向监督 + 自由生成航向链 + 世界轨迹损失，2026-11-02）"),
     "V7_Cv5AR2MF_gb": ModelEntry("V7_Cv5AR2MF_gb", "v7_c2ar2m", "V7_Cv5AR2MF_gb: AR2MF + 鞋垫增益偏置增强（G-b，2026-11-02）"),
@@ -141,6 +142,7 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V7_Cv5AR2M_gb": ModelEntry("V7_Cv5AR2M_gb", "v7_c2ar2m", "V7_Cv5AR2M_gb: AR2M（因果掩码无反馈）+ G-b 鞋垫增强（2026-11-02）"),
     "V7_Cv5AR2R": ModelEntry("V7_Cv5AR2R", "v7_c2ar2r", "V7_Cv5AR2R: Cv5 + AR2 相对读出纯回归（双向无反馈无因果，2026-11-02）"),
     "V7_Cv5AR2RT": ModelEntry("V7_Cv5AR2RT", "v7_c2ar2rt", "V7_Cv5AR2RT: AR2R + VT 零初始化触觉残差（2026-11-02）"),
+    "V7_Cv5AR2MSC": ModelEntry("V7_Cv5AR2MSC", "v7_c2ar2msc", "V7_Cv5AR2MSC: AR2M + 按模态分窗（V 只看当前窗，T 吃 obs_context 长历史，2026-11-03）"),
     # 修改 04（2026-11-03，z_note/修改/04_AR训练目标与自由生成对齐.md）：
     # R = AR2 结构 + 多步自由 rollout 损失（改动 A）；RD = R + 低维状态
     # 反馈（改动 B）。结构 = AR2（ar2_fb=True——开工裁定：AR2M 无反馈

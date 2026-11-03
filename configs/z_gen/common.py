@@ -699,3 +699,8 @@ _V7_CROSSFIT_BASES = ("V7_Cv7_fS5S6S11", "V7_Cv7_fS5S11S12",
 EXPERIMENTS["v7_crossfit"] = {"KIND": "model_suite",
     "MODEL_IDS": [x + "_s1" for x in _V7_CROSSFIT_BASES],
     "REQUIRES": []}
+
+# 按模态分窗（2026-11-03）：V7_Cv5AR2MSC 三格（V 只看当前窗 20 帧；T 观测 80/160/320 帧），
+# 首轮只发 s1。对照 = V7_Cv5AR2M_tw80_s1（V80/T80）。
+EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
+    "V7_Cv5AR2MSC_tw%d_s1" % _c for _c in (80, 160, 320)]

@@ -1819,3 +1819,26 @@ MODELS["V7_Cv5AR2RLD_s1"] = {
     **MODELS["V7_Cv5AR2M_s1"],
     "label": "V7-Cv5AR2RLD-s1", "name": "V7_Cv5AR2RLD", "seed": 1,
     "train_args": {**_RL_TA, "v7_ar2_lowdim": True, "v7_ar2_fb_dim": 16}}
+
+# 继承路线（2026-11-03，z_note/multimodal_fusion/V7_方案/V7_继承路线实验定义.md）：
+# 结构 = AR2M（因果掩码无反馈）；配方继承 V7_Cv5AR2M_tw80_s1（tw20/stride20/obs80/batch64 +
+# AR2 损失权重），唯一差异 = t_prefix_p：enum 的 T 档里 30% 有历史的样本改成「历史窗口 V 真实、
+# 当前窗 V 为 null、T 全程真实」。对照 = V7_Cv5AR2M_tw80_s1（不重跑）。从头训练，不走 --init-from。
+MODELS["V7_Cv5AR2MP_tw80_s1"] = {
+    **MODELS["V7_Cv5AR2M_tw80_s1"],
+    "label": "V7-Cv5AR2MP-obs80-out20-s1",
+    "name": "V7_Cv5AR2MP", "seed": 1,
+    "train_args": {**MODELS["V7_Cv5AR2M_tw80_s1"].get("train_args", {}),
+                   "t_prefix_p": 0.3}}
+
+# 按模态分窗（2026-11-03）：V 只看当前窗（20 帧），T 吃长历史（80/160/320）。
+# 结构 = AR2M + v7_vcur（V 流在模型内裁到当前窗，T 信任门同步只池化当前窗）；
+# 配方继承 V7_Cv5AR2M_tw80_s1（tw20/stride20/batch64 + AR2 损失权重），唯一差异 =
+# 结构标志 + obs_context 取值。对照 = V7_Cv5AR2M_tw80_s1（V80/T80，不重跑）。
+for _context in (80, 160, 320):
+    MODELS["V7_Cv5AR2MSC_tw%d_s1" % _context] = {
+        **MODELS["V7_Cv5AR2M_tw80_s1"],
+        "label": "V7-Cv5AR2MSC-v20-t%d-out20-s1" % _context,
+        "name": "V7_Cv5AR2MSC", "seed": 1,
+        "train_args": {**MODELS["V7_Cv5AR2M_tw80_s1"].get("train_args", {}),
+                       "obs_context": _context}}

@@ -48,6 +48,8 @@ def main(argv=None):
     ap.add_argument("--checkpoint", required=True, type=Path)
     ap.add_argument("--sessions", nargs="+", default=["S13023", "S13061", "S13071", "S13092"])
     ap.add_argument("--prefix-windows", type=int, default=2)
+    ap.add_argument("--init-height", type=float, default=0.0,
+                    help="先验初始高度（m，SMPL y-up；默认 0 = 旧口径）")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--fps", type=int, default=15)
     args = ap.parse_args(argv)
@@ -87,7 +89,8 @@ def main(argv=None):
         else:
             print(f"rollout {sid} ...", flush=True)
             generated = rollout(ds, model, indices, torch.device(args.device),
-                                args.prefix_windows,
+                                init_height=args.init_height,
+                                prefix_windows=args.prefix_windows,
                                 progress=lambda n, t: print(f"  {n}/{t}", flush=True))
             frames = generated["frame_ids"]
             gt_kp = session["kp_gt"][frames]

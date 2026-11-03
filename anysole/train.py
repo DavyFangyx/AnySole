@@ -274,6 +274,28 @@ def _ctx4_residual_batch(batch):
     return b
 
 
+def _t_prefix_rows(batch: dict, cid: torch.Tensor, tw: int, p: float):
+    """V7 继承路线（2026-11-03）：T 档里以概率 p 把有观测历史的样本改成前缀继承样本。
+
+    送模型：config 改 VT（历史窗口的 V 流保持真实、不被整流换成 null），当前窗的 V
+    由 mask_v 整窗换成 null token，T 全程真实——「历史有视觉、当前窗只剩触觉」。
+    损失侧仍按 T 行（调用方保留原 cid）：视觉航向项只对 V 在场行定义，而这类样本
+    当前窗的 V 全是 null，不能让 vis_yaw / vis_gain 去拟合 null。无历史（会话首窗）
+    的样本保持普通 T。返回 (model_cid, mask_v)；mask_v 为 (B, tw) bool，选中行整行 True。
+    """
+    history = batch.get("obs_history")
+    if history is None:
+        raise ValueError("--t-prefix-p requires obs_history in the batch (obs_context > tw)")
+    has_history = torch.tensor([int(h["V_feat"].shape[0]) > 0 for h in history],
+                               dtype=torch.bool, device=cid.device)
+    chosen = has_history & (torch.rand(cid.shape[0], device=cid.device) < p)
+    model_cid = cid.clone()
+    model_cid[chosen] = CONFIG_VT
+    mask_v = torch.zeros(cid.shape[0], tw, dtype=torch.bool, device=cid.device)
+    mask_v[chosen] = True
+    return model_cid, mask_v
+
+
 def backward_v7_enum(model, batch, config, ctx_ss_p: float = 0.0,
                      ctx_cache=None, ar_ss_p: float = 0.0,
                      ar_noise: float = 0.0, ar_cache=None,
@@ -326,7 +348,13 @@ def backward_v7_enum(model, batch, config, ctx_ss_p: float = 0.0,
         if probability == 0:
             continue
         cid = torch.full((batch_size,), mode, dtype=torch.long, device=batch["pose_gt"].device)
-        v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, cid)
+        # 前缀继承样本（--t-prefix-p，默认关）：T 档里一部分有历史的样本送模型时改 VT +
+        # 当前窗 mask_v；损失仍用原 cid（T 行）。关闭时 model_cid 即 cid，前向逐位不变。
+        model_cid, prefix_mask_v = cid, None
+        if mode == CONFIG_T and float(config.get("t_prefix_p", 0.0)) > 0.0:
+            model_cid, prefix_mask_v = _t_prefix_rows(
+                batch, cid, int(config["tw"]), float(config["t_prefix_p"]))
+        v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, model_cid)
         ctx = batch.get("ctx")
         if ctx is not None and ctx_cache is not None and ctx_ss_p > 0:
             # G1 scheduled sampling（续写 v2 实验矩阵）：以概率 p 用上一步
@@ -392,9 +420,10 @@ def backward_v7_enum(model, batch, config, ctx_ss_p: float = 0.0,
                 dyaw_base=str(config.get("ar2_dyaw_base", "zero")),
                 **model_observation_kwargs(batch))
         else:
-            out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m,
+            mask_kw = {"mask_v": prefix_mask_v} if prefix_mask_v is not None else {}
+            out = model(v_feat, t_raw, t_phys, model_cid, batch.get("session_id"), T_s2m=t_s2m,
                         prev_ctx=ctx, prev_state=prev_state, causal=ar_causal,
-                        **model_observation_kwargs(batch))
+                        **mask_kw, **model_observation_kwargs(batch))
         if (ar_cache is not None and not getattr(model, "ar2", False)
                 and out.get("x0_hat") is not None):
             ar_cache[0] = _ar_ss_cache(out, prev_state)
@@ -885,6 +914,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--ar-rollout-detach", action="store_true", default=None,
                         help="V7 AR2 修改 04：rollout 反馈梯度截断（默认开；"
                         "只影响优化、不改反馈来源）。")
+    parser.add_argument("--t-prefix-p", type=float, default=None, metavar="P",
+                        help="V7 AR2 继承路线（2026-11-03）：enum 的 T 档里，有观测历史的样本"
+                        "以概率 P 改成「历史窗口 V 真实、当前窗 V 换 null、T 全程真实」的前缀"
+                        "继承样本（模型走 VT 配置 + 当前窗 mask_v，损失仍按 T 行；默认关）。")
     parser.add_argument("--v7-ar2-lowdim", action="store_true", default=None,
                         help="V7 AR2 修改 04 改动 B：反馈降维为低维相对状态"
                         "（Δyaw+根倾斜+body 投影+航向系速度，默认关）。")
@@ -1818,6 +1851,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["ar_rollout_schedule_frac"] = float(args.ar_rollout_schedule_frac)
     if args.ar_rollout_detach:
         config["ar_rollout_detach"] = True
+    if args.t_prefix_p is not None:
+        if not 0.0 <= float(args.t_prefix_p) <= 1.0:
+            raise ValueError("--t-prefix-p must be in [0, 1]")
+        config["t_prefix_p"] = float(args.t_prefix_p)
+    if float(config.get("t_prefix_p", 0.0)) > 0.0:
+        # 死开关防御（2026-11-03）：前缀继承样本只接在 backward_v7_enum 的 T 档 + AR2
+        # （无反馈）+ 长观测上下文上；其余路径静默忽略 = 假实验。
+        if not (enum_mode and bool(config.get("v7_ar2", False))
+                and not bool(config.get("v7_ar2_fb", True))):
+            raise ValueError("--t-prefix-p requires enum training on an AR2 model "
+                             "without feedback (ar2_fb=False)")
+        if int(config.get("obs_context", config["tw"])) <= int(config["tw"]):
+            raise ValueError("--t-prefix-p requires obs_context > tw (no history, no prefix)")
+        if (bool(config.get("ar_rollout", False)) or float(config.get("ar_ss", 0.0)) > 0
+                or float(config.get("ar_noise", 0.0)) > 0
+                or float(config.get("ctx_ss", 0.0)) > 0):
+            raise ValueError("--t-prefix-p is incompatible with --ar-rollout/--ar-ss/"
+                             "--ar-noise/--ctx-ss")
     if args.v7_ar2_lowdim:
         config["v7_ar2_lowdim"] = True
     if args.v7_ar2_fb_dim is not None:

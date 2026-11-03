@@ -48,6 +48,7 @@ TRAIN_ARG_FLAG_MAP = {
     "ar_rollout_max": "--ar-rollout-max",
     "ar_rollout_schedule_frac": "--ar-rollout-schedule-frac",
     "ar_rollout_detach": "--ar-rollout-detach",
+    "t_prefix_p": "--t-prefix-p",
     "v7_ar2_lowdim": "--v7-ar2-lowdim",
     "v7_ar2_fb_dim": "--v7-ar2-fb-dim",
     "lr_schedule": "--lr-schedule",

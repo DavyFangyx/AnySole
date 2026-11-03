@@ -67,3 +67,8 @@ template_path: /data/fangyuxuan/projects/gait/AnysoleWorkspace/assets/insole_tem
 # 0.887 m（采样 12 会话，受试者间 std 0.109）——声明常量非逐会话 GT；
 # 默认 0 = 旧口径。修复 GroundPen/GlobalMPJPE/traj_ATE 的「骨盆贴地」。
 ar2_init_height: 0.887
+
+# V/VT 行段首帧 ψ ← 模型视觉航向读出（2026-11-03 管线修正）：替代
+# 「ψ 从 0 起 + 小增益慢收敛」（收敛段被 Drift 记为漂移；|ψ0|≥20° 的
+# 5 会话 Drift 67.5 vs 其余 4.5）。T 行不受影响。默认 false = 旧口径。
+ar2_vis_yaw_init: true

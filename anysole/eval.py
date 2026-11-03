@@ -941,6 +941,7 @@ def _evaluate_one(
                 # 与评分同口径的增益下限/先验高度（run_protocol 同键同默认）。
                 ar2_gain_floor = float(config.get("ar2_vis_gain_floor", 0.0))
                 ar2_init_height = float(config.get("ar2_init_height", 0.0))
+                ar2_vis_yaw_init = bool(config.get("ar2_vis_yaw_init", False))
                 for session_id, idxs in _session_window_groups(dataset).items():
                     v_kw = ({"V_hmr": dataset[idxs[0]].get("V_hmr")}
                             if v_hmr_mode else {})
@@ -950,7 +951,8 @@ def _evaluate_one(
                         gain_floor=ar2_gain_floor, null_t=null_t,
                         dyaw_base=str(checkpoint.get("config", {}).get(
                             "ar2_dyaw_base", "zero")),
-                        init_height=ar2_init_height)
+                        init_height=ar2_init_height,
+                        vis_yaw_init=ar2_vis_yaw_init)
                     for chunk in chunks:
                         start = chunk["start"]
                         exports.setdefault(session_id, []).append(

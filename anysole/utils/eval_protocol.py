@@ -668,6 +668,7 @@ def _evaluate_config(
     gain_floor: float = 0.0,
     overlap_assemble: bool = False,
     init_height: float = 0.0,
+    vis_yaw_init: bool = False,
 ) -> Tuple[Dict[str, float], dict, List[dict], int]:
     """Full-session inference for one conditioning config, then all protocol
     metrics.  ``degrade`` in ("v", "t") adds the robustness span dropout.
@@ -763,7 +764,7 @@ def _evaluate_config(
                     degrade=degrade, seed=seed, regression=ar2_regression,
                     gain_floor=gain_floor, dyaw_base=ar2_dyaw_base,
                     null_t=null_t, overlap_assemble=overlap_assemble,
-                    init_height=init_height)
+                    init_height=init_height, vis_yaw_init=vis_yaw_init)
                 if dump_detail:
                     _merge_sess_detail(
                         seq, tw, forward_axis, config_value, accum, contact,
@@ -1273,13 +1274,20 @@ def blend_overlap_windows_np(windows, tw):
 def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
                        device, tw, v_kw, *, degrade=None, seed=0,
                        regression=False, gain_floor=0.0, dyaw_base="zero",
-                       null_t=False, init_height=0.0):
+                       null_t=False, init_height=0.0, vis_yaw_init=False):
     """AR2 自由生成（2026-11-01，V7_AR方案 §4/§6）：逐窗逐帧串行。
 
     外部状态：ψ（累计航向）、p（自由积分位置）、vis_ema（视觉航向观测
     的 EMA，0.5 平滑防注入 V 帧级抖动）、prev（148 维相对反馈）。
     V/VT 行：ψ += Δψ̂ 后应用视觉校正 ψ += g·wrap(vis_ema − ψ)（g 只读
     运行时证据）；T 行：纯积分 ψ += Δψ̂，会话首帧 ψ=0（坐标约定）。
+
+    ``vis_yaw_init``（2026-11-03）：V/VT 行段首帧 ψ ← vis_ema（模型自己的
+    视觉航向读出，非 GT），替代「ψ 从 0 起 + 逐帧小增益慢收敛」——
+    收敛段此前被 RootOrientationDrift 记为漂移（|ψ0|≥20° 的 5 个 test
+    会话 Drift 67.5 vs 其余 31 会话 4.5）。T 行不受影响（无视觉参照，
+    ψ=0 为坐标约定）；无可调参数（等价段首帧增益 1，其后仍用模型增益）；
+    默认 False = 旧口径逐位不变。
     世界组装逐帧：R_root = Y(ψ) @ tilt、v_world = Y(ψ) @ v_head、
     p += v_world/FPS——无每窗 GT 锚（§3.4）。会话开始/跳窗复位。
     返回 (chunks, meta)：chunks 逐窗含 world pred_pose/pred_trans 与
@@ -1308,6 +1316,8 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
     prev_start = None
     meta = None
     use_vis = config_value != CONFIG_T
+    # vis_yaw_init：段首帧 ψ ← vis_ema 的待置位标记（复位时重新置起）。
+    seed_psi = bool(vis_yaw_init) and use_vis
     dropped = set()
     if degrade is not None:
         rng = np.random.RandomState((seed * 1000003) ^ zlib.crc32(str(session_id).encode()))
@@ -1325,6 +1335,7 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
             pos = torch.tensor([0.0, float(init_height), 0.0],
                                device=device, dtype=torch.float64)
             vis_ema = None
+            seed_psi = bool(vis_yaw_init) and use_vis
         config_id = torch.full((1,), config_value, device=device, dtype=torch.long)
         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
         obs_kw = model_observation_kwargs(batch)
@@ -1392,6 +1403,10 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
                     gain_t = gain_all[t].clamp(min=gain_floor)
                     vis_ema = (vis_yaw_t if vis_ema is None
                                else 0.5 * vis_ema + 0.5 * vis_yaw_t)
+                    if seed_psi:
+                        # 段首帧：ψ ← 视觉航向读出（校正前置位，等价增益 1）。
+                        psi = vis_ema.clone()
+                        seed_psi = False
                     psi = psi + gain_t * _wrap_angle(vis_ema - psi)
                 r_yaw = yaw_rotmat(psi.reshape(1))[0].float()      # (3,3)
                 r_root = torch.matmul(r_yaw, rot6d_to_rotmat(rel_pose_t[:6]))
@@ -1416,6 +1431,10 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
                         min=gain_floor)
                     vis_ema = (vis_yaw_t if vis_ema is None
                                else 0.5 * vis_ema + 0.5 * vis_yaw_t)
+                    if seed_psi:
+                        # 段首帧：ψ ← 视觉航向读出（校正前置位，等价增益 1）。
+                        psi = vis_ema.clone()
+                        seed_psi = False
                     psi = psi + gain_t * _wrap_angle(vis_ema - psi)
                 r_yaw = yaw_rotmat(psi.reshape(1))[0].float()      # (3,3)
                 r_root = torch.matmul(r_yaw, rot6d_to_rotmat(rel_pose_t[:6]))
@@ -1455,7 +1474,7 @@ def _v7_ar2_session_seq(dataset, model, session_id, idxs, config_value,
                         device, tw, v_kw, *, degrade=None, seed=0,
                         regression=False, gain_floor=0.0, dyaw_base="zero",
                         null_t=False, overlap_assemble=False,
-                        init_height=0.0):
+                        init_height=0.0, vis_yaw_init=False):
     """AR2 协议会话序列：ar2_session_chunks 的 seq 组装（评分口径）。
 
     regression：V7_Cv5AR2R 纯回归格（窗口并行前向，组装公式同源）。
@@ -1469,7 +1488,8 @@ def _v7_ar2_session_seq(dataset, model, session_id, idxs, config_value,
                                       regression=regression,
                                       gain_floor=gain_floor,
                                       dyaw_base=dyaw_base, null_t=null_t,
-                                      init_height=init_height)
+                                      init_height=init_height,
+                                      vis_yaw_init=vis_yaw_init)
     floor_y, offsets, parents, betas = meta
     if overlap_assemble:
         parts = []
@@ -1783,6 +1803,8 @@ def run_protocol(
     # 默认 0 = 关（不改既有 cell 行为）。
     ar2_gain_floor = float(config.get("ar2_vis_gain_floor", 0.0))
     ar2_init_height = float(config.get("ar2_init_height", 0.0))
+    # V/VT 行段首帧 ψ ← 模型视觉航向读出（2026-11-03）：默认 False = 旧口径。
+    ar2_vis_yaw_init = bool(config.get("ar2_vis_yaw_init", False))
     if (dataset.stride != dataset.window_length
             and not getattr(model, "prev_ctx", False)
             and not overlap_assemble):
@@ -1824,6 +1846,7 @@ def run_protocol(
                     gain_floor=ar2_gain_floor,
                     overlap_assemble=overlap_assemble,
                     init_height=ar2_init_height,
+                    vis_yaw_init=ar2_vis_yaw_init,
                 )
             if dump_detail:
                 window_conditions[name] = window_rows
@@ -1843,6 +1866,7 @@ def run_protocol(
                 gain_floor=ar2_gain_floor,
                 overlap_assemble=overlap_assemble,
                 init_height=ar2_init_height,
+                vis_yaw_init=ar2_vis_yaw_init,
             )
             metrics["robust_tdrop"], _, _, anchor_counts["robust_tdrop"] = _evaluate_config(
                 ds_rob, model, device, CONFIG_VT, regress_mode, diffusion,
@@ -1853,6 +1877,7 @@ def run_protocol(
                 gain_floor=ar2_gain_floor,
                 overlap_assemble=overlap_assemble,
                 init_height=ar2_init_height,
+                vis_yaw_init=ar2_vis_yaw_init,
             )
             print("protocol robust_vdrop: mpjpe=%.3fmm pa_mpjpe=%.3fmm"
                   % (metrics["robust_vdrop"]["mpjpe_mm"], metrics["robust_vdrop"]["pa_mpjpe_mm"],
