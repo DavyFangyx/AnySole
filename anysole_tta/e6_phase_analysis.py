@@ -96,13 +96,16 @@ def predicted_contact_per_frame(pred: np.ndarray, floor: float,
 
 
 def build_session_sets() -> dict[str, list[str]]:
-    """canonical test 36 会话按动作组归类。"""
+    """E6 评估会话按动作组归类：默认 canonical test 36 会话；环境变量 E6_SPLIT_CSV / E6_SPLIT_COLUMN
+    可改读其他 split（如 splits_action_8020.csv 的 val 列，2026-11-04），不设即旧行为逐位不变。"""
+    import os
+    split_csv = os.environ.get("E6_SPLIT_CSV", "splits.csv")
+    column = os.environ.get("E6_SPLIT_COLUMN", "test")
     test = []
-    with open(PROJECT_ROOT / "AnysoleWorkspace/protocol/splits/default/"
-              "splits.csv") as f:
+    with open(PROJECT_ROOT / "AnysoleWorkspace/protocol/splits/default" / split_csv) as f:
         for row in csv.DictReader(f):
-            if row["test"]:
-                test.append(row["test"])
+            if row[column]:
+                test.append(row[column])
     sets: dict[str, list[str]] = {}
     for sid in sorted(test):
         a = _action_of(sid)
@@ -323,6 +326,9 @@ def main():
                          "缺省 ankle_foot_mpjpe = 现行踝足口径）")
     ap.add_argument("--allow-partial", action="store_true",
                     help="跳过缺评估产物的模型（默认硬报错）")
+    ap.add_argument("--skip-missing-sessions", action="store_true",
+                    help="按 split 建会话集后，剔除此批模型没有预测的会话"
+                         "（eval 侧已排除的会话，如 S12102；默认硬报错）")
     ap.add_argument("--contact-method", default="f6_soft_time_accel_state_smpl24_v1",
                     choices=("f6_soft", "f6_soft_time_accel_v1", "f6_soft_time_accel_state_v2",
                              "f6_soft_time_accel_state_smpl24_v1"))
@@ -350,12 +356,26 @@ def main():
             if args.allow_partial:
                 print(msg)
                 models.remove(model)
-            else:
+            elif not args.skip_missing_sessions:
                 raise SystemExit(msg)
     if not models:
         raise SystemExit("no model with complete eval products")
 
     session_sets = build_session_sets()
+    if args.skip_missing_sessions:
+        pruned = {}
+        for action, sids in session_sets.items():
+            keep = [s for s in sids
+                    if all((CELL_ROOT / m / "predictions/eval_motion" /
+                            ("%s_%s.npz" % (s, c))).is_file()
+                           for m in models for c in CONDS)]
+            if len(keep) != len(sids):
+                print("[E6] %s: 剔除 %d 个无预测会话 %s" % (
+                    action, len(sids) - len(keep),
+                    sorted(set(sids) - set(keep))))
+            if keep:
+                pruned[action] = keep
+        session_sets = pruned
     actions = ([a for a in args.actions.split(",") if a.strip()]
                if args.actions else list(session_sets))
     unknown = [a for a in actions if a not in session_sets]

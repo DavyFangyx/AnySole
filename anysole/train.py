@@ -70,7 +70,13 @@ from anysole.utils.constraints_h import apply_v3h
 from anysole.models.common.model_v3f import _split_state, sample_v3f
 from anysole.models.common.model_v3h import apply_foot_residual
 from anysole.models.common.model_v5_1 import v5_1_z_src
-from anysole.data.occ_mix import SRC_CAM3, SRC_OCC, grouped_mean
+from anysole.data.occ_mix import (
+    P_NULLV_DEFAULT,
+    P_T_DEFAULT,
+    SRC_CAM3,
+    grouped_mean,
+    normalize_levels,
+)
 from anysole.utils.losses import soft_contact_from_keypoints
 from anysole.types import CONFIG_NAMES
 from anysole.utils.checkpoint_policy import CandidateArchive, DashboardUnavailable, infer_role
@@ -107,6 +113,9 @@ DEFAULT_CONFIG = {
     "noise_scaled": False,      # E3 口径（E4 的噪声缩放被证伪）；默认与 anysole/configs/v1.yaml 对齐
     "lr_schedule": "constant",  # E3 口径（E5 的 cosine 被证伪）
     "t_phys_v2": False,  # 维度 2 显式物理特征（2026-10-21）：T_phys 12→20 维
+    # 修改 11 §9.3（2026-11-05）：hull_mcol 逐会话重定心（pressure-only p5–p95），
+    # 仅 t_phys_v2 生效；宽度仍 20，模型结构不变。
+    "t_phys_hull_recenter": False,
     "d8_heads": False,  # 维度 3 足-地监督三头（2026-10-21）
     "lambda_tcop": 0.0,
     "lambda_strike": 0.0,
@@ -136,7 +145,7 @@ DEFAULT_CONFIG = {
     "wandb_mode": "disabled",
     "wandb_project": "Anysole",
     "wandb_entity": "davyfangyuxuan-nanjing-university-of-aeronautics-and-ast",
-    "wandb_eval_interval": 5,
+    "wandb_eval_interval": 10,  # 2026-11-04 裁定：eval 间隔 5→10（提速唯一有效杠杆）
     "wandb_experiment_tag": "anysole_v1",
     # 在线监控后端（2026-11-03）：WANDB 访问受限后默认改投 SwanLab；
     # "wandb" 仍可选，行为与改造前一致。
@@ -225,6 +234,61 @@ def condition_inputs(batch: dict, config_id: torch.Tensor, t_s2m_dim: int = T_S2
     return v_feat, t_raw, t_phys, t_s2m
 
 
+def _stale_partner(batch: dict, device) -> Optional[torch.Tensor]:
+    """修改 14 §5.3：同会话、不同窗口的伙伴索引（(B,) long；无伙伴 = 自己）。
+
+    batch["session_id"] 是逐窗字符串列表（collate 不 stack）；同会话内的
+    随机环置换给出无固定点的配对。批内无同会话第二窗时该行无伙伴。
+    """
+    session_ids = batch.get("session_id")
+    if session_ids is None:
+        return None
+    n = len(session_ids)
+    partner = torch.arange(n, dtype=torch.long, device=device)
+    groups: dict[str, list[int]] = {}
+    for i, sid in enumerate(session_ids):
+        groups.setdefault(str(sid), []).append(i)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        order = torch.tensor(group, dtype=torch.long, device=device)
+        order = order[torch.randperm(len(order), device=device)]
+        partner[order] = torch.roll(order, shifts=-1)
+    return partner
+
+
+def _apply_stale_v(v_feat: torch.Tensor, batch: dict, config_id: torch.Tensor,
+                   p_stale: float, stats: Optional[dict] = None) -> torch.Tensor:
+    """修改 14 §5.3：VT 行的 V_feat 整窗换成同会话另一窗口（不原地改 batch）。
+
+    * 只作用于 config_id == CONFIG_VT 的行；V/T 行逐位不变。
+    * 局部返回新张量：enum 三档共用同一个 batch，原地改会泄漏到 V 行。
+    * V_hmr 路径（hmr_gvhmr）不在本轮 V8 基座上，未处理。
+    """
+    if p_stale <= 0.0:
+        return v_feat
+    if batch.get("V_hmr") is not None:
+        raise ValueError("p_stale does not support v_input=hmr_gvhmr yet")
+    partner = _stale_partner(batch, v_feat.device)
+    if partner is None:
+        return v_feat
+    self_idx = torch.arange(v_feat.shape[0], device=v_feat.device)
+    eligible = (config_id == CONFIG_VT) & (partner != self_idx)
+    if stats is not None:
+        stats["eligible"] = int(stats.get("eligible", 0)) + int(eligible.sum())
+    if not bool(eligible.any()):
+        return v_feat
+    swap = eligible & (torch.rand(v_feat.shape[0], device=v_feat.device) < p_stale)
+    applied = int(swap.sum())
+    if stats is not None:
+        stats["applied"] = int(stats.get("applied", 0)) + applied
+    if applied == 0:
+        return v_feat
+    v_feat = v_feat.clone()
+    v_feat[swap] = v_feat[partner[swap]]
+    return v_feat
+
+
 def _ar_rollout_curriculum(global_step: int, total_steps: int, tw: int,
                            l_max: int = 8, schedule_frac: float = 0.6) -> int:
     """修改 04 改动 A（2026-11-03）：rollout 长度课程——L 从 1 线性升到
@@ -299,7 +363,7 @@ def _t_prefix_rows(batch: dict, cid: torch.Tensor, tw: int, p: float):
 def backward_v7_enum(model, batch, config, ctx_ss_p: float = 0.0,
                      ctx_cache=None, ar_ss_p: float = 0.0,
                      ar_noise: float = 0.0, ar_cache=None,
-                     ar_rollout_len: int = 0):
+                     ar_rollout_len: int = 0, stale_acc: Optional[dict] = None):
     """Enumerate the same windows, accumulate gradients, then update once.
 
     Motion keeps config_probs weights. T-only auxiliary terms normalize over
@@ -355,6 +419,10 @@ def backward_v7_enum(model, batch, config, ctx_ss_p: float = 0.0,
             model_cid, prefix_mask_v = _t_prefix_rows(
                 batch, cid, int(config["tw"]), float(config["t_prefix_p"]))
         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, model_cid)
+        # 修改 14 §5.3：VT 行同会话窗级错位（只换 V；V/T 行逐位不变）。
+        if mode == CONFIG_VT and float(config.get("p_stale", 0.0)) > 0.0:
+            v_feat = _apply_stale_v(v_feat, batch, model_cid,
+                                    float(config["p_stale"]), stale_acc)
         ctx = batch.get("ctx")
         if ctx is not None and ctx_cache is not None and ctx_ss_p > 0:
             # G1 scheduled sampling（续写 v2 实验矩阵）：以概率 p 用上一步
@@ -525,6 +593,32 @@ def fit_pose_stats(loader: DataLoader, device: torch.device, key: str = "pose_gt
     mean = sums / count
     var = (sumsq / count - mean.square()).clamp(min=0.0)
     return mean.float(), var.sqrt().float()
+
+
+def fit_anchor_stats(loader: DataLoader, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    """修改 08 改动 A2：per-axis mean/std of ``batch["trans_anchor"]``.
+
+    One pass over the training loader (same mechanism and position as
+    ``fit_pose_stats``); the anchor head normalizes its residual with these
+    values and they are frozen into the checkpoint.  The std floor 1e-2 m is
+    the same convention as the pose stats floor.
+    """
+    sums = torch.zeros(3, dtype=torch.float64, device=device)
+    sumsq = torch.zeros(3, dtype=torch.float64, device=device)
+    count = 0
+    with torch.no_grad():
+        for raw_batch in loader:
+            anchor = raw_batch["trans_anchor"].to(
+                device=device, dtype=torch.float64, non_blocking=True)
+            flat = anchor.reshape(-1, 3)
+            sums += flat.sum(dim=0)
+            sumsq += flat.square().sum(dim=0)
+            count += flat.shape[0]
+    if count == 0:
+        raise RuntimeError("cannot fit anchor stats: training loader is empty")
+    mean = sums / count
+    var = (sumsq / count - mean.square()).clamp(min=0.0)
+    return mean.float(), var.sqrt().float().clamp(min=1e-2)
 
 
 def fit_pressure_cell_means(loader: DataLoader, device: torch.device) -> Tuple[float, ...]:
@@ -990,6 +1084,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                              "(default off; --p-occ/--p-nullv/--p-nullt tune it).")
     parser.add_argument("--t-phys-v2", action="store_true", default=None,
                         help="维度 2：T_phys 12→20 维显式物理特征（着地几何+双足关系）")
+    parser.add_argument("--t-phys-hull-recenter", action="store_true", default=None,
+                        help="修改 11 §9.3：hull_mcol 逐会话 p5–p95 重定心（需 --t-phys-v2）")
     parser.add_argument("--d8-heads", action="store_true", default=None,
                         help="维度 3：足-地监督三头（tcop 自重建 + 着地模式 + GT CoP）")
     parser.add_argument("--tactile-gainbias", action="store_true",
@@ -1005,6 +1101,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="V6_Av1 occ_mix: P(null-V window) (default 0.1).")
     parser.add_argument("--p-nullt", type=float, default=None, metavar="P",
                         help="V6_Av1 occ_mix: P(null-T window) (default 0.1).")
+    parser.add_argument("--occ-levels", type=str, default=None, metavar="L",
+                        help="修改 13 D1: occ_mix 档梯，逗号分隔（如 010,020,030；"
+                             "默认 010 单档 = v1 行为）。occ 命中后逐窗均匀抽档。")
+    parser.add_argument("--p-stale", type=float, default=None, metavar="P",
+                        help="修改 14 §5.3: VT 行的同会话窗级错位增强概率 "
+                             "（默认 0 = 关；仅 enum 训练生效）。")
     parser.add_argument("--occ-a3-monitor", action="store_true",
                         help="V6_Av1 A3 val 分层监控（窗口级 VT2M<=V2M 占比 "
                              "occ vs cam3 对照；默认关，仅 occ_mix 启用时有效).")
@@ -1063,6 +1165,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Comma-separated state-dict key prefixes to skip in addition "
                              "to the automatic name/shape matching (e.g. 'pose_head.' to "
                              "re-init the whole pose head while reusing the encoders).")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from <out_dir>/ckpt_last.pt (model + optimizer + epoch; candidate pool "
+                             "restored from its manifest). Explicit only, never inferred. RNG state is not "
+                             "saved, so a resumed run is statistically equivalent to, not bitwise identical "
+                             "with, an uninterrupted one.")
     parser.add_argument("--wandb_mode", choices=("disabled", "offline", "online"), default=None)
     parser.add_argument("--wandb_project", default=None)
     parser.add_argument("--wandb_entity", default=None)
@@ -1071,6 +1178,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                              "DDIM sampling). One eval costs ~16 normal epochs of wall-clock, so this "
                              "knob dominates total time: 10 -> 57s stall every 10 epochs (~64%% overhead), "
                              "50 -> ~26%% overhead. Runs regardless of wandb mode.")
+    parser.add_argument("--wandb_run_name", default=None,
+                        help="Monitoring run name override (default: <model>_<stage>_<fold>). "
+                             "Lets several cells sharing one model_name stay distinguishable.")
     parser.add_argument("--wandb_experiment_tag", default=None, help="Batch tag used by Wandb_Analyzer to group runs.")
     parser.add_argument("--monitor_backend", choices=("wandb", "swanlab"), default=None,
                         help="Online monitoring backend used when --wandb_mode != disabled.")
@@ -1565,8 +1675,8 @@ def _occ_a3_monitor(model, loader, config, device):
             err_vt = torch.linalg.vector_norm(kp_vt - batch["kp_gt"], dim=-1).mean(dim=(-1, -2))
             vt_le_v = err_vt <= err_v
             src = batch["occ_src"].to(device)
-            for src_val, name in ((SRC_CAM3, "cam3"), (SRC_OCC, "occ")):
-                mask = src == src_val
+            # 档梯下 occ_src 为档索引 ⇒ 二值化为 cam3(=0) / occ(≠0)。
+            for mask, name in (((src == SRC_CAM3), "cam3"), ((src != SRC_CAM3), "occ")):
                 if bool(mask.any()):
                     stats[name][0] += int(vt_le_v[mask].sum().item())
                     stats[name][1] += int(mask.sum().item())
@@ -1661,7 +1771,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.lr_schedule is not None:
         config["lr_schedule"] = args.lr_schedule
     for key in ("wandb_mode", "wandb_project", "wandb_entity", "wandb_eval_interval", "wandb_experiment_tag",
-                "monitor_backend", "swanlab_workspace"):
+                "wandb_run_name", "monitor_backend", "swanlab_workspace"):
         value = getattr(args, key)
         if value is not None:
             config[key] = value
@@ -1695,8 +1805,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     v5_1_mode = bool(config.get("v5_1", False))
     v4_1_mode = bool(config.get("v4_1", False))
     enum_mode = config.get("condition_sampling", "sample") == "enum"
-    if enum_mode and (not bool(config.get("v7")) or bool(config.get("occ_mix", False)) or args.occ_mix):
-        raise ValueError("enum currently requires a V7-derived model without occ_mix")
+    if enum_mode and not bool(config.get("v7")):
+        raise ValueError("enum currently requires a V7-derived model")
+    if enum_mode and (bool(config.get("occ_mix", False)) or args.occ_mix):
+        # 修改 13 D1：enum 本来就在枚举 V/T 的在场与否，p_nullV/p_nullT
+        # 与它同义重复 —— 置零后语义不冲突，只有降质档位（v_src）这一维
+        # 叠加在枚举之上（condition_inputs 在枚举循环内调用，三行共享同一
+        # 份降质 V，正是要的语义）。两个 null 开关非零才是真冲突。
+        _p_null = (float(args.p_nullv if args.p_nullv is not None
+                         else config.get("p_nullV", P_NULLV_DEFAULT)),
+                   float(args.p_nullt if args.p_nullt is not None
+                         else config.get("p_nullT", P_T_DEFAULT)))
+        if any(p > 0.0 for p in _p_null):
+            raise ValueError(
+                "enum + occ_mix requires p_nullV=p_nullT=0 (enum already "
+                "enumerates V/T presence); got p_nullV=%g p_nullT=%g" % _p_null)
+    if float(config.get("p_stale", 0.0)) > 0.0 and not enum_mode:
+        # 修改 14 §5.3：错位增强只接在 backward_v7_enum 的 VT 档上；
+        # 非 enum 静默不生效 = 假实验（2026-11-03 死开关防御）。
+        raise ValueError("--p-stale requires enum training "
+                         "(condition_sampling=enum)")
     if bool(config.get("ar_rollout", False)) and not enum_mode:
         # 修改 04：rollout 只接在 backward_v7_enum（枚举路径）上——
         # 非枚举模式静默死开关 = 假实验（2026-11-03）。
@@ -1831,6 +1959,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["occ_mix"] = True
     if getattr(args, "t_phys_v2", None) is not None:
         config["t_phys_v2"] = bool(args.t_phys_v2)
+    if getattr(args, "t_phys_hull_recenter", None) is not None:
+        config["t_phys_hull_recenter"] = bool(args.t_phys_hull_recenter)
     if getattr(args, "d8_heads", None) is not None:
         config["d8_heads"] = bool(args.d8_heads)
     if args.occ_a3_monitor:
@@ -1874,9 +2004,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.v7_ar2_fb_dim is not None:
         config["v7_ar2_fb_dim"] = int(args.v7_ar2_fb_dim)
     for key, value in (("p_occ", args.p_occ), ("p_nullV", args.p_nullv),
-                       ("p_nullT", args.p_nullt)):
+                       ("p_nullT", args.p_nullt), ("p_stale", args.p_stale)):
         if value is not None:
             config[key] = float(value)
+    if args.occ_levels is not None:
+        config["occ_levels"] = ",".join(normalize_levels(args.occ_levels))
     # V6_Av1 occ_mix (2026-10-19)：训练侧增强，默认关。启用后 train/val
     # dataset 均按标签采样（val 同挂标签供 A3 分层监控）。必须在本 args
     # →config 段之后计算（早于 --occ-mix 映射会恒为 None——2026-10-20
@@ -1887,7 +2019,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             "p_occ": float(config.get("p_occ", 0.2)),
             "p_nullV": float(config.get("p_nullV", 0.1)),
             "p_T": float(config.get("p_nullT", 0.1)),
+            # 修改 13 D1 档梯；缺省单档 010 = v1 行为逐位不变。
+            "levels": normalize_levels(config.get("occ_levels")),
         }
+        config["occ_levels"] = ",".join(occ_mix_kwargs["levels"])
     # 阶段 3 触觉泛化增强（2026-10-31）：训练侧 T_raw 增强，默认关。
     # tactile_aug dict 直接传给 AnySoleDataset（train 侧），val/eval 不传。
     tactile_aug_kwargs = None
@@ -1935,9 +2070,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             v7_ar=bool(config.get("v7_ar", False)),
             v7_ar2=bool(config.get("v7_ar2", False)),
             obs_context=config.get("obs_context"),
+            long_obs=bool(config.get("v7_vcur", False)),
             load_v5_1_gt=v5_1_mode,
             occ_mix=occ_mix_kwargs,
             t_phys_v2=bool(config.get("t_phys_v2", False)),
+            t_phys_hull_recenter=bool(config.get("t_phys_hull_recenter", False)),
             d8_heads=bool(config.get("d8_heads", False)),
             tactile_aug=tactile_aug_kwargs,
             smpl_support_policy=str(config.get("smpl_support_policy", "exclude")),
@@ -1965,7 +2102,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     val_loader = None
     try:
-        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs, t_phys_v2=bool(config.get("t_phys_v2", False)), d8_heads=bool(config.get("d8_heads", False)),
+        val_dataset = AnySoleDataset(mode="eval", seq_root=Path(config["seq_root"]), split_csv=Path(config["split_csv"]), cache_root=Path(config["cache_root"]), window_length=int(config["tw"]), contact_method=str(config["contact_method"]), tactile_input=str(config.get("tactile_input", "raw108")), no_imu=bool(config.get("no_imu", False)), v_input=str(config.get("v_input", "hrnet")), f2_repr=bool(config.get("f2_repr", False)), smpl_roots=config.get("smpl_roots"), cam_id=int(config.get("cam_id", 3)), load_v5_1_gt=v5_1_mode, occ_mix=occ_mix_kwargs, t_phys_v2=bool(config.get("t_phys_v2", False)), t_phys_hull_recenter=bool(config.get("t_phys_hull_recenter", False)), d8_heads=bool(config.get("d8_heads", False)),
         tactile_weight_norm=bool(config.get("tactile_weight_norm", False)),
         v7_ctx=bool(config.get("v7_prev_ctx", False)),
         v7_ctx3=bool(config.get("v7_ctx3", False) or config.get("v7_ctx4", False) or config.get("v7_ctx5", False)),
@@ -1973,6 +2110,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         v7_ar=bool(config.get("v7_ar", False)),
         v7_ar2=bool(config.get("v7_ar2", False)),
         obs_context=config.get("obs_context"),
+        long_obs=bool(config.get("v7_vcur", False)),
         smpl_support_policy=str(config.get("smpl_support_policy", "exclude")))
         if len(val_dataset):
             val_loader = DataLoader(val_dataset, batch_size=int(config["batch_size"]), shuffle=False, num_workers=int(config["num_workers"]), collate_fn=collate_windows, pin_memory=device.type == "cuda")
@@ -1981,7 +2119,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             # V5_Av1：z 通道 GT 缺失时 val 必须失败而非静默禁用——ckpt_best
             # 只由 val 面板选出，静默禁用 = 整轮训练无 best 快照。
             raise
-        if occ_mix_kwargs and "occ010 cache" in str(exc):
+        if occ_mix_kwargs and "occ_mix cache" in str(exc):
             # V6_Av1：occ 缓存缺失时 val 同样必须失败（ckpt_best 只由 val
             # 面板选出；occ_mix 增强运行不允许静默退化为普通 val）。
             raise
@@ -2002,7 +2140,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             "stage": "single",
             "fold": "fold0",
         }
-        monitor_name = "%s_%s_%s" % (monitor_identity["model"], monitor_identity["stage"], monitor_identity["fold"])
+        # run 名默认 = model_stage_fold（Wandb_Analyzer 口径）。model_name 决定
+        # ckpt 路径不可改，但同一 model_name 的多个 cell（不同 split/obs_context）
+        # 在监控页上会同名难辨 —— wandb_run_name 显式覆盖，不写即旧行为不变。
+        monitor_name = str(config.get("wandb_run_name") or "%s_%s_%s" % (
+            monitor_identity["model"], monitor_identity["stage"], monitor_identity["fold"]))
         monitor_group = "%s_%s" % (monitor_identity["experiment_tag"], monitor_identity["run_kind"])
         monitor_tags = [monitor_identity[k] for k in
                         ("experiment_tag", "run_kind", "model", "stage", "fold")]
@@ -2184,6 +2326,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("pose stats: mean %.4f +/- %.4f, std %.4f +/- %.4f (dims floored at 1e-2: %d/%d)"
               % (pose_mean.mean().item(), pose_mean.std().item(), pose_std.mean().item(),
                  pose_std.std().item(), int((pose_std <= 1e-2).sum().item()), pose_mean.shape[0]))
+    if getattr(model, "trans_anchor_head", False):
+        # 修改 08 改动 A2：平移锚逐轴统计，同机制拟合后冻结。
+        # RNG 存/复（2026-11-04 验收）：多遍历一遍 shuffle=True 训练 loader
+        # 会消费数据顺序的采样种子（RandomSampler 每次建迭代器从全局 CPU
+        # RNG 抽 seed，多 worker 时再抽一次 base_seed），不存复则此后每个
+        # epoch 的批顺序与 Cv5 不同 → 零税契约「数据取样顺序不变」失效
+        # （判据 1 从可证退化为统计）。与 A1 构造期同一套存/复先例。
+        _rng = torch.get_rng_state()
+        anchor_mean, anchor_std = fit_anchor_stats(loader, device)
+        torch.set_rng_state(_rng)
+        model.set_anchor_stats(anchor_mean, anchor_std)
+        print("anchor stats: mean %s std %s (floored at 1e-2 m)"
+              % (anchor_mean.tolist(), anchor_std.tolist()))
     if v3f_mode:
         state_mean, state_std = fit_state_stats(loader, device)
         model.denoiser.set_stats(state_mean, state_std)
@@ -2248,6 +2403,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             t_pa_max=float(config.get("checkpoint_gate_t", 90.0)),
             vt_pa_max=float(config.get("checkpoint_gate_vt", 40.0)),
             keep_latest=not bool(config.get("checkpoint_all", False)),
+            resume=bool(args.resume),
         )
         print("additive candidate pool: role=%s, mode=%s, path=%s" %
               (checkpoint_archive.role,
@@ -2265,6 +2421,34 @@ def main(argv: Optional[List[str]] = None) -> int:
               % (lr_warmup_frac, int(config["epochs"]), len(loader), warmup_steps))
 
     global_step = 0
+    start_epoch = 0
+    resume_best_vt = None
+    if args.resume:
+        # 断点续训（2026-11-03，显式开关，不推断）：model + optimizer + epoch 从
+        # out_dir/ckpt_last.pt 接回；学习率按 epoch 现算（无调度器状态）；
+        # global_step = epoch × steps/epoch（与不中断时一致）；best_vt 取自 ckpt_best.pt。
+        resume_path = out_dir / "ckpt_last.pt"
+        if not resume_path.is_file():
+            raise FileNotFoundError("--resume: no ckpt_last.pt in %s" % out_dir)
+        resume_ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
+        saved_cfg = resume_ckpt.get("config", {})
+        mismatch = [k for k in ("model_name", "tw", "stride", "obs_context", "epochs",
+                                "batch_size", "seed", "lr", "split_csv", "config_probs")
+                    if saved_cfg.get(k) != config.get(k)]
+        if mismatch:
+            raise RuntimeError("--resume: checkpoint config differs from the current run on %s" % mismatch)
+        model.load_state_dict(resume_ckpt["model"])
+        optimizer.load_state_dict(resume_ckpt["optimizer"])
+        start_epoch = int(resume_ckpt["epoch"])
+        if not 0 < start_epoch < int(config["epochs"]):
+            raise RuntimeError("--resume: nothing to resume (epoch %d of %d)" % (start_epoch, int(config["epochs"])))
+        global_step = start_epoch * len(loader)
+        best_file = out_dir / "ckpt_best.pt"
+        if best_file.is_file():
+            resume_best_vt = torch.load(best_file, map_location="cpu", weights_only=False).get("best_vt")
+        torch.manual_seed(int(config.get("seed", 0)) + start_epoch)
+        print("resumed from %s: epoch %d, global_step %d, best_vt %s"
+              % (resume_path, start_epoch, global_step, resume_best_vt))
     # V4A clustering schedule (方案 A): temperature/entropy anneal linearly
     # over the first assign_anneal_frac of total steps, then A is frozen for
     # the last (1 - assign_lock_frac) of the run so the heads settle against
@@ -2300,8 +2484,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     else:
         sigma_freeze_steps = 0
-    best_vt = None
-    for epoch in range(int(config["epochs"])):
+    best_vt = resume_best_vt
+    for epoch in range(start_epoch, int(config["epochs"])):
         model.train()
         # E4 cosine LR decay over the whole run; E3 base uses lr_schedule
         # "constant" (E3's regime, whose output was verified good).
@@ -2331,6 +2515,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         cond_tau = None
         # V6_Av1 A1/A2 窗源分层累计（occ_mix 启用时；key -> [sum, count]）。
         occ_acc: Dict[str, tuple] = {}
+        # 修改 14 §5.3：错位增强生效比例（逐 epoch 打印，别假设 = p_stale）。
+        _p_stale = float(config.get("p_stale", 0.0))
+        stale_acc = {"applied": 0, "eligible": 0} if _p_stale > 0.0 else None
         # epoch_sums 的损失键映射：L_corr_prior 只在 v4_1_mode 存在
         # （compute_losses_v4_1 独有）——按模式隔离，其余模式损失 dict
         # 无此键，混入会 KeyError（2026-10-20 V5_Av1 队列竞态事故）。
@@ -2342,7 +2529,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                       ("L_contact", "loss_contact"), ("L_phase", "loss_phase"),
                       ("L_cop", "loss_cop"),
                       ("L_tcop", "loss_tcop"), ("L_strike", "loss_strike"),
-                      ("L_gtcop", "loss_gtcop"), ("L_cond", "loss_cond")]
+                      ("L_gtcop", "loss_gtcop"), ("L_cond", "loss_cond"),
+                      # 修改 07（V7_Cv5SD）：按通道分解的轨迹键 + 方向头
+                      # 退化诊断；老格损失 dict 无这些键，present_losses
+                      # 过滤后不会进入 epoch 汇总。
+                      ("L_traj_speed", "loss_traj_speed"),
+                      ("L_traj_vy", "loss_traj_vy"),
+                      ("L_traj_dir", "loss_traj_dir"),
+                      ("L_traj_dmag", "loss_traj_dmag"),
+                      ("sd_dir_norm_q10", "sd_dir_norm_q10"),
+                      ("sd_dir_norm_q50", "sd_dir_norm_q50"),
+                      ("sd_dir_tiny_frac", "sd_dir_tiny_frac")]
         if v4_1_mode:
             loss_pairs.append(("L_corr_prior", "loss_corr_prior"))
             epoch_sums["loss_corr_prior"] = 0.0
@@ -2415,7 +2612,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                                ar_ss_p=ar_p_cur,
                                                ar_noise=ar_noise,
                                                ar_cache=ar_ss_cache,
-                                               ar_rollout_len=ar_rollout_len)
+                                               ar_rollout_len=ar_rollout_len,
+                                               stale_acc=stale_acc)
             elif v3f_mode:
                 # V3_Fv1: diffuse the full normalized state [pose | trans |
                 # contact]; 10% V zeroing is the unconditional prior pass
@@ -2565,7 +2763,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 occ_acc[key] = (occ_acc.get(key, (0.0, 0))[0] + float(cell["sum"]),
                                                occ_acc.get(key, (0.0, 0))[1] + int(cell["n"]))
                     occ_acc["frac_occ"] = (occ_acc.get("frac_occ", (0.0, 0))[0]
-                                           + float((src == SRC_OCC).sum().item()), batch_size)
+                                           + float((src != SRC_CAM3).sum().item()), batch_size)
                     occ_acc["frac_nullV"] = (occ_acc.get("frac_nullV", (0.0, 0))[0]
                                              + float(vz_l.sum().item()), batch_size)
                     occ_acc["frac_nullT"] = (occ_acc.get("frac_nullT", (0.0, 0))[0]
@@ -2635,7 +2833,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                     _norm / math.sqrt(max(grad_probe_counts[_name], 1)) * batch_size)
             grad_clip = config.get("grad_clip")
             if grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
+                clip_params = model.parameters()
+                if (getattr(model, "trans_anchor_head", False)
+                        and getattr(model, "trans_anchor_stopgrad", True)):
+                    # 修改 10 零税补丁（2026-11-05）：旁路平移锚头不参与
+                    # 主干梯度范数。实测锚头梯度范数 ~0.4-0.7，clip 触发步
+                    # （trunk 6.6 > 5）会把 trunk 缩放因子从 5/6.602 改成
+                    # 5/6.635（−0.5%），逐 epoch 注入系统性扰动——1 epoch
+                    # 后主干参数差 1.6e-6（同配置重跑仅 2.3e-7）。排除后
+                    # clip 口径与 Cv5 逐位一致，零税契约回到代数恒等。
+                    clip_params = [
+                        p for n, p in model.named_parameters()
+                        if not n.startswith("anchor_trans_off")]
+                torch.nn.utils.clip_grad_norm_(clip_params, float(grad_clip))
             # clip 就地缩放梯度，须重建扁平列表才能读到缩放后的值。
             grads_list = [
                 p.grad.detach().reshape(-1) for p in model.parameters() if p.grad is not None
@@ -2681,6 +2891,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             parts = ["%s=%.4f(n=%d)" % (key, total / max(count, 1), count)
                      for key, (total, count) in occ_acc.items()]
             print("occ_mix epoch %d: %s" % (epoch + 1, " ".join(parts)))
+        if stale_acc is not None:
+            # 修改 14 §5.3：真实生效比例 = applied / eligible（不是 p_stale）。
+            rate = stale_acc["applied"] / max(stale_acc["eligible"], 1)
+            print("stale_mix epoch %d: applied=%d eligible=%d rate=%.4f (p_stale=%.3f)"
+                  % (epoch + 1, stale_acc["applied"], stale_acc["eligible"],
+                     rate, _p_stale))
         # V5_Av1 机制探针（epoch 级）：film/* = FiLM 偏离恒等幅度与梯度
         # （兑现瓶颈定位——FiLM 是否收到梯度、是否被推回恒等）；poe/w_* =
         # PoE 接触合成权重（精度加权是否分化）。z_* 均值见 wandb 块。

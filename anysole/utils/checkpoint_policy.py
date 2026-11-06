@@ -95,19 +95,28 @@ class CandidateArchive:
     """
 
     def __init__(self, root, role, v_pa_max=40.0, t_pa_max=90.0, vt_pa_max=40.0,
-                 keep_latest=False):
+                 keep_latest=False, resume=False):
         if role not in ROLE_MODES:
             raise ValueError("Unknown checkpoint role: " + str(role))
         gates = {"V": v_pa_max, "T": t_pa_max, "VT": vt_pa_max}
         if any(not finite(x) or x <= 0 for x in gates.values()):
             raise ValueError("Checkpoint gates must be positive finite numbers")
         self.root = Path(root)
-        if self.root.exists() and any(self.root.iterdir()):
+        if self.root.exists() and any(self.root.iterdir()) and not resume:
             raise FileExistsError("Use a fresh run directory; candidate archive already exists: %s" % self.root)
         self.role, self.gates, self.keep_latest = role, gates, bool(keep_latest)
         self.keys = tuple(mode + "/" + metric for mode in ROLE_MODES[role]
                           for metric in ("PA-MPJPE", "GlobalMPJPE"))
         self.rows, self.champions, self.last_epoch = {}, {}, 0
+        manifest = self.root / "manifest.json"
+        if resume and manifest.is_file():
+            # 断点续训：从已提交的 manifest 恢复池状态（与 update 写出的字段一一对应）。
+            state = json.loads(manifest.read_text(encoding="utf-8"))
+            if state.get("role") != role or state.get("mode") != ("latest" if self.keep_latest else "full"):
+                raise ValueError("candidate archive manifest does not match the resumed run")
+            self.rows = dict(state.get("candidates", {}))
+            self.champions = dict(state.get("champions", {}))
+            self.last_epoch = int(state.get("last_epoch", 0))
 
     def _gate_pass(self, metrics):
         for mode in ROLE_MODES[self.role]:

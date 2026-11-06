@@ -71,6 +71,12 @@ if set(_V7_PART_GATE_GROUP) != set(PART_NAMES):
 _V7_QUERY_GATE_IDX = (0,) + tuple(
     _V7_GATE_GROUPS.index(_V7_PART_GATE_GROUP[name]) for name in PART_NAMES)
 
+# 修改 13 D3（2026-11-06）：按可观测性钉门的 query 槽 —— 腿/足四部位。
+# query 轴序 = [根速度] + PART_NAMES ⇒ 槽 6/7/8/9。
+_V7_LEG_FOOT_PARTS = ("l_leg", "r_leg", "l_foot", "r_foot")
+_V7_GATE_PIN_LEGS = (0.0,) + tuple(
+    1.0 if name in _V7_LEG_FOOT_PARTS else 0.0 for name in PART_NAMES)
+
 
 class _V7DecoderLayer(nn.Module):
     """一层共享运动解码：query 自注意力 + 分别读取 M_V / M_T + FFN。
@@ -98,14 +104,29 @@ class _V7DecoderLayer(nn.Module):
         self.ln_f = nn.LayerNorm(dim)
 
     def forward(self, q, m_v, m_t, v_present, t_present, tw, gate=None,
-                gate_fn=None, attn_mask=None):
+                gate_fn=None, attn_mask=None, gate_v=None):
         # q / m_v / m_t: (B, seq, d)；v_present/t_present: (B,) float01。
         # attn_mask：帧级 AR（2026-11-01）的因果掩码（仅 T 行）。
         # gate_fn（Q，§6）：第一层以「视觉更新后的 query h 与未乘门的 T
         # 注意力输出 a_T」为条件计算门——本层使用，并返回供后续层复用。
+        # gate_v（修改 14 §5）：V 侧信任门，乘在 V 交叉注意力输出上；
+        # 与 T 门同形状契约（(B,tw,1,1) 或 (B,tw,nq,1)）。
         h = self.ln_q(q + self.self_attn(q, q, q, need_weights=False,
                                          attn_mask=attn_mask)[0])
         v_out = self.xattn_v(h, m_v, m_v, need_weights=False)[0]
+        if gate_v is not None:
+            batch, queries, dim = v_out.shape
+            nq = queries // tw
+            gv = gate_v
+            if gv.dim() == 3:
+                gv = gv.unsqueeze(2)
+            if gv.dim() != 4 or gv.shape[0] != batch or gv.shape[1] != tw:
+                raise ValueError("V gate must be window-level or match the motion queries")
+            if gv.shape[2] == 1:
+                gv = gv.expand(-1, -1, nq, -1)
+            elif gv.shape[2] != nq:
+                raise ValueError("V gate query axis must be 1 or nq")
+            v_out = (v_out.view(batch, tw, nq, dim) * gv).view(batch, queries, dim)
         h = self.ln_v(h + v_out * v_present.view(-1, 1, 1))
         t_out = self.xattn_t(h, m_t, m_t, need_weights=False)[0]
         if gate_fn is not None:
@@ -133,11 +154,22 @@ class V7MotionHead(nn.Module):
     def __init__(self, embeddings, dim=D_MODEL, tw=TW, nhead=8,
                  dim_feedforward=1024, dropout=0.1, n_layers=6, route=False,
                  ctx_v2=False, ctx5=False, ar=False, ar_fb=True, ar2=False,
-                 ar2_fb=True, ar2_lowdim=False, ar2_fb_dim=16):
+                 ar2_fb=True, ar2_lowdim=False, ar2_fb_dim=16, root_sd=False,
+                 root_sd_t1=False, abs_vrows=False):
         super().__init__()
+        # 读出按条件分支（2026-11-04，修改 09）：abs_vrows=True 时只有 T 行
+        # （v_present<0.5）做去航向投影 → V/VT 行根 6D 保持绝对世界朝向
+        # （= Cv5 目标空间），T 行仍是 tilt + 外部 ψ 累积。默认 False =
+        # AR2M 旧行为逐位不变（全条件去航向）。
+        self.abs_vrows = bool(abs_vrows)
         self.embeddings = embeddings
         self.dim = dim
         self.tw = tw
+        # 根头速率/方向解耦（2026-11-04，修改 07 改动 A）：True 时根头
+        # 输出 [水平速率, 水平单位方向 (x,z), 垂直分量] 四通道；False 时
+        # 与 Cv5 逐位一致（3 通道、同一构造顺序 → 同一 RNG 消耗）。
+        self.root_sd = bool(root_sd)
+        self.root_sd_t1 = bool(root_sd_t1)
         self.ctx_v2 = bool(ctx_v2)
         self.ctx5 = bool(ctx5)
         self.ar = bool(ar)
@@ -168,7 +200,14 @@ class V7MotionHead(nn.Module):
         self.out_parts = nn.ModuleList(
             [nn.Linear(dim, 6 * len(joints)) for joints in self.part_joints])
         self.root_head = nn.Sequential(
-            nn.Linear(dim, dim), nn.GELU(), nn.Linear(dim, 3))
+            nn.Linear(dim, dim), nn.GELU(),
+            nn.Linear(dim, 4 if (self.root_sd and not self.root_sd_t1) else 3))
+        if self.root_sd_t1:
+            # T1（2026-11-06）：根头 3 通道 [s, φ, vy]；φ 末层零初始化
+            # ⇒ init 时方向 = 同帧根 6D 前向轴（不消耗 RNG，其他通道不变）。
+            with torch.no_grad():
+                self.root_head[-1].weight[1].zero_()
+                self.root_head[-1].bias[1].zero_()
         if self.ar or self.ar2:
             # 帧级 AR（2026-11-01，V7 方案 §11）：反馈 = 上一帧完整输出，
             # 共享投影加性注入；零初始化保留 init 逐位 = Cv5 契约（RNG
@@ -241,6 +280,7 @@ class V7MotionHead(nn.Module):
         self.pose_std = pose_std.to(self.pose_std.dtype)
 
     def forward(self, m_v, m_t, v_present, t_present, gate=None,
+                gate_v=None,
                 t_only_mask=None, t_only_adapters=None, vt_mask=None,
                 vt_adapters=None, z_override=None,
                 gate_fn=None, ctx_vec=None, ctx_pose=None, ctx_block=None,
@@ -334,12 +374,15 @@ class V7MotionHead(nn.Module):
                           :frames * (1 + self.n_parts)]
         if gate is not None and max_frames is not None:
             gate = gate[:, :frames]
+        if gate_v is not None and max_frames is not None:
+            gate_v = gate_v[:, :frames]
         if gate_fn is not None and max_frames is not None:
             raise ValueError("prefix decoding (max_frames) is unsupported "
                              "with route_conditional gate_fn")
         for layer in self.layers:
             q, gate = layer(q, m_v, m_t, v_present, t_present, frames,
-                            gate=gate, gate_fn=gate_fn, attn_mask=_mask)
+                            gate=gate, gate_fn=gate_fn, attn_mask=_mask,
+                            gate_v=gate_v)
             gate_fn = None  # Q：第一层计算的同一组门供后续五层复用（§6）
         if z_override is not None:
             q = z_override  # TTA 注入点（decoder 输出 / out_parts·root_head 前）
@@ -358,7 +401,41 @@ class V7MotionHead(nn.Module):
             mask = vt_mask.to(q.dtype).view(B, 1, 1, 1)
             z_root = z_root + mask * vt_adapters[0](z_root)
             z_parts = z_parts + mask * vt_adapters[1](z_parts)
-        v_hat = self.root_head(z_root)[:, :, 0, :]       # (B, tw, 3)
+        root_out = self.root_head(z_root)[:, :, 0, :]    # (B, tw, 3|4)
+        sd_out = None
+        if self.root_sd:
+            # 修改 07 改动 A（2026-11-04）：三通道组装。轴约定 y-up、
+            # forward_axis=+Z → 水平面 = (x, z) = 下标 [0, 2]。softplus
+            # 保证速率非负；normalize 的 eps 让静止帧方向模长趋零成为
+            # 合法状态（不加前向报错，原始模长另行登记进诊断）。
+            s_hat = F.softplus(root_out[..., 0])               # (B, tw)
+            if self.root_sd_t1:
+                # T1（2026-11-06，T 运动轴 T1）：方向载体 = 同帧根 6D 前向轴
+                # + 标量偏角 φ。根头 3 通道 [s, φ, vy]；φ 零初始化 ⇒ init
+                # 方向 = 姿态前向轴。前向轴取 POSE_DIM 前 6 位（关节 0 =
+                # root）经 rot6d_to_rotmat 的第三列（+Z），投影到 (x,z)。
+                phi = root_out[..., 1]                         # (B, tw) rad
+                vy_hat = root_out[..., 2]
+                root6 = (self.out_parts[0](z_parts[..., 0, :])[..., :6]
+                         * self.pose_std[:6] + self.pose_mean[:6])
+                fwd = rot6d_to_rotmat(root6)[..., :, 2]        # (B,tw,3) +Z
+                fwd_xz = F.normalize(fwd[..., [0, 2]], dim=-1, eps=1e-6)
+                c, s = torch.cos(phi), torch.sin(phi)
+                d_x = c * fwd_xz[..., 0] - s * fwd_xz[..., 1]
+                d_z = s * fwd_xz[..., 0] + c * fwd_xz[..., 1]
+                d_hat = torch.stack([d_x, d_z], dim=-1)        # (B,tw,2)
+                sd_dir_norm = torch.ones_like(phi)             # 诊断占位
+            else:
+                dir_raw = root_out[..., 1:3]
+                d_hat = F.normalize(dir_raw, dim=-1, eps=1e-6)  # (B, tw, 2)
+                vy_hat = root_out[..., 3]                      # (B, tw)
+                sd_dir_norm = torch.linalg.vector_norm(dir_raw, dim=-1)
+            # v_hat 契约不变：(B, tw, 3) 世界系 m/s（下游 cumsum/锚/FK 全不动）
+            v_hat = torch.stack([s_hat * d_hat[..., 0], vy_hat,
+                                 s_hat * d_hat[..., 1]], dim=-1)
+            sd_out = (s_hat, d_hat, vy_hat, sd_dir_norm)
+        else:
+            v_hat = root_out                                   # (B, tw, 3)
         dyaw = None
         if self.ar2:
             dyaw = self.dyaw_head(z_root)[:, :, 0, :]    # (B, tw, 1) rad/帧
@@ -376,8 +453,19 @@ class V7MotionHead(nn.Module):
             # ——反归一化后的物理旋转上投影（§3.1），前向退化报错不静默。
             root6 = pose[..., :6]
             r_root = rot6d_to_rotmat(root6)
-            pose = torch.cat([rotmat_to_6d(deyaw_rotmat(r_root)),
-                              pose[..., 6:]], dim=-1)
+            deyawed = rotmat_to_6d(deyaw_rotmat(r_root))
+            if self.abs_vrows:
+                # 修改 09：只 T 行去航向；V/VT 行保留绝对朝向（视觉直接观测
+                # 到世界航向，无需经 Δψ 二次组装——避免沿运动学链放大）。
+                t_rows = (v_present < 0.5).view(-1, 1, 1).to(deyawed.dtype)
+                root_out6 = t_rows * deyawed + (1.0 - t_rows) * root6
+            else:
+                root_out6 = deyawed
+            pose = torch.cat([root_out6, pose[..., 6:]], dim=-1)
+        # root_sd=True 时在第 6 位追加 sd_out；False 时保持 5 元组，既有
+        # 调用方（model.forward / rollout_forward / tests）逐位不变。
+        if self.root_sd:
+            return pose, v_hat, dyaw, z_root, z_parts, sd_out
         return pose, v_hat, dyaw, z_root, z_parts
 
 
@@ -390,6 +478,8 @@ class AnySoleModelV7(nn.Module):
       ``part_routes``：四组门（LR/TLR）——vel/other/left/right，左右门
         = 姿态门深拷贝（初始化等价契约 §5：共享模块随机初始化不受新增
         参数影响；LR 的相同门初始化复现 B，TLR 复现 T）。
+      ``gate_pin_legs``：PO（修改 13 D3）——腿/足四部位 query 的门钉成
+        1.0（门只作用在 vel/其余姿态上）。零新增参数，只缩门的作用域。
       ``route_conditional``：Q（§6）——保持 TLR 四组逐帧门与 MLP 尺寸，
         门输入改为第一层解码上下文（视觉更新后的 query 均值 + 未乘门的
         T 注意力输出均值），第一层计算、六层复用；无新增参数。
@@ -399,15 +489,23 @@ class AnySoleModelV7(nn.Module):
                  contact_root: bool = False, reliability_route: bool = False,
                  task_routes: bool = False, t_only_adapters: bool = False,
                  route_temporal: bool = False, part_routes: bool = False,
-                 route_conditional: bool = False, prev_ctx: bool = False,
+                 route_conditional: bool = False,
+                 gate_pin_legs: bool = False,
+                 v_gate: bool = False, gate_2sigma: bool = False,
+                 prev_ctx: bool = False,
                  ctx_v2: bool = False, ctx_vcond: bool = False,
                  ctx3: bool = False, ctx4: bool = False,
                  ctx4b: bool = False, ctx5: bool = False,
                  ar: bool = False, ar_fb: bool = True, ar2: bool = False,
                  ar2_fb: bool = True, ar2_lowdim: bool = False,
                  ar2_fb_dim: int = 16, ar2_regression: bool = False,
-                 vt_t_residual: bool = False,
-                 obs_context=None, v_cur: bool = False):
+                 abs_vrows: bool = False,
+                 vt_t_residual: bool = False, root_sd: bool = False,
+                 root_sd_t1: bool = False,
+                 trans_anchor_head: bool = True,
+                 trans_anchor_stopgrad: bool = True,
+                 obs_context=None, v_cur: bool = False,
+                 t_phys_v2: bool = False):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -417,13 +515,16 @@ class AnySoleModelV7(nn.Module):
         self.v_cur = bool(v_cur)
         if self.obs_context < tw or self.obs_context % tw:
             raise ValueError("obs_context must be a multiple of tw and at least as large")
-        if self.obs_context > tw and not ar2:
-            raise ValueError("extended observation context requires ar2")
+        if self.obs_context > tw and not (ar2 or self.v_cur):
+            raise ValueError("extended observation context requires ar2 or v_cur")
         self.modal = "anysolev2"
         self.v7 = True
         self.v_input = "hrnet"
         self.tactile_input = "raw108"
         self.t_encoder = "foot_conv"
+        # 维度 2（2026-11-05，修改 11 A3）：T_phys 12→20 只改物理量那一段，
+        # raw108 的 96 维 T_raw 口径不动；默认 False = Cv5/SD2 逐位不变。
+        self.t_phys_v2 = bool(t_phys_v2)
         self.f2_repr = False
         self.contact_root = bool(contact_root)
         self.reliability_route = bool(reliability_route)
@@ -432,6 +533,18 @@ class AnySoleModelV7(nn.Module):
         self.route_temporal = bool(route_temporal)
         self.part_routes = bool(part_routes)
         self.route_conditional = bool(route_conditional)
+        # 按可观测性划定门的作用域（修改 13 D3，2026-11-06）：腿/足 query
+        # 的 T 信任门钉成 1.0 —— 实测踝足 Δ(VT−V) 在 occ000 就四折同负、
+        # 逐受试者 6/6 同负，T→足/腿 这条路上没有可压的害。零新增参数，
+        # 只改门的作用域（单旗）；默认关 = Cv5 逐位不变。
+        self.gate_pin_legs = bool(gate_pin_legs)
+        # 双向信任门（修改 14 §5，2026-11-06）：V 侧镜像门 + T 门 2σ。
+        #   v_gate      —— 在 V 交叉注意力输出上加连续门 g_v（2σ，init 1）；
+        #   gate_2sigma —— T 门值域由 (0,1) 改成 (0,2)，末层零初始化
+        #                  ⇒ init 时 g_t ≡ 1（= 无门 Cv7 的 T 支路）。
+        # 两旗默认关 = Cv5 逐位不变；V8_Cv5VG 两旗同开。
+        self.v_gate = bool(v_gate)
+        self.gate_2sigma = bool(gate_2sigma)
         self.prev_ctx = bool(prev_ctx)
         self.ctx_v2 = bool(ctx_v2)
         self.ctx_vcond = bool(ctx_vcond)
@@ -448,7 +561,40 @@ class AnySoleModelV7(nn.Module):
         # 纯回归收口（2026-11-02，v7_c2ar2r）：训练/评估两侧读本属性
         # （模型属性 = 真值，checkpoint config 只作回退）。
         self.ar2_regression = bool(ar2_regression)
+        # 读出按条件分支（修改 09，2026-11-04）：V/VT 行绝对根朝向 + 绝对
+        # 世界速度（= Cv5 目标空间），T 行保持 AR2 相对表征 + 外部 ψ。
+        # 训练/评估两侧读本属性（模型属性 = 真值，ckpt config 只作回退）。
+        self.abs_vrows = bool(abs_vrows)
+        if self.abs_vrows and not self.ar2:
+            raise ValueError("abs_vrows requires ar2 (它只改 AR2 的条件读出)")
+        if self.gate_pin_legs:
+            if not self.task_routes:
+                raise ValueError("gate_pin_legs requires task_routes "
+                                 "(它钉的是 10 槽 query 门里的腿/足槽)")
+            if self.route_conditional:
+                raise ValueError("gate_pin_legs is incompatible with "
+                                 "route_conditional (Q 门走独立出口)")
+            # (10,) 常量掩码：1 = 该 query 槽的门钉成 1.0（无新增参数）。
+            self.register_buffer("gate_pin",
+                                 torch.tensor(_V7_GATE_PIN_LEGS), persistent=False)
+        if self.v_gate and not self.reliability_route:
+            raise ValueError("v_gate requires tactile reliability routing")
+        if self.v_gate and self.route_conditional:
+            raise ValueError("v_gate is incompatible with route_conditional (Q)")
+        if self.gate_2sigma and not self.reliability_route:
+            raise ValueError("gate_2sigma requires tactile reliability routing")
         self.vt_t_residual = bool(vt_t_residual)
+        self.root_sd_t1 = bool(root_sd_t1)
+        # 根头速率/方向解耦（修改 07 改动 A）：只定义世界系根的 Cv5 线；
+        # AR/AR2 的根目标在航向系（v_head_gt/dyaw），语义不同，不允许混用。
+        self.root_sd = bool(root_sd)
+        # 平移锚头（修改 08，2026-11-04）：V/VT 行旁路读出窗外那个常数
+        # 平移（评估仍吃 GT 锚；新头只喂并列自锚列）。默认关 = 旧格不变。
+        self.trans_anchor_head = bool(trans_anchor_head)
+        self.trans_anchor_stopgrad = bool(trans_anchor_stopgrad)
+        if self.root_sd and (self.ar or self.ar2):
+            raise ValueError("root_sd is a world-frame root head; "
+                             "ar/ar2 use their own root targets")
         if self.ar2 and self.ar:
             raise ValueError("ar2 and ar are mutually exclusive")
         if self.ar2 and (self.prev_ctx or self.ctx3 or self.ctx4
@@ -488,7 +634,7 @@ class AnySoleModelV7(nn.Module):
         self.encoders = ModalEncoders(
             self.embeddings, dim=d, tw=tw, tactile_input="raw108",
             tactile_direct=False, no_imu=False, v_input="hrnet",
-            t_encoder="foot_conv")
+            t_encoder="foot_conv", t_phys_v2=self.t_phys_v2)
         self.v_temporal = _temporal_encoder(d, 4, nhead, dropout=dropout)
         self.t_temporal = _temporal_encoder(d, 4, nhead, dropout=dropout)
         # 运动解码（挂名为 pose_head：train.py 的姿态统计拟合按名调用）。
@@ -497,7 +643,8 @@ class AnySoleModelV7(nn.Module):
             n_layers=pose_layers, route=reliability_route, ctx_v2=bool(ctx_v2),
             ctx5=bool(ctx5), ar=bool(ar), ar_fb=bool(ar_fb), ar2=bool(ar2),
             ar2_fb=bool(ar2_fb), ar2_lowdim=bool(ar2_lowdim),
-            ar2_fb_dim=int(ar2_fb_dim))
+            ar2_fb_dim=int(ar2_fb_dim), root_sd=bool(root_sd),
+            root_sd_t1=bool(root_sd_t1), abs_vrows=bool(abs_vrows))
         self.contact_head = V41ContactHead(dim=d)
         if ar2:
             # 视觉航向观测分支（方案 §2/§4，仅 V/VT 生效；T 行 v_present=0
@@ -520,6 +667,20 @@ class AnySoleModelV7(nn.Module):
             # 由 route_temporal 决定）。task_routes 下本 MLP = 姿态门。
             self.route_mlp = nn.Sequential(
                 nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 1))
+            if self.gate_2sigma:
+                # 修改 14 §5.2：T 门值域 (0,2)，末层零初始化 ⇒ g_t ≡ 1
+                # （init 逐位 = 无门 Cv7 的 T 支路）。零初始化不消耗 RNG。
+                nn.init.zeros_(self.route_mlp[-1].weight)
+                nn.init.zeros_(self.route_mlp[-1].bias)
+            if self.v_gate:
+                # 修改 14 §5：V 信任门——与 T 门同输入、同粒度、同展开；
+                # 末层零初始化 ⇒ g_v = 2σ(0) = 1（init 逐位 = Cv5）。
+                # fork_rng：新模块的构造不扰动共享参数的 RNG 序列。
+                with torch.random.fork_rng(devices=[]):
+                    self.route_v_mlp = nn.Sequential(
+                        nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 1))
+                    nn.init.zeros_(self.route_v_mlp[-1].weight)
+                    nn.init.zeros_(self.route_v_mlp[-1].bias)
         if self.prev_ctx:
             # 续写上下文（2026-11-01，V7_续写协议方案 §1-§2）：窗首帧根状态
             # [根朝向 6D + 根速度 3 + 有效标志 1]（评估链 = 上一窗预测在其
@@ -547,6 +708,22 @@ class AnySoleModelV7(nn.Module):
             torch.set_rng_state(_rng)
             self.register_buffer(
                 "identity_6d", torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]))
+        if self.trans_anchor_head:
+            # 修改 08：V/VT 行平移锚头（模型改动 A）。m_v 窗口均值 → 归一化
+            # 残差 → 绝对锚（米）。零初始化 ⇒ init 锚 = anchor_mean（最佳常数
+            # 地板，与 ctx4b「恒等 6D 起跳」同角色）；RNG 存/复构造保证
+            # trans_anchor_head=False 时与 Cv5 共享参数 init 逐位相同。
+            _rng = torch.get_rng_state()
+            self.anchor_trans_off = nn.Sequential(
+                nn.Linear(d, d), nn.GELU(), nn.Linear(d, 3))
+            nn.init.zeros_(self.anchor_trans_off[-1].weight)
+            nn.init.zeros_(self.anchor_trans_off[-1].bias)
+            torch.set_rng_state(_rng)
+            # 逐轴统计（三轴量程差 5 倍，不归一化则等权 MSE 被 z 独占）。
+            self.register_buffer("anchor_mean", torch.zeros(3))
+            self.register_buffer("anchor_scale", torch.ones(3))
+            # provenance：联合训练 vs 事后拟合（修改 10 改动 A）。
+            self.trans_anchor_source = "joint"
         # Add private parameters after shared initialization. V2 initially
         # reproduces C's single gate, then learns independent root routing.
         if self.task_routes:
@@ -567,6 +744,38 @@ class AnySoleModelV7(nn.Module):
                 self.vt_root_adapter = self._make_t_only_adapter(d)
                 self.vt_pose_adapter = self._make_t_only_adapter(d)
 
+    def attach_trans_anchor_head(self, state_dict, mean, scale,
+                                 source: str = "post_hoc") -> None:
+        """修改 10 改动 A：把事后拟合的平移锚头挂到冻结 ckpt 上。
+
+        与联合训练版同构（Linear(d,d)+GELU+Linear(d,3)），输入仍是
+        ``m_v.mean(1).detach()``；差别只在 ``trans_anchor_source`` 的
+        provenance（`post_hoc` vs `joint`）。评估侧由 eval.py 在
+        ckpt 旁发现 ``anchor_head.pt`` 时调用。
+        """
+        device = next(self.parameters()).device
+        head = nn.Sequential(
+            nn.Linear(self.d, self.d), nn.GELU(), nn.Linear(self.d, 3))
+        head.load_state_dict({k: v.to(device) for k, v in state_dict.items()})
+        self.anchor_trans_off = head.to(device)
+        if "anchor_mean" not in dict(self.named_buffers()):
+            self.register_buffer("anchor_mean", torch.zeros(3))
+            self.register_buffer("anchor_scale", torch.ones(3))
+        self.anchor_mean = mean.to(device=device, dtype=self.anchor_mean.dtype)
+        self.anchor_scale = scale.to(device=device, dtype=self.anchor_scale.dtype)
+        self.trans_anchor_head = True
+        self.trans_anchor_stopgrad = True
+        self.trans_anchor_source = str(source)
+
+    def set_anchor_stats(self, mean: torch.Tensor, scale: torch.Tensor) -> None:
+        """修改 08 改动 A2：平移锚的逐轴统计（与 set_stats 同款签名）。
+
+        ``train.py`` 在首步前用一遍训练 loader 拟合 ``batch["trans_anchor"]``
+        的均值/标准差（std 下限 1e-2 m）后冻结进 ckpt。
+        """
+        self.anchor_mean = mean.to(self.anchor_mean.dtype)
+        self.anchor_scale = scale.to(self.anchor_scale.dtype)
+
     @staticmethod
     def _make_t_only_adapter(dim):
         adapter = nn.Sequential(
@@ -576,6 +785,20 @@ class AnySoleModelV7(nn.Module):
         nn.init.zeros_(adapter[-1].bias)
         return adapter
 
+    def _gate_input(self, v_tok, t_tok):
+        """T 门与 V 门共用的输入（修改 14 §5：同输入、同粒度）。"""
+        if self.v_cur:
+            t_tok = t_tok[:, -v_tok.shape[1]:]   # 门只池化当前窗（V 已裁到 tw）
+        x = torch.cat([v_tok, t_tok], dim=-1)               # (B, tw, 2d)
+        if not self.route_temporal:
+            x = x.mean(dim=1)                               # (B, 2d)
+        return x
+
+    def _gate_act(self, z):
+        # 修改 14 §5.2：T 门值域 (0,2)（gate_2sigma）或 Cv5 的 (0,1)。
+        out = torch.sigmoid(z)
+        return 2.0 * out if self.gate_2sigma else out
+
     def _route_gate(self, v_tok, t_tok):
         # C 类 T 信任门（V7_C门控修改方案 §2/§4/§5）：
         #   x_t = cat(v_tok_t, t_tok_t)。窗口级（B 基线/LR）= 时间均值池化
@@ -583,22 +806,18 @@ class AnySoleModelV7(nn.Module):
         #   门参数量与 Cv5 相同）。组 = vel（根速度 query）/ other（其余
         #   姿态）/ left（l_leg、l_foot）/ right（r_leg、r_foot）；无
         #   part_routes 时合为单一姿态门（T）。
-        if self.v_cur:
-            t_tok = t_tok[:, -v_tok.shape[1]:]   # 门只池化当前窗（V 已裁到 tw）
-        x = torch.cat([v_tok, t_tok], dim=-1)               # (B, tw, 2d)
-        if not self.route_temporal:
-            x = x.mean(dim=1)                               # (B, 2d)
+        x = self._gate_input(v_tok, t_tok)
         if self.part_routes:
-            g_vel = torch.sigmoid(self.route_root_mlp(x))   # (B, tw|1, 1)
-            g_other = torch.sigmoid(self.route_mlp(x))
-            g_left = torch.sigmoid(self.route_left_mlp(x))
-            g_right = torch.sigmoid(self.route_right_mlp(x))
+            g_vel = self._gate_act(self.route_root_mlp(x))   # (B, tw|1, 1)
+            g_other = self._gate_act(self.route_mlp(x))
+            g_left = self._gate_act(self.route_left_mlp(x))
+            g_right = self._gate_act(self.route_right_mlp(x))
             gates = torch.cat([g_vel, g_other, g_left, g_right], dim=-1)
             gates = gates[..., _V7_QUERY_GATE_IDX]          # (B, tw|1, 10)
             return self._expand_gate(gates)                 # (B, tw, 10, 1)
         if self.task_routes:
-            root = torch.sigmoid(self.route_root_mlp(x))
-            pose = torch.sigmoid(self.route_mlp(x))
+            root = self._gate_act(self.route_root_mlp(x))
+            pose = self._gate_act(self.route_mlp(x))
             if self.route_temporal:
                 gates = torch.cat(
                     [root, pose.expand(-1, -1, self.pose_head.n_parts)], dim=-1)
@@ -606,13 +825,29 @@ class AnySoleModelV7(nn.Module):
                 gates = torch.cat(
                     [root, pose.expand(-1, self.pose_head.n_parts)], dim=-1)
             return self._expand_gate(gates)
-        g = torch.sigmoid(self.route_mlp(x))
+        g = self._gate_act(self.route_mlp(x))
         if self.route_temporal:
             return g.unsqueeze(-1)                          # (B, tw, 1)
         return g.view(-1, 1, 1).expand(-1, self.tw, 1)      # (B, tw, 1)
 
+    def _route_v_gate(self, v_tok, t_tok):
+        """修改 14 §5：V 侧信任门（单标量，值域 (0,2)，init 逐位 = 1）。
+
+        与 T 门同输入 / 同粒度；V 只有一条支路，所以不分组。门乘在
+        `v_out` 上：g_v → 0 让 U@VT 连续插值到 U@T。
+        """
+        x = self._gate_input(v_tok, t_tok)
+        g_v = 2.0 * torch.sigmoid(self.route_v_mlp(x))
+        return self._expand_gate(g_v)
+
     def _expand_gate(self, gates):
         # (B, tw, 10)（逐帧）或 (B, 10)（窗口）→ (B, tw, 10, 1)。
+        if self.gate_pin_legs and gates.shape[-1] == len(_V7_GATE_PIN_LEGS):
+            # 修改 13 D3：腿/足槽的门钉成 1.0（T→足/腿 不设门），
+            # 其余槽照常由 MLP 给。pin 是常量掩码，梯度只流未钉的槽。
+            # V 门是单标量，槽数 != 10，不走这条（修改 14 §5）。
+            pin = self.gate_pin.to(dtype=gates.dtype, device=gates.device)
+            gates = gates * (1.0 - pin) + pin
         if gates.dim() == 3:
             return gates.unsqueeze(-1)
         return gates[:, None, :, None].expand(-1, self.tw, -1, -1)
@@ -634,10 +869,10 @@ class AnySoleModelV7(nn.Module):
         mean_h = torch.einsum("btqd,qk->btkd", h, onehot) / counts.view(1, 1, -1, 1)
         mean_a = torch.einsum("btqd,qk->btkd", a, onehot) / counts.view(1, 1, -1, 1)
         u = torch.cat([mean_h, mean_a], dim=-1)          # (B, tw, 4, 2d)
-        g_vel = torch.sigmoid(self.route_root_mlp(u[..., 0, :]))
-        g_other = torch.sigmoid(self.route_mlp(u[..., 1, :]))
-        g_left = torch.sigmoid(self.route_left_mlp(u[..., 2, :]))
-        g_right = torch.sigmoid(self.route_right_mlp(u[..., 3, :]))
+        g_vel = self._gate_act(self.route_root_mlp(u[..., 0, :]))
+        g_other = self._gate_act(self.route_mlp(u[..., 1, :]))
+        g_left = self._gate_act(self.route_left_mlp(u[..., 2, :]))
+        g_right = self._gate_act(self.route_right_mlp(u[..., 3, :]))
         gates = torch.cat([g_vel, g_other, g_left, g_right], dim=-1)  # (B, tw, 4)
         gates = gates[..., _V7_QUERY_GATE_IDX]           # (B, tw, 10)
         return gates.unsqueeze(-1)                       # (B, tw, 10, 1)
@@ -659,8 +894,8 @@ class AnySoleModelV7(nn.Module):
         if t_present is None:
             t_present = (config_id != CONFIG_V).to(V_feat.dtype)
         if obs_history is not None:
-            if not self.ar2 or len(obs_history) != V_feat.shape[0]:
-                raise ValueError("obs_history requires one AR2 history per sample")
+            if not (self.ar2 or self.v_cur) or len(obs_history) != V_feat.shape[0]:
+                raise ValueError("obs_history requires one AR2 or split-window (v_cur) history per sample")
             groups = {}
             for i, history in enumerate(obs_history):
                 if set(history) != {"V_feat", "T_raw", "T_phys"}:
@@ -721,6 +956,22 @@ class AnySoleModelV7(nn.Module):
             off = self.anchor_off(m_v.mean(dim=1))                # (B, 6)
             anchor_rot = rot6d_to_rotmat(
                 self.identity_6d.to(dtype=m_v.dtype, device=m_v.device) + off)
+        anchor_trans = None
+        anchor_scale = None
+        if self.trans_anchor_head:
+            # 修改 08 改动 A3：m_v 窗口均值 → 归一化残差 → 绝对锚（米）。
+            # 零税契约：stopgrad=True 时 feat.detach() ⇒
+            # ∂L_tanchor/∂θ_主干 ≡ 0（主干每一步与 Cv5 数值相同）。
+            # 旁路读出：不进 cumsum，trans_hat 形状/语义一字不动。
+            feat = m_v.mean(dim=1)
+            if self.trans_anchor_stopgrad:
+                feat = feat.detach()
+            _a_mean = self.anchor_mean.to(dtype=m_v.dtype, device=m_v.device)
+            _a_scale = self.anchor_scale.to(dtype=m_v.dtype, device=m_v.device)
+            anchor_trans = _a_mean + _a_scale * self.anchor_trans_off(feat)  # (B,3)
+            # 损失侧归一化尺度（逐样本展开，随 out 透传；obs_history 合并
+            # 沿 dim 0 拼接，故必须带样本维）。
+            anchor_scale = _a_scale.view(1, 3).expand(m_v.shape[0], 3)
         ctx_vec = None
         ctx_pose = None
         ctx_block = None
@@ -761,6 +1012,7 @@ class AnySoleModelV7(nn.Module):
             gate = None            # Q：门由第一层解码上下文计算（gate_fn）
         else:
             gate = self._route_gate(v_tok, t_tok) if self.reliability_route else None
+        gate_v = self._route_v_gate(v_tok, t_tok) if self.v_gate else None
         if self.route_conditional and gate_override is None:
             captured = {}
 
@@ -775,14 +1027,21 @@ class AnySoleModelV7(nn.Module):
         vt_adapters = ((self.vt_root_adapter, self.vt_pose_adapter)
                        if self.vt_t_residual else None)
         vt_both = v_present.bool() & t_present.bool()
-        pose, v_hat, dyaw_hat, z_root, z_parts = self.pose_head(
-            m_v, m_t, v_present, t_present, gate=gate, gate_fn=gate_fn,
+        head_out = self.pose_head(
+            m_v, m_t, v_present, t_present, gate=gate, gate_v=gate_v,
+            gate_fn=gate_fn,
             t_only_mask=t_only, t_only_adapters=adapters,
             vt_mask=vt_both, vt_adapters=vt_adapters,
             z_override=z_override, ctx_vec=ctx_vec, ctx_pose=ctx_pose,
             ctx_block=ctx_block, ctx_emb=(self.ctx_emb if self.ctx3 else None),
             prev_state=prev_state,
             causal=bool(causal) and (self.ar or self.ar2))
+        if self.root_sd:
+            pose, v_hat, dyaw_hat, z_root, z_parts, sd_out = head_out
+            s_hat, d_hat, vy_hat, sd_dir_norm = sd_out
+        else:
+            pose, v_hat, dyaw_hat, z_root, z_parts = head_out
+            s_hat = d_hat = vy_hat = sd_dir_norm = None
         vis_yaw = None
         vis_gain = None
         if self.ar2:
@@ -796,8 +1055,15 @@ class AnySoleModelV7(nn.Module):
             "x0_hat": pose,                  # 单一生成器的输出（当前条件）
             "v_hat": v_hat,                  # 根速度
             "trans_hat": trans_hat,          # 根轨迹（cumsum）
+            # 修改 07 改动 A：三通道读出（仅 root_sd；旧模型为 None）。
+            # v_hat 契约不变，损失侧按 s_hat 是否存在分流。
+            "s_hat": s_hat,                  # 水平速率 (B,tw) m/s
+            "d_hat": d_hat,                  # 水平单位方向 (B,tw,2) (x,z)
+            "vy_hat": vy_hat,                # 垂直速度 (B,tw) m/s
+            "sd_dir_norm": sd_dir_norm,      # 方向头原始模长（诊断，无梯度）
             "contact_logits": contact_logits,
             "route_gate": gate,              # C：窗口级 T 信任门（监控/损失）
+            "route_v_gate": gate_v,          # 修改 14：V 信任门（无门模型为 None）
             "z": torch.cat([z_root, z_parts], dim=2),  # (B,tw,1+n_parts,d) TTA 叶子
             "F": m_v[:, -self.tw:] + m_t[:, -self.tw:],
             "v_tok": v_tok[:, -self.tw:],
@@ -805,6 +1071,9 @@ class AnySoleModelV7(nn.Module):
             "m_v": m_v[:, -self.tw:],
             "m_t": m_t[:, -self.tw:],
             "anchor_rot": anchor_rot,
+            # 修改 08 改动 A4：平移锚旁路读出（B,3）+ 损失归一化尺度（B,3）。
+            "anchor_trans": anchor_trans,
+            "anchor_scale": anchor_scale,
             "dyaw_hat": dyaw_hat,          # AR2：逐帧航向增量 (B,tw,1) rad/帧
             "vis_yaw": vis_yaw,            # AR2：视觉航向观测（V/VT 行）
             "vis_gain": vis_gain,          # AR2：视觉校正增益 ∈ (0,1)
@@ -859,6 +1128,7 @@ class AnySoleModelV7(nn.Module):
         m_v = self.v_temporal(v_tok)
         m_t = self.t_temporal(t_tok)
         gate = self._route_gate(v_tok, t_tok) if self.reliability_route else None
+        gate_v = self._route_v_gate(v_tok, t_tok) if self.v_gate else None
         t_only = (~v_present.bool()) & t_present.bool()
         vt_both = v_present.bool() & t_present.bool()
         adapters = ((self.t_only_root_adapter, self.t_only_pose_adapter)
@@ -868,7 +1138,7 @@ class AnySoleModelV7(nn.Module):
 
         def decode(pstate, frames):
             return self.pose_head(
-                m_v, m_t, v_present, t_present, gate=gate,
+                m_v, m_t, v_present, t_present, gate=gate, gate_v=gate_v,
                 t_only_mask=t_only, t_only_adapters=adapters,
                 vt_mask=vt_both, vt_adapters=vt_adapters,
                 prev_state=pstate, causal=True, max_frames=frames)
@@ -923,8 +1193,12 @@ class AnySoleModelV7(nn.Module):
             "x0_hat": pose,                  # 帧 1..L 闭环、其余 TF
             "v_hat": v_hat,
             "trans_hat": trans_hat,
+            # root_sd 与 ar2 互斥（__init__ 守卫）→ 此路径恒为 None；键集
+            # 与 forward 对齐，读取方无需按路径分支。
+            "s_hat": None, "d_hat": None, "vy_hat": None, "sd_dir_norm": None,
             "contact_logits": contact_logits,
             "route_gate": gate,
+            "route_v_gate": gate_v,
             "z": torch.cat([z_root, z_parts], dim=2),
             "F": m_v[:, -self.tw:] + m_t[:, -self.tw:],
             "v_tok": v_tok[:, -self.tw:],
@@ -932,6 +1206,10 @@ class AnySoleModelV7(nn.Module):
             "m_v": m_v[:, -self.tw:],
             "m_t": m_t[:, -self.tw:],
             "anchor_rot": None,
+            # 修改 08：rollout 路径不含锚头（锚头只作用于 forward）；键集
+            # 与 forward 对齐，读取方无需按路径分支。
+            "anchor_trans": None,
+            "anchor_scale": None,
             "dyaw_hat": dyaw_hat,
             "vis_yaw": vis_yaw,
             "vis_gain": vis_gain,

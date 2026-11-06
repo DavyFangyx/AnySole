@@ -1,0 +1,26 @@
+{
+  "date": "20260808",
+  "model": "wham",
+  "b": [
+    -1.036713062194848,
+    -1.2962276413090672,
+    0.7474046863274574
+  ],
+  "residual_rmse_mm": 285.3740361799172,
+  "n_sessions": 11,
+  "sessions": [
+    "S10101",
+    "S12012",
+    "S10111",
+    "S11013",
+    "S12101",
+    "S11021",
+    "S11032",
+    "S11062",
+    "S11071",
+    "S11102",
+    "S11113"
+  ],
+  "fit_source": "exported local_gen predictions (pre-correction) vs smpl GT pelvis, pooled least squares",
+  "note": "3-parameter global translation; per-date; same mechanism as MMVP drift points m/n (04_E §8.4)"
+}

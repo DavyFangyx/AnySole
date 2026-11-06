@@ -102,8 +102,13 @@ TRAIN_ARG_FLAG_MAP = {
     "p_occ": "--p-occ",
     "p_nullV": "--p-nullv",
     "p_nullT": "--p-nullt",
+    # 修改 14 §5.3（2026-11-06）：VT 行同会话窗级错位概率（默认关）。
+    "p_stale": "--p-stale",
+    # 修改 13 D1（2026-11-06）：occ_mix 档梯（逗号分隔，如 "010,020,030"）。
+    "occ_levels": "--occ-levels",
     "occ_a3_monitor": "--occ-a3-monitor",
     "t_phys_v2": "--t-phys-v2",
+    "t_phys_hull_recenter": "--t-phys-hull-recenter",
     "d8_heads": "--d8-heads",
     # 阶段 3 触觉泛化增强（2026-10-31，E6 门控重设计）：训练侧 T_raw 增强。
     "tactile_gainbias": "--tactile-gainbias",
@@ -136,14 +141,18 @@ TRAIN_ARG_FLAG_MAP = {
     "wandb_project": "--wandb_project",
     "wandb_entity": "--wandb_entity",
     "wandb_experiment_tag": "--wandb_experiment_tag",
+    "wandb_run_name": "--wandb_run_name",
     "wandb_eval_interval": "--wandb_eval_interval",
     # 在线监控后端（2026-11-03）：wandb（默认）或 swanlab；workspace 空 =
     # SwanLab 个人空间。
     "monitor_backend": "--monitor_backend",
     "swanlab_workspace": "--swanlab_workspace",
+    # 断点续训（2026-11-03）：conf 行 RESUME=true 经 runner 注入；默认关。
+    "resume": "--resume",
 }
-TRAIN_STORE_TRUE = {"assign_cluster", "occ_mix", "occ_a3_monitor",
-                    "t_phys_v2", "d8_heads", "checkpoint_all", "tactile_gainbias",
+TRAIN_STORE_TRUE = {"resume", "assign_cluster", "occ_mix", "occ_a3_monitor",
+                    "t_phys_v2", "t_phys_hull_recenter", "d8_heads",
+                    "checkpoint_all", "tactile_gainbias",
                     "v7_ar2_yaw_fix", "ar_rollout", "ar_rollout_detach",
                     "v7_ar2_lowdim"}
 

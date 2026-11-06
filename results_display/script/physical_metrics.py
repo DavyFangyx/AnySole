@@ -104,7 +104,19 @@ class Target:
         if group not in groups:
             raise ValueError("%s: no %s group (have %s)"
                              % (detail_path, group, ", ".join(groups)))
-        self.pooled = groups[group]
+        # 修改 10：吃锚列展示名带（GT Anchored）/旧 (anchored) 后缀；按原名读取。
+        # 默认列（自锚）优先，吃锚列仅在同名缺省时补位。
+        block = groups[group]
+        default = {str(k): v for k, v in block.items()
+                   if not str(k).endswith(("（GT Anchored）", " (anchored)"))}
+        anchored = {}
+        for k, v in block.items():
+            name = str(k)
+            for suffix in ("（GT Anchored）", " (anchored)"):
+                if name.endswith(suffix):
+                    anchored[name[:-len(suffix)]] = v
+                    break
+        self.pooled = {**anchored, **default}
         self.sessions: list[dict[str, Any]] = []
         session_path = detail_path.with_name("session_detail_%s.json" % detail_path.stem)
         if session_path.is_file():

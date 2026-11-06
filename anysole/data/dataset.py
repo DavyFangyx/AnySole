@@ -46,9 +46,10 @@ def derive_strike(left48: np.ndarray, right48: np.ndarray):
 from anysole.data.pressure import physical_tokens
 from anysole.data.v5_1_gt import derive_phase_gt, load_cop
 from anysole.data.occ_mix import (
-    SRC_OCC,
+    SRC_CAM3,
     OccMixSampler,
-    default_occ_cache_root,
+    occ_cache_root,
+    occ_feat_key,
     load_occ_session,
 )
 from anysole.data.workspace_adapter import (
@@ -221,6 +222,7 @@ class AnySoleDataset(Dataset):
         d8_heads: bool = False,
         occ_mix: Optional[dict] = None,
         t_phys_v2: bool = False,
+        t_phys_hull_recenter: bool = False,
         tactile_aug: Optional[dict] = None,
         tactile_weight_norm: bool = False,
         smpl_support_policy: str = "legacy_clip",
@@ -231,6 +233,7 @@ class AnySoleDataset(Dataset):
         v7_ar2: bool = False,
         obs_context: Optional[int] = None,
         v7_s_label: Optional[str] = None,
+        long_obs: bool = False,
     ):
         self.mode = mode
         if smpl_support_policy not in ("legacy_clip", "exclude"):
@@ -240,11 +243,16 @@ class AnySoleDataset(Dataset):
         self.obs_context = int(obs_context if obs_context is not None else window_length)
         if self.obs_context < self.window_length or self.obs_context % self.window_length:
             raise ValueError("obs_context must be a multiple of window_length and at least as large")
-        if self.obs_context > self.window_length and not v7_ar2:
-            raise ValueError("extended observation context is supported only by AR2/AR2M")
+        # long_obs（2026-11-03）：按模态分窗的非 AR2 模型（v7_vcur）只放行长历史，
+        # 不切换目标表示（v7_ar2 才会把 pose_gt 换成相对表示）。
+        if self.obs_context > self.window_length and not (v7_ar2 or long_obs):
+            raise ValueError("extended observation context is supported only by AR2/AR2M or split-window (v7_vcur) models")
         self.tactile_input = str(tactile_input)
         self.tactile_weight_norm = bool(tactile_weight_norm)
         self.t_phys_v2 = bool(t_phys_v2)
+        self.t_phys_hull_recenter = bool(t_phys_hull_recenter)
+        if self.t_phys_hull_recenter and not self.t_phys_v2:
+            raise ValueError("t_phys_hull_recenter requires t_phys_v2=True")
         self.cam_id = int(cam_id)
         # 四相机扩展 D2：cam_id 切换缓存目录——GVHMR 经 hmr_cache_path(cam)；
         # HRNet 经 cache_root 重定向到 <hrnet_root>/cam{N}（extract_hrnet
@@ -284,8 +292,9 @@ class AnySoleDataset(Dataset):
         self.load_v5_1_gt = bool(load_v5_1_gt)
         self.d8_heads = bool(d8_heads)
         # V6_Av1 occ_mix（2026-10-19）：窗口级结构化丢弃采样器，默认关
-        # （None = 现行为逐位不变）。启用后逐会话装载 occ010 双缓存、
+        # （None = 现行为逐位不变）。启用后逐会话装载声明档位的 occ 缓存、
         # __getitem__ 采样窗源并挂标签（occ_src/occ_v_zeroed/occ_t_zeroed）。
+        # 键 levels 可声明档梯（修改 13 D1；缺省单档 010 = v1 逐位不变）。
         self.occ_sampler = OccMixSampler(**occ_mix) if occ_mix else None
         # 阶段 3 触觉泛化增强（2026-10-31，E6 门控重设计）：训练侧 T_raw
         # 数据增强，默认关（None = 现行为逐位不变）。只在 mode=="train"
@@ -385,8 +394,9 @@ class AnySoleDataset(Dataset):
                 pressure = {
                     "T_raw": (np.concatenate([left_n, right_n], axis=1)
                               if self.tactile_weight_norm else t_raw_source),
-                    "T_phys": physical_tokens(left_n, right_n,
-                                              t_phys_v2=self.t_phys_v2),
+                    "T_phys": physical_tokens(
+                        left_n, right_n, t_phys_v2=self.t_phys_v2,
+                        t_phys_hull_recenter=self.t_phys_hull_recenter),
                     "left48": left48,
                     "right48": right48,
                 }
@@ -581,12 +591,13 @@ class AnySoleDataset(Dataset):
                 "smpl_support_policy": self.smpl_support_policy,
             }
             if self.occ_sampler is not None:
-                # occ_mix 挂钩点 1b：occ010 双缓存装载（同帧轴强制核对，
-                # 缺失/不符立即报错）。
-                session["V_feat_occ"] = load_occ_session(
-                    session_id,
-                    occ_root=default_occ_cache_root(self.cache_root),
-                    cam3_array=v_feat)
+                # occ_mix 挂钩点 1b：逐档缓存装载（同帧轴强制核对，
+                # 缺失/不符立即报错）。档梯 = 声明的每一档各一份。
+                for level in self.occ_sampler.levels:
+                    session[occ_feat_key(level)] = load_occ_session(
+                        session_id,
+                        occ_root=occ_cache_root(self.cache_root, level),
+                        cam3_array=v_feat)
             if self.d8_heads:
                 # 维度 3 着地模式标签（2026-10-21）：T 侧落地事件首触区
                 # 三分类（0=趾先 / 1=中足 / 2=跟先），仅落地帧有标签。
@@ -708,8 +719,9 @@ class AnySoleDataset(Dataset):
 
         # occ_mix 挂钩点 1c：crop 装配之前的窗口级采样（整窗一致）。
         aug = self.occ_sampler.sample_one() if self.occ_sampler is not None else None
+        v_key = aug.feat_key if (aug is not None and aug.v_src != SRC_CAM3) else "V_feat"
         item = {
-            "V_feat": crop("V_feat_occ") if (aug is not None and aug.v_src == SRC_OCC) else crop("V_feat"),
+            "V_feat": crop(v_key),
             "T_raw": crop("T_raw"),
             "T_phys": crop("T_phys"),
             "T_s2m": crop("T_s2m"),
@@ -728,7 +740,7 @@ class AnySoleDataset(Dataset):
         }
         if self.obs_context > self.window_length:
             start = self.observation_starts[idx]
-            visual = "V_feat_occ" if (aug is not None and aug.v_src == SRC_OCC) else "V_feat"
+            visual = v_key
             item["obs_history"] = {
                 key: torch.from_numpy(np.ascontiguousarray(session[source][start:left])).float()
                 for key, source in (("V_feat", visual), ("T_raw", "T_raw"),

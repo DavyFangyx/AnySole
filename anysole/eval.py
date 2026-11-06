@@ -50,7 +50,16 @@ from anysole.types import (
 _MISSING_OK = frozenset({
     "encoders.t_enc.stream_norm.weight",
     "encoders.t_enc.stream_norm.bias",
+    # 2026-11-05 裁定：平移锚头是模型默认组件；早于该裁定的 ckpt 没有这些
+    # 键。装载后先禁用随机初始化的头，再由 _attach_anchor_head 挂事后锚头。
+    "anchor_trans_off.0.weight", "anchor_trans_off.0.bias",
+    "anchor_trans_off.2.weight", "anchor_trans_off.2.bias",
+    "anchor_mean", "anchor_scale",
 })
+_ANCHOR_HEAD_KEYS = (
+    "anchor_trans_off.0.weight", "anchor_trans_off.0.bias",
+    "anchor_trans_off.2.weight", "anchor_trans_off.2.bias",
+)
 
 
 def _smpl_yup_to_display(points: np.ndarray) -> np.ndarray:
@@ -264,6 +273,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Standard SMPL motion NPZ export dir (default: <model>/predictions/eval_motion).",
     )
     parser.add_argument("--no-write-motion", action="store_true", help="Disable SMPL motion export.")
+    parser.add_argument(
+        "--anchor-head", type=Path, default=None, metavar="FILE",
+        help="修改 10 改动 A：事后拟合的平移锚头（默认自动发现 ckpt 同目录的 "
+             "anchor_head.pt）。挂载后输出 GlobalMPJPE_self / W-MPJPE100_self / "
+             "RootAbs_self / AnchorErr 四个零 GT 锚列；联合训练版（V7_Cv5TA）自带，忽略本项。")
     parser.add_argument("--metrics-out", type=Path, default=None, metavar="FILE",
                         help="Write the whole-body brief metrics (T2M/V2M/VT2M/V2T) to this JSON "
                         "path (default: <model>/metrics/<split>_brief.json).")
@@ -455,12 +469,23 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         if saved_config.get("part_joints") is not None and "pose_parts" in saved_struct:
             # V4B: pose_parts is derived from the partition at build time.
             saved_struct["pose_parts"] = len(saved_config["part_joints"])
-        if saved_struct != dict(entry.STRUCTURE):
+        # 2026-11-05 裁定：平移锚头是模型默认组件。旧 ckpt 的 config 里
+        # 没有该键（训练时尚未加入）——按「无锚头」构建，事后锚头由
+        # _attach_anchor_head 挂载；不得因默认组件升级而拒绝旧 ckpt。
+        legacy_anchor_head = ("v7_trans_anchor_head" in entry.STRUCTURE
+                              and "v7_trans_anchor_head" not in saved_config)
+        expected_struct = dict(entry.STRUCTURE)
+        if legacy_anchor_head:
+            expected_struct.pop("v7_trans_anchor_head", None)
+            saved_struct.pop("v7_trans_anchor_head", None)
+        if saved_struct != expected_struct:
             raise RuntimeError(
                 "checkpoint structure does not match the %s entry: saved=%s entry=%s"
-                % (model_name, saved_struct, dict(entry.STRUCTURE))
+                % (model_name, saved_struct, expected_struct)
             )
         for key, value in getattr(entry, "CONFIG_EXTRA", {}).items():
+            if legacy_anchor_head and key == "lambda_tanchor":
+                continue
             if saved_config.get(key) != value:
                 raise RuntimeError(
                     "checkpoint flag %s=%r does not match the %s entry (%r)"
@@ -471,7 +496,10 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         # v7_contact_root/v7_reliability_route 决定模型构造（route_mlp 的
         # 存在与否）——此前只校验了 ckpt 与 entry 的结构一致，却没有把
         # 结构键传给 build，C 类模型的 state_dict 装载必然 mismatch。
-        build_cfg.update(entry.STRUCTURE)
+        build_cfg.update(expected_struct)
+        if legacy_anchor_head:
+            # 旧 ckpt：按无锚头构建（权重里没有锚头键）。
+            build_cfg["v7_trans_anchor_head"] = False
         build_cfg["d_model"] = d_model
         build_cfg["tw"] = tw
         build_cfg["obs_context"] = int(saved_config.get("obs_context", tw))
@@ -537,6 +565,11 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         raise RuntimeError(
             "state_dict mismatch: missing=%s unexpected=%s" % (missing, unexpected)
         )
+    if (bool(getattr(model, "trans_anchor_head", False))
+            and any(key in set(missing) for key in _ANCHOR_HEAD_KEYS)):
+        # 旧 ckpt（无锚头权重）：禁用到随机初始化的头，等待事后锚头文件。
+        model.trans_anchor_head = False
+        print("anchor head: checkpoint has none (disabled; awaiting post-hoc head)")
     # E4: sampling init scale must match the checkpoint's training noise scale
     # (train.py saves noise_scaled=True when it scales q_sample noise by
     # pose_std; older checkpoints lack the flag and sample unscaled).
@@ -547,6 +580,28 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
         model.pose_head.set_assign_temp(float(saved_config.get("assign_temp_final", 1.0)))
     model.eval()
     return model
+
+
+def _attach_anchor_head(model, ckpt: Path, override, device: torch.device) -> None:
+    """修改 10 改动 A：挂载事后拟合的平移锚头（若存在）。
+
+    联合训练版（ckpt 结构自带锚头）不覆盖；默认在 ckpt 同目录找
+    ``anchor_head.pt``，可用 --anchor-head 显式指定。
+    """
+    if not hasattr(model, "attach_trans_anchor_head"):
+        return
+    if bool(getattr(model, "trans_anchor_head", False)):
+        print("anchor head: joint-trained version already present")
+        return
+    path = Path(override) if override is not None else Path(ckpt).parent / "anchor_head.pt"
+    if not path.is_file():
+        return
+    payload = torch.load(path, map_location="cpu")
+    model.attach_trans_anchor_head(
+        payload["state_dict"], payload["anchor_mean"], payload["anchor_scale"],
+        source=str(payload.get("source", "post_hoc")))
+    print("anchor head: attached post-hoc %s (train AnchorErr %.2f mm)" %
+          (path, float(payload.get("meta", {}).get("train_anchor_err_mm", float("nan")))))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -682,6 +737,7 @@ def _evaluate_one(
         if checkpoint["config"].get("contact_label_package_sha256") != provenance["contact_label_package_sha256"]:
             raise ValueError("Checkpoint corrected contact package hash missing or mismatched")
     model = _load_model(checkpoint, config, device)
+    _attach_anchor_head(model, ckpt, args.anchor_head, device)
     # --no-imu checkpoints: the eval dataset must build the 38-dim T_s2m
     # (IMU channels deleted) to match the checkpoint's encoder input width.
     no_imu = bool(checkpoint.get("config", {}).get("no_imu", False))
@@ -764,6 +820,7 @@ def _evaluate_one(
         contact_method=contact_method,
         v7_ar2=v7_ar2,
         obs_context=getattr(model, "obs_context", tw),
+        long_obs=bool(getattr(model, "v_cur", False)),
         smpl_support_policy=(args.smpl_support_policy or checkpoint.get("config", {}).get("smpl_support_policy", "legacy_clip")),
         tactile_input=str(checkpoint.get("config", {}).get("tactile_input", "raw108")),
         no_imu=no_imu,
@@ -778,6 +835,7 @@ def _evaluate_one(
                 else ((tw // 2) if ((pos_mode and continuation) or v7_ctx)
                       else None)),
                         t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
+                        t_phys_hull_recenter=bool(checkpoint.get("config", {}).get("t_phys_hull_recenter", False)),
                         d8_heads=bool(checkpoint.get("config", {}).get("d8_heads", False)),
                         tactile_weight_norm=bool(checkpoint.get("config", {}).get("tactile_weight_norm", False)),
     )
@@ -802,6 +860,7 @@ def _evaluate_one(
             cam_id=int(config.get("cam_id", 3)),
             stride=None,
             t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
+                        t_phys_hull_recenter=bool(checkpoint.get("config", {}).get("t_phys_hull_recenter", False)),
             d8_heads=bool(checkpoint.get("config", {}).get("d8_heads", False)),
             tactile_weight_norm=bool(checkpoint.get("config", {}).get("tactile_weight_norm", False)),
         )
@@ -865,7 +924,8 @@ def _evaluate_one(
                                                device=device, dtype=torch.long)
                         batch["config_id"] = config_id
                         assert_batch_shapes(batch, batch_size, tw=tw,
-                            t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
+                            t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
+                            t_phys_hull_recenter=bool(checkpoint.get("config", {}).get("t_phys_hull_recenter", False)))
                         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
                         if null_t:
                             # 修改 03（2026-11-03）：null-T 对 V7 ctx 导出
@@ -952,7 +1012,8 @@ def _evaluate_one(
                         dyaw_base=str(checkpoint.get("config", {}).get(
                             "ar2_dyaw_base", "zero")),
                         init_height=ar2_init_height,
-                        vis_yaw_init=ar2_vis_yaw_init)
+                        vis_yaw_init=ar2_vis_yaw_init,
+                        abs_vrows=bool(getattr(model, "abs_vrows", False)))
                     for chunk in chunks:
                         start = chunk["start"]
                         exports.setdefault(session_id, []).append(
@@ -973,7 +1034,8 @@ def _evaluate_one(
                                                    device=device, dtype=torch.long)
                             batch["config_id"] = config_id
                             assert_batch_shapes(batch, batch_size, tw=tw,
-                                t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
+                                t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
+                            t_phys_hull_recenter=bool(checkpoint.get("config", {}).get("t_phys_hull_recenter", False)))
                             v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
                             if null_t:
                                 # 修改 03（2026-11-03）：null-T 对 V7 帧级
@@ -1019,7 +1081,8 @@ def _evaluate_one(
                         config_id = torch.full((bsz,), config_value, device=device, dtype=torch.long)
                         batch["config_id"] = config_id
                         assert_batch_shapes(batch, bsz, tw=tw,
-                                   t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
+                                   t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
+                            t_phys_hull_recenter=bool(checkpoint.get("config", {}).get("t_phys_hull_recenter", False)))
                         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
                         v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
                         cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
@@ -1061,7 +1124,8 @@ def _evaluate_one(
                         config_id = torch.full((batch_size,), config_value, device=device, dtype=torch.long)
                         batch["config_id"] = config_id
                         assert_batch_shapes(batch, batch_size, tw=tw,
-                            t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
+                            t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
+                            t_phys_hull_recenter=bool(checkpoint.get("config", {}).get("t_phys_hull_recenter", False)))
                         v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
                         v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
                         cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
@@ -1098,7 +1162,8 @@ def _evaluate_one(
                     config_id = torch.full((batch_size,), config_value, device=device, dtype=torch.long)
                     batch["config_id"] = config_id
                     assert_batch_shapes(batch, batch_size, tw=tw,
-                            t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)))
+                            t_phys_v2=bool(checkpoint.get("config", {}).get("t_phys_v2", False)),
+                            t_phys_hull_recenter=bool(checkpoint.get("config", {}).get("t_phys_hull_recenter", False)))
                     v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
                     if v3f_mode:
                         # V3_Fv1: T stays live under every condition (the
@@ -1117,6 +1182,12 @@ def _evaluate_one(
                         t_raw = torch.zeros_like(t_raw)
                         t_phys = torch.zeros_like(t_phys)
                         t_s2m = torch.zeros_like(t_s2m)
+                        if "obs_history" in batch:
+                            # 按模态分窗模型（非 AR2，v_cur）：长 T 历史同样置零，否则 null-T 干预会漏进历史。
+                            batch["obs_history"] = [
+                                {key: (torch.zeros_like(value) if key in ("T_raw", "T_phys") else value)
+                                 for key, value in history.items()}
+                                for history in batch["obs_history"]]
                     v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
                     if v3f_mode:
                         out = sample_v3f(
@@ -1136,7 +1207,8 @@ def _evaluate_one(
                         # crossfade below stays.
                         z_kw = {"z_src": v5_1_z_src(config_value, z_src_override)} if v5_1_mode else {}
                         out = model(v_feat, t_raw, t_phys, config_id,
-                                    batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw)
+                                    batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw,
+                                    **({"obs_history": batch["obs_history"]} if "obs_history" in batch else {}))
                         pred_pose = out["x0_hat"]
                     else:
                         cond = {

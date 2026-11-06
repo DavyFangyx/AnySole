@@ -47,6 +47,7 @@ from anysole.types import (
     N_JOINTS,
     POSE_DIM,
     T_PHYS_DIM,
+    T_PHYS_V2_DIM,
     T_RAW_DIM,
     T_S2M_DIM,
     T_S2M_NOIMU_DIM,
@@ -233,6 +234,20 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     if not isinstance(saved_config, dict):
         raise RuntimeError("checkpoint config is missing or is not a mapping")
     _require_supported_inference(saved_config)
+    # 维度 2 / 修改 11：T_phys 口径由 checkpoint 决定（12/20 维 + hull_mcol
+    # 重定心）。原先这里固定 12 维，会与 t_phys_v2 checkpoint 的编码器不匹配。
+    t_phys_v2_cfg = bool(saved_config.get("t_phys_v2", False))
+    t_phys_rc_cfg = bool(saved_config.get("t_phys_hull_recenter", False))
+    if t_phys_rc_cfg and not t_phys_v2_cfg:
+        raise ValueError("checkpoint has t_phys_hull_recenter without t_phys_v2")
+    if t_phys_v2_cfg:
+        if config_value in (CONFIG_VT, CONFIG_T):
+            from anysole.data.pressure import physical_tokens
+            t_phys = physical_tokens(
+                normalize_raw(left48), normalize_raw(right48),
+                t_phys_v2=True, t_phys_hull_recenter=t_phys_rc_cfg)
+        else:
+            t_phys = np.zeros((n_frames, T_PHYS_V2_DIM), dtype=np.float32)
     checkpoint_modal = str(saved_config.get("modal", MODEL_ANYSOLEV1))
     if args.modal is not None and args.modal != checkpoint_modal:
         raise ValueError("legacy architecture override %s does not match checkpoint architecture %s" % (args.modal, checkpoint_modal))

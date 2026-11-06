@@ -50,15 +50,16 @@ CELLS = REPO / "results" / "cells"
 METRICS10 = ["PA-MPJPE", "MPJPE", "GlobalMPJPE", "W-MPJPE100", "MPJRE",
              "traj_ATE", "RootOrientationDrift", "FootSliding", "GroundPen",
              "Jitter_pred"]
-# E2 主性能表轨迹列 = 双列（2026-11-01 用户裁定）：traj_ATE@0.5s（20 帧段首
-# GT 对齐，所有方法同一处理）+ traj_ATE（未对齐全局，基线已含平移修正）；
-# 其余实验表（E1/E4/E5）保留未对齐 traj_ATE 单列。
-E2_METRICS10 = [k if k != "traj_ATE" else v for k in METRICS10
-                for v in (["traj_ATE@0.5s", "traj_ATE"] if k == "traj_ATE" else [k])]
+# 表 1（E2 主性能表）指标顺序（2026-11-05 用户裁定）：领头物理/接触量与
+# PA，长程 Global 如实报但**不领头**；短程轨迹列 traj_ATE@0.5s 已取消
+# （同日裁定：不进入评估指标），轨迹只保留无锚 traj_ATE。
+E2_METRICS10 = ["GroundPen", "FootSliding", "RootOrientationDrift",
+                "PA-MPJPE", "MPJPE", "MPJRE", "W-MPJPE100",
+                "GlobalMPJPE", "traj_ATE", "Jitter_pred"]
 # E5 表 2 = 触觉有利指标表（2026-11-02 用户裁定：A 层 cells 已落盘指标，
 # 零重算；箭头 = 更优方向，Δ 列同向为正即触觉有帮助）。接触类指标已移出
 # （cell 级混两套机制），统一入表 3（Full_Table3_E5_ContactFair.csv）。
-E5_TACTILE_METRICS = [("traj_ATE@0.5s", "↓"), ("GroundPenFrac", "↓"),
+E5_TACTILE_METRICS = [("traj_ATE", "↓"), ("GroundPenFrac", "↓"),
                       ("ground_pen_foot_mm", "↓"),
                       ("PA-MPJPE_anklefoot", "↓"), ("PA-MPJPE_l_foot", "↓"),
                       ("PA-MPJPE_r_foot", "↓"), ("MPJPE_anklefoot", "↓"),
@@ -73,7 +74,7 @@ E5_OCCS = ("occ000",) + tuple("occ" + o for o in E5_OCC_LEVELS)
 # 八点 × 7 精选指标；必选 PA-MPJPE/traj_ATE@0.5s/GroundPen/FootSliding，
 # 可选 GlobalMPJPE/RootOrientationDrift，另加 PA-MPJPE_anklefoot）
 E5_MAIN_LEVELS = ("020", "030", "040", "050", "060", "070", "080", "090")
-E5_MAIN_METRICS = ["PA-MPJPE", "traj_ATE@0.5s", "GroundPen", "FootSliding",
+E5_MAIN_METRICS = ["PA-MPJPE", "traj_ATE", "GroundPen", "FootSliding",
                    "GlobalMPJPE", "RootOrientationDrift", "PA-MPJPE_anklefoot"]
 CONTACT_NAMESPACE = "state_smpl24"  # 当前默认线（f6_soft_time_accel_state_smpl24_v1）
 EVAL_SPLIT = "test"
@@ -116,7 +117,8 @@ def write_csv(path: Path, header: list[str], rows: list[list]) -> None:
 def display_name(cell_id: str) -> str:
     """cell id → 展示模型名：V7_Cv5_s1_evalocc010 → V7_Cv5。"""
     for suffix in ("_s1", "_s2", "_s3", "_statistics_evalocc", "_evalbest_occ",
-                   "_evalocc", "_evalbest", "_statistics", "_sel_evalocc", "_sel"):
+                   "_evalocc", "_evalexp", "_evalgap", "_evalbest", "_statistics",
+                   "_sel_evalocc", "_sel"):
         if suffix in cell_id:
             return cell_id.split(suffix)[0]
     return cell_id
@@ -130,6 +132,32 @@ def dedupe(rows: list[list]) -> list[list]:
         if key not in seen:
             seen.add(key)
             out.append(r)
+    return out
+
+
+def _strip_anchor_suffix(metrics):
+    """修改 10：吃锚列展示名带（GT Anchored）后缀；导出层按原名读取。
+
+    默认列（无后缀）= 自锚读数；吃锚列去掉后缀后与默认同名时**不覆盖**
+    默认值（默认优先）——老文件（无自锚列）则原样保留吃锚值。
+    """
+    if not isinstance(metrics, dict):
+        return metrics
+    out = {}
+    for cond, block in metrics.items():
+        if not isinstance(block, dict):
+            out[cond] = block
+            continue
+        default = {str(k): v for k, v in block.items()
+                   if not str(k).endswith(("（GT Anchored）", " (anchored)"))}
+        anchored = {}
+        for k, v in block.items():
+            name = str(k)
+            for suffix in ("（GT Anchored）", " (anchored)"):
+                if name.endswith(suffix):
+                    anchored[name[:-len(suffix)]] = v
+                    break
+        out[cond] = {**anchored, **default}   # 默认（自锚）优先
     return out
 
 
@@ -156,7 +184,7 @@ def cell_metrics(model_id: str, split=None):
     SOURCE_RECEIPTS.append({"cell": key, "path": str(p), "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
                             "split": split, "checkpoint_sha256": payload.get("checkpoint_sha256"),
                             "contact_label_package_sha256": payload.get("contact_label_package_sha256")})
-    return payload.get("metrics")
+    return _strip_anchor_suffix(payload.get("metrics"))
 
 
 def metric_row(m: dict, cond: str) -> list:
@@ -177,7 +205,8 @@ def seeded_metrics(model_id: str, split=None) -> dict | None:
     # _sN 插在子后缀前（与 conf 层 seed_models 一致）：
     # V7_Cv5_evalocc010 → V7_Cv5_s2_evalocc010
     sub_pos = None
-    for sub in ("_evalocc", "_evalbest", "_precheck", "_sel", "_statistics"):
+    for sub in ("_evalocc", "_evalexp", "_evalgap", "_evalbest", "_precheck", "_sel",
+                "_statistics"):
         pos = key.rfind(sub)
         if pos != -1 and pos > 0:
             sub_pos = pos
@@ -511,8 +540,7 @@ def export_e5(models: list[str], ckpt: str) -> None:
     # 各指标随 occ 的退化 = 值 − occ000 基线；行 V2M / VT2M /
     # Δ退化(VT−V)。Δ退化 为负 = VT 退化更轻 = 触觉有帮助；traj 列 =
     # traj_ATE@0.5s（与图 3 子图口径一致）。
-    E5_FIG_METRICS = [("traj_ATE@0.5s" if k == "traj_ATE" else k)
-                      for k in METRICS10]
+    E5_FIG_METRICS = list(METRICS10)
 
     def _scalar(x):
         return x[0] if isinstance(x, tuple) else x
@@ -555,15 +583,302 @@ def export_e5(models: list[str], ckpt: str) -> None:
     main_header, main_rows = _degradation_table(E5_MAIN_METRICS, E5_MAIN_LEVELS)
     write_csv(E5_DIR / "Main_Table2_E5_Degradation.csv", main_header, main_rows)
     export_e5_figure(models)
+    export_e5_visual_failure(models)
+
+
+# E5 视觉退化三轴扩展（2026-11-04，z_note/E5_视觉退化扩展说明.md §3）：
+# 同一 ckpt、固定 VT 输入，只替换视觉特征缓存；单元格 = Δ(VT−V)，负值 =
+# 触觉有帮助（与 E6 的 ΔE 同号）。空间轴 = 现成 occ 缓存；光度轴 = 曝光
+# 增益；时间轴 = 连续断流（冻结）。总表只列 occ 10/20/40/60/80，其余 occ
+# 五档留给已有 Full_Table1_E5_Occlusion.csv 补充材料。
+E5_EXP_GAINS = ("0005", "0020", "0050", "0200", "0400", "0800")
+E5_GAP_RHOS = ("010", "020", "040", "060", "080")
+E5_VISUAL_MAIN_METRICS = ["PA-MPJPE", "MPJPE", "GlobalMPJPE",
+                          "FootSliding", "GroundPen"]
+
+
+def _e5_visual_conditions(model: str) -> list[tuple[str, str, str, str]]:
+    """(轴, 档位, 条件说明, cell id) — 总表行序 = 设计文档表序。"""
+    conditions = [("空间", "occ000", "干净", model)]
+    for occ in ("010", "020", "040", "060", "080"):
+        conditions.append(("空间", "occ" + occ, "下肢截断 %d%%" % int(occ),
+                           "%s_evalocc%s" % (model, occ)))
+    for gain in E5_EXP_GAINS:
+        value = int(gain) / 100.0
+        label = "%s G=%g" % ("欠曝" if value < 1.0 else "过曝", value)
+        conditions.append(("光度", "exp_g" + gain, label,
+                           "%s_evalexp%s" % (model, gain)))
+    for rho in E5_GAP_RHOS:
+        conditions.append(("时间", "gap_r" + rho, "连续断流 ρ=%d%%" % int(rho),
+                           "%s_evalgap%s" % (model, rho)))
+    return conditions
+
+
+def export_e5_visual_failure(models: list[str]) -> None:
+    """E5 扩展总表（Main_Table3）+ Full 表（十指标 × V / VT / Δ）。
+
+    Full 表编号顺延为 Table5：Table4 已被 Main/Full_Table4_E5_Degradation
+    占用（设计文档 §3 注明文件名可改）。
+    """
+    model = models[0] if models else "V7_Cv5"
+    conditions = _e5_visual_conditions(model)
+    header = ["模型", "口径", "轴", "档位", "条件"] + E5_VISUAL_MAIN_METRICS
+    header_full = ["模型", "口径", "轴", "档位", "条件", "行"] + METRICS10
+    rows, rows_full = [], []
+    for axis, tag, label, cell_id in conditions:
+        m = seeded_metrics(cell_id)
+        if not m:
+            print("[skip] E5 visual %s: 无 cell 结果" % cell_id)
+            continue
+        rows.append([display_name(cell_id), "last", axis, tag, label]
+                    + delta_row(m, keys=E5_VISUAL_MAIN_METRICS))
+        for row_key, cond in (("V2M", "V2M"), ("VT2M", "VT2M")):
+            rows_full.append([display_name(cell_id), "last", axis, tag, label, row_key]
+                             + metric_row(m, cond))
+        rows_full.append([display_name(cell_id), "last", axis, tag, label, "Δ(VT−V)"]
+                         + delta_row(m))
+    write_csv(E5_DIR / "Main_Table3_E5_VisualFailure.csv", header, rows)
+    write_csv(E5_SUPP / "Full_Table5_E5_VisualFailure.csv", header_full, rows_full)
+    export_e5_pure_visual(model)
+
+
+# E5 纯视觉基线对照（2026-11-04 口径更正版，z_note/E5_纯视觉基线扩展说明.md §3.3）：
+# 同一退化条件下 V7_Cv5 的 VT / V 与外部纯视觉基线的差，Δ<0 = VT（或 V）误差更低；
+# 当前只有 WHAM（WHAM first, other baselines pending）。表号 6 为顺延占位。
+E5_PURE_VISUAL_BASELINES = ("WHAM",)
+
+
+def _e5_baseline_pred_dir(tag: str) -> str:
+    """条件档位 → 基线 predictions 子目录（occ000 = 干净档 local_gen）。"""
+    if tag == "occ000":
+        return "local_gen"
+    if tag.startswith("occ"):
+        return "e5_occ_lower" + tag[3:]
+    return "e5_" + tag
+
+
+def _e5_baseline_payload(baseline: str, tag: str) -> dict | None:
+    path = (REPO / "results" / "baselines" / baseline / "predictions"
+            / _e5_baseline_pred_dir(tag) / "eval_motion" / "metrics"
+            / ("%s_comparison.json" % EVAL_SPLIT))
+    if not path.is_file():
+        print("[skip] E5 pure-visual %s %s: 无 %s" % (baseline, tag, path))
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("split") != EVAL_SPLIT:
+        raise ValueError("Result split mismatch: " + str(path))
+    import hashlib
+    SOURCE_RECEIPTS.append({"cell": "%s/%s" % (baseline, _e5_baseline_pred_dir(tag)),
+                            "path": str(path),
+                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                            "split": EVAL_SPLIT, "checkpoint_sha256": None,
+                            "contact_label_package_sha256": None})
+    return payload
+
+
+def _e5_num(v):
+    if isinstance(v, tuple):
+        v = v[0]
+    if v is None:
+        return None
+    v = float(v)
+    return v if np.isfinite(v) else None
+
+
+def _e5_diff(a, b):
+    return round(a - b, 3) if a is not None and b is not None else ""
+
+
+def export_e5_pure_visual(model: str) -> None:
+    """Main_Table6：Δ(VT−基线) / Δ(V−基线)；Full_Table6：V / VT / 基线绝对值
+    与相对干净档的退化量（Δ干净），用于比较各方法在遮挡下的退化幅度。"""
+    conditions = _e5_visual_conditions(model)
+    metrics = E5_VISUAL_MAIN_METRICS
+    header = ["轴", "档位", "条件"]
+    for b in E5_PURE_VISUAL_BASELINES:
+        header += ["%s_Δ(VT−%s) %s" % (b, b, k) for k in metrics]
+        header += ["%s_Δ(V−%s) %s" % (b, b, k) for k in metrics]
+    header_full = ["轴", "档位", "条件", "行"] + metrics + ["会话数"]
+    rows, rows_full, clean, series = [], [], {}, {}
+    for axis, tag, label, cell_id in conditions:
+        m = seeded_metrics(cell_id)
+        if not m:
+            print("[skip] E5 pure-visual %s: 无 cell 结果" % cell_id)
+            continue
+        vals = {"V": [_e5_num(m["V2M"].get(k)) for k in metrics],
+                "VT": [_e5_num(m["VT2M"].get(k)) for k in metrics]}
+        counts = {"V": "", "VT": ""}
+        row = [axis, tag, label]
+        for b in E5_PURE_VISUAL_BASELINES:
+            payload = _e5_baseline_payload(b, tag)
+            summary = (payload or {}).get("summary") or {}
+            vals[b] = [_e5_num(summary.get(BASELINE_METRIC_KEYS[k])) for k in metrics]
+            counts[b] = (payload or {}).get("n_sessions", "")
+            row += [_e5_diff(a, w) for a, w in zip(vals["VT"], vals[b])]
+            row += [_e5_diff(a, w) for a, w in zip(vals["V"], vals[b])]
+        rows.append(row)
+        series[tag] = {n: list(v) for n, v in vals.items()}
+        if tag == "occ000":
+            clean = {n: list(v) for n, v in vals.items()}
+        for n, v in vals.items():
+            rows_full.append([axis, tag, label, {"V": "V2M", "VT": "VT2M"}.get(n, n)]
+                             + ["" if x is None else round(x, 3) for x in v] + [counts[n]])
+        for n, v in vals.items():
+            if n in clean:
+                rows_full.append([axis, tag, label, "Δ干净(%s)" % {"V": "V2M", "VT": "VT2M"}.get(n, n)]
+                                 + [_e5_diff(x, c) for x, c in zip(v, clean[n])] + [""])
+    write_csv(E5_DIR / "Main_Table6_E5_PureVisual.csv", header, rows)
+    write_csv(E5_SUPP / "Full_Table6_E5_PureVisual.csv", header_full, rows_full)
+    _e5_pure_visual_figure(model, metrics, series)
+
+
+def _e5_pure_visual_figure(model: str, metrics: list[str],
+                           series: dict[str, dict[str, list]]) -> None:
+    """Main_Fig5 = 三条线的退化曲线：主模型 V / 主模型 VT / 外部纯视觉基线
+    （2026-11-05 用户要求）。y = 指标绝对值，三轴各一张子图行。
+    图号 5 为顺延占位（Main_Fig2/3/4 已占用），与 Table6 同一对照口径。
+
+    数字直接复用 Main/Full_Table6 的同一批取数（series），表图同源——
+    不另读基线 json，避免表与图各算一次而对不上。
+    基线只有五主指标与 occ 10/20/40/60/80，故曲线按各轴**实际落地的档位**
+    画，缺的点留空（不插值）。判读只读符号与排序。
+
+    只画**有数据的轴**：act8020 口径只有遮挡轴的 eval 格，光度/断流轴整行无点，
+    留着就是两行空白子图。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    baseline = E5_PURE_VISUAL_BASELINES[0]
+    # 三轴 ×（档位, x 值, x 轴标题）：x 用物理量，光度轴按 log2(G) 等距排布。
+    axes_spec = [
+        ("Occlusion (%)", [("occ%s" % o, float(int(o))) for o in ("010", "020", "040", "060", "080")], False),
+        ("Exposure gain G", [("exp_g%s" % g, int(g) / 100.0) for g in E5_EXP_GAINS], True),
+        ("Dropout rho (%)", [("gap_r%s" % r, float(int(r))) for r in E5_GAP_RHOS], False),
+    ]
+    names = ("V", "VT", baseline)
+
+    def xy(points: list, clean_x: float, name: str, col: int) -> tuple[list, list]:
+        # 干净档在每轴都作为参照：遮挡/断流的 0 点，光度的 G=1。
+        xs, ys = [], []
+        for tag, xv in [("occ000", clean_x)] + points:
+            value = (series.get(tag) or {}).get(name)
+            if value is None or value[col] is None:
+                continue
+            xs.append(xv)
+            ys.append(value[col])
+        return xs, ys
+
+    live = []
+    for xlabel, points, logx in axes_spec:
+        clean_x = 1.0 if logx else 0.0
+        if any(len(xy(points, clean_x, name, c)[1]) >= 2
+               for name in names for c in range(len(metrics))):
+            live.append((xlabel, points, logx, clean_x))
+    if not live:
+        print("[skip] E5 pure-visual figure: 无足够落地档位")
+        return
+    color_v, color_vt, color_b = "#2a78d6", "#eb6834", "#4f4f4f"
+    nrow, ncol = len(live), len(metrics)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(3.5 * ncol, 3.3 * nrow))
+    axes = np.atleast_2d(axes)
+    drawn = False
+    for r, (xlabel, points, logx, clean_x) in enumerate(live):
+        for c, metric in enumerate(metrics):
+            ax = axes[r][c]
+            for name, color, style, marker in (
+                    ("V", color_v, "-", "o"),
+                    ("VT", color_vt, "--", "s"),
+                    (baseline, color_b, ":", "^")):
+                xs, ys = xy(points, clean_x, name, c)
+                if len(ys) < 2:
+                    continue
+                order = np.argsort(xs)
+                ax.plot(np.asarray(xs)[order], np.asarray(ys)[order], color=color,
+                        ls=style, lw=1.9, marker=marker, ms=4.5,
+                        label=name if name != baseline else "%s (pure visual)" % baseline)
+                drawn = True
+            if logx:
+                ax.set_xscale("log", base=2)
+            ax.axvline(clean_x, color="#c8c8c8", ls=":", lw=0.9, zorder=0)
+            ax.set_title(metric if r == 0 else "", fontsize=10)
+            ax.set_xlabel(xlabel, fontsize=8.5)
+            if c == 0:
+                ax.set_ylabel("mm", fontsize=8.5)
+            ax.grid(alpha=0.25, lw=0.6)
+            ax.margins(y=0.14)
+    if not drawn:
+        plt.close(fig)
+        print("[skip] E5 pure-visual figure: 无足够落地档位")
+        return
+    # 图例跨所有子图去重收集：某个子图少画一条线时图例不能跟着少一条。
+    handles, labels = [], []
+    for ax in axes.ravel():
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            if label not in labels:
+                handles.append(handle)
+                labels.append(label)
+    fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False, fontsize=10)
+    fig.suptitle("E5 pure-visual comparison: %s V / VT vs %s (ckpt_last)"
+                 % (model, baseline), fontsize=12)
+    out = E5_DIR / "Main_Fig5_E5_PureVisual.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout(rect=(0, 0.04, 1, 0.96))
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("[png] %s" % out)
+
+
+def _curve_crossings(xs, a, b) -> list[tuple[float, float]]:
+    """两条折线的交点：d = a − b 变号处按线性插值求 x 与 y（跳过缺失点）。
+    起点重合（两条曲线同起点，d[0] == 0）不算交点。"""
+    x = np.asarray(xs, dtype=float)
+    ya = np.asarray(a, dtype=float)
+    d = np.asarray(b, dtype=float) - ya
+    out = []
+    for i in range(len(x) - 1):
+        if not (np.isfinite(d[i]) and np.isfinite(d[i + 1])):
+            continue
+        if d[i] * d[i + 1] < 0:
+            t = d[i] / (d[i] - d[i + 1])
+            out.append((x[i] + t * (x[i + 1] - x[i]),
+                        ya[i] + t * (ya[i + 1] - ya[i])))
+        elif d[i] == 0 and i > 0 and d[i - 1] * d[i + 1] < 0:
+            out.append((x[i], ya[i]))
+    return out
+
+
+def _mark_crossings(ax, xs, v, vt) -> None:
+    """在 VT 与 V 的交点画竖虚线 + × 标记 + 交点档位文字（靠顶时文字放下方）。"""
+    y0, y1 = ax.get_ylim()
+    for xi, yi in _curve_crossings(xs, v, vt):
+        if xi < 1.0:  # 起点附近的伪交点（两线相差 <1% 档位）不标
+            continue
+        ax.axvline(xi, color="#8a8a8a", ls=":", lw=0.9, zorder=1)
+        ax.plot([xi], [yi], marker="x", color="#333333", ms=7, mew=1.5,
+                zorder=5, label="_nolegend_")
+        above = (yi - y0) < 0.75 * (y1 - y0)
+        ax.annotate("cross %.0f%%" % xi, xy=(xi, yi),
+                    xytext=(0, 9 if above else -14),
+                    textcoords="offset points", ha="center", fontsize=7.5,
+                    color="#4a4a4a")
 
 
 def _e5_degradation_figure(models: list[str], metrics: list[str],
                            units: dict[str, str], scales: dict[str, float],
                            suptitle: str, fname: str,
                            titles: dict[str, str] | None = None,
-                           levels: tuple[str, ...] | None = None) -> None:
-    """E5 退化曲线通用绘图：x = 遮挡档、y = 相对 occ000 的 Δ（×scale），
-    V 蓝实线 / VT 橙虚线，子图 = metrics。判读：VT 退化应轻于 V。
+                           levels: tuple[str, ...] | None = None,
+                           absolute: bool = False,
+                           crossover: bool = False,
+                           t_reference: bool = False) -> None:
+    """E5 遮挡曲线通用绘图：x = 遮挡档，V 蓝实线 / VT 橙虚线，子图 = metrics。
+    absolute=False：y = 相对 occ000 的 Δ（×scale），判读 VT 退化应轻于 V；
+    absolute=True：y = 指标绝对值（×scale），直接看 V / VT 两条曲线的高低
+    与间距（多 seed 时画 mean ± std 带）。
+    crossover=True：标注 VT / V 曲线交点（绝对误差图的判据，实验计划 §4.3）；
+    t_reference=True：叠加 U@T（纯触觉）水平参考线，判断视觉退化到哪一档时
+    触觉开始主导。
     titles = 子图标题覆盖（接触类标注两套机制口径）；
     levels = 档位子集（缺省 = E5_OCC_LEVELS 全部十档）。"""
     import matplotlib
@@ -586,19 +901,53 @@ def _e5_degradation_figure(models: list[str], metrics: list[str],
         if not base:
             continue
 
-        def _val(v):
+        def _mean(v):
             return v[0] if isinstance(v, tuple) else float(v)
 
+        def _std(v):
+            return v[1] if isinstance(v, tuple) else 0.0
+
         def series(cond):
-            vals = []
+            vals, errs = [], []
             for occ, cell in cells.items():
                 m = seeded_metrics(cell)
-                vals.append((_val(m[cond][metric]) - _val(base[cond][metric]))
-                            * scale if m else float("nan"))
-            return vals
-        v, vt = series("V2M"), series("VT2M")
+                raw = m[cond].get(metric) if m else None
+                if raw is None:
+                    vals.append(float("nan"))
+                    errs.append(float("nan"))
+                    continue
+                if absolute:
+                    vals.append(_mean(raw) * scale)
+                    errs.append(_std(raw) * scale)
+                else:
+                    b = base[cond].get(metric)
+                    if b is None:
+                        vals.append(float("nan"))
+                        errs.append(float("nan"))
+                        continue
+                    vals.append((_mean(raw) - _mean(b)) * scale)
+                    errs.append(((_std(raw) ** 2 + _std(b) ** 2) ** 0.5) * scale)
+            return vals, errs
+
+        v, v_err = series("V2M")
+        vt, vt_err = series("VT2M")
         ax.plot(xs, v, color=color_v, lw=2, marker="o", ms=5, label="V")
         ax.plot(xs, vt, color=color_vt, lw=2, ls="--", marker="s", ms=5, label="VT")
+        for vals, errs, color in ((v, v_err, color_v), (vt, vt_err, color_vt)):
+            arr_v = np.asarray(vals, dtype=float)
+            arr_e = np.asarray(errs, dtype=float)
+            ok = np.isfinite(arr_v) & np.isfinite(arr_e) & (arr_e > 0)
+            if ok.any():
+                ax.fill_between(np.asarray(xs, dtype=float)[ok],
+                                (arr_v - arr_e)[ok], (arr_v + arr_e)[ok],
+                                color=color, alpha=0.15, lw=0)
+        if t_reference:
+            tv = base["T2M"].get(metric)
+            if tv is not None:
+                ax.axhline(_mean(tv) * scale, color="#7a7a7a", ls="-.",
+                           lw=1.1, zorder=0, label="T-only")
+        if crossover:
+            _mark_crossings(ax, xs, v, vt)
         if all(np.isfinite(v)) and all(np.isfinite(vt)):
             ax.annotate("V", (xs[-1], v[-1]), color=color_v, fontweight="bold",
                         xytext=(4, 0), textcoords="offset points", va="center")
@@ -606,15 +955,20 @@ def _e5_degradation_figure(models: list[str], metrics: list[str],
                         xytext=(4, 0), textcoords="offset points", va="center")
         ax.set_title((titles or {}).get(metric, metric), fontsize=10)
         ax.set_xlabel("Occlusion (%)", fontsize=9)
-        ax.set_ylabel("Δ vs occ000 (%s)" % units.get(metric, "mm"),
+        ax.set_ylabel((units.get(metric, "mm") if absolute
+                       else "Δ vs occ000 (%s)" % units.get(metric, "mm")),
                       fontsize=9)
+        if absolute:
+            ax.set_ylim(bottom=0)
         ax.grid(alpha=0.25, lw=0.6)
         ax.margins(y=0.15)
     for ax in np.asarray(axes).flat[len(metrics):]:
         ax.set_visible(False)
     fig.suptitle(suptitle % model, fontsize=12)
-    fig.legend(handles=np.asarray(axes).flat[0].lines, labels=["V", "VT"],
-               loc="lower center", ncol=2, frameon=False, fontsize=10)
+    handles = [h for h in np.asarray(axes).flat[0].lines
+               if h.get_label() and not str(h.get_label()).startswith("_")]
+    fig.legend(handles=handles, labels=[h.get_label() for h in handles],
+               loc="lower center", ncol=len(handles), frameon=False, fontsize=10)
     out = (E5_DIR if "/" not in fname else ETEST / "E5_OcclusionRobustness") / fname
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout(rect=(0, 0.03, 1, 0.97))
@@ -623,8 +977,86 @@ def _e5_degradation_figure(models: list[str], metrics: list[str],
     print("[png] %s" % out)
 
 
+def _e5_global_figure(models: list[str], metrics: list[str], fname: str,
+                      levels: tuple[str, ...] | None = None,
+                      suptitle: str = "E5 global degradation under occlusion - %s (ckpt_last)"
+                      ) -> None:
+    """全局退化量图：每个指标先除以 **V 的 occ000 值**（干净 V = 100%），
+    再对指标等权平均，得到单条 V / VT 全局曲线；标注两者交点与 T-only
+    水平线。共用同一基准，干净档 VT 相对 V 的代价因此可见。
+    y 越低越好；>100% = 比干净 V 退化。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    levels = tuple(levels) if levels is not None else E5_OCC_LEVELS
+    model = models[0] if models else "V7_Cv5"
+    cells = {"occ000": model}
+    for occ in levels:
+        cells["occ%s" % occ] = "%s_evalocc%s" % (model, occ)
+    xs = [0] + [int(o) for o in levels]
+    base = seeded_metrics(cells["occ000"])
+
+    def _mean(v):
+        return v[0] if isinstance(v, tuple) else float(v)
+
+    def global_series(cond):
+        vals = []
+        for _, cell in cells.items():
+            m = seeded_metrics(cell)
+            rel = []
+            for k in metrics:
+                raw = m[cond].get(k) if m else None
+                b = base["V2M"].get(k) if base else None
+                if raw is None or b is None or float(_mean(b)) == 0:
+                    continue
+                rel.append(float(_mean(raw)) / float(_mean(b)) * 100.0)
+            vals.append(float(np.mean(rel)) if rel else float("nan"))
+        return vals
+
+    v, vt = global_series("V2M"), global_series("VT2M")
+    t_ref = []
+    for _ in cells:
+        rel = []
+        for k in metrics:
+            raw = base["T2M"].get(k) if base else None
+            b = base["V2M"].get(k) if base else None
+            if raw is None or b is None or float(_mean(b)) == 0:
+                continue
+            rel.append(float(_mean(raw)) / float(_mean(b)) * 100.0)
+        t_ref.append(float(np.mean(rel)) if rel else float("nan"))
+
+    color_v, color_vt = "#2a78d6", "#eb6834"
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    ax.plot(xs, v, color=color_v, lw=2.2, marker="o", ms=5, label="V")
+    ax.plot(xs, vt, color=color_vt, lw=2.2, ls="--", marker="s", ms=5, label="VT")
+    if np.isfinite(t_ref[0]):
+        ax.axhline(t_ref[0], color="#7a7a7a", ls="-.", lw=1.2,
+                   label="T-only", zorder=0)
+    ax.axhline(100.0, color="#c8c8c8", ls=":", lw=0.9, zorder=0,
+               label="clean (100%)")
+    crosses = _curve_crossings(xs, v, vt)
+    _mark_crossings(ax, xs, v, vt)
+    if not crosses:
+        ax.text(0.98, 0.03, "VT ≤ V at all occlusion levels (no crossing)",
+                transform=ax.transAxes, ha="right", va="bottom",
+                fontsize=9, color="#4a4a4a")
+    ax.set_xlabel("Occlusion (%)", fontsize=10)
+    ax.set_ylabel("Mean error relative to clean V (%)", fontsize=10)
+    ax.set_title(suptitle % model, fontsize=12)
+    ax.grid(alpha=0.25, lw=0.6)
+    ax.margins(y=0.12)
+    ax.legend(loc="upper left", frameon=False, fontsize=9)
+    out = E5_DIR / fname
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("[png] %s" % out)
+
+
 def export_e5_figure(models: list[str]) -> None:
-    """E5 图 1 + 图 2 + Main_Fig2（2026-11-02 用户裁定）。
+    """E5 图 1 + 图 2 + Main_Fig2 + Main_Fig3（2026-11-02 用户裁定）。
 
     x = 遮挡档，y = 相对 occ000 的退化（Δ），V（蓝实线）与 VT（橙虚线）
     两条曲线——判读：VT 退化应轻于 V（曲线更低/更平）。
@@ -633,6 +1065,10 @@ def export_e5_figure(models: list[str]) -> None:
     - Main_Fig2 = 论文主图（2026-11-02 用户裁定：occ 20–90 八点，
       7 精选指标 = PA-MPJPE / traj_ATE@0.5s / GroundPen / FootSliding /
       GlobalMPJPE / RootOrientationDrift / PA-MPJPE_anklefoot）。
+    - Main_Fig3 = 绝对误差遮挡曲线（2026-11-04 用户要求）：同 Main_Fig2 的
+      指标与档位，y 改为指标绝对值，标注 V / VT 交点与 U@T 参考线。
+    - Main_Fig4 = 全局退化量图（2026-11-04 用户要求）：七指标各自除以 V 的
+      occ000 值后等权平均为单条全局曲线（干净 V = 100%），标出 V / VT 交点。
     主模型缺省 V7_Cv5（last 口径）。图内英文。
     """
     units = {"MPJRE": "deg", "RootOrientationDrift": "deg", "Jitter_pred": "m/s³",
@@ -644,13 +1080,12 @@ def export_e5_figure(models: list[str]) -> None:
     # traj 子图 = traj_ATE@0.5s（20 帧段首对齐全方法同一处理，11-01 裁定；
     # occ 四档 11-02 重评后五 cell 齐列）；表 1 保留未对齐 traj_ATE 单列。
     _e5_degradation_figure(
-        models, [("traj_ATE@0.5s" if k == "traj_ATE" else k)
-                 for k in METRICS10], units, scales,
+        models, list(METRICS10), units, scales,
         "E5 degradation under occlusion - %s (ckpt_last)",
         "Full_Fig1_E5_Degradation.png")
     _e5_degradation_figure(
         models, ["contact_acc", "contact_f1", "contact_balanced_acc",
-                 "traj_ATE@0.5s", "GroundPenFrac", "ground_pen_foot_mm",
+                 "traj_ATE", "GroundPenFrac", "ground_pen_foot_mm",
                  "RootOrientationDrift", "PA-MPJPE_anklefoot",
                  "PA-MPJPE_upper"],
         units, scales,
@@ -668,6 +1103,23 @@ def export_e5_figure(models: list[str]) -> None:
         "Main_Fig2_E5_Degradation.png",
         levels=E5_MAIN_LEVELS,
         titles={"PA-MPJPE_anklefoot": "PA-MPJPE (ankle-foot)"})
+    # Main_Fig3 = 绝对误差遮挡曲线（2026-11-04 用户要求；实验计划 §4.3 正文图）：
+    # 与 Main_Fig2 同指标同档位，y 改为指标绝对值——直接对照 V / VT 曲线高低，
+    # 标注两者交点，并叠加 U@T 水平参考线判断视觉退化到哪一档触觉开始主导。
+    _e5_degradation_figure(
+        models, list(E5_MAIN_METRICS),
+        units, scales,
+        "E5 absolute error under occlusion - %s (ckpt_last)",
+        "Main_Fig3_E5_Absolute.png",
+        levels=E5_MAIN_LEVELS,
+        titles={"PA-MPJPE_anklefoot": "PA-MPJPE (ankle-foot)"},
+        absolute=True, crossover=True, t_reference=True)
+    # Main_Fig4 = 全局退化量图（2026-11-04 用户要求）：七指标各自除以 V 的
+    # occ000 值后等权平均为单条全局曲线（干净 V = 100%，两条件共用基准），
+    # 标出 V / VT 交点。
+    _e5_global_figure(
+        models, list(E5_MAIN_METRICS), "Main_Fig4_E5_Global.png",
+        levels=E5_MAIN_LEVELS)
 
 
 # ---------------- E3：多视角（表 4 骨架：落地的填数、未落地的填 —） ----------------
@@ -901,8 +1353,13 @@ E6_METRIC_ZH = {"vert": "足垂直误差(mm)", "pen": "地面穿透(mm)",
 # 裁定：去掉 T2M 参照列，全 10 指标；traj 列 = traj_ATE@0.5s 口径）。
 E6_GATE_ROWS = [("V7_Cv7_s1", "无门"), ("V7_Cv5_s1", "双门"),
                 ("V7_Cv4_s1", "单门")]
+# 动作分层 80/20 新 split（2026-11-04）只有 Cv5/Cv7 两格：环境变量 E6_GATE_ROWS 覆盖，
+# 格式 cell:标签,cell:标签（首项 = 无门参照）；不设即旧行为逐位不变。
+import os as _os
+if _os.environ.get("E6_GATE_ROWS"):
+    E6_GATE_ROWS = [tuple(item.split(":", 1)) for item in _os.environ["E6_GATE_ROWS"].split(",") if item]
 E6_GATE_METRICS = ["PA-MPJPE", "MPJPE", "GlobalMPJPE", "W-MPJPE100", "MPJRE",
-                   "traj_ATE@0.5s", "RootOrientationDrift", "FootSliding",
+                   "traj_ATE", "RootOrientationDrift", "FootSliding",
                    "GroundPen", "Jitter_pred"]
 E6_SESSION_KEYS = {"PA-MPJPE": "pa_mpjpe_mm", "MPJPE": "mpjpe_mm",
                    "GlobalMPJPE": "global_mpjpe_mm",
@@ -943,7 +1400,7 @@ def _e6_gate_decomposition() -> dict:
         print("[warn] %s 缺失；FootSliding 退回按帧数加权" % weight_path)
     comp: dict = {}
     for cell, _ in E6_GATE_ROWS:
-        d = json.loads((CELLS / cell / "metrics" / "session_detail_test.json")
+        d = json.loads((CELLS / cell / "metrics" / ("session_detail_%s.json" % EVAL_SPLIT))
                        .read_text(encoding="utf-8"))["conditions"]
         vt = {e["session_id"]: e["metrics"] for e in d["VT2M"]}
         v = {e["session_id"]: e["metrics"] for e in d["V2M"]}
@@ -1199,7 +1656,7 @@ def migrate_reports() -> None:
 
 
 def main() -> int:
-    global CONTACT_NAMESPACE, EVAL_SPLIT, ETEST, CELL_MAP, STRICT_EXPORT
+    global CONTACT_NAMESPACE, EVAL_SPLIT, ETEST, CELL_MAP, STRICT_EXPORT, E5_DIR, E5_SUPP, E5_DETAIL, E6_BASE, E7_BASE, RECEIPTS
     import argparse
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--experiment", default="all",
@@ -1227,6 +1684,14 @@ def main() -> int:
         CELL_MAP = json.loads(args.cell_map.read_text())
     if args.out_dir:
         ETEST = args.out_dir
+        # E5/E6/E7/receipts 目录在 import 时按默认 ETEST 拼成常量；--out-dir 必须重算，
+        # 否则这些实验仍写回 Etest 旧目录，覆盖按 test 口径生成的论文表图（2026-11-04 act8020 val 导出前发现）。
+        E5_DIR = ETEST / "E5_OcclusionRobustness"
+        E5_SUPP = E5_DIR / "supplementary"
+        E5_DETAIL = E5_DIR / "detail"
+        E6_BASE = ETEST / "E6_ContactPhaseAnalysis"
+        E7_BASE = ETEST / "E7_DynamicModalityInputs"
+        RECEIPTS = ETEST / "receipts"
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     exp = args.experiment.lower()
     if exp in ("all", "e1"):

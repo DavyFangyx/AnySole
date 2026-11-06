@@ -9,12 +9,14 @@ configs）由主会话统一串行完成；本文件独立可导入，文件末�
 三开关（逐窗独立采样、允许叠加；采样粒度 = 窗口整窗一致，在 crop 装配
 之前决定）：
 
-- ``v_src`` ∈ {SRC_CAM3=0, SRC_OCC=1}，P(occ) = ``p_occ``（默认 0.2）。
-  occ010 = bbox 底部 10% 涂黑后重跑 HRNet 的独立特征缓存
-  （``.../visual/hrnet/cam3_occ_lower010/``，与 cam3 同帧轴、同窗口网格——
+- ``v_src``：0 = cam3，k≥1 = 档索引（``levels[k-1]``），P(occ) = ``p_occ``
+  （默认 0.2）。occ0NN = bbox 底部 NN% 涂黑后重跑 HRNet 的独立特征缓存
+  （``.../visual/hrnet/cam3_occ_lower0NN/``，与 cam3 同帧轴、同窗口网格——
   闸门 ``smoke_occ_cache_align.py`` 已核实 140/140 会话零缺失、帧数全等、
-  特征确有差异）。occ 窗的 V_feat 整窗来自 occ 缓存（档位 010 = 足部档，
-  足部特征级丢弃由此承载；可扩展档位 020/030/050 缓存已齐，登记不进 v1）。
+  特征确有差异）。occ 窗的 V_feat 整窗来自该档缓存。
+  档梯（2026-11-06，修改 13 D1 `Cv5RM`）：``levels`` 可声明多档
+  （如 ``("010","020","030")``），occ 命中后逐窗均匀抽档——把「V 在场但
+  无信息」这一态放进训练分布；默认单档 ``("010",)`` = v1 行为逐位不变。
 - ``v_zeroed`` ∈ {0,1}，P = ``p_nullV``（默认 0.1）。整窗 V 输入置零——
   train.py ``condition_inputs`` 层既有机制（H 口径，无学习参数，默认输入
   置零而非 learned null token）。
@@ -47,11 +49,16 @@ __all__ = [
     "SRC_CAM3",
     "SRC_OCC",
     "SRC_NAMES",
+    "OCC_DIR_FMT",
     "OCC_DIR_DEFAULT",
+    "OCC_LEVELS_DEFAULT",
+    "normalize_levels",
+    "occ_feat_key",
     "WindowAug",
     "OccMixSampler",
     "undisturbed_ratio",
     "default_occ_cache_root",
+    "occ_cache_root",
     "occ_cache_path",
     "load_hrnet_cache",
     "load_occ_session",
@@ -61,12 +68,38 @@ __all__ = [
 ]
 
 SRC_CAM3 = 0
-SRC_OCC = 1
+SRC_OCC = 1  # 单档语义保留；档梯下 v_src 为档索引（0 = cam3，k≥1 = levels[k-1]）
 SRC_NAMES = {SRC_CAM3: "cam3", SRC_OCC: "occ"}
 
-# 档位口径（010 = 足部档）：occ010 缓存目录名（相对 hrnet 根）。
-# 可扩展档位 occ_lower020/030/050 缓存已齐，登记不进 v1（方案 §2.3a）。
-OCC_DIR_DEFAULT = "cam3_occ_lower010"
+# 档位口径（010 = 足部档）：occ 缓存目录名（相对 hrnet 根）。
+# 档梯（2026-11-06，修改 13 D1）：occ_lower{010..100} 缓存全部在盘，
+# `levels` 声明训练用哪几档；单档 ("010",) = v1 行为逐位不变。
+OCC_DIR_FMT = "cam3_occ_lower%s"
+OCC_LEVELS_DEFAULT = ("010",)
+OCC_DIR_DEFAULT = OCC_DIR_FMT % OCC_LEVELS_DEFAULT[0]
+
+
+def normalize_levels(levels) -> Tuple[str, ...]:
+    """档位声明 → 规范三位字符串元组（接受 "010,020,030" / ["10", 20] 等）。"""
+    if levels is None:
+        return OCC_LEVELS_DEFAULT
+    if isinstance(levels, str):
+        items = [part for part in levels.replace(" ", "").split(",") if part]
+    else:
+        items = list(levels)
+    out = []
+    for item in items:
+        token = "%03d" % int(item)
+        if token not in out:
+            out.append(token)
+    if not out:
+        raise ValueError("occ levels must be non-empty")
+    return tuple(out)
+
+
+def occ_feat_key(level: str) -> str:
+    """该档位在 session dict 里的特征键（单档 "010" 保留 v1 键名）。"""
+    return "V_feat_occ" if str(level) == OCC_LEVELS_DEFAULT[0] else ("V_feat_occ%s" % level)
 
 # 预注册参数（方案 §2.3/§3；0.3 作 p_occ 扫描记录，不设网格）。
 P_OCC_DEFAULT = 0.2
@@ -82,13 +115,23 @@ P_T_DEFAULT = 0.1
 class WindowAug:
     """一个窗口的采样标签（整窗一致；``__getitem__`` crop 之前决定）。"""
 
-    v_src: int  # SRC_CAM3 / SRC_OCC —— 决定 V_feat crop 来自哪个缓存
+    v_src: int  # 0 = cam3；k≥1 = 档索引（levels[k-1]）—— 决定 V_feat crop 来自哪个缓存
     v_zeroed: bool  # null-V 开关（train.py 侧应用置零）
     t_zeroed: bool  # null-T 开关（train.py 侧应用置零）
+    v_level: str = ""  # occ 档位（cam3 窗为空串）
+
+    @property
+    def feat_key(self) -> str:
+        """该窗口应 crop 的 session 键（cam3 窗 = "V_feat"）。"""
+        if int(self.v_src) == SRC_CAM3:
+            return "V_feat"
+        return occ_feat_key(self.v_level)
 
     @property
     def src_name(self) -> str:
-        return SRC_NAMES[int(self.v_src)]
+        if int(self.v_src) == SRC_CAM3:
+            return SRC_NAMES[SRC_CAM3]
+        return "occ%s" % self.v_level if self.v_level else SRC_NAMES[SRC_OCC]
 
     @property
     def undisturbed(self) -> bool:
@@ -132,6 +175,7 @@ class OccMixSampler:
         p_nullV: float = P_NULLV_DEFAULT,
         p_T: float = P_T_DEFAULT,
         seed: Optional[int] = None,
+        levels=None,
     ):
         for name, value in (("p_occ", p_occ), ("p_nullV", p_nullV), ("p_T", p_T)):
             if not 0.0 <= float(value) <= 1.0:
@@ -139,6 +183,8 @@ class OccMixSampler:
         self.p_occ = float(p_occ)
         self.p_nullV = float(p_nullV)
         self.p_T = float(p_T)
+        # 档梯（修改 13 D1）：occ 命中后在 levels 内逐窗均匀抽档。
+        self.levels = normalize_levels(levels)
         self._gen = torch.Generator() if seed is not None else None
         if self._gen is not None:
             self._gen.manual_seed(int(seed))
@@ -153,12 +199,24 @@ class OccMixSampler:
         self._gen.manual_seed(int(seed))
 
     def sample(self, n: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """向量化采样 n 个窗口 → (v_src long (n,), v_zeroed bool (n,), t_zeroed bool (n,))。"""
+        """向量化采样 n 个窗口 → (v_src long (n,), v_zeroed bool (n,), t_zeroed bool (n,))。
+
+        ``v_src``：0 = cam3，k≥1 = ``levels[k-1]``。档位复用 ``draws[0]`` 的
+        同一个均匀数（命中区间内再均分），RNG 流仍是 3 行 ⇒ 单档时与 v1
+        逐位一致。
+        """
         n = int(n)
         if n <= 0:
             raise ValueError("n must be positive")
         draws = torch.rand(3, n, generator=self._gen)
-        v_src = (draws[0] < self.p_occ).long()
+        hit = draws[0] < self.p_occ
+        n_levels = len(self.levels)
+        if n_levels > 1 and self.p_occ > 0.0:
+            unit = (draws[0] / self.p_occ).clamp_(0.0, 1.0 - 1e-6)
+            level_idx = (unit * n_levels).floor_().long()
+        else:
+            level_idx = torch.zeros(n, dtype=torch.long)
+        v_src = torch.where(hit, level_idx + 1, torch.zeros_like(level_idx))
         v_zeroed = draws[1] < self.p_nullV
         t_zeroed = draws[2] < self.p_T
         return v_src, v_zeroed, t_zeroed
@@ -166,10 +224,12 @@ class OccMixSampler:
     def sample_one(self) -> WindowAug:
         """单窗口采样（``__getitem__`` 挂钩用；crop 装配之前调用）。"""
         v_src, v_zeroed, t_zeroed = self.sample(1)
+        src = int(v_src.item())
         return WindowAug(
-            v_src=int(v_src.item()),
+            v_src=src,
             v_zeroed=bool(v_zeroed.item()),
             t_zeroed=bool(t_zeroed.item()),
+            v_level="" if src == SRC_CAM3 else self.levels[src - 1],
         )
 
 
@@ -206,9 +266,15 @@ def undisturbed_ratio(
 # 双缓存装载与对齐闸门（同帧轴/同窗格 = 形状一致 + 特征确有差异）
 # ---------------------------------------------------------------------------
 
+def occ_cache_root(cam3_root: Path = HRNET_CACHE_ROOT,
+                   level: str = OCC_LEVELS_DEFAULT[0]) -> Path:
+    """由 cam3 缓存根推导某一档 occ 缓存根（兄弟目录）。"""
+    return Path(cam3_root).parent / (OCC_DIR_FMT % normalize_levels([level])[0])
+
+
 def default_occ_cache_root(cam3_root: Path = HRNET_CACHE_ROOT) -> Path:
     """由 cam3 缓存根推导 occ010 缓存根（兄弟目录，v1 档位固定 010）。"""
-    return Path(cam3_root).parent / OCC_DIR_DEFAULT
+    return occ_cache_root(cam3_root, OCC_LEVELS_DEFAULT[0])
 
 
 def occ_cache_path(session_id: str, occ_root: Optional[Path] = None) -> Path:
@@ -229,12 +295,12 @@ def load_occ_session(
     occ_root: Optional[Path] = None,
     cam3_array: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """单会话 occ010 缓存装载；给 ``cam3_array`` 则强制同形状（同帧轴）。"""
+    """单会话 occ 缓存装载；给 ``cam3_array`` 则强制同形状（同帧轴）。"""
     path = occ_cache_path(session_id, occ_root)
     if not path.is_file():
         raise FileNotFoundError(
-            "Missing occ010 cache %s (V6_Av1 occ_mix requires cam3_occ_lower010 "
-            "built for every training session)" % path
+            "Missing occ_mix cache %s (occ_mix requires the declared "
+            "cam3_occ_lower<level> cache for every training session)" % path
         )
     occ = load_hrnet_cache(path)
     if cam3_array is not None and occ.shape != np.asarray(cam3_array).shape:
@@ -276,17 +342,22 @@ def check_dual_cache(
     }
 
 
-def resolve_v_feat(session: Dict[str, np.ndarray], v_src: int) -> np.ndarray:
-    """按窗源标签取该窗口应 crop 的特征数组（occ_mix 双缓存装载后的会话）。
+def resolve_v_feat(session: Dict[str, np.ndarray], v_src: int, levels=None) -> np.ndarray:
+    """按窗源标签取该窗口应 crop 的特征数组（occ_mix 多缓存装载后的会话）。
 
-    ``session`` 需含 ``"V_feat"``（cam3，dataset 现装载）与 ``"V_feat_occ"``
-    （occ_mix 挂钩时由 ``load_occ_session`` 补入）。
+    ``session`` 需含 ``"V_feat"``（cam3，dataset 现装载）与各档
+    ``occ_feat_key(level)``（occ_mix 挂钩时由 ``load_occ_session`` 补入）。
     """
-    if int(v_src) == SRC_OCC:
-        if "V_feat_occ" not in session:
-            raise KeyError("v_src=occ but session has no 'V_feat_occ' (occ_mix 未装载)")
-        return session["V_feat_occ"]
-    return session["V_feat"]
+    src = int(v_src)
+    if src == SRC_CAM3:
+        return session["V_feat"]
+    levels = normalize_levels(levels)
+    if src < 0 or src > len(levels):
+        raise IndexError("v_src=%d out of range for levels %s" % (src, levels))
+    key = occ_feat_key(levels[src - 1])
+    if key not in session:
+        raise KeyError("v_src=%d but session has no %r (occ_mix 未装载)" % (src, key))
+    return session[key]
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +378,8 @@ def grouped_mean(
     - A2：``values`` = L_pose per-sample 损失，同组比对（操纵检查）。
     键：边际组 "cam3"/"occ"/"vz"/"tz"/"not_vz"/"not_tz" + 8 个组合键
     ``"<src>|<vz>|<tz>"``（如 "occ|0|1"）。
+    档梯下 ``occ_src`` 为档索引，分组按 **cam3（=0）vs occ（≠0）二值化**
+    （档内细分交由逐档键 ``"occ<level>"``，此处不展开）。
     """
     values = torch.as_tensor(values).reshape(-1).float()
     occ_src = torch.as_tensor(occ_src).reshape(-1).long()
@@ -328,9 +401,10 @@ def grouped_mean(
             "mean": float(v.mean().item()),
         }
 
+    is_occ = occ_src != SRC_CAM3
+    src_masks = ((SRC_CAM3, ~is_occ), (SRC_OCC, is_occ))
     groups: Dict[str, Dict[str, object]] = {}
-    for src in (SRC_CAM3, SRC_OCC):
-        mask = occ_src == src
+    for src, mask in src_masks:
         groups[SRC_NAMES[src]] = _sum(values[mask])
     for key, mask in (
         ("vz", v_zeroed == 1),
@@ -339,10 +413,10 @@ def grouped_mean(
         ("not_tz", t_zeroed == 0),
     ):
         groups[key] = _sum(values[mask])
-    for src in (SRC_CAM3, SRC_OCC):
+    for src, src_mask in src_masks:
         for vz in (0, 1):
             for tz in (0, 1):
-                mask = (occ_src == src) & (v_zeroed == vz) & (t_zeroed == tz)
+                mask = src_mask & (v_zeroed == vz) & (t_zeroed == tz)
                 groups["%s|%d|%d" % (SRC_NAMES[src], vz, tz)] = _sum(values[mask])
     return groups
 

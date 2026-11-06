@@ -166,6 +166,8 @@ POSE_POS_DIM = (N_JOINTS - 1) * 3
 TRAJ_F2_DIM = 4
 T_RAW_DIM = 96
 T_PHYS_DIM = 12
+# 维度 2（2026-10-21）：T_phys 12→20（每足 base6 + hull3 + 双足关系 2）。
+T_PHYS_V2_DIM = 20
 # E6.6a: Step2Motion-口径触觉通道（每脚 25 维 = 16 压力池化[heel8 toes8] +
 # 合成 IMU acc3/gyro3 + 总力1 + CoP2）。IMU 沿用 Step2Motion 的原始
 # BVH-23/ToeBase 运动学链生成；它不是 AnySole 的 SMPL-24 motion target。
@@ -341,13 +343,17 @@ BATCH_SHAPES = {
 }
 
 
-def assert_batch_shapes(batch, batch_size=None, tw=TW, t_phys_v2=False):
+def assert_batch_shapes(batch, batch_size=None, tw=TW, t_phys_v2=False,
+                        t_phys_hull_recenter=False):
+    # t_phys_hull_recenter 只改 hull_mcol 的取值，不改 T_phys 宽度；
+    # 接收该 kwarg 是为了让 eval/train 的统一调用签名不必分支。
+    del t_phys_hull_recenter
     """Raise if a training batch is missing a frozen field or has the wrong shape."""
     import torch
 
     for name, expected in BATCH_SHAPES.items():
         if name == "T_phys" and t_phys_v2:
-            expected = (TW, 20)   # 维度 2（2026-10-21）：T_phys 12→20 维
+            expected = (TW, T_PHYS_V2_DIM)   # 维度 2（2026-10-21）：T_phys 12→20 维
         if name in ("session_id",):
             continue
         if name in ("V_hmr", "traj_gt_f2", "psi_anchor") and name not in batch:

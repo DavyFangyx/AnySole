@@ -92,6 +92,7 @@ from anysole.utils.metrics import (
     root_trajectory_segmented_error,
     shape_vertex_std,
     temporal_metrics,
+    window_displacement_errors,
     windowed_world_mpjpe,
 )
 from anysole.train import condition_inputs, model_observation_kwargs, move_batch
@@ -167,19 +168,77 @@ METRIC_DISPLAY_NAMES = {
     "ground_pen_mm": "GroundPen",
     "ground_pen_frac": "GroundPenFrac",
     "traj_rel_ate_mm": "trajRelATE",
+    "window_disp_mag_mm": "WinDispMag",
+    "window_disp_angle_deg": "WinDispAngle",
+    # 修改 08/10：自锚列 = **默认**绝对位置读数（无后缀）；吃锚列带
+    # "（GT Anchored）"（2026-11-05 用户裁定：锚是模型默认组件）。
+    "global_mpjpe_selfanchor_mm": "GlobalMPJPE",
+    "w_mpjpe100_selfanchor_mm": "W-MPJPE100",
+    "root_abs_rmse_selfanchor_mm": "RootAbs",
+    "anchor_err_mm": "AnchorErr",
+    "anchor_seam_jump_mm": "AnchorSeamJump",
 }
+# 吃锚列后缀（全角括号，与 2026-11-05 用户裁定一致）；旧文件的后缀
+# " (anchored)" 在读取层兼容。
+ANCHORED_SUFFIX = "（GT Anchored）"
+LEGACY_ANCHORED_SUFFIXES = (ANCHORED_SUFFIX, " (anchored)")
+# 修改 10（2026-11-05）：论文口径的锚依赖分类。
+#   anchored          = 预测侧每窗消费一个 GT 平移锚（gt_anchor_consumed =
+#                       n_gt_anchors_used），展示名带 " (anchored)"；
+#   anchor_free       = 零 GT 锚列（窗内差分/段相对/自锚读出）；
+#   anchor_invariant  = 常数平移在公式里代数消去（PA/MPJPE/旋转/压力等）。
+# 分类按内部 snake_case key；part 键 "GlobalMPJPE_<part>" 走前缀判定。
+ANCHORED_METRIC_KEYS = frozenset({
+    "global_mpjpe_mm", "w_mpjpe100_mm", "wa_mpjpe100_mm",
+    "root_rte_percent", "root_ate_seg20_mm",
+    "foot_sliding_mm", "foot_sliding_vertex_mm",
+    "ground_pen_mm", "ground_pen_frac",
+    "seam_jump_mm", "shape_vertex_std_mm",
+    "accel_mag_ms2", "accel_mag_upper_ms2",
+})
+ANCHOR_FREE_METRIC_KEYS = frozenset({
+    "window_disp_mag_mm", "window_disp_angle_deg",
+    "root_ate_unanchored_mm", "traj_rel_ate_mm",
+    "global_mpjpe_selfanchor_mm", "w_mpjpe100_selfanchor_mm",
+    "root_abs_rmse_selfanchor_mm",
+    "anchor_err_mm", "anchor_seam_jump_mm",
+    "ground_pen_gt_mm",
+})
+
+
+def is_anchored_metric(key: str) -> bool:
+    return key in ANCHORED_METRIC_KEYS or key.startswith("GlobalMPJPE_")
+
+
+def metric_display_name(key: str) -> str:
+    """Display name（唯一命名入口）：默认列无后缀，吃锚列带（GT Anchored）。"""
+    name = METRIC_DISPLAY_NAMES.get(key, key)
+    return name + ANCHORED_SUFFIX if is_anchored_metric(key) else name
+
+
 INVERSE_DISPLAY_NAMES = {
     display: internal for internal, display in METRIC_DISPLAY_NAMES.items()
 }
+for _suffix in LEGACY_ANCHORED_SUFFIXES:
+    INVERSE_DISPLAY_NAMES.update({
+        display + _suffix: internal
+        for internal, display in METRIC_DISPLAY_NAMES.items()
+        if is_anchored_metric(internal)
+    })
 # Whole-body brief keys in their fixed JSON order — PA-MPJPE first so the
 # primary metric is visible at a glance; doubles as the brief whitelist.
 BRIEF_MOTION_KEYS = (
     "pa_mpjpe_mm", "mpjpe_mm", "global_mpjpe_mm", "mpjae_deg", "w_mpjpe100_mm",
-    "root_ate_seg20_mm", "root_ate_unanchored_mm",
+    "root_ate_unanchored_mm",
     "root_orientation_drift_deg", "traj_rel_ate_mm",
     "foot_sliding_mm",
     "ground_pen_mm", "jitter_gt_m_s3", "jitter_pred_m_s3",
 )
+# brief 的默认绝对位置列优先取自锚读数（无后缀），老格才回落吃锚列。
+_SELF_ANCHOR_ALIAS = {
+    "global_mpjpe_mm": "global_mpjpe_selfanchor_mm",
+    "w_mpjpe100_mm": "w_mpjpe100_selfanchor_mm",
+}
 # Keys the detail file reports but that are diagnostics, not formal metrics
 # (kept for training monitoring and history; excluded from brief by the
 # whitelist above and declared here explicitly).
@@ -193,6 +252,9 @@ DIAGNOSTIC_KEYS = (
     # percentile of the GT joint heights, so GT penetrates slightly by
     # construction — its value contextualizes the prediction rows only.
     "ground_pen_gt_mm",
+    # 修改 08：锚头自身误差与跨窗锚接缝跳跃——诊断列，不作正式比较候选
+    # （自锚正式列 = GlobalMPJPE_self / W-MPJPE100_self / RootAbs_self）。
+    "anchor_err_mm", "anchor_seam_jump_mm",
 )
 # Fixed group order of the brief file (json.dump sort_keys=False keeps it);
 # V2T is always fourth, absent groups are skipped rather than invented.
@@ -203,7 +265,8 @@ BRIEF_GROUP_ORDER = ("T2M", "V2M", "VT2M", "V2T", "robust_vdrop", "robust_tdrop"
 PAYLOAD_KEY_ORDER = (
     "checkpoint", "modal", "contact_method", "split", "protocol_seed", "tw",
     "sample_steps", "robustness", "forward_axis",
-    "diagnostic_fields", "v2t_leaf_keys", "key_migration", "metrics",
+    "diagnostic_fields", "v2t_leaf_keys", "key_migration",
+    "metric_provenance", "metrics",
 )
 
 
@@ -221,7 +284,7 @@ def _display_block(block: Dict[str, float]) -> Dict[str, float]:
     ordered.extend(
         (key, block[key]) for key in sorted(set(block) - set(BRIEF_MOTION_KEYS))
     )
-    return {METRIC_DISPLAY_NAMES.get(key, key): value for key, value in ordered}
+    return {metric_display_name(key): value for key, value in ordered}
 
 
 def display_metrics(metrics: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
@@ -264,12 +327,67 @@ def summary_metrics(metrics: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str,
             continue
         if name in metrics:
             block = metrics[name]
-            groups[name] = {
-                METRIC_DISPLAY_NAMES.get(key, key): block[key]
-                for key in BRIEF_MOTION_KEYS
-                if key in block
-            }
+            # 默认列 = 自锚读数（2026-11-05 裁定）：模型有自锚列时，brief
+            # 的 GlobalMPJPE / W-MPJPE100 取自锚值；无锚头的老格才回落到
+            # 吃锚值（并带（GT Anchored）后缀）。
+            brief_block: Dict[str, float] = {}
+            for key in BRIEF_MOTION_KEYS:
+                self_key = _SELF_ANCHOR_ALIAS.get(key)
+                if self_key is not None and self_key in block:
+                    brief_block[metric_display_name(self_key)] = block[self_key]
+                elif key in block:
+                    brief_block[metric_display_name(key)] = block[key]
+            groups[name] = brief_block
     return groups
+
+
+def _metric_anchor_provenance(metrics: Dict[str, Dict[str, float]],
+                              anchor_counts: Dict[str, int],
+                              anchor_source: str) -> Dict[str, dict]:
+    """逐列锚依赖登记（修改 10，2026-11-05）。
+
+    Display-name key → {status, gt_anchor_consumed, ...}：
+      anchored         = 每窗消费一个 GT 平移锚（计数取 n_gt_anchors_used；
+                         所有条件一致时写标量，否则写逐条件映射）；
+      anchor_free      = 零 GT 锚列（窗内差分 / 段相对 / 自锚读出）；
+      anchor_invariant = 常数平移在公式里代数消去。
+    """
+    counts = sorted({int(v) for v in anchor_counts.values()})
+    shared = counts[0] if len(counts) == 1 else None
+    out: Dict[str, dict] = {}
+    for block in metrics.values():
+        for key in block:
+            name = metric_display_name(key)
+            if name in out:
+                continue
+            if is_anchored_metric(key):
+                if shared == 0:
+                    # AR2 自由积分：这些列不吃锚（n_gt_anchors_used = 0）。
+                    out[name] = {"status": "anchor_free",
+                                 "gt_anchor_consumed": 0}
+                else:
+                    out[name] = {
+                        "status": "anchored",
+                        "gt_anchor_consumed": (
+                            shared if shared is not None else
+                            {k: int(v) for k, v in anchor_counts.items()}),
+                        "anchor_source": "gt_previous_frame_per_window",
+                    }
+            elif key in ANCHOR_FREE_METRIC_KEYS:
+                entry = {"status": "anchor_free", "gt_anchor_consumed": 0}
+                if key in ("window_disp_mag_mm", "window_disp_angle_deg"):
+                    entry["window"] = 20
+                    if key == "window_disp_angle_deg":
+                        entry["min_disp_m"] = 0.0
+                if key in ("global_mpjpe_selfanchor_mm",
+                           "w_mpjpe100_selfanchor_mm",
+                           "root_abs_rmse_selfanchor_mm", "anchor_err_mm"):
+                    # joint = 联合训练；post_hoc = 冻结 ckpt 事后拟合（修改 10 A）
+                    entry["anchor_source"] = anchor_source
+                out[name] = entry
+            else:
+                out[name] = {"status": "anchor_invariant"}
+    return out
 
 
 def _pa_align(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -337,11 +455,19 @@ def _bone_angle(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tens
 
 
 class _Accum:
-    """Per-name sums/counts; means() returns the protocol dict."""
+    """Per-name sums/counts; means() returns the protocol dict.
+
+    ``add_rms`` / ``add_median``（2026-11-04，修改 07 改动 C）：窗口位移
+    幅度列按跨会话池化 RMSE 汇总（平方和除以总窗数再开方），方向列按
+    跨会话池化中位数汇总（保留全部窗值）——两者都不能用逐会话均值再
+    加权还原。``add`` 的口径与求和顺序不变。
+    """
 
     def __init__(self) -> None:
         self.sums: Dict[str, float] = {}
         self.counts: Dict[str, float] = {}
+        self.sq_sums: Dict[str, float] = {}
+        self.medians: Dict[str, list] = {}
 
     def add(self, name: str, values: torch.Tensor, scale: float = 1.0) -> None:
         self.sums[name] = self.sums.get(name, 0.0) + float(values.double().sum().item()) * scale
@@ -351,8 +477,23 @@ class _Accum:
         self.sums[name] = self.sums.get(name, 0.0) + float(value) * weight
         self.counts[name] = self.counts.get(name, 0.0) + weight
 
+    def add_rms(self, name: str, values: torch.Tensor, scale: float = 1.0) -> None:
+        values = values.double() * scale
+        self.sq_sums[name] = self.sq_sums.get(name, 0.0) + float(values.square().sum().item())
+        self.counts[name] = self.counts.get(name, 0.0) + float(values.numel())
+
+    def add_median(self, name: str, values, scale: float = 1.0) -> None:
+        self.medians.setdefault(name, []).extend(
+            (np.asarray(values, dtype=np.float64).reshape(-1) * scale).tolist())
+
     def means(self) -> Dict[str, float]:
-        return {name: self.sums[name] / max(self.counts[name], 1e-12) for name in self.sums}
+        result = {name: self.sums[name] / max(self.counts[name], 1e-12)
+                  for name in self.sums}
+        for name, sq_sum in self.sq_sums.items():
+            result[name] = math.sqrt(sq_sum / max(self.counts[name], 1e-12))
+        for name, values in self.medians.items():
+            result[name] = (float(np.median(values)) if values else float("nan"))
+        return result
 
 
 def _apply_pos_corr(pred_kp: torch.Tensor, seq: dict) -> torch.Tensor:
@@ -395,8 +536,46 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
     accum.add_scalar("wa_mpjpe100_mm", wa_mpjpe, T)
     root = root_trajectory_metrics(pred_np[:, 0], gt_np[:, 0])
     accum.add_scalar("root_rte_percent", root["root_rte_percent"], T)
-    accum.add_scalar("root_ate_seg20_mm",
-                     root_trajectory_segmented_error(pred_np[:, 0], gt_np[:, 0]), T)
+    # 2026-11-05 用户裁定：取消短程轨迹列 traj_ATE@0.5s（root_ate_seg20_mm），
+    # 不再进入评估指标；轨迹读数只保留 traj_ATE（无锚）与 trajRelATE。
+    # 无锚窗位移读数（修改 07 改动 C，2026-11-04）：Δ 在窗内差分里代数
+    # 消去平移锚，这两列不消费任何 GT 更正因子。幅度 = 跨会话池化 RMSE，
+    # 方向 = 跨会话池化中位夹角；窗口集与 2026-11-04 手算一致（GT 位移
+    # 数值为零的窗对两列同时剔除）。
+    pred_root_np = seq["pred_trans"].detach().cpu().numpy()
+    gt_root_np = seq["gt_trans"].detach().cpu().numpy()
+    mag_err, angle_deg, gt_disp = window_displacement_errors(
+        pred_root_np, gt_root_np, window=20)
+    disp_valid = gt_disp > 1e-9
+    if np.any(disp_valid):
+        accum.add_rms("window_disp_mag_mm", torch.from_numpy(mag_err[disp_valid]))
+    angle_valid = disp_valid & np.isfinite(angle_deg)
+    if np.any(angle_valid):
+        accum.add_median("window_disp_angle_deg", angle_deg[angle_valid])
+    # 自锚列（修改 08 改动 C，2026-11-04）：预测侧每窗常数换成锚头输出
+    # （T 行 = 注册常数），GT 侧、FK、求解器完全不变——与现役列并列报，
+    # 不替换。锚误差本身在 _evaluate_config 按窗累加（AnchorErr）。
+    if seq.get("pred_trans_self") is not None:
+        pred_kp_self = fk_pose6d(
+            seq["pred_pose"][None], seq["pred_trans_self"][None],
+            seq["offsets"], seq["parents"])[0]
+        pred_kp_self = _apply_pos_corr(pred_kp_self, seq)
+        pred_self_np = pred_kp_self.detach().cpu().numpy()
+        accum.add_scalar(
+            "global_mpjpe_selfanchor_mm",
+            float(mean_point_error(pred_self_np, gt_np, scale=1000.0).mean()), T)
+        w_mpjpe_self, _ = windowed_world_mpjpe(pred_self_np, gt_np, window=100)
+        accum.add_scalar("w_mpjpe100_selfanchor_mm", w_mpjpe_self, T)
+        root_abs = np.linalg.norm(pred_self_np[:, 0] - gt_np[:, 0], axis=-1)
+        accum.add_rms("root_abs_rmse_selfanchor_mm",
+                      torch.from_numpy(root_abs), 1000.0)
+        if T > tw:
+            # 接缝跳跃（C4）：相邻窗锚的绝对位置差 = pred[seam] − pred[seam−1]
+            # （窗内相对位移已含在 pred_trans_self 里）。不做任何平滑。
+            seams = np.arange(tw, T, tw)
+            jump = np.linalg.norm(
+                pred_self_np[seams, 0] - pred_self_np[seams - 1, 0], axis=-1)
+            accum.add_median("anchor_seam_jump_mm", jump, 1000.0)
     # 无锚未对齐 ATE（2026-11-01 用户裁定）：链式拼接 trans_hat（减去各自窗口
     # GT 锚）从 GT 起点出发——当前锚协议模型的无锚协议数字（与基线对等口径）。
     if T >= 2:
@@ -636,7 +815,8 @@ def _window_detail_rows(seq: dict, tw: int, frame_starts=None) -> dict:
     return rows
 
 
-def _degrade_inputs(v_feat, t_raw, t_phys, t_s2m, tw: int, kind: str, rng: np.random.RandomState):
+def _degrade_inputs(v_feat, t_raw, t_phys, t_s2m, tw: int, kind: str, rng: np.random.RandomState,
+                    history=None):
     """Zero one contiguous 20-40% span of frames on the V or T stream
     (robustness set).  Windows are non-overlapping, so window w covers session
     frames [w*tw, (w+1)*tw)."""
@@ -654,6 +834,21 @@ def _degrade_inputs(v_feat, t_raw, t_phys, t_s2m, tw: int, kind: str, rng: np.ra
         tr[mask] = 0.0
         tp[mask] = 0.0
         ts[mask] = 0.0
+    if history is not None:
+        # 按模态分窗模型（非 AR2，v_cur）：同一退化区间同样落在长观测历史上
+        # （窗 w 的历史帧 j 的会话帧坐标 = w*tw - length + j）；默认 None = 旧行为逐位不变。
+        keys = ("V_feat",) if kind == "v" else ("T_raw", "T_phys")
+        for w, hist in enumerate(history):
+            length = hist["V_feat"].shape[0]
+            coords = torch.arange(length) + (w * tw - length)
+            span = (coords >= start) & (coords < end)
+            if bool(span.any()):
+                hist = dict(hist)
+                for key in keys:
+                    value = hist[key].clone()
+                    value[span.to(value.device)] = 0.0
+                    hist[key] = value
+                history[w] = hist
     return v, tr, tp, ts
 
 def _evaluate_config(
@@ -828,10 +1023,17 @@ def _evaluate_config(
                 t_raw = torch.zeros_like(t_raw)
                 t_phys = torch.zeros_like(t_phys)
                 t_s2m = torch.zeros_like(t_s2m)
+                if "obs_history" in batch:
+                    # 按模态分窗模型（非 AR2，v_cur）：长 T 历史同样置零，否则 null-T 干预会漏进历史。
+                    batch["obs_history"] = [
+                        {key: (torch.zeros_like(value) if key in ("T_raw", "T_phys") else value)
+                         for key, value in history.items()}
+                        for history in batch["obs_history"]]
             if degrade is not None:
                 rng = np.random.RandomState((seed * 1000003) ^ zlib.crc32(str(session_id).encode()))
                 v_feat, t_raw, t_phys, t_s2m = _degrade_inputs(
-                    v_feat, t_raw, t_phys, t_s2m, tw, degrade, rng
+                    v_feat, t_raw, t_phys, t_s2m, tw, degrade, rng,
+                    history=batch.get("obs_history")
                 )
             v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
             if v3f_mode:
@@ -849,7 +1051,8 @@ def _evaluate_config(
             elif regress_mode:
                 z_kw = {"z_src": v5_1_z_src(config_value, z_src_override)} if v5_1_mode else {}
                 out = model(v_feat, t_raw, t_phys, config_id,
-                            batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw)
+                            batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw,
+                            **model_observation_kwargs(batch))
                 pred_pose = out["x0_hat"]
             else:
                 cond = {"V_feat": v_feat, "T_raw": t_raw, "T_phys": t_phys,
@@ -865,6 +1068,22 @@ def _evaluate_config(
                 out = model(v_feat, t_raw, t_phys, pred_pose, tau_zero, config_id,
                             batch.get("session_id"), T_s2m=t_s2m, **v_kw)
             anchor = batch["trans_anchor"][:, None, :]
+            # 修改 08 改动 C1：自锚读出。V/VT 行 = 锚头输出；T 行走注册
+            # 常数（头不训、损失掩码——压力读不出绝对位置）。旁路，不替换
+            # 下面的现役 anchor。AnchorErr 按窗累加（跨会话池化 = 窗均值）。
+            anchor_trans_self = None
+            if not v3f_mode and out.get("anchor_trans") is not None:
+                if config_value == CONFIG_T:
+                    anchor_trans_self = model.anchor_mean.to(
+                        dtype=out["anchor_trans"].dtype,
+                        device=out["anchor_trans"].device).view(1, 3).expand(bsz, 3)
+                else:
+                    anchor_trans_self = out["anchor_trans"]
+                accum.add(
+                    "anchor_err_mm",
+                    torch.linalg.vector_norm(
+                        anchor_trans_self - batch["trans_anchor"], dim=-1),
+                    1000.0)
             if not v3f_mode:
                 v3e_contact = None
             if v7_mode and config_value != CONFIG_V:
@@ -1006,6 +1225,10 @@ def _evaluate_config(
                     "pred_pose": pred_pose.reshape(-1, pred_pose.shape[-1]),
                     "pred_trans": (pred_trans_w if (v3e_mode or v3g_mode or v3h_mode or v5_1_mode or v4_1_mode)
                                    else out["trans_hat"] + anchor).reshape(-1, 3),
+                    # 修改 08：自锚轨迹（同一 trans_hat，常数换成锚头输出）。
+                    "pred_trans_self": (
+                        (out["trans_hat"] + anchor_trans_self[:, None, :]).reshape(-1, 3)
+                        if anchor_trans_self is not None else None),
                     "gt_pose": batch["pose_gt"].reshape(-1, batch["pose_gt"].shape[-1]),
                     "gt_trans": (batch["trans_gt"] + anchor).reshape(-1, 3),
                     "pos_corr": seq_pos_corr,
@@ -1025,7 +1248,7 @@ def _evaluate_config(
                 # 修改 02 §B3：seq 逐帧键按窗拆回 → 三角权重混合组装
                 # （单覆盖帧直接拷贝 → stride=tw 与现协议逐位一致）。
                 per_frame = {key: seq[key] for key in (
-                    "pred_pose", "pred_trans", "gt_pose", "gt_trans",
+                    "pred_pose", "pred_trans", "pred_trans_self", "gt_pose", "gt_trans",
                     "pos_corr", "contact_pred", "kp_gt", "contact_gt",
                     "pressure_gt", "pressure_pred")}
                 parts = []
@@ -1274,7 +1497,8 @@ def blend_overlap_windows_np(windows, tw):
 def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
                        device, tw, v_kw, *, degrade=None, seed=0,
                        regression=False, gain_floor=0.0, dyaw_base="zero",
-                       null_t=False, init_height=0.0, vis_yaw_init=False):
+                       null_t=False, init_height=0.0, vis_yaw_init=False,
+                       abs_vrows=False):
     """AR2 自由生成（2026-11-01，V7_AR方案 §4/§6）：逐窗逐帧串行。
 
     外部状态：ψ（累计航向）、p（自由积分位置）、vis_ema（视觉航向观测
@@ -1316,6 +1540,9 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
     prev_start = None
     meta = None
     use_vis = config_value != CONFIG_T
+    # 修改 09（2026-11-04）：abs_vrows 模型的 V/VT 行输出绝对根朝向 + 世界系
+    # 速度，组装时跳过 Y(ψ) 旋转；T 行恒走相对 + 外部 ψ 自由积分。
+    abs_rows = bool(abs_vrows) and config_value != CONFIG_T
     # vis_yaw_init：段首帧 ψ ← vis_ema 的待置位标记（复位时重新置起）。
     seed_psi = bool(vis_yaw_init) and use_vis
     dropped = set()
@@ -1409,8 +1636,15 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
                         seed_psi = False
                     psi = psi + gain_t * _wrap_angle(vis_ema - psi)
                 r_yaw = yaw_rotmat(psi.reshape(1))[0].float()      # (3,3)
-                r_root = torch.matmul(r_yaw, rot6d_to_rotmat(rel_pose_t[:6]))
-                v_world = torch.matmul(r_yaw, v_head_t)
+                if abs_rows:
+                    # 修改 09：V/VT 行输出已是绝对根朝向 + 世界系速度，
+                    # 跳过 Y(ψ) 组装（否则等于二次旋转）；ψ 仍逐帧维护，
+                    # 供视觉校正链与 T 行同构。
+                    r_root = rot6d_to_rotmat(rel_pose_t[:6])
+                    v_world = v_head_t
+                else:
+                    r_root = torch.matmul(r_yaw, rot6d_to_rotmat(rel_pose_t[:6]))
+                    v_world = torch.matmul(r_yaw, v_head_t)
                 pos = pos + v_world.double() / float(FPS)
                 poses.append(torch.cat([rotmat_to_6d(r_root), rel_pose_t[6:]]))
                 trans.append(pos.float().clone())
@@ -1437,8 +1671,13 @@ def ar2_session_chunks(dataset, model, session_id, idxs, config_value,
                         seed_psi = False
                     psi = psi + gain_t * _wrap_angle(vis_ema - psi)
                 r_yaw = yaw_rotmat(psi.reshape(1))[0].float()      # (3,3)
-                r_root = torch.matmul(r_yaw, rot6d_to_rotmat(rel_pose_t[:6]))
-                v_world = torch.matmul(r_yaw, v_head_t)
+                if abs_rows:
+                    # 修改 09：同 regression 分支——V/VT 行输出已是世界系。
+                    r_root = rot6d_to_rotmat(rel_pose_t[:6])
+                    v_world = v_head_t
+                else:
+                    r_root = torch.matmul(r_yaw, rot6d_to_rotmat(rel_pose_t[:6]))
+                    v_world = torch.matmul(r_yaw, v_head_t)
                 pos = pos + v_world.double() / float(FPS)
                 poses.append(torch.cat([rotmat_to_6d(r_root), rel_pose_t[6:]]))
                 trans.append(pos.float().clone())
@@ -1489,7 +1728,8 @@ def _v7_ar2_session_seq(dataset, model, session_id, idxs, config_value,
                                       gain_floor=gain_floor,
                                       dyaw_base=dyaw_base, null_t=null_t,
                                       init_height=init_height,
-                                      vis_yaw_init=vis_yaw_init)
+                                      vis_yaw_init=vis_yaw_init,
+                                      abs_vrows=bool(getattr(model, "abs_vrows", False)))
     floor_y, offsets, parents, betas = meta
     if overlap_assemble:
         parts = []
@@ -1733,6 +1973,13 @@ def _merge_sess_detail(seq, tw, forward_axis, config_value, accum, contact,
     for name, value in sess_accum.sums.items():
         accum.sums[name] = accum.sums.get(name, 0.0) + value
         accum.counts[name] = accum.counts.get(name, 0.0) + sess_accum.counts[name]
+    # add_rms / add_median 的池化账（修改 07 改动 C）：平方和按会话逐段
+    # 相加（RMSE 不能由逐会话 RMSE 还原），中位数保留全部窗值。
+    for name, value in sess_accum.sq_sums.items():
+        accum.sq_sums[name] = accum.sq_sums.get(name, 0.0) + value
+        accum.counts[name] = accum.counts.get(name, 0.0) + sess_accum.counts[name]
+    for name, values in sess_accum.medians.items():
+        accum.medians.setdefault(name, []).extend(values)
     for key in contact:
         contact[key] += sess_contact[key]
     sess_metrics = sess_accum.means()
@@ -1891,6 +2138,26 @@ def run_protocol(
             torch.cuda.set_rng_state_all(prev_cuda)
     from anysole.utils.evaluation_contract import evaluation_contract
     contract = evaluation_contract(dataset, checkpoint.get("config", {}))
+    # 修改 10 改动 B（2026-11-05）：主轨迹读数声明。有自锚列时主读数 =
+    # 模型每窗自估锚（零 GT 锚）；否则回落到 evaluation_contract 的协议口径。
+    has_self_anchor = any("global_mpjpe_selfanchor_mm" in block
+                          for block in metrics.values())
+    anchor_source = getattr(model, "trans_anchor_source", "model")
+    contract["primary_trajectory_readout"] = (
+        "model_estimated_anchor_per_window" if has_self_anchor
+        else contract.get("trajectory", ""))
+    # 2026-11-05 用户裁定：平移锚是模型的默认组件；没有锚头的模型与评估在
+    # 「绝对位置」口径上不合规（每窗消费 GT 锚）。此字段供导出层硬过滤主表。
+    contract["absolute_position_compliance"] = {
+        "status": "compliant" if has_self_anchor else "legacy_non_compliant",
+        "anchor_head": anchor_source if has_self_anchor else None,
+        "note": ("absolute-position readout = model-estimated anchor per window "
+                 "(gt_anchor_consumed = 0)")
+        if has_self_anchor else
+        ("no model anchor head: absolute-position columns consume one GT translation "
+         "anchor per window and are non-compliant for main tables (2026-11-05 ruling)"),
+    }
+    provenance = _metric_anchor_provenance(metrics, anchor_counts, anchor_source)
     payload = {
         "evaluation_contract": contract,
         "checkpoint": checkpoint_path,
@@ -1916,6 +2183,10 @@ def run_protocol(
         # 现协议每窗一锚逐位相同）；AR2 自由积分 = 0；ctx/帧级 AR = 窗数
         # （每窗 left−1 锚，仅登记信息）。
         "n_gt_anchors_used": anchor_counts,
+        # 修改 07 改动 C（2026-11-04）：无锚窗位移读数的口径声明。两列的
+        # Δ 在窗内差分里消去平移锚 → 不含任何 GT 更正因子，与 GlobalMPJPE
+        # （每窗 GT 平移锚）、traj_ATE@0.5s（段首对齐）并列报，不替换。
+        "metric_provenance": provenance,
         "metrics": display_metrics(metrics),
     }
     payload = order_payload(payload)

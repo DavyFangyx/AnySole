@@ -263,9 +263,13 @@ def _materialize_checkpoint(registry: dict[str, Any], experiment_id: str, model_
         else:
             variant = effective_variant(spec)
             last = infer_anysole_paths(str(spec["name"]), variant=variant, contact=contact, which="last")["ckpt"]
-        if not force and last.is_file():
+        # RESUME=true（2026-11-03）绕过完整度断言直接进训练分支（train.py
+        # --resume 从现有 ckpt_last 续训）——此前续训 conf 在 materialize
+        # 处被 "Incomplete" 拒绝，从未到达训练命令（2026-11-04 修复）。
+        resume = bool(train_overrides and train_overrides.get("resume"))
+        if not force and not resume and last.is_file():
             _assert_training_complete(last, int(spec.get("epochs", 800)))
-        elif not force and last.with_name("ckpt_best.pt").is_file():
+        elif not force and not resume and last.with_name("ckpt_best.pt").is_file():
             raise RuntimeError("Found best without a completed last checkpoint for %s: %s" % (model_id, last))
         else:
             command = _train_command(registry, model_id, train_overrides)
@@ -491,6 +495,10 @@ def _run_task(
         elif monitor in {"swanlab", "wandb"}:
             train_overrides["wandb_mode"] = "online"
             train_overrides["monitor_backend"] = monitor
+        # 断点续训（2026-11-03）：conf 行 RESUME=true → train.py --resume，从
+        # out_dir/ckpt_last.pt 接续；默认关，不写即从头训练。
+        if str(values.get("RESUME", "")).strip().lower() in {"1", "true", "yes", "on"}:
+            train_overrides["resume"] = True
         if str(values.get("CHECKPOINT_ALL", "")).strip().lower() in {"1", "true", "yes", "on"}:
             train_overrides["checkpoint_all"] = True
         elif str(values.get("CHECKPOINT_ALL", "")).strip().lower() in {"0", "false", "no", "off"}:

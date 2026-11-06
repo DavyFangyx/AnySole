@@ -113,6 +113,33 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V7_Cv5": ModelEntry("V7_Cv5", "v7_c2", "V7_Cv5: 双独立 T 门 + 枚举三条件训练（2026-10-26）"),
     "V7_Cv5_bs512": ModelEntry("V7_Cv5_bs512", "v7_c2", "V7_Cv5 训练提速实验：batch 256→512（2026-11-01）"),
     "V7_Cv5_precheck": ModelEntry("V7_Cv5_precheck", "v7_c2", "V7_Cv5 六轮预检"),
+    # 修改 11 A3（2026-11-05）：Cv5 + T_phys v2（12→20 维，hull 着地几何 +
+    # 双足关系）。Cv5 既有 12 维 base 不动；4 折 LSO 测净兑现量。
+    "V7_Cv5_tphys": ModelEntry("V7_Cv5_tphys", "v7_c2tphys",
+                               "V7_Cv5 + T_phys v2（修改 11 A3，2026-11-05）"),
+    "V7_Cv5_tphys_precheck": ModelEntry("V7_Cv5_tphys_precheck", "v7_c2tphys",
+                                        "V7_Cv5_tphys 六轮预检"),
+    "V7_Cv5_tphys_fS5S6S11": ModelEntry("V7_Cv5_tphys_fS5S6S11", "v7_c2tphys",
+                                        "V7_Cv5_tphys 折 fS5S6S11（LSO）"),
+    "V7_Cv5_tphys_fS5S11S12": ModelEntry("V7_Cv5_tphys_fS5S11S12", "v7_c2tphys",
+                                         "V7_Cv5_tphys 折 fS5S11S12（LSO）"),
+    "V7_Cv5_tphys_fS6S7S13": ModelEntry("V7_Cv5_tphys_fS6S7S13", "v7_c2tphys",
+                                        "V7_Cv5_tphys 折 fS6S7S13（LSO）"),
+    "V7_Cv5_tphys_fS5S6S8": ModelEntry("V7_Cv5_tphys_fS5S6S8", "v7_c2tphys",
+                                       "V7_Cv5_tphys 折 fS5S6S8（LSO）"),
+    # 修改 11 §9.3（2026-11-05）：hull_mcol 逐会话 p5–p95 重定心；T_phys 仍 20 维。
+    "V7_Cv5_tphysRC": ModelEntry("V7_Cv5_tphysRC", "v7_c2tphysrc",
+                                 "V7_Cv5 + T_phys v2 重定心 hull_mcol（修改 11 §9.3）"),
+    "V7_Cv5_tphysRC_precheck": ModelEntry("V7_Cv5_tphysRC_precheck", "v7_c2tphysrc",
+                                          "V7_Cv5_tphysRC 六轮预检"),
+    "V7_Cv5_tphysRC_fS5S6S11": ModelEntry("V7_Cv5_tphysRC_fS5S6S11", "v7_c2tphysrc",
+                                          "V7_Cv5_tphysRC 折 fS5S6S11（LSO）"),
+    "V7_Cv5_tphysRC_fS5S11S12": ModelEntry("V7_Cv5_tphysRC_fS5S11S12", "v7_c2tphysrc",
+                                           "V7_Cv5_tphysRC 折 fS5S11S12（LSO）"),
+    "V7_Cv5_tphysRC_fS6S7S13": ModelEntry("V7_Cv5_tphysRC_fS6S7S13", "v7_c2tphysrc",
+                                          "V7_Cv5_tphysRC 折 fS6S7S13（LSO）"),
+    "V7_Cv5_tphysRC_fS5S6S8": ModelEntry("V7_Cv5_tphysRC_fS5S6S8", "v7_c2tphysrc",
+                                         "V7_Cv5_tphysRC 折 fS5S6S8（LSO）"),
     "V7_Cv2_precheck": ModelEntry("V7_Cv2_precheck", "v7_c2", "V7_Cv2 六轮预检"),
     "V7_Cv3_precheck": ModelEntry("V7_Cv3_precheck", "v7_c3", "V7_Cv3 六轮预检"),
     "V7_Cv4_precheck": ModelEntry("V7_Cv4_precheck", "v7_c", "V7_Cv4 六轮预检"),
@@ -136,12 +163,53 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V7_Cv5AR2": ModelEntry("V7_Cv5AR2", "v7_c2ar2", "V7_Cv5AR2: Cv5 + AR 相对运动 + 航向状态分离（2026-11-01）"),
     "V7_Cv5AR2MP": ModelEntry("V7_Cv5AR2MP", "v7_c2ar2mp", "V7_Cv5AR2MP: AR2M + 前缀继承样本（enum T 档里历史 V 真实、当前窗 V 为 null，2026-11-03）"),
     "V7_Cv5AR2M": ModelEntry("V7_Cv5AR2M", "v7_c2ar2m", "V7_Cv5AR2M: AR2 对照格（因果掩码无反馈，2026-11-02）"),
+    "V7_Cv5AR2MA": ModelEntry("V7_Cv5AR2MA", "v7_c2ar2ma", "V7_Cv5AR2MA: AR2M + 读出按条件分支（V/VT 绝对 = Cv5 目标空间，T 相对 + 外部 ψ，2026-11-04 修改 09）"),
     "V7_Cv5AR2MF": ModelEntry("V7_Cv5AR2MF", "v7_c2ar2m", "V7_Cv5AR2MF: AR2M + yaw-fix（T 行无航向监督 + 自由生成航向链 + 世界轨迹损失，2026-11-02）"),
     "V7_Cv5AR2MF_gb": ModelEntry("V7_Cv5AR2MF_gb", "v7_c2ar2m", "V7_Cv5AR2MF_gb: AR2MF + 鞋垫增益偏置增强（G-b，2026-11-02）"),
     "V7_Cv5_gb": ModelEntry("V7_Cv5_gb", "v7_c2", "V7_Cv5_gb: Cv5 双门回归 + 鞋垫增益偏置增强（G-b，2026-11-02）"),
     "V7_Cv5AR2M_gb": ModelEntry("V7_Cv5AR2M_gb", "v7_c2ar2m", "V7_Cv5AR2M_gb: AR2M（因果掩码无反馈）+ G-b 鞋垫增强（2026-11-02）"),
     "V7_Cv5AR2R": ModelEntry("V7_Cv5AR2R", "v7_c2ar2r", "V7_Cv5AR2R: Cv5 + AR2 相对读出纯回归（双向无反馈无因果，2026-11-02）"),
     "V7_Cv5AR2RT": ModelEntry("V7_Cv5AR2RT", "v7_c2ar2rt", "V7_Cv5AR2RT: AR2R + VT 零初始化触觉残差（2026-11-02）"),
+    "V7_Cv5SC": ModelEntry("V7_Cv5SC", "v7_c2sc", "V7_Cv5SC: Cv5 + 按模态分窗（V 只看当前窗，T 吃 obs_context 长历史，非 AR2，2026-11-03）"),
+    # 修改 07（2026-11-04，z_note/修改/07_根头速率方向解耦与T行方向掩码.md）：
+    # 根头三通道（水平速率/水平方向/垂直分量）+ 按通道损失 + T 行方向掩码。
+    "V7_Cv5SD": ModelEntry("V7_Cv5SD", "v7_c2sd", "V7_Cv5SD: Cv5 + 根头速率/方向解耦 + T 行方向掩码（2026-11-04）"),
+    "V7_Cv5SD_precheck": ModelEntry("V7_Cv5SD_precheck", "v7_c2sd", "V7_Cv5SD 六轮预检"),
+    # 第二臂 B′（2026-11-04，修改 07）：SD 结构不变，损失改为恒等式配平
+    # （全 1.0 且不掩码时 ≡ Cv5 的 l_vel；T 行方向掩码为唯一干预）。
+    "V7_Cv5SD2": ModelEntry("V7_Cv5SD2", "v7_c2sd2", "V7_Cv5SD2: SD 结构 + 恒等式配平损失（B′，2026-11-04）"),
+    "V7_Cv5SD2_precheck": ModelEntry("V7_Cv5SD2_precheck", "v7_c2sd2", "V7_Cv5SD2 六轮预检"),
+    # 修改 10 §三 可直接移植 ①（2026-11-05）：SD2 + VT 零初始化触觉残差。
+    "V7_Cv5SD2RT": ModelEntry("V7_Cv5SD2RT", "v7_c2sd2rt", "V7_Cv5SD2RT: SD2 + VT 零初始化触觉残差（修改 10，2026-11-05）"),
+    "V7_Cv5SD2RT_precheck": ModelEntry("V7_Cv5SD2RT_precheck", "v7_c2sd2rt", "V7_Cv5SD2RT 六轮预检"),
+    # V8 系列（2026-11-05）：新基座 = V7_Cv5SD2；消融在 V8 上重建。
+    # 第 4 折直接用 splits_test_S6S7_val_S14.csv（train/val 与原折逐位相同，
+    # test = S6+S7，S13 退出留出池）；其余实验沿同一折表。
+    "V8_Cv5": ModelEntry("V8_Cv5", "v8_cv5", "V8 基座：双门+枚举+SD2+锚头（2026-11-05）"),
+    "V8_Cv4": ModelEntry("V8_Cv4", "v8_cv4", "V8 消融：单门+枚举+SD2+锚头"),
+    "V8_Cv2": ModelEntry("V8_Cv2", "v8_cv5", "V8 消融：双门+随机 dropout+SD2+锚头"),
+    "V8_Cv6": ModelEntry("V8_Cv6", "v8_cv5", "V8 消融：双门+始终 VT+SD2+锚头"),
+    "V8_Cv7": ModelEntry("V8_Cv7", "v8_cv7", "V8 消融：无门+枚举+SD2+锚头"),
+    # T 运动轴 T1（2026-11-06）：方向载体 = 同帧根 6D 前向轴 + 标量 φ。
+    "V8_Cv5T1": ModelEntry("V8_Cv5T1", "v8_cv5t1", "V8 基座 + T1 方向载体（根6D前向轴+φ，2026-11-06）"),
+    "V8_Cv5T1_precheck": ModelEntry("V8_Cv5T1_precheck", "v8_cv5t1", "V8_Cv5T1 六轮预检"),
+    # 门控条件化波 1（修改 13，2026-11-06）：
+    #   RM = 结构同 V8_Cv5，只把可靠性轴放进训练分布（occ_mix 档梯
+    #        {010,020,030}，p_occ=0.45，p_nullV=p_nullT=0）—— 单旗在 train_args。
+    #   PO = 结构单旗（腿/足 query 门钉 1.0），train_args 同 V8_Cv5。
+    "V8_Cv5RM": ModelEntry("V8_Cv5RM", "v8_cv5", "V8 基座 + occ 档梯训练分布（修改 13 D1，2026-11-06）"),
+    "V8_Cv5PO": ModelEntry("V8_Cv5PO", "v8_cv5po", "V8 基座 + 腿/足门钉 1.0（修改 13 D3，2026-11-06）"),
+    # 双向信任门波 1（修改 14 §5，2026-11-06）：
+    #   VG   = V 侧镜像门 + T 门 2σ（结构由入口 v8_cv5vg 携带）；
+    #   ST   = 结构同 V8_Cv5，单旗在 train_args（p_stale，同会话窗级错位）；
+    #   VGST = 两旗同开（主模型）。
+    "V8_Cv5VG": ModelEntry("V8_Cv5VG", "v8_cv5vg", "V8 基座 + 双向信任门（修改 14 §5，2026-11-06）"),
+    "V8_Cv5ST": ModelEntry("V8_Cv5ST", "v8_cv5", "V8 基座 + 同会话窗级错位增强（修改 14 §5.3，2026-11-06）"),
+    "V8_Cv5VGST": ModelEntry("V8_Cv5VGST", "v8_cv5vg", "V8 基座 + 双向门 + 错位增强（修改 14 主模型，2026-11-06）"),
+    # 修改 08（2026-11-04，z_note/修改/08_平移锚头.md）：V/VT 行平移锚头
+    # （旁路读出，不替换现役 GT 锚）；新增并列自锚列。
+    "V7_Cv5TA": ModelEntry("V7_Cv5TA", "v7_c2ta", "V7_Cv5TA: Cv5 + V/VT 平移锚头（旁路读出，2026-11-04）"),
+    "V7_Cv5TA_precheck": ModelEntry("V7_Cv5TA_precheck", "v7_c2ta", "V7_Cv5TA 六轮预检"),
     "V7_Cv5AR2MSC": ModelEntry("V7_Cv5AR2MSC", "v7_c2ar2msc", "V7_Cv5AR2MSC: AR2M + 按模态分窗（V 只看当前窗，T 吃 obs_context 长历史，2026-11-03）"),
     # 修改 04（2026-11-03，z_note/修改/04_AR训练目标与自由生成对齐.md）：
     # R = AR2 结构 + 多步自由 rollout 损失（改动 A）；RD = R + 低维状态
@@ -176,6 +244,12 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V7_Cv7_fS5S11S12": ModelEntry("V7_Cv7_fS5S11S12", "v7_a", "V7_Cv7 折 fS5S11S12（leave-subjects-out）"),
     "V7_Cv7_fS6S7S13": ModelEntry("V7_Cv7_fS6S7S13", "v7_a", "V7_Cv7 折 fS6S7S13（leave-subjects-out）"),
     "V7_Cv7_fS5S6S8": ModelEntry("V7_Cv7_fS5S6S8", "v7_a", "V7_Cv7 折 fS5S6S8（leave-subjects-out）"),
+    # 协议 A 主表 4 折（2026-11-05）：V7_Cv5 双门 + 枚举，跨受试者配对读数；
+    # 对照 = V7_Cv7 同 fold（无门，已跑）。仅 split 配置不同。
+    "V7_Cv5_fS5S6S11": ModelEntry("V7_Cv5_fS5S6S11", "v7_c2", "V7_Cv5 折 fS5S6S11（leave-subjects-out）"),
+    "V7_Cv5_fS5S11S12": ModelEntry("V7_Cv5_fS5S11S12", "v7_c2", "V7_Cv5 折 fS5S11S12（leave-subjects-out）"),
+    "V7_Cv5_fS6S7S13": ModelEntry("V7_Cv5_fS6S7S13", "v7_c2", "V7_Cv5 折 fS6S7S13（leave-subjects-out）"),
+    "V7_Cv5_fS5S6S8": ModelEntry("V7_Cv5_fS5S6S8", "v7_c2", "V7_Cv5 折 fS5S6S8（leave-subjects-out）"),
     "V7_SV1": ModelEntry("V7_SV1", "v7_a", "V7 E1 专家 S_V（仅视觉训练，2026-10-26）"),
     "V7_ST1": ModelEntry("V7_ST1", "v7_a", "V7 E1 专家 S_T（仅触觉训练，2026-10-26）"),
     "V7_Cv5_SV1": ModelEntry("V7_Cv5_SV1", "v7_c2", "V7_Cv5 E1 专家 S_V（双门同架构，2026-10-26）"),
@@ -196,6 +270,27 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V4A": ModelEntry("V4A", "v4a", "24-slot gradient clustering"),
     "V4B": ModelEntry("V4B", "v4b", "learned hard partition (--part-json)"),
 }
+
+# 协议 A 主表 4 折（2026-11-05）：Cv5 折已在上方；其余四族同 split 逐折配对。
+for _fam, _mod in (("V7_Cv5SD2", "v7_c2sd2"), ("V7_Cv5SD2RT", "v7_c2sd2rt"),
+                   ("V7_Cv4", "v7_c"), ("V7_Cv2", "v7_c2"), ("V7_Cv6", "v7_c2")):
+    for _fold in ("fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8"):
+        _name = "%s_%s" % (_fam, _fold)
+        MODEL_REGISTRY[_name] = ModelEntry(
+            _name, _mod, "%s 折 %s（leave-subjects-out，协议 A）" % (_fam, _fold))
+
+# V8 系列 4 折（2026-11-05）：第 4 折用 S13-out split（test = S6+S7），
+# 其余三折不变；主评估与 E5/E6 等实验沿同一折表。
+for _fam, _mod in (("V8_Cv5", "v8_cv5"), ("V8_Cv4", "v8_cv4"),
+                   ("V8_Cv2", "v8_cv5"), ("V8_Cv6", "v8_cv5"),
+                   ("V8_Cv7", "v8_cv7"), ("V8_Cv5T1", "v8_cv5t1"),
+                   ("V8_Cv5RM", "v8_cv5"), ("V8_Cv5PO", "v8_cv5po"),
+                   ("V8_Cv5VG", "v8_cv5vg"), ("V8_Cv5ST", "v8_cv5"),
+                   ("V8_Cv5VGST", "v8_cv5vg")):
+    for _fold in ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8"):
+        _name = "%s_%s" % (_fam, _fold)
+        MODEL_REGISTRY[_name] = ModelEntry(
+            _name, _mod, "%s 折 %s（协议 A 4 折，S13-out）" % (_fam, _fold))
 
 # 四相机扩展（D2，2026-10-12 裁定：相机进模型名）。每相机一份 V3_Bv1，
 # 共用 v3_3b 结构入口；数据根差异由 v1_cam{N}.yaml 携带（types.camera_roots）。

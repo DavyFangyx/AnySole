@@ -232,6 +232,7 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
                     checkpoint_all: bool | None = None,
                     force: bool | None = None,
                     dry_run: bool = False,
+                    resume: bool = False,
                     skip: bool = True) -> int:
     """把 EXPERIMENTS 条目展开成 queue conf（统一生成器 gen.py 的引擎）。
 
@@ -272,6 +273,7 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
     ckpt_line = "CHECKPOINT_ALL=%s" % str(
         raw.get("CHECKPOINT_ALL", False) if checkpoint_all is None else checkpoint_all).lower()
     force_line = "FORCE=%s" % str(False if force is None else force).lower()
+    resume_line = "RESUME=true" if resume else ""
 
     sequence = _next_sequence()
     count = 0
@@ -288,6 +290,7 @@ def emit_experiment(experiment_id: str, selected_models: list[str] | None = None
             # runner only retrains when an explicit FORCE=true is set
             # (it skips the checkpoint/grid reuse check then).
             force_line,
+            resume_line,  # RESUME=true 仅断点续训时写入（默认不写）；续训需同时 FORCE=true
             # 在线监控开关（2026-11-03 起取代 WANDB=true/false）：每个 conf
             # 恒带一行，取值 none/swanlab/wandb，实验级默认取
             # EXPERIMENTS[].MONITOR（缺省 none）；swanlab/wandb 时 runner 注入
@@ -351,8 +354,8 @@ def concat_models(models: list[str], method: str) -> list[str]:
         target = model + suffix
         if target not in MODELS:
             # 子后缀（_stat/_evalocc 等）前插入版本后缀
-            for sub in ("_statistics", "_evalocc", "_evalbest", "_precheck", "_sel", "_drop",
-                        "_vonly", "_tonly", "_nodrop", "_smpl24"):
+            for sub in ("_statistics", "_evalocc", "_evalexp", "_evalgap", "_evalbest",
+                        "_precheck", "_sel", "_drop", "_vonly", "_tonly", "_nodrop", "_smpl24"):
                 if sub in model:
                     target = model.replace(sub, suffix + sub, 1)
                     break
@@ -406,7 +409,7 @@ def seed_models(models: list[str], seeds: list[int]) -> list[str]:
             continue
         # 子后缀位置（_sN 插在子后缀前：V7_Cv5_evalocc010 → V7_Cv5_s2_evalocc010）
         sub_pos = None
-        for sub in ("_evalocc", "_evalbest", "_precheck", "_sel"):
+        for sub in ("_evalocc", "_evalexp", "_evalgap", "_evalbest", "_precheck", "_sel"):
             pos = model.rfind(sub)
             if pos != -1 and pos > 0:
                 sub_pos = pos
@@ -696,11 +699,167 @@ EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
 # model_registry.py 同名块；每 fold 专属 config = v1_fold_<testSubjects>.yaml。
 _V7_CROSSFIT_BASES = ("V7_Cv7_fS5S6S11", "V7_Cv7_fS5S11S12",
                       "V7_Cv7_fS6S7S13", "V7_Cv7_fS5S6S8")
+# 协议 A 主表 4 折（2026-11-05）：Cv7 无门折已在 _V7_CROSSFIT_BASES；
+# 其余五族（Cv5/Cv5SD2/Cv4/Cv2/Cv6）× 4 折逐折配对，单种子 s1。
+_V7_CROSSFIT_FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")
+_V7_CROSSFIT_FAMILIES = ("V7_Cv5", "V7_Cv5_tphys", "V7_Cv5_tphysRC",
+                         "V7_Cv5SD2", "V7_Cv5SD2RT",
+                         "V7_Cv4", "V7_Cv2", "V7_Cv6")
 EXPERIMENTS["v7_crossfit"] = {"KIND": "model_suite",
-    "MODEL_IDS": [x + "_s1" for x in _V7_CROSSFIT_BASES],
+    "MODEL_IDS": ([x + "_s1" for x in _V7_CROSSFIT_BASES]
+                  + ["%s_%s_s1" % (f, fold)
+                     for f in _V7_CROSSFIT_FAMILIES
+                     for fold in _V7_CROSSFIT_FOLDS]),
     "REQUIRES": []}
+# S13 退出留出轮换（2026-11-05 用户裁定）：唯一把 S13 放进 test 的 `fS6S7S13`
+# 折做 eval-only 重评，test 池收缩为 S6/S7；train/val 列与原折逐位一致，
+# 复用同一 ckpt_last、零重训。注册块见 model_registry.py 末尾 `_S13OUT_FAMILIES`。
+EXPERIMENTS["v7_crossfit"]["MODEL_IDS"] += [
+    "%s_fS6S7S13_s1_s13out" % _f
+    for _f in _V7_CROSSFIT_FAMILIES + ("V7_Cv7",)]
 
 # 按模态分窗（2026-11-03）：V7_Cv5AR2MSC 三格（V 只看当前窗 20 帧；T 观测 80/160/320 帧），
 # 首轮只发 s1。对照 = V7_Cv5AR2M_tw80_s1（V80/T80）。
 EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
     "V7_Cv5AR2MSC_tw%d_s1" % _c for _c in (80, 160, 320)]
+# Cv5 按模态分窗（2026-11-03）：V7_Cv5SC（非 AR2，V 当前窗 + T 80 帧），首轮只发 s1。
+EXPERIMENTS["v7_train"]["MODEL_IDS"] += ["V7_Cv5SC_tw80_s1"]
+# 动作分层 split 80/20（2026-11-04）：四格对照（Cv5 / AR2M obs80 / AR2MSC oc160 / Cv7 无门）。
+EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
+    "%s_act8020_s1" % x for x in ("V7_Cv5", "V7_Cv5AR2M_tw80", "V7_Cv5AR2MSC_tw160", "V7_Cv7")]
+# 修改 09（2026-11-04）：读出按条件分支（V/VT 绝对 = Cv5 目标空间、T 相对 + 外部 ψ）。
+# 对照 = V7_Cv5AR2M_tw80_act8020_s1（同配方同 obs80，唯一差异 = 结构入口）。
+EXPERIMENTS["v7_train"]["MODEL_IDS"] += ["V7_Cv5AR2MA_tw80_act8020_s1"]
+# 动作分层 split 的 E5 遮挡交叉评估（2026-11-04）：Cv5 act8020 × occ010–100，eval-only，只评 val。
+EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
+    "V7_Cv5_act8020_s1_evalocc%s" % _o for _o in OCC_LEVELS_10]
+# 门控随遮挡打开实验（2026-11-05 用户指定）：Cv7 无门对照 × occ010–100，
+# 与 Cv5 act8020 同格同口径；E6 门控表逐 occ 档以 Cv7 为 ΔE 分解参照。
+EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
+    "V7_Cv7_act8020_s1_evalocc%s" % _o for _o in OCC_LEVELS_10]
+# SD2 基座遮挡交叉评估（2026-11-05 用户指定，修改 07 判据 3）：同 Cv5/Cv7
+# 口径，eval-only 零重训，只评 val。
+EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
+    "V7_Cv5SD2_act8020_s1_evalocc%s" % _o for _o in OCC_LEVELS_10]
+# 四折 LSO 的 E5 遮挡交叉评估（2026-11-05，Etest_crossfit）：主线 5 格
+# （Cv5 / Cv5SD2 / Cv5SD2RT / Cv5_tphys + Cv7 无门参照）× 4 折 ×
+# occ020/040/060/080/100，eval-only、只评 test；fold yaml 见 model_registry
+# 末尾同块，与 v1_fold_<fold>.yaml 仅差 cache_root。
+_E5_FOLD_FAMILIES = ("V7_Cv5", "V7_Cv5SD2", "V7_Cv5SD2RT",
+                     "V7_Cv5_tphys", "V7_Cv7")
+_E5_FOLD_IDS = ("fS5S6S11", "fS5S11S12", "fS6S7S13", "fS5S6S8")
+EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
+    "%s_%s_s1_evalocc%s" % (_fam, _fold, _o)
+    for _fam in _E5_FOLD_FAMILIES
+    for _fold in _E5_FOLD_IDS
+    for _o in ("020", "040", "060", "080", "100")]
+# S13-out 折的 E5 遮挡轴（2026-11-05 用户裁定）：fS6S7S13 折改用
+# splits_test_S6S7_val_S14.csv，5 族 × 5 档 = 25 格 eval-only。
+EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
+    "%s_fS6S7S13_s1_s13out_evalocc%s" % (_fam, _o)
+    for _fam in _E5_FOLD_FAMILIES
+    for _o in ("020", "040", "060", "080", "100")]
+# E5 视觉退化三轴扩展（2026-11-04，z_note/E5_视觉退化扩展说明.md）：曝光 6 档
+# （G=0.05/0.2/0.5/2/4/8）+ 连续断流 5 档（ρ=10/20/40/60/80%），eval-only，
+# 首轮只发 s1（cell = V7_Cv5_s1_evalexp*/evalgap*；注册见 model_registry.py 末尾）。
+_E5_VISUAL_IDS = (
+    ["V7_Cv5_s1_evalexp" + _g for _g in ("0005", "0020", "0050", "0200", "0400", "0800")]
+    + ["V7_Cv5_s1_evalgap" + _r for _r in ("010", "020", "040", "060", "080")])
+EXPERIMENTS["v7_eval_visual"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": _E5_VISUAL_IDS,
+    "REQUIRES": [],
+}
+
+# V8 系列 4 折（2026-11-05）：新基座 V8_Cv5（双门+枚举+SD2+锚头）+
+# 门控/条件消融；第 4 折用 S13-out split（fS6S7），其余三折不变。
+_V8_CROSSFIT_FAMILIES = ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6", "V8_Cv7",
+                         "V8_Cv5T1")
+_V8_CROSSFIT_FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
+EXPERIMENTS["v8_crossfit"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1" % (f, x)
+                  for f in _V8_CROSSFIT_FAMILIES
+                  for x in _V8_CROSSFIT_FOLDS],
+    "REQUIRES": [],
+}
+# T1 端到端预检（6 epoch，主 split）：先冒烟再发 4 折正式格。
+EXPERIMENTS["v8_precheck"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V8_Cv5T1_precheck"],
+    "REQUIRES": [],
+}
+
+# V8 的 E5/E6 评估（2026-11-06 用户指定）：6 族（Cv5 / Cv4 / Cv2 / Cv6 /
+# Cv5RM / Cv5PO）× 4 折。E5 = 5 档 eval-only；E6 = 独立 base test eval-only。
+_V8_EVAL_FAMILIES = ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6",
+                     "V8_Cv5RM", "V8_Cv5PO")
+_V8_EVAL_FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
+EXPERIMENTS["v8_eval_e6"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1_e6" % (f, fold)
+                  for f in _V8_EVAL_FAMILIES for fold in _V8_EVAL_FOLDS],
+    "REQUIRES": [],
+}
+EXPERIMENTS["v8_eval_occ"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1_evalocc%s" % (f, fold, o)
+                  for f in _V8_EVAL_FAMILIES
+                  for fold in _V8_EVAL_FOLDS
+                  for o in ("020", "040", "060", "080", "100")],
+    "REQUIRES": [],
+}
+# 无门参照（14 号文档 §1.9 / 波 0，2026-11-06）：Cv7 不在上面那 6 族里，
+# 导致四折遮挡轴上「有门 vs 无门」这个 §4.4 核心对照无数据。单独 20 格。
+EXPERIMENTS["v8_eval_occ_cv7"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V8_Cv7_%s_s1_evalocc%s" % (fold, o)
+                  for fold in _V8_EVAL_FOLDS
+                  for o in ("020", "040", "060", "080", "100")],
+    "REQUIRES": [],
+}
+
+# 双向信任门波 1（修改 14 §6，2026-11-06）：Cv5VG / Cv5ST 两臂 × 4 折。
+# 主模型 Cv5VGST 单列一组，等两臂判读后再发（避免未判先烧 4 格）。
+_V8_GATE2_FAMILIES = ("V8_Cv5VG", "V8_Cv5ST")
+_V8_GATE2_VGST = ("V8_Cv5VGST",)
+_V8_GATE2_FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
+_V8_GATE2_OCC = ("020", "040", "060", "080", "100")
+EXPERIMENTS["v8_gate2"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1" % (f, fold)
+                  for f in _V8_GATE2_FAMILIES for fold in _V8_GATE2_FOLDS],
+    "REQUIRES": [],
+}
+EXPERIMENTS["v8_gate2_eval_e6"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1_e6" % (f, fold)
+                  for f in _V8_GATE2_FAMILIES for fold in _V8_GATE2_FOLDS],
+    "REQUIRES": [],
+}
+EXPERIMENTS["v8_gate2_eval_occ"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1_evalocc%s" % (f, fold, o)
+                  for f in _V8_GATE2_FAMILIES
+                  for fold in _V8_GATE2_FOLDS for o in _V8_GATE2_OCC],
+    "REQUIRES": [],
+}
+EXPERIMENTS["v8_gate2_vgst"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1" % (f, fold)
+                  for f in _V8_GATE2_VGST for fold in _V8_GATE2_FOLDS],
+    "REQUIRES": [],
+}
+EXPERIMENTS["v8_gate2_vgst_eval_e6"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1_e6" % (f, fold)
+                  for f in _V8_GATE2_VGST for fold in _V8_GATE2_FOLDS],
+    "REQUIRES": [],
+}
+EXPERIMENTS["v8_gate2_vgst_eval_occ"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1_evalocc%s" % (f, fold, o)
+                  for f in _V8_GATE2_VGST
+                  for fold in _V8_GATE2_FOLDS for o in _V8_GATE2_OCC],
+    "REQUIRES": [],
+}

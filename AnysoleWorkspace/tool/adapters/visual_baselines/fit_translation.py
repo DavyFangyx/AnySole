@@ -9,9 +9,12 @@
 导出器（export_wham/export_sam3db/export_gvhmr）经 ``common.load_translation``
 消费（无 artifact 的日期 = 零修正）。
 
-注意：当前预测仅覆盖 test（20260810），故 b 在该日期、该 split 的预测上拟合
-（3 参数全局平移，拟合来源登记于 artifact）。若后续生成 val/train 预测，
-按同脚本对各自日期重拟合即可。
+b 逐日期在该日期**已导出且未经修正**的预测上拟合（3 参数全局平移，拟合来源与
+会话清单登记于 artifact）：首次导出时该日期无 artifact = 零修正，拟合后重新
+导出即带上 b。已有 artifact 的日期再拟合会读到已修正的预测（残差 ≈ 0），
+故需 --force 显式覆盖。
+覆盖现状：test = 20260810；act8020 的 val 口径另含 20260804 / 20260808
+（2026-11-05 WHAM 补跑，19 个会话）。
 
 用法（touch_gait）：
   python AnysoleWorkspace/tool/adapters/visual_baselines/fit_translation.py \
@@ -51,14 +54,27 @@ def _manifest_rows() -> dict[str, dict]:
     return rows
 
 
-def _sessions_of_date(date: str, split: str = "test") -> list[str]:
+def _sessions_of_date(date: str) -> list[str]:
+    """One recording date's sessions, across every split column.
+
+    The membership table stays the canonical session source; the date of a
+    session comes from its recording path (``common.session_parts``, the same
+    helper the exporters use). Scanning all columns is what makes val/train
+    dates fittable — the test-only era read the ``test`` column alone.
+    """
+    from AnysoleWorkspace.tool.adapters.visual_baselines import common
+
+    rows = _manifest_rows()
     out = []
     with (WORKSPACE / "protocol/splits/default/splits.csv").open(
             encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
-            value = (row.get(split) or "").strip()
-            if value and value not in out:
-                out.append(value)
+            for split in ("train", "val", "test"):
+                value = (row.get(split) or "").strip()
+                if not value or value in out or value not in rows:
+                    continue
+                if common.session_parts(rows[value])[0] == date:
+                    out.append(value)
     return out
 
 
@@ -66,7 +82,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", required=True)
     parser.add_argument("--model", choices=tuple(MODEL_DIRS), required=True)
+    parser.add_argument("--force", action="store_true",
+                        help="overwrite an existing artifact (see the warning below)")
     args = parser.parse_args()
+
+    out = CALIBRATION_DIR / f"{args.date}.{args.model}_native_to_mocap.json"
+    if out.is_file() and not args.force:
+        # b is fitted on *pre-correction* predictions. Once an artifact exists the
+        # exporter folds b into the npz, so refitting on those would measure the
+        # residual (~0) and overwrite a good artifact. Re-export without the
+        # artifact first if a refit is really wanted.
+        raise SystemExit(f"{out} exists; refit needs --force (fit consumes pre-correction predictions)")
 
     from Baselines.utils.gt_loading import protocol_gt
 
@@ -101,7 +127,6 @@ def main() -> int:
         "fit_source": "exported local_gen predictions (pre-correction) vs smpl GT pelvis, pooled least squares",
         "note": "3-parameter global translation; per-date; same mechanism as MMVP drift points m/n (04_E §8.4)",
     }
-    out = CALIBRATION_DIR / f"{args.date}.{args.model}_native_to_mocap.json"
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"wrote {out}")
     print(f"b = {b}  residual RMSE {payload['residual_rmse_mm']:.1f} mm  ({len(used)} sessions)")

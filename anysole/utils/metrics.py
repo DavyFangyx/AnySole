@@ -49,6 +49,8 @@ METRIC_UNITS = {
     "global_mpjpe_mm": "mm",
     "ground_pen_mm": "mm",
     "ground_pen_frac": "fraction",
+    "window_disp_mag_mm": "mm",
+    "window_disp_angle_deg": "degree",
 }
 
 # Public motion metric set (formal tables).  ``shape_vertex_std_mm`` and the
@@ -410,6 +412,92 @@ def root_trajectory_segmented_error(
     if not errors:
         return float("nan")
     return float(np.concatenate(errors).mean() * 1000.0)
+
+
+def window_displacement_errors(
+    pred_trans: np.ndarray,
+    gt_trans: np.ndarray,
+    *,
+    window: int = 20,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-window endpoint displacement errors (shared solver).
+
+    ``pred_trans`` / ``gt_trans`` are ``(T, 3)`` root trajectories in one world
+    frame.  Non-overlapping ``window``-frame blocks are compared by their
+    endpoint displacement ``x[k+window-1] - x[k]``; the block offset cancels in
+    the difference, so these reads consume no GT translation anchor.  The tail
+    shorter than one window is dropped, matching the window grid of the
+    protocol.
+
+    Returns ``(mag_err_mm, angle_deg, gt_disp_m)``.  ``angle_deg`` is NaN where
+    the predicted or GT displacement has zero norm (direction undefined);
+    callers filter on ``gt_disp_m`` and on finiteness.
+    """
+    predicted = np.asarray(pred_trans, dtype=np.float64)
+    target = np.asarray(gt_trans, dtype=np.float64)
+    window = int(window)
+    if window < 2:
+        raise ValueError("window must be >= 2")
+    n = min(len(predicted), len(target))
+    n = (n // window) * window
+    empty = np.zeros((0,), dtype=np.float64)
+    if n < window:
+        return empty, empty.copy(), empty.copy()
+    pred = predicted[:n].reshape(-1, window, 3)
+    gt = target[:n].reshape(-1, window, 3)
+    pred_disp = pred[:, -1] - pred[:, 0]
+    gt_disp = gt[:, -1] - gt[:, 0]
+    pred_norm = np.linalg.norm(pred_disp, axis=-1)
+    gt_norm = np.linalg.norm(gt_disp, axis=-1)
+    mag_err = np.abs(pred_norm - gt_norm) * 1000.0
+    denom = pred_norm * gt_norm
+    cos = np.divide(
+        np.einsum("ij,ij->i", pred_disp, gt_disp), denom,
+        out=np.zeros_like(denom), where=denom > 1e-12,
+    )
+    angle = np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))
+    angle[denom <= 1e-12] = np.nan
+    return mag_err, angle, gt_norm
+
+
+def window_disp_magnitude_error(
+    pred_trans: np.ndarray,
+    gt_trans: np.ndarray,
+    window: int = 20,
+) -> float:
+    """RMSE of | ‖Δpred‖ − ‖Δgt‖ | over non-overlapping windows, mm.
+
+    Windows whose GT displacement is numerically zero are dropped (the
+    decomposition of 2026-11-04 drops them for both channels so magnitude and
+    angle read the same window set).
+    """
+    mag_err, _, gt_norm = window_displacement_errors(
+        pred_trans, gt_trans, window=window)
+    valid = gt_norm > 1e-9
+    if not np.any(valid):
+        return float("nan")
+    return float(np.sqrt(np.mean(np.square(mag_err[valid]))))
+
+
+def window_disp_angle_error(
+    pred_trans: np.ndarray,
+    gt_trans: np.ndarray,
+    window: int = 20,
+    min_disp_m: float = 0.0,
+) -> float:
+    """Median angle between Δpred and Δgt over non-overlapping windows, deg.
+
+    ``min_disp_m`` excludes windows whose GT displacement is below the given
+    floor; the default 0.0 keeps every non-degenerate window, reproducing the
+    2026-11-04 hand calculation (a 0.02 m floor gives 28.0° on T2M instead of
+    40.5° because 125/494 windows move less than 2 cm).
+    """
+    _, angle, gt_norm = window_displacement_errors(
+        pred_trans, gt_trans, window=window)
+    valid = np.isfinite(angle) & (gt_norm >= max(float(min_disp_m), 1e-9))
+    if not np.any(valid):
+        return float("nan")
+    return float(np.median(angle[valid]))
 
 
 def foot_sliding_joints(

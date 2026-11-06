@@ -1842,3 +1842,397 @@ for _context in (80, 160, 320):
         "name": "V7_Cv5AR2MSC", "seed": 1,
         "train_args": {**MODELS["V7_Cv5AR2M_tw80_s1"].get("train_args", {}),
                        "obs_context": _context}}
+
+# Cv5 按模态分窗（2026-11-03）：V 只看当前窗，T 吃长历史（80 帧），非 AR2。
+# 结构 = V7_Cv5 + v7_vcur（v7_c2sc 入口）；配方继承 V7_Cv5_s1（绝对目标、枚举三条件、740ep），
+# 唯一差异 = obs_context=80 + 结构标志。对照 = V7_Cv5_s1（V20/T20），用于回答 T 长窗在非 AR2 架构里能否兑现。
+MODELS["V7_Cv5SC_tw80_s1"] = {
+    **MODELS["V7_Cv5_s1"],
+    "label": "V7-Cv5SC-v20-t80-s1",
+    "name": "V7_Cv5SC", "seed": 1,
+    "train_args": {**MODELS["V7_Cv5_s1"].get("train_args", {}),
+                   "obs_context": 80}}
+
+# 根头速率/方向解耦（2026-11-04，修改 07 → z_note/修改/07_根头速率方向解耦与
+# T行方向掩码.md）：结构 = V7_Cv5（v7_c2 双门、枚举三条件、非 AR2）+ v7_root_sd
+# （入口 v7_c2sd）。判据列 = 改动 C 的 WinDispMag / WinDispAngle；新 split 口径
+# （_ACT8020，seed=101）与 V7_Cv5_act8020_s1 / V7_Cv7_act8020_s1 同配方可比。
+# 基座用 _s1（裸名 V7_Cv5 已在第二轮白名单清理中删除）；seed 从裸条目移除，
+# 与既有 V7_Cv5/_s1 的「裸名 = 结构基座、_sN = 训练格」约定一致。
+MODELS["V7_Cv5SD"] = {**MODELS["V7_Cv5_s1"], "label": "V7-Cv5SD", "name": "V7_Cv5SD"}
+MODELS["V7_Cv5SD"].pop("seed", None)
+MODELS["V7_Cv5SD_precheck"] = {**MODELS["V7_Cv5SD"], "label": "V7-Cv5SD-precheck",
+                               "name": "V7_Cv5SD_precheck", "epochs": 6,
+                               "train_args": {**MODELS["V7_Cv5SD"]["train_args"],
+                                              "wandb_experiment_tag": "v7_variants_precheck"}}
+MODELS["V7_Cv5SD_s1"] = {**MODELS["V7_Cv5SD"], "label": "V7-Cv5SD-s1", "seed": 1}
+
+# 第二臂 B′（2026-11-04，修改 07「改动 B 的配平形式」）：结构逐参数 =
+# V7_Cv5SD（入口 v7_c2sd2），唯一差异 = 损失恒等式配平（全 1.0 且不掩码
+# 时 L_speed+L_vy+L_dir ≡ Cv5 的 l_vel；T 行方向掩码为唯一干预）。
+# 对照 = V7_Cv5SD_act8020_s1（默认权重臂）与 V7_Cv5_act8020_s1。
+MODELS["V7_Cv5SD2"] = {**MODELS["V7_Cv5SD"], "label": "V7-Cv5SD2", "name": "V7_Cv5SD2"}
+MODELS["V7_Cv5SD2_precheck"] = {**MODELS["V7_Cv5SD2"], "label": "V7-Cv5SD2-precheck",
+                                "name": "V7_Cv5SD2_precheck", "epochs": 6,
+                                "train_args": {**MODELS["V7_Cv5SD2"]["train_args"],
+                                               "wandb_experiment_tag": "v7_variants_precheck"}}
+MODELS["V7_Cv5SD2_s1"] = {**MODELS["V7_Cv5SD2"], "label": "V7-Cv5SD2-s1", "seed": 1}
+
+# 修改 10 §三 可直接移植 ①（2026-11-05）：SD2 + VT 零初始化触觉残差
+# （入口 v7_c2sd2rt）。控制臂 = V7_Cv5SD2_act8020_s1（同结构、仅差
+# vt_t_residual）；判据 = 无遮挡档 Δ(VT−V) 符号 + occ010–100 曲线。
+MODELS["V7_Cv5SD2RT"] = {**MODELS["V7_Cv5SD2"], "label": "V7-Cv5SD2RT", "name": "V7_Cv5SD2RT"}
+MODELS["V7_Cv5SD2RT_precheck"] = {**MODELS["V7_Cv5SD2RT"], "label": "V7-Cv5SD2RT-precheck",
+                                  "name": "V7_Cv5SD2RT_precheck", "epochs": 6,
+                                  "train_args": {**MODELS["V7_Cv5SD2RT"]["train_args"],
+                                                 "wandb_experiment_tag": "v7_variants_precheck"}}
+MODELS["V7_Cv5SD2RT_s1"] = {**MODELS["V7_Cv5SD2RT"], "label": "V7-Cv5SD2RT-s1", "seed": 1}
+
+# 修改 11 A3（2026-11-05）：Cv5 + T_phys v2（12→20 维，hull 着地几何 +
+# 双足关系）。结构逐参数 = Cv5，唯一差异 = t_phys_v2；Cv5/SD2 的 12 维
+# base 一行不动（R3）。首轮只做接链，不含量纲修正/A1/A2/A4。
+# 4 折 LSO 与 V7_Cv5_f* 基线配对；V5_Av1 老基座已测 T2M −17.9mm。
+# 必须放在第二轮白名单清理之后（与 Cv5SD2 同段），否则会被 _drop_all_but_current 删除。
+MODELS["V7_Cv5_tphys"] = {**MODELS["V7_Cv5_s1"], "label": "V7-Cv5-tphys",
+                          "name": "V7_Cv5_tphys"}
+MODELS["V7_Cv5_tphys"].pop("seed", None)
+MODELS["V7_Cv5_tphys"]["train_args"] = {
+    **MODELS["V7_Cv5_tphys"].get("train_args", {}), "t_phys_v2": True}
+MODELS["V7_Cv5_tphys_precheck"] = {
+    **MODELS["V7_Cv5_tphys"], "label": "V7-Cv5-tphys-precheck",
+    "name": "V7_Cv5_tphys_precheck", "epochs": 6,
+    "train_args": {**MODELS["V7_Cv5_tphys"]["train_args"],
+                   "wandb_experiment_tag": "v7_variants_precheck"}}
+MODELS["V7_Cv5_tphys_s1"] = {**MODELS["V7_Cv5_tphys"],
+                             "label": "V7-Cv5-tphys-s1", "seed": 1}
+
+# 修改 11 §9.3（2026-11-05）：hull_mcol 逐会话 p5–p95 重定心（pressure-only）。
+# T_phys 仍 20 维，模型/编码器与 V7_Cv5_tphys 完全同形；唯一差异是数据侧
+# hull_mcol 的值。对照 = Cv5（无新增维）与 Cv5_tphys（raw hull_mcol）。
+MODELS["V7_Cv5_tphysRC"] = {**MODELS["V7_Cv5_tphys"],
+                            "label": "V7-Cv5-tphysRC",
+                            "name": "V7_Cv5_tphysRC",
+                            "train_args": {**MODELS["V7_Cv5_tphys"]["train_args"],
+                                           "t_phys_hull_recenter": True}}
+MODELS["V7_Cv5_tphysRC_precheck"] = {
+    **MODELS["V7_Cv5_tphysRC"], "label": "V7-Cv5-tphysRC-precheck",
+    "name": "V7_Cv5_tphysRC_precheck", "epochs": 6,
+    "train_args": {**MODELS["V7_Cv5_tphysRC"]["train_args"],
+                   "wandb_experiment_tag": "v7_variants_precheck"}}
+MODELS["V7_Cv5_tphysRC_s1"] = {**MODELS["V7_Cv5_tphysRC"],
+                               "label": "V7-Cv5-tphysRC-s1", "seed": 1}
+
+# 平移锚头（2026-11-04，修改 08 → z_note/修改/08_平移锚头.md）：结构 =
+# V7_Cv5（v7_c2 双门、枚举三条件、非 AR2）+ v7_trans_anchor_head（入口
+# v7_c2ta）。锚头只读 m_v（stopgrad），主干逐位 = Cv5；新列
+# GlobalMPJPE_self / W-MPJPE100_self / RootAbs_self 与现役列并列。
+# 与 07 相互独立、可并行；基座 / 配方同 V7_Cv5_s1，新 split（_ACT8020，
+# seed=101）对照 V7_Cv5_act8020_s1。裸名 = 结构基座、_sN = 训练格。
+MODELS["V7_Cv5TA"] = {**MODELS["V7_Cv5_s1"], "label": "V7-Cv5TA", "name": "V7_Cv5TA"}
+MODELS["V7_Cv5TA"].pop("seed", None)
+MODELS["V7_Cv5TA_precheck"] = {**MODELS["V7_Cv5TA"], "label": "V7-Cv5TA-precheck",
+                               "name": "V7_Cv5TA_precheck", "epochs": 6,
+                               "train_args": {**MODELS["V7_Cv5TA"]["train_args"],
+                                              "wandb_experiment_tag": "v7_variants_precheck"}}
+MODELS["V7_Cv5TA_s1"] = {**MODELS["V7_Cv5TA"], "label": "V7-Cv5TA-s1", "seed": 1}
+
+# 动作分层 split 80/20（2026-11-04，用户裁定）：旧 split 按被试切，动作分布在
+# train/val/test 间严重偏移（val 缺 03/08/09，test 在难动作 06/07 超配），
+# 模型好坏被动作难度偏移淹没。新 split = 按动作分层、切分单位 take 组、
+# 04/08 全进 train（方案 A）、无 test 列（109/27，val 19.9%，8 类动作 val 占比
+# 18–23%）。csv = splits_action_8020.csv，yaml = v1_act8020.yaml（只改 split_csv）。
+# 口径：test 列为空 → eval_splits 必须只含 val（runner 默认 ("val","test") 会失败）。
+# 与旧 split 的任何读数都不可比（用户已确认先不管）。
+# 修改 09（2026-11-04）：读出按条件分支——V/VT 行绝对（= Cv5 目标空间）、T 行
+# 相对 + 外部 ψ。结构 = AR2M + v7_abs_vrows（入口 v7_c2ar2ma）；配方逐项继承
+# V7_Cv5AR2M_tw80_s1（obs80/tw20/bs64 + AR2 损失权重），唯一差异 = 结构入口。
+# 判据：V/VT 行 PA 回到 Cv5 档（act8020 val 28.9/29.1，AR2M 现为 37.7/37.8），
+# 同时 T 行航向保持 AR2 级（5 个 180° 折返会话绝对航向 2–8°、Drift 5.1）。
+MODELS["V7_Cv5AR2MA_tw80_s1"] = {
+    **MODELS["V7_Cv5AR2M_tw80_s1"],
+    "label": "V7-Cv5AR2MA-obs80-out20-s1",
+    "name": "V7_Cv5AR2MA", "seed": 1}
+
+_ACT8020 = {"config": "anysole/configs/v1_act8020.yaml", "eval_splits": ["val"]}
+for _base in ("V7_Cv5_s1", "V7_Cv2_s1", "V7_Cv5AR2M_tw80_s1", "V7_Cv5AR2MSC_tw160_s1", "V7_Cv7_s1",
+              "V7_Cv5SD_s1", "V7_Cv5SD2_s1", "V7_Cv5SD2RT_s1", "V7_Cv5TA_s1", "V7_Cv5AR2MA_tw80_s1"):
+    _new = _base.replace("_s1", "_act8020_s1")
+    MODELS[_new] = {**MODELS[_base], **_ACT8020,
+                    "label": MODELS[_base]["label"] + "-act8020"}
+    # 卡位只由 worker 的 CUDA_VISIBLE_DEVICES 决定；cell 写死 device 会在
+    # worker 只暴露 1 张卡时触发 "CUDA error: invalid device ordinal"（2026-11-04 实测）。
+    MODELS[_new].pop("device", None)
+    # 四格共用两个 model_name，监控页默认名 <model>_single_fold0 会重名；
+    # 显式 run 名带 cell id，SwanLab 上一眼可分。
+    MODELS[_new]["train_args"] = {**MODELS[_new].get("train_args", {}),
+                                  "wandb_run_name": _new,
+                                  "wandb_experiment_tag": "act8020"}
+    # ckpt 路径 = model_name + 超参 variant，不含 split —— 与旧 split 的 _sd1
+    # 目录同名会被覆盖（E2–E6 全部表格的来源）。seed 参与 variant，故新 split
+    # 统一 seed=101 → 落到 _sd101，与旧 split 物理隔离（2026-11-04 实测）。
+    MODELS[_new]["seed"] = 101
+
+# 动作分层 split 的 E5 遮挡交叉评估（2026-11-04）：eval-only，ckpt = Cv5 act8020 格（_sd101）的 ckpt_last，
+# 遮挡 yaml = v1_act8020_occNNN.yaml（只换 cache_root），test 列为空 → eval_splits 只含 val。
+for _occ in OCC_LEVELS_10:
+    MODELS["V7_Cv5_act8020_s1_evalocc%s" % _occ] = {
+        **MODELS["V7_Cv5_act8020_s1"],
+        "label": "V7-Cv5-act8020-s1-evalocc%s" % _occ,
+        "train": False, "which": "last", "eval_splits": ["val"],
+        "config": "anysole/configs/v1_act8020_occ%s.yaml" % _occ}
+# Cv2 同口径遮挡交叉评估（2026-11-04 用户指定）：ckpt = Cv2 act8020 格（_sd101）。
+for _occ in OCC_LEVELS_10:
+    MODELS["V7_Cv2_act8020_s1_evalocc%s" % _occ] = {
+        **MODELS["V7_Cv2_act8020_s1"],
+        "label": "V7-Cv2-act8020-s1-evalocc%s" % _occ,
+        "train": False, "which": "last", "eval_splits": ["val"],
+        "config": "anysole/configs/v1_act8020_occ%s.yaml" % _occ}
+
+# 门控随遮挡打开实验（2026-11-05 用户指定）：Cv7 = 无门对照，同 Cv5 的
+# 遮挡交叉评估口径（eval-only、ckpt = Cv7 act8020 格 _sd101、只评 val）。
+# E6 门控表在每个 occ 档用 Cv7（无门）作 ΔE 分解参照，比较 Cv5 双门。
+for _occ in OCC_LEVELS_10:
+    MODELS["V7_Cv7_act8020_s1_evalocc%s" % _occ] = {
+        **MODELS["V7_Cv7_act8020_s1"],
+        "label": "V7-Cv7-act8020-s1-evalocc%s" % _occ,
+        "train": False, "which": "last", "eval_splits": ["val"],
+        "config": "anysole/configs/v1_act8020_occ%s.yaml" % _occ}
+
+# SD2 基座遮挡交叉评估（2026-11-05 用户指定，修改 07 判据 3）：eval-only
+# 零重训，ckpt = SD2 act8020 格（_sd101）的 ckpt_last，只评 val。判据 =
+# Δ(VT−V) 在 occ010–100 全档为负。
+for _occ in OCC_LEVELS_10:
+    MODELS["V7_Cv5SD2_act8020_s1_evalocc%s" % _occ] = {
+        **MODELS["V7_Cv5SD2_act8020_s1"],
+        "label": "V7-Cv5SD2-act8020-s1-evalocc%s" % _occ,
+        "train": False, "which": "last", "eval_splits": ["val"],
+        "config": "anysole/configs/v1_act8020_occ%s.yaml" % _occ}
+
+# E5 视觉退化三轴扩展（2026-11-04，z_note/E5_视觉退化扩展说明.md §3）：
+# 曝光 6 档 + 连续断流 5 档，eval-only（train False、which last）。同一
+# ckpt（V7_Cv5 s1）固定 VT 输入，只替换视觉特征缓存；yaml 与
+# v1_cam3_occ080.yaml 仅差 cache_root 一行。首轮只发 s1。
+# 注意：本块必须留在 _drop_all_but_current() 之后（白名单不登记新格）。
+_E5_EXP_SUFFIXES = ("0005", "0020", "0050", "0200", "0400", "0800")
+_E5_GAP_SUFFIXES = ("010", "020", "040", "060", "080")
+_V7_E5_SPEC = MODELS["V7_Cv5_s1"]
+for _suffix in _E5_EXP_SUFFIXES:
+    MODELS["V7_Cv5_s1_evalexp%s" % _suffix] = {
+        **_V7_E5_SPEC,
+        "label": _V7_E5_SPEC["label"] + "-evalexp%s" % _suffix,
+        "train": False, "which": "last",
+        "eval_splits": ["val", "test"],
+        "config": "anysole/configs/v1_cam3_exp_g%s.yaml" % _suffix}
+for _suffix in _E5_GAP_SUFFIXES:
+    MODELS["V7_Cv5_s1_evalgap%s" % _suffix] = {
+        **_V7_E5_SPEC,
+        "label": _V7_E5_SPEC["label"] + "-evalgap%s" % _suffix,
+        "train": False, "which": "last",
+        "eval_splits": ["val", "test"],
+        "config": "anysole/configs/v1_cam3_gap_r%s.yaml" % _suffix}
+
+# 协议 A 主表 4 折（2026-11-05，论文设计选择表配套）：每个族一张 4 折表，
+# 结构 = 该族 _s1 基座（ckpt_last、740ep），唯一差异 = 每 fold 专属 config
+# （v1_fold_<testSubjects>.yaml，split_csv 指向该 fold 文件）。
+# Cv7 折已在上方单独注册（无门臂）；本块覆盖 Cv5 / Cv5SD2 / Cv4 / Cv2 / Cv6。
+# 必须放在文件末尾：V7_Cv5SD2_s1 等基座在本文件中段才定义。
+_V7_FOLD_CONFIGS = (
+    ("fS5S6S11",  "anysole/configs/v1_fold_S5S6S11.yaml"),
+    ("fS5S11S12", "anysole/configs/v1_fold_S5S11S12.yaml"),
+    ("fS6S7S13",  "anysole/configs/v1_fold_S6S7S13.yaml"),
+    ("fS5S6S8",   "anysole/configs/v1_fold_S5S6S8.yaml"),
+)
+_V7_FOLD_FAMILIES = ("V7_Cv5", "V7_Cv5_tphys", "V7_Cv5_tphysRC", "V7_Cv5SD2",
+                     "V7_Cv5SD2RT", "V7_Cv4", "V7_Cv2", "V7_Cv6")
+for _fam in _V7_FOLD_FAMILIES:
+    for _fold, _fconfig in _V7_FOLD_CONFIGS:
+        _fname = "%s_%s" % (_fam, _fold)
+        MODELS["%s_s1" % _fname] = {
+            **MODELS["%s_s1" % _fam],
+            "label": "%s-s1" % _fname.replace("_", "-"),
+            "name": _fname,
+            "config": _fconfig,
+            "eval_splits": ["val", "test"]}
+
+# 四折 LSO 的 E5 遮挡交叉评估（2026-11-05，Etest_crossfit 口径）：主线 5 格
+# （Cv5 / Cv5SD2 / Cv5SD2RT / Cv5_tphys + Cv7 无门参照）× 4 折 ×
+# occ020/040/060/080/100，eval-only、ckpt = 对应 fold cell 的 ckpt_last、
+# 只评 test（留出受试者）。fold yaml 与 v1_fold_<fold>.yaml 仅差 cache_root。
+# 必须留在 _drop_all_but_current() 与 fold 基座注册之后。
+_E5_FOLD_MODELS = ("V7_Cv5", "V7_Cv5SD2", "V7_Cv5SD2RT",
+                   "V7_Cv5_tphys", "V7_Cv7")
+_E5_FOLD_LEVELS = ("020", "040", "060", "080", "100")
+for _fam in _E5_FOLD_MODELS:
+    for _fold, _fconfig in _V7_FOLD_CONFIGS:
+        _cell = "%s_%s_s1" % (_fam, _fold)
+        for _occ in _E5_FOLD_LEVELS:
+            MODELS["%s_evalocc%s" % (_cell, _occ)] = {
+                **MODELS[_cell],
+                "label": "%s-evalocc%s" % (MODELS[_cell]["label"], _occ),
+                "train": False, "which": "last",
+                "eval_splits": ["test"],
+                "config": "anysole/configs/v1_occ%s_fold_%s.yaml"
+                          % (_occ, _fold[1:])}
+
+# S13 退出留出轮换（2026-11-05 用户裁定）：S13 采集时鞋垫硬件异常，压力量程
+# 只用掉 71% 值域（单格峰值 915 < clip@1023、饱和 0.000%、活跃格占比 z=−3.01），
+# 底层无法弥合，故 S13 只作 train/val 受试者、不作留出 test 受试者。
+# 四折里唯一把 S13 放进 test 的是 fS6S7S13 → 本块对该折做 eval-only 重评，
+# test 池收缩为 S6/S7（49→31 会话、18180→12540 帧），train/val 列与原折逐位
+# 一致（`splits_test_S6S7_val_S14.csv`），故复用同一 ckpt_last、零重训。
+# 口径代价：该折 test 动作覆盖 11/11→10/11（动作 08 全库仅 3 条 = S5×2 + S13，
+# 本折 S5 在 train）；动作 08 的留出读数仍由 S5 在 test 的另三折提供。
+_S13OUT_FAMILIES = _V7_FOLD_FAMILIES + ("V7_Cv7",)
+for _fam in _S13OUT_FAMILIES:
+    _cell = "%s_fS6S7S13_s1" % _fam
+    MODELS["%s_s13out" % _cell] = {
+        **MODELS[_cell],
+        "label": "%s-s13out" % MODELS[_cell]["label"],
+        "train": False, "which": "last",
+        "eval_splits": ["test"],
+        "config": "anysole/configs/v1_fold_S6S7.yaml"}
+
+# S13-out 折的 E5 遮挡轴（2026-11-05 用户裁定「保留现有 4 折 + _s13out」）：
+# 该折的 E5 occ 格同样池化了 S13，用同一 S13-out split + 5 档 occ yaml 做
+# eval-only 覆盖；cell 名 = <fam>_fS6S7S13_s1_s13out_evalocc<lv>。
+_E5_S13OUT_FAMS = ("V7_Cv5", "V7_Cv5SD2", "V7_Cv5SD2RT",
+                   "V7_Cv5_tphys", "V7_Cv7")
+for _fam in _E5_S13OUT_FAMS:
+    _cell = "%s_fS6S7S13_s1_s13out" % _fam
+    for _occ in ("020", "040", "060", "080", "100"):
+        MODELS["%s_evalocc%s" % (_cell, _occ)] = {
+            **MODELS[_cell],
+            "label": "%s-evalocc%s" % (MODELS[_cell]["label"], _occ),
+            "train": False, "which": "last",
+            "eval_splits": ["test"],
+            "config": "anysole/configs/v1_occ%s_fold_S6S7.yaml" % _occ}
+
+# V8 系列（2026-11-05）：新基座 = V7_Cv5SD2；门控/条件消融在 V8 上重建。
+# 基座结构由入口 v8_cv5（= v7_c2sd2）携带；Cv4/Cv7 用新入口 v8_cv4/v8_cv7，
+# Cv2/Cv6 与 Cv5 同结构、只差 train_args（sample / always-VT）。
+# 锚头：V8 全族由入口 STRUCTURE 统一置 `v7_trans_anchor_head: True`
+# （V8_Cv2/Cv6 复用 v8_cv5，同样带头；不是 train_args 开关）。
+# SD2：V8 全族都带 `v7_root_sd` + `v7_root_sd_balance`；无 SD2 的
+# 「通道不分离」对照 = V7_Cv5（现成 4 折 + `_s13out`，不重训）。
+# 第 4 折直接用 S13-out split（v1_fold_S6S7.yaml）：train/val 与原折逐位
+# 相同，test = S6+S7；主评估与 E5/E6 等实验沿同一折表，不再二次 eval-only。
+_V8_BASE = {**MODELS["V7_Cv5SD2_s1"], "label": "V8-Cv5", "name": "V8_Cv5"}
+MODELS["V8_Cv5"] = _V8_BASE
+MODELS["V8_Cv4"] = {**MODELS["V7_Cv4_s1"], "label": "V8-Cv4", "name": "V8_Cv4"}
+MODELS["V8_Cv2"] = {**MODELS["V7_Cv2_s1"], "label": "V8-Cv2", "name": "V8_Cv2"}
+MODELS["V8_Cv6"] = {**MODELS["V7_Cv6_s1"], "label": "V8-Cv6", "name": "V8_Cv6"}
+MODELS["V8_Cv7"] = {**MODELS["V7_Cv7_s1"], "label": "V8-Cv7", "name": "V8_Cv7"}
+# T1：V8_Cv5 的方向载体替换（根头 4→3 通道；结构由入口 v8_cv5t1 携带）。
+MODELS["V8_Cv5T1"] = {**MODELS["V8_Cv5"], "label": "V8-Cv5T1", "name": "V8_Cv5T1"}
+MODELS["V8_Cv5T1_precheck"] = {
+    **MODELS["V8_Cv5T1"], "label": "V8-Cv5T1-precheck",
+    "name": "V8_Cv5T1_precheck", "epochs": 6,
+    "train_args": {**MODELS["V8_Cv5T1"]["train_args"],
+                   "wandb_experiment_tag": "v8_precheck"}}
+# 门控条件化波 1（修改 13，2026-11-06）。
+# D1 RM：结构 = V8_Cv5，单旗在 train_args —— occ_mix 档梯 {010,020,030}
+#   逐窗均匀抽档、p_occ=0.45、**p_nullV=p_nullT=0**（enum 本来就在枚举
+#   V/T 在场与否，两个 null 开关与它同义重复；置零后与 enum 不冲突）。
+#   只训低档 ⇒ E5 的 040–100 保持分布外，OOD 语义不变。
+MODELS["V8_Cv5RM"] = {
+    **MODELS["V8_Cv5"], "label": "V8-Cv5RM", "name": "V8_Cv5RM",
+    "train_args": {**MODELS["V8_Cv5"]["train_args"],
+                   "occ_mix": True, "occ_levels": "010,020,030",
+                   "p_occ": 0.45, "p_nullV": 0.0, "p_nullT": 0.0}}
+# D3 PO：结构单旗（腿/足 query 门钉 1.0，入口 v8_cv5po 携带），train_args
+#   与 V8_Cv5 逐项相同。
+MODELS["V8_Cv5PO"] = {**MODELS["V8_Cv5"], "label": "V8-Cv5PO",
+                      "name": "V8_Cv5PO"}
+# 双向信任门波 1（修改 14 §5，2026-11-06）。
+#   VG：结构单旗在入口 v8_cv5vg（V 门 + T 门 2σ），train_args 同 V8_Cv5；
+#   ST：结构同 V8_Cv5，单旗在 train_args（p_stale=0.5，同会话窗级错位）；
+#   VGST：两旗同开，主模型。
+MODELS["V8_Cv5VG"] = {**MODELS["V8_Cv5"], "label": "V8-Cv5VG",
+                      "name": "V8_Cv5VG"}
+MODELS["V8_Cv5ST"] = {
+    **MODELS["V8_Cv5"], "label": "V8-Cv5ST", "name": "V8_Cv5ST",
+    "train_args": {**MODELS["V8_Cv5"]["train_args"], "p_stale": 0.5}}
+MODELS["V8_Cv5VGST"] = {
+    **MODELS["V8_Cv5VG"], "label": "V8-Cv5VGST", "name": "V8_Cv5VGST",
+    "train_args": {**MODELS["V8_Cv5VG"]["train_args"], "p_stale": 0.5}}
+_V8_FOLD_CONFIGS = (
+    ("fS5S6S11",  "anysole/configs/v1_fold_S5S6S11.yaml"),
+    ("fS5S11S12", "anysole/configs/v1_fold_S5S11S12.yaml"),
+    ("fS6S7",     "anysole/configs/v1_fold_S6S7.yaml"),
+    ("fS5S6S8",   "anysole/configs/v1_fold_S5S6S8.yaml"),
+)
+_V8_FOLD_FAMILIES = ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6", "V8_Cv7",
+                     "V8_Cv5T1", "V8_Cv5RM", "V8_Cv5PO",
+                     "V8_Cv5VG", "V8_Cv5ST", "V8_Cv5VGST")
+for _fam in _V8_FOLD_FAMILIES:
+    for _fold, _fconfig in _V8_FOLD_CONFIGS:
+        _fname = "%s_%s" % (_fam, _fold)
+        MODELS["%s_s1" % _fname] = {
+            **MODELS[_fam],
+            "label": "%s-s1" % _fname.replace("_", "-"),
+            "name": _fname,
+            "config": _fconfig,
+            "eval_splits": ["val", "test"],
+            "seed": 1,
+        }
+
+# V8 的 E5/E6 评估格（2026-11-06 用户指定）：6 族 × 4 折。
+#   E5 = occ020/040/060/080/100，eval-only、只评 test；
+#   E6 = 独立 base test eval-only（`_e6`，读同一 fold yaml/ckpt）。
+# 已评估的参照（V81 = 旧 V7_Cv5SD2、V7_Cv5）不在此列。
+_V8_EVAL_FAMILIES = ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6",
+                     "V8_Cv5RM", "V8_Cv5PO")
+_V8_EVAL_LEVELS = ("020", "040", "060", "080", "100")
+for _fam in _V8_EVAL_FAMILIES:
+    for _fold, _fconfig in _V8_FOLD_CONFIGS:
+        _cell = "%s_%s_s1" % (_fam, _fold)
+        MODELS["%s_e6" % _cell] = {
+            **MODELS[_cell],
+            "label": "%s-e6" % MODELS[_cell]["label"],
+            "train": False, "which": "last",
+            "eval_splits": ["test"],
+            "config": _fconfig}
+        for _occ in _V8_EVAL_LEVELS:
+            MODELS["%s_evalocc%s" % (_cell, _occ)] = {
+                **MODELS[_cell],
+                "label": "%s-evalocc%s" % (MODELS[_cell]["label"], _occ),
+                "train": False, "which": "last",
+                "eval_splits": ["test"],
+                "config": "anysole/configs/v1_occ%s_fold_%s.yaml"
+                          % (_occ, _fold[1:])}
+
+# 无门参照的遮挡轴（14 号文档 §1.9 / 波 0，2026-11-06）：`V8_Cv7` 在
+# `_V8_FOLD_FAMILIES` 里、四折 ckpt 与 base test 都已落盘，但不在上面那张
+# 用户指定的 6 族 `_V8_EVAL_FAMILIES` 里，所以四折遮挡轴上「有门 vs 无门」
+# ——§4.4 的核心对照——一格数据都没有，现在能引的全是 act8020/val 数字。
+# 单独补 20 格，不动上面那张表。
+for _fold, _fconfig in _V8_FOLD_CONFIGS:
+    _cell = "V8_Cv7_%s_s1" % _fold
+    for _occ in _V8_EVAL_LEVELS:
+        MODELS["%s_evalocc%s" % (_cell, _occ)] = {
+            **MODELS[_cell],
+            "label": "%s-evalocc%s" % (MODELS[_cell]["label"], _occ),
+            "train": False, "which": "last",
+            "eval_splits": ["test"],
+            "config": "anysole/configs/v1_occ%s_fold_%s.yaml"
+                      % (_occ, _fold[1:])}
+
+# 双向信任门波 1 的 E5/E6 评估格（修改 14 §6，2026-11-06）：VG/ST/VGST × 4 折。
+# 与上面 6 族表分离，避免改已有 experiment 的 MODEL_IDS（同 Cv7 的做法）。
+for _fam in ("V8_Cv5VG", "V8_Cv5ST", "V8_Cv5VGST"):
+    for _fold, _fconfig in _V8_FOLD_CONFIGS:
+        _cell = "%s_%s_s1" % (_fam, _fold)
+        MODELS["%s_e6" % _cell] = {
+            **MODELS[_cell],
+            "label": "%s-e6" % MODELS[_cell]["label"],
+            "train": False, "which": "last",
+            "eval_splits": ["test"],
+            "config": _fconfig}
+        for _occ in _V8_EVAL_LEVELS:
+            MODELS["%s_evalocc%s" % (_cell, _occ)] = {
+                **MODELS[_cell],
+                "label": "%s-evalocc%s" % (MODELS[_cell]["label"], _occ),
+                "train": False, "which": "last",
+                "eval_splits": ["test"],
+                "config": "anysole/configs/v1_occ%s_fold_%s.yaml"
+                          % (_occ, _fold[1:])}

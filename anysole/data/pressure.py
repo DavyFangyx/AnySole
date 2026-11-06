@@ -58,10 +58,17 @@ def _foot_phys(values48: np.ndarray) -> np.ndarray:
 HULL_THRESH = 0.05   # 与 foot_encoder.CONTACT_AREA_THRESH 同阈值
 
 
-def _hull_feats(values48: np.ndarray) -> np.ndarray:
+def _hull_feats(values48: np.ndarray, hull_recenter: bool = False) -> np.ndarray:
     """每足 3 维着地几何（维度 2，2026-10-21）：激活格的沿足长位置
-    （0=跟、1=尖——脚尖先/脚跟先着地的显式编码）、内外侧位置、沿足长
-    散布（平铺 vs 点接触）。零载荷帧全零。"""
+    （col0=脚尖、col11=脚跟——脚尖先/脚跟先着地的显式编码）、内外侧位置、
+    沿足长散布（平铺 vs 点接触）。零载荷帧全零。
+
+    ``hull_recenter``（修改 11 §9.3，2026-11-05）：只把 ``mean_col`` 从
+    鞋垫绝对坐标改成相对该会话接触跨度——对活跃帧的 ``mean_col`` 取
+    p5–p95，线性映射到 [0,1] 并裁剪。它保留“脚尖先/脚跟先”的相位
+    信息，去掉足长/鞋垫贴合带来的受试者身份分量。统计量只用压力输入、
+    逐会话逐足独立计算，不使用 GT 标签；零载荷帧仍置零。
+    """
     grid = np.clip(values48.reshape(-1, 4, 12), 0.0, None)
     active = grid > HULL_THRESH
     cnt = active.sum(axis=(1, 2))
@@ -71,18 +78,30 @@ def _hull_feats(values48: np.ndarray) -> np.ndarray:
     mean_col = (active * cols).sum(axis=(1, 2)) / np.maximum(cnt, 1.0)
     var_col = (active * (cols - mean_col[:, None, None]) ** 2).sum(
         axis=(1, 2)) / np.maximum(cnt, 1.0)
-    out = np.stack([mean_col / 11.0, mean_row / 3.0,
+    mcol = mean_col / 11.0
+    if hull_recenter:
+        has = cnt > 0
+        if has.any():
+            lo, hi = np.percentile(mcol[has], [5.0, 95.0])
+            span = max(float(hi - lo), 1e-3)
+            mcol = np.clip((mcol - lo) / span, 0.0, 1.0)
+    out = np.stack([mcol, mean_row / 3.0,
                     np.sqrt(var_col) / 11.0], axis=1)
     out[cnt == 0] = 0.0
     return out.astype(np.float32)
 
 
-def _foot_phys_v2(left48: np.ndarray, right48: np.ndarray) -> np.ndarray:
+def _foot_phys_v2(left48: np.ndarray, right48: np.ndarray,
+                  hull_recenter: bool = False) -> np.ndarray:
     """维度 2 显式物理特征（2026-10-21）：基础 12 维 + 每足着地几何 3 维
-    + 双足关系 2 维（力比、CoP 距离）= 20 维。"""
+    + 双足关系 2 维（力比、CoP 距离）= 20 维。
+
+    ``hull_recenter``（修改 11 §9.3）：只重定心 ``hull_mcol``（每足 1 维），
+    其余 6 个新增维（mrow/std/力比/CoP 距离）原样。宽度仍为 20。
+    """
     base = np.concatenate([_foot_phys(left48), _foot_phys(right48)], axis=1)
-    lh = _hull_feats(left48)
-    rh = _hull_feats(right48)
+    lh = _hull_feats(left48, hull_recenter=hull_recenter)
+    rh = _hull_feats(right48, hull_recenter=hull_recenter)
     lf = np.clip(left48, 0.0, None).sum(axis=1)
     rf = np.clip(right48, 0.0, None).sum(axis=1)
     ratio = lf / np.maximum(lf + rf, 1e-6)
@@ -94,9 +113,13 @@ def _foot_phys_v2(left48: np.ndarray, right48: np.ndarray) -> np.ndarray:
 
 
 def physical_tokens(left48: np.ndarray, right48: np.ndarray,
-                    t_phys_v2: bool = False) -> np.ndarray:
+                    t_phys_v2: bool = False,
+                    t_phys_hull_recenter: bool = False) -> np.ndarray:
+    if t_phys_hull_recenter and not t_phys_v2:
+        raise ValueError("t_phys_hull_recenter requires t_phys_v2=True")
     if t_phys_v2:
-        return _foot_phys_v2(left48, right48)
+        return _foot_phys_v2(left48, right48,
+                             hull_recenter=t_phys_hull_recenter)
     phys = np.concatenate([_foot_phys(left48), _foot_phys(right48)], axis=1)
     if phys.shape[1] != T_PHYS_DIM:
         raise ValueError("T_phys dim %d != %d" % (phys.shape[1], T_PHYS_DIM))

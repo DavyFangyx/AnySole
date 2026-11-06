@@ -22,7 +22,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +53,9 @@ GENERATION_ENV = {
 }
 SCHEMA_ID = "target_bboxes_v1"
 SCHEMA_VERSION = 1
+# E5 退化对照（z_note/E5_纯视觉基线扩展说明.md）：cam3 缓存格上的 bbox 与暂存根。
+BBOX_CAM3_ROOT = WORKSPACE / "model_inputs" / "AnySole" / "adapter_v1" / "visual" / "hrnet" / "bbox_cam3"
+DEGRADED_ROOT = WORKSPACE / "work" / "visual_baselines_degraded"
 
 
 def session_parts(row: dict) -> tuple[str, str]:
@@ -180,14 +185,111 @@ def build_sequence_video(frame_paths: list[Path], unit_root: Path,
     return video
 
 
-def generate_wham(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) -> Path:
+def parse_degrade(spec: str) -> tuple[str, float]:
+    """--degrade grammar: none | occ:<lower-body occlusion %> | exp:<gain G> | gap:<stream-gap %>."""
+    spec = (spec or "none").strip().lower()
+    if spec == "none":
+        return "none", 0.0
+    kind, _, value = spec.partition(":")
+    if kind not in ("occ", "exp", "gap") or not value:
+        raise SystemExit(f"bad --degrade {spec!r}: use none | occ:<pct> | exp:<gain> | gap:<pct>")
+    return kind, float(value)
+
+
+def degrade_tag(kind: str, level: float) -> str:
+    """Condition tag shared with the cache dirs (occ_lower010 / exp_g0005 / gap_r080)."""
+    from anysole.data.extract_hrnet import exposure_cache_dirname, occlusion_cache_dirname
+    from anysole.data.make_gap_cache import gap_cache_dirname
+    if kind == "occ":
+        name = occlusion_cache_dirname(3, level / 100.0)
+    elif kind == "exp":
+        name = exposure_cache_dirname(3, level)
+    else:
+        name = gap_cache_dirname(3, level)
+    return name.split("_", 1)[1]
+
+
+def cache_grid(session_id: str, cam: int) -> list[Path]:
+    """Real JPEG behind each model-cache row (rgb/%06d.jpg symlinks), in cache row order."""
+    from anysole.data.dataset import find_session_dir
+    from anysole.types import SEQ_ROOT
+    seq_dir = find_session_dir(SEQ_ROOT.parent / f"cam{cam}", session_id)
+    count = int(json.loads((seq_dir / "session.json").read_text(encoding="utf-8"))["frame_count"])
+    rgb = seq_dir / ("rgb" if (seq_dir / "rgb").is_dir() else "color")
+    return [Path(os.path.realpath(rgb / f"{index:06d}.jpg")) for index in range(count)]
+
+
+def unit_cache_rows(unit_paths: list[Path], grid: list[Path]) -> list[int]:
+    """Cache row of each unit frame: same-file match, else nearest wall clock (frames the cache dropped)."""
+    by_name = {path.name: row for row, path in enumerate(grid)}
+    stamps = np.asarray([_jpeg_wall_seconds(path.name) for path in grid])
+    rows = []
+    for path in unit_paths:
+        row = by_name.get(path.name)
+        if row is None:
+            row = int(np.argmin(np.abs(stamps - _jpeg_wall_seconds(path.name))))
+        rows.append(row)
+    return rows
+
+
+def stage_frames(row: dict, cam: int, unit_paths: list[Path], stage_dir: Path,
+                 kind: str, level: float) -> list[Path]:
+    """Frame list for build_sequence_video under one E5 degradation.
+
+    Pixel and anchor math is the model cache's own (apply_exposure_gain,
+    occlude_lower_strip with the cache-side bbox of the same image, the
+    make_gap_cache anchor rule): imported, never re-implemented.  occ/exp write
+    lossless PNGs; gap writes nothing and points frozen frames at the anchor JPEG.
+    """
+    import cv2
+    from anysole.data.extract_hrnet import apply_exposure_gain, occlude_lower_strip, read_rgb
+    from anysole.data.make_gap_cache import CYCLE_DEFAULT, SEED_DEFAULT, build_gap_array
+    if cam != 3:
+        raise SystemExit("--degrade is defined on the cam3 cache grid only")
+    session = row["session_id"]
+    grid = cache_grid(session, cam)
+    rows = unit_cache_rows(unit_paths, grid)
+    if kind == "gap":
+        index = np.arange(len(grid), dtype=np.int64)[:, None]
+        anchors = build_gap_array(index, level, CYCLE_DEFAULT, SEED_DEFAULT, session)[:, 0]
+        return [path if int(anchors[cache_row]) == cache_row else grid[int(anchors[cache_row])]
+                for path, cache_row in zip(unit_paths, rows)]
+    boxes = np.load(BBOX_CAM3_ROOT / f"{session}.npy")[:, 1:5] if kind == "occ" else None
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    staged: dict[str, Path] = {}
+    frames = []
+    for path, cache_row in zip(unit_paths, rows):
+        if path.name not in staged:
+            rgb = read_rgb(path)
+            if kind == "exp":
+                rgb = apply_exposure_gain(rgb, level)
+            else:
+                rgb = occlude_lower_strip(rgb, boxes[cache_row], level / 100.0, "black")
+            target = stage_dir / (path.stem + ".png")
+            if not cv2.imwrite(str(target), np.ascontiguousarray(rgb[:, :, ::-1])):
+                raise RuntimeError(f"failed to write {target}")
+            staged[path.name] = target
+        frames.append(staged[path.name])
+    return frames
+
+
+def generate_wham(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int,
+                  degrade: str = "none") -> Path:
     """Drive Baselines/WHAM/demo.py and compact to the saved-prediction contract."""
     import joblib
     date, subject = session_parts(row)
     frames = unit_frame_paths(row, cam, unit)
+    kind, level = parse_degrade(degrade)
+    stage_dir = work_dir / date / subject / f"{row['session_id']}_c{cam}" / "frames"
+    if kind != "none":
+        frames = stage_frames(row, cam, frames, stage_dir, kind, level)
     unit_root = work_dir / "reference_results" / "3_Result" / "WHAM_baseline" / f"{date}_m1_{row['session_id']}_c{cam}"
     unit_root.mkdir(parents=True, exist_ok=True)
-    video = build_sequence_video(frames, unit_root)
+    try:
+        video = build_sequence_video(frames, unit_root)
+    finally:
+        if kind != "none":
+            shutil.rmtree(stage_dir, ignore_errors=True)
     calibration, _, _ = __import__(
         "AnysoleWorkspace.tool.adapters.visual_baselines.common",
         fromlist=["load_calibration"]).load_calibration(date)
@@ -336,7 +438,13 @@ def main() -> int:
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--work-dir", default="",
                         help="persistent work dir (default: work/visual_baselines_local)")
+    parser.add_argument("--degrade", default="none",
+                        help="E5 degradation (wham, cam3 only): none | occ:<pct> | exp:<gain> | gap:<pct>; "
+                             "default work dir becomes work/visual_baselines_degraded/<cond>")
     args = parser.parse_args()
+    kind, level = parse_degrade(args.degrade)
+    if kind != "none" and args.model != "wham":
+        raise SystemExit("--degrade is implemented for --model wham only")
     manifest = {}
     for line in (WORKSPACE / "protocol/manifests" / "session_manifest.jsonl").open(
             encoding="utf-8"):
@@ -363,11 +471,12 @@ def main() -> int:
         row = manifest[session]
         date, subject = session_parts(row)
         unit = unit_entry(unit_manifest, date, session, args.cam)
-        tmp = Path(args.work_dir) if args.work_dir else LOCAL_ROOT
+        tmp = Path(args.work_dir) if args.work_dir else (
+            LOCAL_ROOT if kind == "none" else DEGRADED_ROOT / degrade_tag(kind, level))
         tmp.mkdir(parents=True, exist_ok=True)
         try:
             if args.model == "wham":
-                result = generate_wham(row, args.cam, unit, tmp, args.gpu)
+                result = generate_wham(row, args.cam, unit, tmp, args.gpu, args.degrade)
             elif args.model == "sam3db":
                 result = generate_sam3db(row, args.cam, unit, tmp, args.gpu)
             elif args.model == "gvhmr":

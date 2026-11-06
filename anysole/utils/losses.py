@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from anysole.utils.geometry import (
     ar2_to_world, f2_to_world, fk_pose6d, rot6d_to_rotmat,
-    yaw_rotmat)
+    rotmat_to_6d, yaw_rotmat)
 from anysole.utils.v5_conditioning import availability_masks, conditioning_policy
 from anysole.types import (
     CONFIG_T,
@@ -121,6 +121,151 @@ def _trajectory_losses(out, batch, weights):
         l_vel,
         l_delta,
     )
+
+
+def _trajectory_losses_sd(out, batch, weights, config_id):
+    """Rate/direction-decoupled trajectory losses（修改 07 改动 B，2026-11-04）。
+
+    根头三通道（s_hat 水平速率 / d_hat 水平单位方向 / vy_hat 垂直分量）
+    按通道监督：
+      * 速率与垂直分量全行监督（压力可读的正是速率标量）；
+      * 水平方向按 GT 速率加权（静止帧方向无定义），且 **T 行屏蔽**
+        ——T 行方向不可观测（GT 行进方向与身体前向中位夹角 48.9°），
+        不能在方向通道上惩罚它；
+      * 多尺度位移拆成向量项（非 T 行）与标量幅度项（全行，即实测可读
+        的那个量），避免向量差把方向惩罚重新带回 T 行。
+    ``v_hat`` 的形状与语义不受影响（仍由三通道组装成世界系 3 维）。
+    """
+    vel_gt = batch["vel_gt"]
+    s_hat = out["s_hat"]
+    d_hat = out["d_hat"]
+    vy_hat = out["vy_hat"]
+    x_hat = out["trans_hat"]
+    x_gt = torch.cumsum(vel_gt, dim=1) / float(FPS)
+
+    speed_gt = torch.linalg.vector_norm(vel_gt[..., [0, 2]], dim=-1)  # (B,tw)
+    dir_gt = F.normalize(vel_gt[..., [0, 2]], dim=-1, eps=1e-6)
+
+    l_speed = F.mse_loss(s_hat, speed_gt)
+    l_vy = F.mse_loss(vy_hat, vel_gt[..., 1])
+    cos = (d_hat * dir_gt).sum(-1)                                    # (B,tw)
+    not_t = (config_id != CONFIG_T).to(cos.dtype).view(-1, 1)
+    w = speed_gt.detach() * not_t
+    l_dir = ((1.0 - cos) * w).sum() / w.sum().clamp(min=1e-6)
+
+    deltas = weights.get("traj_deltas", DEFAULT_TRAJ_DELTAS)
+    if isinstance(deltas, str):
+        deltas = tuple(int(value.strip()) for value in deltas.split(",") if value.strip())
+    else:
+        deltas = tuple(int(value) for value in deltas)
+    valid = tuple(delta for delta in deltas if 1 <= delta < x_hat.shape[1])
+    if not valid:
+        raise ValueError("traj_deltas must contain an integer in [1, Tw-1]")
+    power = float(weights.get("traj_delta_weight_power", 1.0))
+    vec_terms, mag_terms = [], []
+    for delta in valid:
+        pred_delta = x_hat[:, delta:] - x_hat[:, :-delta]
+        gt_delta = x_gt[:, delta:] - x_gt[:, :-delta]
+        scale_weight = 1.0 / (float(delta) ** power)
+        vec_terms.append(scale_weight * _masked_mean(
+            ((pred_delta - gt_delta) ** 2).mean((1, 2)),
+            config_id != CONFIG_T))
+        mag_terms.append(scale_weight * F.mse_loss(
+            torch.linalg.vector_norm(pred_delta[..., [0, 2]], dim=-1),
+            torch.linalg.vector_norm(gt_delta[..., [0, 2]], dim=-1)))
+    l_delta_vec = torch.stack(vec_terms).mean()
+    l_delta_mag = torch.stack(mag_terms).mean()
+
+    l_traj = (
+        _weight(weights, "traj_speed_w", 1.0) * l_speed
+        + _weight(weights, "traj_vy_w", 1.0) * l_vy
+        + _weight(weights, "traj_dir_w", 1.0) * l_dir
+        + _weight(weights, "traj_delta_w", 1.0) * l_delta_vec
+        + _weight(weights, "traj_dmag_w", 1.0) * l_delta_mag
+    )
+    return l_traj, l_speed, l_vy, l_dir, l_delta_vec, l_delta_mag
+
+
+def _trajectory_losses_sd_balance(out, batch, weights, config_id):
+    """B′ 配平形式（修改 07「改动 B 的配平形式」，2026-11-04）。
+
+    水平分量精确恒等式（``v = s·d``、``v_gt = s_gt·d_gt``，``d``/``d_gt``
+    为单位向量）::
+
+        ‖v − v_gt‖²_h = (s − s_gt)² + 2·s·s_gt·(1 − cos)
+
+    原 ``l_vel`` 的 ``F.mse_loss`` 对最后一维（3 维）取均值，故三项各乘
+    ``1/3`` 后，全权重 1.0 且 T 行不掩码时::
+
+        L_speed + L_vy + L_dir ≡ l_vel
+
+    （浮点结合序以内）——于是「T 行方向掩码」成为唯一干预变量，与 08 的
+    stopgrad 契约、ctx4b 的零初始化同一套方法论。
+
+    ``s_hat`` 不 detach：``∂/∂s [2·s·s_gt·(1−cos)]`` 本来就是原 MSE 里
+    速度梯度的一部分。``s_gt = 0`` 时横向项权重自动为 0，不需要
+    ``min_disp`` 阈值，也不需要 ``/Σw`` 归一化（后者会把低速帧抬回等权）。
+
+    多尺度位移项对 Δ 向量用同一恒等式再分配为「径向（幅度）+ 横向
+    （方向）+ 垂直」三部分；径向与垂直全行、横向按 T 行掩码。不再使用
+    现版「向量项（非 T）+ 标量幅度项（全行）」两个独立权重相加——那会
+    对 V/VT 行把径向分量重复计一次。
+    """
+    vel_gt = batch["vel_gt"]
+    s_hat = out["s_hat"]
+    d_hat = out["d_hat"]
+    vy_hat = out["vy_hat"]
+    x_hat = out["trans_hat"]
+    x_gt = torch.cumsum(vel_gt, dim=1) / float(FPS)
+
+    speed_gt = torch.linalg.vector_norm(vel_gt[..., [0, 2]], dim=-1)  # (B,tw)
+    dir_gt = F.normalize(vel_gt[..., [0, 2]], dim=-1, eps=1e-6)
+
+    inv3 = 1.0 / 3.0
+    l_speed = inv3 * ((s_hat - speed_gt) ** 2).mean()
+    l_vy = inv3 * ((vy_hat - vel_gt[..., 1]) ** 2).mean()
+    cos = (d_hat * dir_gt).sum(-1)                                    # (B,tw)
+    tangential = 2.0 * s_hat * speed_gt * (1.0 - cos)                 # s_hat 不 detach
+    l_dir = inv3 * _masked_mean(tangential.mean(dim=1), config_id != CONFIG_T)
+
+    deltas = weights.get("traj_deltas", DEFAULT_TRAJ_DELTAS)
+    if isinstance(deltas, str):
+        deltas = tuple(int(value.strip()) for value in deltas.split(",") if value.strip())
+    else:
+        deltas = tuple(int(value) for value in deltas)
+    valid = tuple(delta for delta in deltas if 1 <= delta < x_hat.shape[1])
+    if not valid:
+        raise ValueError("traj_deltas must contain an integer in [1, Tw-1]")
+    power = float(weights.get("traj_delta_weight_power", 1.0))
+    radial_terms, tan_terms, vert_terms = [], [], []
+    for delta in valid:
+        pred_delta = x_hat[:, delta:] - x_hat[:, :-delta]
+        gt_delta = x_gt[:, delta:] - x_gt[:, :-delta]
+        scale_weight = 1.0 / (float(delta) ** power)
+        pred_h = pred_delta[..., [0, 2]]
+        gt_h = gt_delta[..., [0, 2]]
+        pred_mag = torch.linalg.vector_norm(pred_h, dim=-1)
+        gt_mag = torch.linalg.vector_norm(gt_h, dim=-1)
+        cos_d = (pred_h * gt_h).sum(-1) / (pred_mag * gt_mag).clamp(min=1e-12)
+        radial = (pred_mag - gt_mag) ** 2
+        tangential_d = 2.0 * pred_mag * gt_mag * (1.0 - cos_d)
+        vertical = (pred_delta[..., 1] - gt_delta[..., 1]) ** 2
+        radial_terms.append(scale_weight * inv3 * radial.mean())
+        tan_terms.append(scale_weight * inv3 * _masked_mean(
+            tangential_d.mean(dim=1), config_id != CONFIG_T))
+        vert_terms.append(scale_weight * inv3 * vertical.mean())
+    l_delta_rad = torch.stack(radial_terms).mean()
+    l_delta_tan = torch.stack(tan_terms).mean()
+    l_delta_ver = torch.stack(vert_terms).mean()
+    l_delta = l_delta_rad + l_delta_tan + l_delta_ver
+
+    l_traj = (
+        _weight(weights, "traj_speed_w", 1.0) * l_speed
+        + _weight(weights, "traj_vy_w", 1.0) * l_vy
+        + _weight(weights, "traj_dir_w", 1.0) * l_dir
+        + _weight(weights, "traj_delta_w", 1.0) * l_delta
+    )
+    return l_traj, l_speed, l_vy, l_dir, l_delta, l_delta_rad
 
 
 def _f2_trajectory_losses(out, batch, weights):
@@ -930,7 +1075,26 @@ def _compute_losses_v7_ar2(out, batch, config_id, weights):
     pose_gt = batch["pose_gt"]                        # ar2 形式 [tilt+body]
     t_present = (config_id != CONFIG_V).to(pose_gt.device)
     v_rows = (config_id != CONFIG_T).to(pose_gt.device)
-    l_pose = F.mse_loss(out["x0_hat"], pose_gt)
+    # 读出按条件分支（修改 09，2026-11-04，v7_abs_vrows，默认关）：
+    # 模型 V/VT 行输出绝对根朝向 + 世界系速度（= Cv5 目标空间），故监督
+    # 目标也必须按行切换。绝对 pose 目标 = Y(ψ_gt) @ tilt（与 ar2_to_world
+    # 同一公式，零新增 dataset 字段）；绝对速度目标 = vel_gt（世界系）。
+    # T 行目标不变（相对 tilt + 航向系 v_head）。
+    abs_vrows = bool(weights.get("v7_abs_vrows", False))
+    if abs_vrows:
+        rows = v_rows.view(-1, 1, 1).to(pose_gt.dtype)
+        n_j = pose_gt.shape[-1] // 6
+        r_root_world = torch.matmul(
+            yaw_rotmat(batch["psi_gt"]),
+            rot6d_to_rotmat(pose_gt.reshape(*pose_gt.shape[:2], n_j, 6)[:, :, 0]))
+        pose_gt_abs = torch.cat(
+            [rotmat_to_6d(r_root_world), pose_gt[..., 6:]], dim=-1)
+        pose_gt_eff = rows * pose_gt_abs + (1.0 - rows) * pose_gt
+        batch = {**batch, "v_head_gt": (rows * batch["vel_gt"]
+                                        + (1.0 - rows) * batch["v_head_gt"])}
+    else:
+        pose_gt_eff = pose_gt
+    l_pose = F.mse_loss(out["x0_hat"], pose_gt_eff)
     l_traj, l_traj_vel, l_traj_delta = _ar2_trajectory_losses(out, batch, weights)
 
     dyaw_hat = out["dyaw_hat"][..., 0]                # (B, tw)
@@ -942,7 +1106,7 @@ def _compute_losses_v7_ar2(out, batch, config_id, weights):
     l_dyaw_td = mrad * F.mse_loss(dyaw_hat[:, 1:] - dyaw_hat[:, :-1],
                                   dyaw_gt[:, 1:] - dyaw_gt[:, :-1])
     l_pose_vel = F.mse_loss(out["x0_hat"][:, 1:] - out["x0_hat"][:, :-1],
-                            pose_gt[:, 1:] - pose_gt[:, :-1])
+                            pose_gt_eff[:, 1:] - pose_gt_eff[:, :-1])
 
     # 2026-11-02 yaw-fix（v7_ar2_yaw_fix，默认关）：
     # ① T 行航向监督移除（probe_dyaw_observability_20261101 §4：test 无
@@ -1001,7 +1165,13 @@ def _compute_losses_v7_ar2(out, batch, config_id, weights):
             l_yawcorr = _wrap_angle(corrected - psi_gt)[v_rows].square().mean()
         if yaw_fix:
             r_yaw = yaw_rotmat(psi_chain)             # (B, tw, 3, 3)
-            v_world = torch.einsum("btij,btj->bti", r_yaw, out["v_hat"])
+            if abs_vrows:
+                # 修改 09：V/VT 行 v_hat 已是世界系（绝对读出），不再左乘
+                # Y(ψ)——否则等于把世界速度又旋转一次。本项只在 V 行加权
+                # （wmask = v_rows），故 T 行分支不参与，直接整批用 v_hat。
+                v_world = out["v_hat"]
+            else:
+                v_world = torch.einsum("btij,btj->bti", r_yaw, out["v_hat"])
             p_hat = torch.cumsum(v_world, dim=1) / float(FPS)
             p_gt = torch.cumsum(batch["vel_gt"], dim=1) / float(FPS)
             deltas = weights.get("traj_deltas", DEFAULT_TRAJ_DELTAS)
@@ -1142,8 +1312,35 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
     pose_gt = batch["pose_gt"]
     t_present = (config_id != CONFIG_V).to(pose_gt.device)
     l_pose = F.mse_loss(out["x0_hat"], pose_gt)
-    l_traj, l_traj_vel, l_traj_delta = _trajectory_losses(
-        {"v_hat": out["v_hat"], "trans_hat": out["trans_hat"]}, batch, weights)
+    l_traj_speed = l_traj_vy = l_traj_dir = l_traj_dmag = None
+    sd_q10 = sd_q50 = sd_tiny = None
+    if out.get("s_hat") is not None:
+        # 修改 07 改动 B：三通道读出走按通道分解 + T 行方向掩码。
+        # v7_root_sd_balance（第二臂 B′）：恒等式再分配配平形式；结构与
+        # 读出不变，唯一差异是损失尺度（见 _trajectory_losses_sd_balance）。
+        if bool(weights.get("v7_root_sd_balance", False)):
+            (l_traj, l_traj_speed, l_traj_vy, l_traj_dir,
+             l_traj_delta, l_traj_dmag) = _trajectory_losses_sd_balance(
+                out, batch, weights, config_id)
+        else:
+            (l_traj, l_traj_speed, l_traj_vy, l_traj_dir,
+             l_traj_delta, l_traj_dmag) = _trajectory_losses_sd(
+                out, batch, weights, config_id)
+        # 旧日志键保留为真正的向量 MSE（与 Cv5 的 l_vel 同口径）：B′ 下
+        # L_speed+L_vy+L_dir 在未掩码时恰好等于它，可直接对账。该键只作
+        # 诊断，不进入任何总损失。
+        l_traj_vel = F.mse_loss(out["v_hat"], batch["vel_gt"])
+        # 改动 A4 退化诊断：方向头原始模长分位数 + 近零帧占比（无前向
+        # 报错——静止帧方向模长趋零是合法状态）。随损失 dict 进 run.log。
+        with torch.no_grad():
+            sd_norm = out["sd_dir_norm"].detach().float().reshape(-1)
+            sd_q10 = torch.quantile(sd_norm, 0.1)
+            sd_q50 = torch.quantile(sd_norm, 0.5)
+            sd_tiny = (sd_norm < 1e-4).float().mean()
+    else:
+        # 老格（root_sd=False）逐位不变：原向量 MSE + 原多尺度位移。
+        l_traj, l_traj_vel, l_traj_delta = _trajectory_losses(
+            {"v_hat": out["v_hat"], "trans_hat": out["trans_hat"]}, batch, weights)
 
     gt = batch["contact_gt"]
     pos = gt.float().mean().clamp(1e-4, 1.0 - 1e-4)
@@ -1161,6 +1358,18 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
         tr = torch.einsum("bij,bij->b", r_a.transpose(-1, -2), r_gt)
         ang = torch.acos(((tr - 1.0) / 2.0).clamp(-1.0, 1.0))
         l_anchor = _masked_mean(ang, config_id != CONFIG_T)
+
+    l_tanchor = l_pose.new_zeros(())
+    if out.get("anchor_trans") is not None:
+        # 修改 08 改动 B1：平移锚监督（归一化残差上的 smooth_l1，对异常窗比
+        # MSE 稳）。仅 V 在场行（T 行锚 = 注册常数，不训头——§10 实测压力对
+        # 绝对位置只有 −1.3~−7.0%）。掩码机制与 l_anchor 同款。
+        scale = out["anchor_scale"].to(device=l_pose.device, dtype=l_pose.dtype)
+        diff = (out["anchor_trans"].to(l_pose.dtype)
+                - batch["trans_anchor"].to(l_pose.dtype)) / scale.clamp(min=1e-2)
+        per_sample = F.smooth_l1_loss(diff, torch.zeros_like(diff),
+                                      reduction="none", beta=1.0).mean(dim=-1)
+        l_tanchor = _masked_mean(per_sample, config_id != CONFIG_T)
 
     l_foot = l_pose.new_zeros(())
     if out.get("z_root") is not None and bool(weights.get("v7_contact_root")):
@@ -1215,12 +1424,15 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
         + _weight(weights, "lambda_traj", 1.0) * l_traj
         + _weight(weights, "lambda_contact", 0.0) * l_contact
         + _weight(weights, "lambda_anchor", 0.0) * l_anchor
+        # 2026-11-05 裁定：锚头是模型默认组件，监督默认开启；无头模型
+        # （out 无 anchor_trans）时 l_tanchor 恒 0，本项无作用。
+        + _weight(weights, "lambda_tanchor", 1.0) * l_tanchor
         + _weight(weights, "lambda_foot", 0.0) * l_foot
         + _weight(weights, "lambda_route", 0.0) * l_route
         + _weight(weights, "lambda_s", 0.0) * l_s_gate
     )
     zero = l_pose.new_zeros(())
-    return {
+    losses = {
         "L_pose": l_pose,
         "L_traj": l_traj,
         "L_traj_vel": l_traj_vel,
@@ -1236,6 +1448,7 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
         "L_sigma": zero,
         "L_contact": l_contact,
         "L_anchor": l_anchor,
+        "L_tanchor": l_tanchor,
         "L_nll": zero,
         "L_prior_pose": zero,
         "L_prior_nll": zero,
@@ -1252,6 +1465,18 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
         "L_s_gate": l_s_gate,
         "loss": total,
     }
+    if l_traj_speed is not None:
+        # 修改 07 改动 B5：新增日志键（老格不出现，train.py 的键过滤跳过）。
+        losses.update({
+            "L_traj_speed": l_traj_speed,
+            "L_traj_vy": l_traj_vy,
+            "L_traj_dir": l_traj_dir,
+            "L_traj_dmag": l_traj_dmag,
+            "sd_dir_norm_q10": sd_q10,
+            "sd_dir_norm_q50": sd_q50,
+            "sd_dir_tiny_frac": sd_tiny,
+        })
+    return losses
 
 
 def per_sample_contact_bce(logits, gt, pos_weight, air_w):
