@@ -53,6 +53,7 @@ from anysole.data.occ_mix import (
     load_occ_session,
 )
 from anysole.data.workspace_adapter import (
+    WORKSPACE_ROOT,
     load_contact_label,
     load_shared_session,
     shared_smpl_path,
@@ -467,16 +468,32 @@ class AnySoleDataset(Dataset):
             floor_y = estimate_floor_y(kp)
             t_raw_norm = (pressure["T_raw"] if self.tactile_weight_norm
                           else normalize_raw(pressure["T_raw"]))
-            # E6.6a is an explicit historical auxiliary input.  Its IMU comes
-            # from the directly exported BVH-23/ToeBase chain, exactly as in
-            # Step2Motion; it must never be synthesized from the SMPL target.
-            # Default raw108 runs do not parse BVH or synthesize IMU at all.
+            # E6.6a: s2m50 输入。IMU 默认来源（2026-11-06 起）= 虚拟 IMU facts
+            # （AnysoleWorkspace/shared/facts/virtual_imu/<date>/<sid>/imu_instep.npz，
+            # 原始传感器局部系、含噪声，无世界系泄漏）。缺 facts 的会话回退
+            # 历史 BVH-23/ToeBase 合成（旧口径）。Default raw108 runs do not
+            # parse BVH or synthesize IMU at all.
             if self.tactile_input == "s2m50":
+                imu_facts = None
+                if not self.no_imu:
+                    facts_path = (
+                        WORKSPACE_ROOT / "shared/facts/virtual_imu"
+                        / str(meta.get("date", "")) / session_id / "imu_instep.npz"
+                    )
+                    if facts_path.is_file():
+                        imu_facts = dict(np.load(facts_path, allow_pickle=False))
+                    else:
+                        print(
+                            "s2m50 %s: virtual IMU facts missing (%s); "
+                            "falling back to legacy BVH-23 synthesis"
+                            % (session_id, facts_path)
+                        )
                 t_s2m = build_t_s2m(
                     t_raw_norm,
                     bvh_path=None if self.no_imu else resolve_legacy_bvh_path(meta),
                     query_t=None if self.no_imu else t_mocap,
                     no_imu=self.no_imu,
+                    imu_facts=imu_facts,
                 )
             else:
                 t_s2m = np.zeros((n_frames, 50), dtype=np.float32)

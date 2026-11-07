@@ -2,7 +2,7 @@
 
 集中存放展示产物与展示层脚本。展示行为按目的分三册，互不耦合：
 
-- **Etest/**：E 系列实验（E1–E8）的展示产物——表 = CSV、图 = PNG，
+- **Etest/**：E 系列实验（E1–E9）的展示产物——表 = CSV、图 = PNG，
   命名规范 `用途_图表编号_实验编号_内容名称`（Main_/Appendix_/Full_），
   详见 `README_e_test.md`（命名规范与逐实验参数约定）；生成/刷新 = `script/e_results_export.py`。
 
@@ -29,7 +29,7 @@
 （入口见 `configs/Z_README.md`）；**本层（display）**把 test 结果整理成表图，
 不进 queue、不经过 scheduler：
 
-- E 系列（E1–E8）表图导出与驱动 CLI：见 `README_e_test.md` 的运行指令
+- E 系列（E1–E9）表图导出与驱动 CLI：见 `README_e_test.md` 的运行指令
 - D/R 系列逐实验 CLI：见 `README_d_test.md` / `README_r_test.md`
 
 ## 编号对照

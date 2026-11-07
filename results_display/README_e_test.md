@@ -26,7 +26,7 @@ Main_Fig1_E6_Phase_walk.png
   用的完整结果（全部十指标、全部输入模式、各模型变体、逐会话/逐帧明细）。
   正文/附录选型确定后，从 `Full_` 结果复制生成对应 `Main_`/`Appendix_` 文件。
 - **图表编号**：实验内从 `Table1`/`Fig1` 起编
-- **实验编号**：`E1`..`E8`（对应目录名缩写）
+- **实验编号**：`E1`..`E9`（对应目录名缩写）
 - 表 = CSV（utf-8-sig，Excel 直开）；图 = PNG（dpi 150）
 
 ## 实验目录
@@ -41,6 +41,7 @@ Main_Fig1_E6_Phase_walk.png
 | `E6_ContactPhaseAnalysis` | 接触阶段与门控效果（逐帧相位分析） |
 | `E7_DynamicModalityInputs` | 动态输入配置下的运动重建（五阶段切换） |
 | `E8_ComplementarityProbe` | 模态互补信息探针（ridge 探针；主判据 = 踝足垂直分量互补，全部产物进 supplementary/） |
+| `E9_TrajectorySceneOcc` | 场景遮挡轨迹可视化（单视角 cam3）：S2M / Anysolo-TI / VT / Hybrid / Hybrid+VTα；遮挡内 ATE + teaser；产物在 `Etest_crossfit/` |
 
 ## 运行指令（display 层：统一参数约定；不进 queue、不经过 scheduler）
 
@@ -59,6 +60,7 @@ Cv 家族暂只 last）。表格数字来自 cells（评估由 conf 管线完成
 | E6 | `python anysole_tta/e6_phase_analysis.py --models V7_Cv4_s1,V7_Cv5_s1,V7_Cv7_s1 --ckpt last` | 模型固定三个；`--ckpt` 目前仅 last |
 | E7 | `python anysole_tta/e7_driver.py`（缺省 = canonical test 全部动作组） | 模型固定（V7_Cv5；Vi/ViT 直接读 E3 ③/④ 产物树，缺失空窗不阻断） |
 | E8 | （待做） | `--model` 可选（读冻结 ckpt 中间量 m_v/m_t + ridge 探针） |
+| E9 | `python results_display/script/e9_trajectory_export.py` | 固定口径（S13→fS5S11S12、S14→fS6S7 的 `_last` 模型；可见块帧标定 40 帧；脚本内 device=cuda:3）；产物 → `Etest_crossfit/E9_TrajectorySceneOcc/` |
 
 ## 数据来源与刷新
 

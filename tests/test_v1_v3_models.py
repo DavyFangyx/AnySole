@@ -43,12 +43,14 @@ def batch():
     return {"V_feat": torch.randn(2, 4, 2051), "T_raw": torch.rand(2, 4, 96),
             "T_phys": torch.rand(2, 4, 12), "pose_gt": torch.randn(2, 4, 144),
             "vel_gt": torch.randn(2, 4, 3), "trans_gt": torch.zeros(2, 4, 3),
-            "contact_gt": torch.tensor([[[1., 0.]] * 4, [[0., 1.]] * 4])}
+            "contact_gt": torch.tensor([[[1., 0.]] * 4, [[0., 1.]] * 4]),
+            "T_s2m": torch.randn(2, 4, 50)}
 
 
 def forward(model, data, mode):
     cid = torch.full((2,), mode, dtype=torch.long)
-    return model(data["V_feat"], data["T_raw"], data["T_phys"], cid)
+    return model(data["V_feat"], data["T_raw"], data["T_phys"], cid,
+                 T_s2m=data.get("T_s2m"))
 
 
 class NewModelTests(unittest.TestCase):
@@ -280,6 +282,124 @@ class NewModelTests(unittest.TestCase):
             z = q(data["V_feat"], data["T_raw"], data["T_phys"],
                   torch.zeros(2, dtype=torch.long), gate_override=gate0)
         self.assertGreater((z["x0_hat"] - ref["x0_hat"]).abs().max().item(), 0.)
+
+    def test_router_gate_shapes_masks_and_init(self):
+        # V8_Cv8 竞争路由门：k = σ(s_v − s_t)，逐帧逐组→10 槽；init
+        # s_v≡0、s_t≡+4 ⇒ VT 行 k≈0.018；V-only 行 k≡0、T-only 行 k≡1。
+        model = build("V8_Cv8")
+        data = batch()
+        with torch.no_grad():
+            k_vt = forward(model, data, 0)["route_gate"]     # VT
+            k_v = forward(model, data, 1)["route_gate"]      # V-only
+            k_t = forward(model, data, 2)["route_gate"]      # T-only
+        self.assertEqual(tuple(k_vt.shape), (2, 4, 10, 1))
+        self.assertEqual(k_v.abs().max().item(), 0.)
+        self.assertEqual((k_t - 1.).abs().max().item(), 0.)
+        mean_init = k_vt.mean().item()
+        self.assertGreater(mean_init, 0.01)                  # σ(−4)≈0.018
+        self.assertLess(mean_init, 0.03)
+        # init 时 s_v/s_t 为常数（末层零初始化）⇒ k 逐帧同值；逐帧变化
+        # 在扰动测试里验（权重非零后读逐帧 token 才产生变化）。
+        self.assertEqual(
+            (k_vt[:, 1:, 0, 0] - k_vt[:, :1, 0, 0]).abs().max().item(), 0.)
+        # 组广播：other 组五 query 同值；left/right 组两 query 同值。
+        self.assertEqual(
+            (k_vt[:, :, 1:6, 0] - k_vt[:, :, 1:2, 0]).abs().max().item(), 0.)
+        self.assertEqual(
+            (k_vt[:, :, 6:7, 0] - k_vt[:, :, 8:9, 0]).abs().max().item(), 0.)
+        self.assertEqual(
+            (k_vt[:, :, 7:8, 0] - k_vt[:, :, 9:10, 0]).abs().max().item(), 0.)
+
+    def test_router_init_vt_row_close_to_v_row_and_shared_params(self):
+        # init 契约：VT 行 ≈ V 行（k≈0.018 的 T 支路泄漏远小于 Cv5 双门的
+        # 全强度 T 支路）；共享参数与 V8_Cv5 逐参数一致（fork_rng）。
+        router, base = build("V8_Cv8"), build("V8_Cv5")
+        shared = {k: v for k, v in router.state_dict().items()
+                  if not k.startswith("router_")}
+        self.assertEqual(set(shared), set(base.state_dict()))
+        for key in shared:
+            torch.testing.assert_close(shared[key], base.state_dict()[key],
+                                       rtol=0, atol=0)
+        data = batch()
+        with torch.no_grad():
+            r_vt = forward(router, data, 0)                 # router VT 行
+            b_v = forward(base, data, 1)                    # Cv5 V 行
+            b_vt = forward(base, data, 0)                   # Cv5 VT 行
+        d_router = (r_vt["x0_hat"] - b_v["x0_hat"]).abs().max().item()
+        d_cv5 = (b_vt["x0_hat"] - b_v["x0_hat"]).abs().max().item()
+        self.assertGreater(d_cv5, 0.)
+        self.assertLess(d_router, 0.1 * d_cv5)
+
+    def test_router_group_perturbation_and_override(self):
+        # 左组独立学习：扰动左组 s_t MLP 只改 left 槽（6/8）；right/other
+        # 不变。gate_override 替换 k（V 支路乘 1−k）。
+        model = build("V8_Cv8")
+        data = batch()
+        with torch.no_grad():
+            before = forward(model, data, 0)
+            model.router_t_mlps[2][-1].bias.add_(2.)       # s_t_left += 2
+            after = forward(model, data, 0)
+        k = after["route_gate"]
+        # σ(−6) < σ(−4)：left 槽 k 更小，且与 right 槽（未扰动）不同。
+        self.assertGreater(
+            (k[:, :, 7:8, 0] - k[:, :, 6:7, 0]).min().item(), 0.)
+        torch.testing.assert_close(k[:, :, 7:8, 0],
+                                   before["route_gate"][:, :, 7:8, 0])
+        torch.testing.assert_close(k[:, :, 1:6, 0],
+                                   before["route_gate"][:, :, 1:6, 0])
+        self.assertGreater((after["x0_hat"] - before["x0_hat"]).abs().max().item(), 0.)
+        # 扰动左组末层权重 ⇒ 左组 s_t 读逐帧 token，k 逐帧变化；其余组
+        # （权重仍为零）保持逐帧常数。
+        with torch.no_grad():
+            model.router_t_mlps[2][-1].weight.normal_(0., 0.1)
+            varied = forward(model, data, 0)["route_gate"]
+        self.assertGreater(
+            (varied[:, 1:, 6:7, 0] - varied[:, :1, 6:7, 0]).abs().max().item(), 0.)
+        self.assertEqual(
+            (varied[:, 1:, 7:8, 0] - varied[:, :1, 7:8, 0]).abs().max().item(), 0.)
+        # gate_override：k≡1 时 VT 输出离开 init（≈V 行）走向 T 支路。
+        with torch.no_grad():
+            ones = torch.ones(2, 4, 10, 1)
+            z = model(data["V_feat"], data["T_raw"], data["T_phys"],
+                      torch.zeros(2, dtype=torch.long),
+                      T_s2m=data["T_s2m"], gate_override=ones)
+        self.assertGreater(
+            (z["x0_hat"] - before["x0_hat"]).abs().max().item(), 0.)
+        torch.testing.assert_close(z["route_gate"], ones)
+        torch.testing.assert_close(z["route_v_gate"], 1. - ones)
+
+    def test_router_gradients_flow(self):
+        # 梯度经 k 回到 s_v/s_t MLP（VT 行），有限且末层非零。首层梯度
+        # 延迟（末层零初始化 W=0 截断链，与 route_v_mlp 同款先例——首层
+        # 待末层离开零后才收到梯度），故只断言末层非零 + 全体有限。
+        model = build("V8_Cv8")
+        data = batch()
+        out = forward(model, data, 0)
+        (out["x0_hat"].square().mean() + out["v_hat"].square().mean()).backward()
+        for pname in ("router_v_mlps", "router_t_mlps"):
+            for mlp in getattr(model, pname):
+                for i, p in enumerate(mlp.parameters()):
+                    self.assertIsNotNone(p.grad)
+                    self.assertTrue(torch.isfinite(p.grad).all())
+                last = list(mlp.parameters())[-1]
+                self.assertGreater(last.grad.abs().sum().item(), 0.)
+
+    def test_router_guards(self):
+        from anysole.models.common.model_v7 import AnySoleModelV7
+        with self.assertRaises(ValueError):   # 无 task_routes
+            AnySoleModelV7(d=8, tw=4, reliability_route=True,
+                           route_router=True)
+        with self.assertRaises(ValueError):   # 与 v_gate 互斥
+            AnySoleModelV7(d=8, tw=4, reliability_route=True,
+                           task_routes=True, route_router=True, v_gate=True)
+        with self.assertRaises(ValueError):   # 与 part_routes 互斥
+            AnySoleModelV7(d=8, tw=4, reliability_route=True,
+                           task_routes=True, route_router=True,
+                           part_routes=True)
+        with self.assertRaises(ValueError):   # 与 route_conditional 互斥
+            AnySoleModelV7(d=8, tw=4, reliability_route=True,
+                           task_routes=True, route_router=True,
+                           route_conditional=True)
 
 
 class EnumerationTests(unittest.TestCase):

@@ -819,6 +819,36 @@ EXPERIMENTS["v8_eval_occ_cv7"] = {
     "REQUIRES": [],
 }
 
+# 竞争路由门（2026-11-07 会话裁定）：Cv8 四折训练 + E5/E6 评估 + 预检。
+# 与 v8_crossfit/v8_gate2 分离（独立 experiment，不动已有 MODEL_IDS）。
+_V8_ROUTER_FAMILIES = ("V8_Cv8",)
+_V8_ROUTER_FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
+_V8_ROUTER_OCC = ("020", "040", "060", "080", "100")
+EXPERIMENTS["v8_router"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1" % (f, fold)
+                  for f in _V8_ROUTER_FAMILIES for fold in _V8_ROUTER_FOLDS],
+    "REQUIRES": [],
+}
+EXPERIMENTS["v8_router_precheck"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V8_Cv8_precheck"],
+    "REQUIRES": [],
+}
+EXPERIMENTS["v8_router_eval_e6"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1_e6" % (f, fold)
+                  for f in _V8_ROUTER_FAMILIES for fold in _V8_ROUTER_FOLDS],
+    "REQUIRES": [],
+}
+EXPERIMENTS["v8_router_eval_occ"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1_evalocc%s" % (f, fold, o)
+                  for f in _V8_ROUTER_FAMILIES
+                  for fold in _V8_ROUTER_FOLDS for o in _V8_ROUTER_OCC],
+    "REQUIRES": [],
+}
+
 # 双向信任门波 1（修改 14 §6，2026-11-06）：Cv5VG / Cv5ST 两臂 × 4 折。
 # 主模型 Cv5VGST 单列一组，等两臂判读后再发（避免未判先烧 4 格）。
 _V8_GATE2_FAMILIES = ("V8_Cv5VG", "V8_Cv5ST")

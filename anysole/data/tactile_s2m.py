@@ -324,6 +324,17 @@ def _foot_features(values48, foot_pos, foot_rot, rest_axes, dt, flip_local_y):
     return np.concatenate([pressure16, acc, gyro, force, cop], axis=1).astype(np.float32)
 
 
+def _foot_features_facts(values48, acc, gyro):
+    """25-dim per-foot channel, IMU 来自虚拟 IMU facts（原始传感器局部系）。
+
+    acc 已含重力（g 单位、传感器系）；legacy 契约的左脚 Y 翻转由调用方先行应用。
+    """
+    pressure16 = pool_48_to_16(values48)
+    force = values48.sum(axis=1, keepdims=True).astype(np.float32)
+    cop = cop_from_grid(values48)
+    return np.concatenate([pressure16, acc, gyro, force, cop], axis=1).astype(np.float32)
+
+
 def _foot_features_noimu(values48):
     """--no-imu: 19-dim per-foot channel = pressure16 + force1 + cop2.
 
@@ -355,16 +366,23 @@ def build_t_s2m(
     query_t: np.ndarray | None = None,
     fps: float = FPS,
     no_imu: bool = False,
+    imu_facts: dict | None = None,
 ) -> np.ndarray:
     """Build the Step2Motion-口径 tactile channel for one session.
 
     ``t_raw_norm`` is the anysole-normalized 96-dim pressure (clip/PRESSURE_CLIP
-    then divide).  With IMU enabled, ``bvh_path`` and ``query_t`` are required;
-    the foot IMU is synthesized exclusively from the directly exported BVH-23
-    motion using Step2Motion's Left/RightFoot + ToeBase semantics.
+    then divide).
+
+    IMU 来源（2026-11-06 起默认 = 虚拟 IMU facts）：
+    - ``imu_facts`` 给定（推荐）：直接读
+      AnysoleWorkspace/shared/facts/virtual_imu/<date>/<sid>/imu_instep.npz 的
+      原始测量通道（acc_g / gyro_rad_s，传感器局部系、含重力、含全部噪声层）。
+      这是真实传感器口径（无世界系泄漏）；左脚的 legacy Y 翻转在此应用。
+    - ``imu_facts`` 为 None：回退到历史 BVH-23/ToeBase 合成（含世界系 acc 转换，
+      即旧口径）。仅用于缺 facts 的会话或历史复现。
 
     ``no_imu=True`` (--no-imu): the IMU channels are structurally absent —
-    neither BVH parsing nor ``synthesize_imu`` is called and the output is
+    neither facts 读取 nor ``synthesize_imu`` is called and the output is
     38-dim per frame (pressure16 + force1 + cop2 per foot).
     """
     t_raw_norm = np.asarray(t_raw_norm, dtype=np.float32)
@@ -376,24 +394,40 @@ def build_t_s2m(
         left = _foot_features_noimu(left48)
         right = _foot_features_noimu(right48)
     else:
-        if bvh_path is None or query_t is None:
-            raise ValueError("BVH-derived s2m50 IMU requires both bvh_path and query_t")
-        query_t = np.asarray(query_t, dtype=np.float64)
-        if query_t.shape != (t_raw_norm.shape[0],):
-            raise ValueError(
-                "query_t shape %s != (%d,)" % (query_t.shape, t_raw_norm.shape[0])
+        if imu_facts is not None:
+            n = t_raw_norm.shape[0]
+            lacc = np.asarray(imu_facts["left_acc_g"], dtype=np.float32)
+            lgyro = np.asarray(imu_facts["left_gyro_rad_s"], dtype=np.float32)
+            racc = np.asarray(imu_facts["right_acc_g"], dtype=np.float32)
+            rgyro = np.asarray(imu_facts["right_gyro_rad_s"], dtype=np.float32)
+            if not (len(lacc) == len(lgyro) == len(racc) == len(rgyro) == n):
+                raise ValueError(
+                    "imu_facts length mismatch: %d/%d/%d/%d vs %d"
+                    % (len(lacc), len(lgyro), len(racc), len(rgyro), n)
+                )
+            lacc = lacc.copy()
+            lacc[:, 1] *= -1.0  # legacy 左脚 Y 翻转（adapter_v3 同口径）
+            left = _foot_features_facts(left48, lacc, lgyro)
+            right = _foot_features_facts(right48, racc, rgyro)
+        else:
+            if bvh_path is None or query_t is None:
+                raise ValueError("BVH-derived s2m50 IMU requires both bvh_path and query_t")
+            query_t = np.asarray(query_t, dtype=np.float64)
+            if query_t.shape != (t_raw_norm.shape[0],):
+                raise ValueError(
+                    "query_t shape %s != (%d,)" % (query_t.shape, t_raw_norm.shape[0])
+                )
+            world_pos, global_rot, offsets_m = _legacy_bvh_kinematics(Path(bvh_path), query_t)
+            rest_axes = rest_foot_imu_axes(offsets_m)
+            dt = 1.0 / float(fps)
+            left = _foot_features(
+                left48, world_pos[:, LEGACY_LEFT_FOOT], global_rot[:, LEGACY_LEFT_FOOT],
+                rest_axes["left"], dt, flip_local_y=True,
             )
-        world_pos, global_rot, offsets_m = _legacy_bvh_kinematics(Path(bvh_path), query_t)
-        rest_axes = rest_foot_imu_axes(offsets_m)
-        dt = 1.0 / float(fps)
-        left = _foot_features(
-            left48, world_pos[:, LEGACY_LEFT_FOOT], global_rot[:, LEGACY_LEFT_FOOT],
-            rest_axes["left"], dt, flip_local_y=True,
-        )
-        right = _foot_features(
-            right48, world_pos[:, LEGACY_RIGHT_FOOT], global_rot[:, LEGACY_RIGHT_FOOT],
-            rest_axes["right"], dt, flip_local_y=False,
-        )
+            right = _foot_features(
+                right48, world_pos[:, LEGACY_RIGHT_FOOT], global_rot[:, LEGACY_RIGHT_FOOT],
+                rest_axes["right"], dt, flip_local_y=False,
+            )
     out = np.concatenate([left, right], axis=1).astype(np.float32)
     expected = T_S2M_NOIMU_DIM if no_imu else T_S2M_DIM
     if out.shape[1] != expected:

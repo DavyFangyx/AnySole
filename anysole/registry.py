@@ -206,6 +206,15 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V8_Cv5VG": ModelEntry("V8_Cv5VG", "v8_cv5vg", "V8 基座 + 双向信任门（修改 14 §5，2026-11-06）"),
     "V8_Cv5ST": ModelEntry("V8_Cv5ST", "v8_cv5", "V8 基座 + 同会话窗级错位增强（修改 14 §5.3，2026-11-06）"),
     "V8_Cv5VGST": ModelEntry("V8_Cv5VGST", "v8_cv5vg", "V8 基座 + 双向门 + 错位增强（修改 14 主模型，2026-11-06）"),
+    # 修改 15（2026-11-07）：Cv5 + V 门（T 门保持 Cv5），两阶段只训 V 门。
+    "V8_Cv5VIG": ModelEntry("V8_Cv5VIG", "v8_cv5vig", "V8 基座 + V 门（T 门 Cv5，b* 监督，修改 15）"),
+    # 修改 15（2026-11-07）：Cv5 + 不确定性专家驱动的 V 门（IG 监督，运行时零 GT）。
+    "V8_Cv5VUG": ModelEntry("V8_Cv5VUG", "v8_cv5vug", "V8 基座 + 不确定性专家 V 门（IG 监督，修改 15）"),
+    # 竞争路由门（2026-11-07 会话裁定）：k = σ(s_v − s_t) 逐帧逐组，
+    # s_v 读 V token、s_t 读 T token + 分组物理/IMU 特征；V 支路乘
+    # (1−k)、T 支路乘 k，V-only 行 k≡0、T-only 行 k≡1。
+    "V8_Cv8": ModelEntry("V8_Cv8", "v8_cv8", "V8 基座 + 竞争路由门（k=σ(s_v−s_t)，2026-11-07）"),
+    "V8_Cv8_precheck": ModelEntry("V8_Cv8_precheck", "v8_cv8", "V8_Cv8 六轮预检"),
     # 修改 08（2026-11-04，z_note/修改/08_平移锚头.md）：V/VT 行平移锚头
     # （旁路读出，不替换现役 GT 锚）；新增并列自锚列。
     "V7_Cv5TA": ModelEntry("V7_Cv5TA", "v7_c2ta", "V7_Cv5TA: Cv5 + V/VT 平移锚头（旁路读出，2026-11-04）"),
@@ -286,7 +295,8 @@ for _fam, _mod in (("V8_Cv5", "v8_cv5"), ("V8_Cv4", "v8_cv4"),
                    ("V8_Cv7", "v8_cv7"), ("V8_Cv5T1", "v8_cv5t1"),
                    ("V8_Cv5RM", "v8_cv5"), ("V8_Cv5PO", "v8_cv5po"),
                    ("V8_Cv5VG", "v8_cv5vg"), ("V8_Cv5ST", "v8_cv5"),
-                   ("V8_Cv5VGST", "v8_cv5vg")):
+                   ("V8_Cv5VGST", "v8_cv5vg"), ("V8_Cv5VIG", "v8_cv5vig"),
+                   ("V8_Cv5VUG", "v8_cv5vug"), ("V8_Cv8", "v8_cv8")):
     for _fold in ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8"):
         _name = "%s_%s" % (_fam, _fold)
         MODEL_REGISTRY[_name] = ModelEntry(

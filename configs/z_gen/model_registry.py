@@ -2155,6 +2155,22 @@ MODELS["V8_Cv5ST"] = {
 MODELS["V8_Cv5VGST"] = {
     **MODELS["V8_Cv5VG"], "label": "V8-Cv5VGST", "name": "V8_Cv5VGST",
     "train_args": {**MODELS["V8_Cv5VG"]["train_args"], "p_stale": 0.5}}
+# 修改 15（2026-11-07）：Cv5 + V 门（T 门 Cv5），两阶段只训 V 门。
+MODELS["V8_Cv5VIG"] = {**MODELS["V8_Cv5"], "label": "V8-Cv5VIG",
+                       "name": "V8_Cv5VIG"}
+# 修改 15（2026-11-07）：Cv5 + 不确定性专家 V 门（IG 监督，运行时零 GT）。
+MODELS["V8_Cv5VUG"] = {**MODELS["V8_Cv5"], "label": "V8-Cv5VUG",
+                       "name": "V8_Cv5VUG"}
+# 竞争路由门（2026-11-07 会话裁定）：k = σ(s_v − s_t) 逐帧逐组，s_v 读
+# V token、s_t 读 T token + 分组物理/IMU 特征（T_phys + T_s2m 双足
+# IMU，只作门控特征）；结构单旗在入口 v8_cv8（v7_route_router），
+# train_args 同 V8_Cv5。对照 = V8_Cv5（单侧双门）/ V8_Cv7（无门）。
+MODELS["V8_Cv8"] = {**MODELS["V8_Cv5"], "label": "V8-Cv8", "name": "V8_Cv8"}
+MODELS["V8_Cv8_precheck"] = {
+    **MODELS["V8_Cv8"], "label": "V8-Cv8-precheck",
+    "name": "V8_Cv8_precheck", "epochs": 6,
+    "train_args": {**MODELS["V8_Cv8"]["train_args"],
+                   "wandb_experiment_tag": "v8_precheck"}}
 _V8_FOLD_CONFIGS = (
     ("fS5S6S11",  "anysole/configs/v1_fold_S5S6S11.yaml"),
     ("fS5S11S12", "anysole/configs/v1_fold_S5S11S12.yaml"),
@@ -2163,7 +2179,8 @@ _V8_FOLD_CONFIGS = (
 )
 _V8_FOLD_FAMILIES = ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6", "V8_Cv7",
                      "V8_Cv5T1", "V8_Cv5RM", "V8_Cv5PO",
-                     "V8_Cv5VG", "V8_Cv5ST", "V8_Cv5VGST")
+                     "V8_Cv5VG", "V8_Cv5ST", "V8_Cv5VGST", "V8_Cv5VIG",
+                     "V8_Cv8")
 for _fam in _V8_FOLD_FAMILIES:
     for _fold, _fconfig in _V8_FOLD_CONFIGS:
         _fname = "%s_%s" % (_fam, _fold)
@@ -2216,6 +2233,26 @@ for _fold, _fconfig in _V8_FOLD_CONFIGS:
             "eval_splits": ["test"],
             "config": "anysole/configs/v1_occ%s_fold_%s.yaml"
                       % (_occ, _fold[1:])}
+
+# 竞争路由门的 E5/E6 评估格（2026-11-07）：V8_Cv8 × 4 折，独立块
+# （同 VG/Cv7 的做法，不动上面 6 族表的 experiment MODEL_IDS）。
+for _fam in ("V8_Cv8",):
+    for _fold, _fconfig in _V8_FOLD_CONFIGS:
+        _cell = "%s_%s_s1" % (_fam, _fold)
+        MODELS["%s_e6" % _cell] = {
+            **MODELS[_cell],
+            "label": "%s-e6" % MODELS[_cell]["label"],
+            "train": False, "which": "last",
+            "eval_splits": ["test"],
+            "config": _fconfig}
+        for _occ in _V8_EVAL_LEVELS:
+            MODELS["%s_evalocc%s" % (_cell, _occ)] = {
+                **MODELS[_cell],
+                "label": "%s-evalocc%s" % (MODELS[_cell]["label"], _occ),
+                "train": False, "which": "last",
+                "eval_splits": ["test"],
+                "config": "anysole/configs/v1_occ%s_fold_%s.yaml"
+                          % (_occ, _fold[1:])}
 
 # 双向信任门波 1 的 E5/E6 评估格（修改 14 §6，2026-11-06）：VG/ST/VGST × 4 折。
 # 与上面 6 族表分离，避免改已有 experiment 的 MODEL_IDS（同 Cv7 的做法）。

@@ -77,6 +77,11 @@ _V7_LEG_FOOT_PARTS = ("l_leg", "r_leg", "l_foot", "r_foot")
 _V7_GATE_PIN_LEGS = (0.0,) + tuple(
     1.0 if name in _V7_LEG_FOOT_PARTS else 0.0 for name in PART_NAMES)
 
+# 竞争路由门（2026-11-07，V8_Cv8）分组特征维度：vel/other = 双足 phys 12
+# + IMU 12 + 接触二值 2 = 26；left/right = 单足 phys 6 + IMU 6 + 接触 1。
+# IMU 列 = T_s2m 的 16:22（左）/ 41:47（右，tactile_s2m.S2M_IMU_COLUMNS）。
+_ROUTER_FEAT_DIMS = (26, 26, 13, 13)
+
 
 class _V7DecoderLayer(nn.Module):
     """一层共享运动解码：query 自注意力 + 分别读取 M_V / M_T + FFN。
@@ -483,6 +488,10 @@ class AnySoleModelV7(nn.Module):
       ``route_conditional``：Q（§6）——保持 TLR 四组逐帧门与 MLP 尺寸，
         门输入改为第一层解码上下文（视觉更新后的 query 均值 + 未乘门的
         T 注意力输出均值），第一层计算、六层复用；无新增参数。
+      ``route_router``：竞争路由门（2026-11-07，V8_Cv8）——k = σ(s_v − s_t)
+        逐帧逐组（vel/other/left/right → 10 槽），s_v 读 V token、s_t 读
+        T token + 分组物理/IMU 特征；解码器 V 支路乘 (1−k)、T 支路乘 k，
+        V-only 行 k≡0、T-only 行 k≡1。取代 T 门与 V 门（与 v_gate 互斥）。
     """
 
     def __init__(self, d=D_MODEL, tw=TW, nhead=8, dropout=0.1, pose_layers=6,
@@ -492,6 +501,8 @@ class AnySoleModelV7(nn.Module):
                  route_conditional: bool = False,
                  gate_pin_legs: bool = False,
                  v_gate: bool = False, gate_2sigma: bool = False,
+                 unc_gate: bool = False,
+                 route_router: bool = False,
                  prev_ctx: bool = False,
                  ctx_v2: bool = False, ctx_vcond: bool = False,
                  ctx3: bool = False, ctx4: bool = False,
@@ -579,10 +590,27 @@ class AnySoleModelV7(nn.Module):
                                  torch.tensor(_V7_GATE_PIN_LEGS), persistent=False)
         if self.v_gate and not self.reliability_route:
             raise ValueError("v_gate requires tactile reliability routing")
+        self.unc_gate = bool(unc_gate)
+        if self.unc_gate and not self.v_gate:
+            raise ValueError("unc_gate requires v_gate (V 支路门由不确定性专家驱动)")
         if self.v_gate and self.route_conditional:
             raise ValueError("v_gate is incompatible with route_conditional (Q)")
         if self.gate_2sigma and not self.reliability_route:
             raise ValueError("gate_2sigma requires tactile reliability routing")
+        self.route_router = bool(route_router)
+        if self.route_router:
+            if not (self.reliability_route and self.task_routes):
+                raise ValueError("route_router requires reliability_route "
+                                 "and task_routes (10 槽 query 轴)")
+            if self.v_gate:
+                raise ValueError("route_router replaces the V gate (k 本身即 V 门)")
+            if self.part_routes or self.route_conditional:
+                raise ValueError("route_router is incompatible with "
+                                 "part_routes / route_conditional")
+            if self.gate_pin_legs:
+                raise ValueError("route_router is incompatible with gate_pin_legs")
+            if self.t_phys_v2:
+                raise ValueError("route_router assumes T_phys 12 维（t_phys_v2 未定义分组特征）")
         self.vt_t_residual = bool(vt_t_residual)
         self.root_sd_t1 = bool(root_sd_t1)
         # 根头速率/方向解耦（修改 07 改动 A）：只定义世界系根的 Cv5 线；
@@ -681,6 +709,43 @@ class AnySoleModelV7(nn.Module):
                         nn.Linear(2 * d, d), nn.GELU(), nn.Linear(d, 1))
                     nn.init.zeros_(self.route_v_mlp[-1].weight)
                     nn.init.zeros_(self.route_v_mlp[-1].bias)
+                if self.unc_gate:
+                    # 修改 15（2026-11-07）：不确定性专家驱动 V 门。
+                    # unc_expert = MLP(窗均值 v_tok → û)，û 的监督量 =
+                    # IG（接触可预测性，训练期由冻结接触头 + 接触 GT 算），
+                    # 运行时零 GT；g_v = σ(unc_a·û + unc_b)，unc_a/unc_b
+                    # 为逐折拟合的缓冲（随 ckpt 落盘）。与 route_v_mlp
+                    # 并存（后者闲置，保持结构兼容）。
+                    with torch.random.fork_rng(devices=[]):
+                        self.unc_expert = nn.Sequential(
+                            nn.Linear(d, 128), nn.ReLU(), nn.Linear(128, 1))
+                    self.register_buffer("unc_a", torch.tensor(32.0))
+                    self.register_buffer("unc_b", torch.tensor(0.0))
+            if self.route_router:
+                # 竞争路由门（2026-11-07，V8_Cv8）：k = σ(s_v − s_t)，逐帧
+                # 逐组（vel/other/left/right → 10 槽）。s_v 读 V token；
+                # s_t 读 T token + 分组物理/IMU 特征（vel/other 26 维、
+                # left/right 13 维，过 LayerNorm）。init：s_v≡0、s_t≡+4
+                # ⇒ k≈0.018（VT 行 init ≈ 纯 V，T 支路须赢取信任；
+                # T-only 行由掩码强制 k≡1）。fork_rng 同上。
+                with torch.random.fork_rng(devices=[]):
+                    self.router_v_mlps = nn.ModuleList([
+                        nn.Sequential(nn.Linear(d, d), nn.GELU(),
+                                      nn.Linear(d, 1))
+                        for _ in range(4)])
+                    self.router_t_mlps = nn.ModuleList([
+                        nn.Sequential(
+                            nn.Linear(d + _ROUTER_FEAT_DIMS[g], d),
+                            nn.GELU(), nn.Linear(d, 1))
+                        for g in range(4)])
+                    self.router_feat_norms = nn.ModuleList([
+                        nn.LayerNorm(_ROUTER_FEAT_DIMS[g]) for g in range(4)])
+                    for _mlp in self.router_v_mlps:
+                        nn.init.zeros_(_mlp[-1].weight)
+                        nn.init.zeros_(_mlp[-1].bias)
+                    for _mlp in self.router_t_mlps:
+                        nn.init.zeros_(_mlp[-1].weight)
+                        nn.init.constant_(_mlp[-1].bias, 4.0)
         if self.prev_ctx:
             # 续写上下文（2026-11-01，V7_续写协议方案 §1-§2）：窗首帧根状态
             # [根朝向 6D + 根速度 3 + 有效标志 1]（评估链 = 上一窗预测在其
@@ -830,15 +895,68 @@ class AnySoleModelV7(nn.Module):
             return g.unsqueeze(-1)                          # (B, tw, 1)
         return g.view(-1, 1, 1).expand(-1, self.tw, 1)      # (B, tw, 1)
 
-    def _route_v_gate(self, v_tok, t_tok):
-        """修改 14 §5：V 侧信任门（单标量，值域 (0,2)，init 逐位 = 1）。
+    def _route_v_gate(self, v_tok, t_tok, t_present=None):
+        """修改 14 §5：V 侧信任门（单标量，值域 (0,1]，init 逐位 = 1）。
 
         与 T 门同输入 / 同粒度；V 只有一条支路，所以不分组。门乘在
         `v_out` 上：g_v → 0 让 U@VT 连续插值到 U@T。
+
+        ``t_present``（修改 15）：V 门只应在双模态在场时仲裁；V-only 行
+        用 ``1 + (g_v−1)·t_present`` 把门钉回 1.0，U@V 行逐位不变。
+
+        修改 15 校准（2026-11-07）：值域改为 (0,1]（cap=1）。g>1 的
+        「过信放大」区是模型训练分布之外（放大 V 特征无监督证据），
+        margin 训练直接把健康窗顶到 cap；1 = 完全信任（不动作）。
         """
-        x = self._gate_input(v_tok, t_tok)
-        g_v = 2.0 * torch.sigmoid(self.route_v_mlp(x))
+        if self.unc_gate:
+            u = self.unc_expert(v_tok.mean(dim=1))
+            g_v = torch.sigmoid(self.unc_a * u + self.unc_b)
+        else:
+            x = self._gate_input(v_tok, t_tok)
+            g_v = (2.0 * torch.sigmoid(self.route_v_mlp(x))).clamp(max=1.0)
+        if t_present is not None:
+            g_v = 1.0 + (g_v - 1.0) * t_present.view(-1, 1)
         return self._expand_gate(g_v)
+
+    def _route_router_gate(self, v_tok, t_tok, t_phys, t_s2m,
+                           v_present, t_present):
+        """竞争路由门（2026-11-07，V8_Cv8）：k = σ(s_v − s_t)，逐帧逐组。
+
+        s_v_g = MLP_v_g(v_tok)——V 信任分（V-only 内容自评）；s_t_g =
+        MLP_t_g(cat(t_tok, feat_g))——T 信任分，feat_g 分组物理特征：
+        vel/other = 双足 T_phys 12（cop/force/envelope/spatial/temporal）
+        + T_s2m IMU 12（左 16:22 / 右 41:47，世界系去重力 acc + 局部系
+        gyro）+ 双足接触二值；left/right = 单足对应 13 维。特征过
+        LayerNorm（混合尺度）。硬掩码：V-only 行 k≡0、T-only 行 k≡1、
+        VT 行 k（逐样本）。返回 (B, tw, 10, 1)，解码器 V 支路乘 (1−k)、
+        T 支路乘 k。t_phys/t_s2m 为 None 时对应特征置零兜底。
+        """
+        b, tw, d = v_tok.shape
+        if t_phys is None:
+            t_phys = v_tok.new_zeros(b, tw, 12)
+        if t_s2m is None:
+            t_s2m = v_tok.new_zeros(b, tw, 50)
+        phys_l, phys_r = t_phys[..., :6], t_phys[..., 6:12]
+        imu_l, imu_r = t_s2m[..., 16:22], t_s2m[..., 41:47]
+        contact_l = (phys_l[..., 2:3] > 0.05).to(v_tok.dtype)
+        contact_r = (phys_r[..., 2:3] > 0.05).to(v_tok.dtype)
+        both = torch.cat([phys_l, phys_r, imu_l, imu_r,
+                          contact_l, contact_r], dim=-1)
+        feats = (both, both,
+                 torch.cat([phys_l, imu_l, contact_l], dim=-1),
+                 torch.cat([phys_r, imu_r, contact_r], dim=-1))
+        ks = []
+        for g in range(4):
+            s_v = self.router_v_mlps[g](v_tok)                    # (B,tw,1)
+            s_t = self.router_t_mlps[g](
+                torch.cat([t_tok, self.router_feat_norms[g](feats[g])],
+                          dim=-1))                                # (B,tw,1)
+            ks.append(torch.sigmoid(s_v - s_t))
+        k = torch.cat(ks, dim=-1)                                 # (B,tw,4)
+        k = k[..., _V7_QUERY_GATE_IDX]                            # (B,tw,10)
+        k = (k * v_present.view(-1, 1, 1)
+             + (1.0 - v_present.view(-1, 1, 1))) * t_present.view(-1, 1, 1)
+        return k.unsqueeze(-1)                                    # (B,tw,10,1)
 
     def _expand_gate(self, gates):
         # (B, tw, 10)（逐帧）或 (B, 10)（窗口）→ (B, tw, 10, 1)。
@@ -1006,13 +1124,20 @@ class AnySoleModelV7(nn.Module):
                 ctx_vec = self.ctx_emb(prev_ctx.to(m_v.dtype))  # (B, d)
                 if self.ctx_v2:
                     ctx_pose = self.ctx_pose_emb(prev_ctx.to(m_v.dtype))  # (B, 6)
-        if gate_override is not None:
-            gate = gate_override   # 干预/诊断钩子（§7 单组关门；推理不读 GT）
-        elif self.route_conditional:
-            gate = None            # Q：门由第一层解码上下文计算（gate_fn）
+        if self.route_router:
+            gate = (gate_override if gate_override is not None
+                    else self._route_router_gate(v_tok, t_tok, T_phys, T_s2m,
+                                                 v_present, t_present))
+            gate_v = 1.0 - gate
         else:
-            gate = self._route_gate(v_tok, t_tok) if self.reliability_route else None
-        gate_v = self._route_v_gate(v_tok, t_tok) if self.v_gate else None
+            if gate_override is not None:
+                gate = gate_override   # 干预/诊断钩子（§7 单组关门；推理不读 GT）
+            elif self.route_conditional:
+                gate = None            # Q：门由第一层解码上下文计算（gate_fn）
+            else:
+                gate = self._route_gate(v_tok, t_tok) if self.reliability_route else None
+            gate_v = (self._route_v_gate(v_tok, t_tok, t_present)
+                      if self.v_gate else None)
         if self.route_conditional and gate_override is None:
             captured = {}
 
@@ -1127,8 +1252,14 @@ class AnySoleModelV7(nn.Module):
         v_tok, t_tok = self.encoders(V_feat, T_tac, config_id)
         m_v = self.v_temporal(v_tok)
         m_t = self.t_temporal(t_tok)
-        gate = self._route_gate(v_tok, t_tok) if self.reliability_route else None
-        gate_v = self._route_v_gate(v_tok, t_tok) if self.v_gate else None
+        if self.route_router:
+            gate = self._route_router_gate(v_tok, t_tok, T_phys, T_s2m,
+                                           v_present, t_present)
+            gate_v = 1.0 - gate
+        else:
+            gate = self._route_gate(v_tok, t_tok) if self.reliability_route else None
+            gate_v = (self._route_v_gate(v_tok, t_tok, t_present)
+                      if self.v_gate else None)
         t_only = (~v_present.bool()) & t_present.bool()
         vt_both = v_present.bool() & t_present.bool()
         adapters = ((self.t_only_root_adapter, self.t_only_pose_adapter)
