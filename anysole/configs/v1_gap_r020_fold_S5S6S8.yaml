@@ -1,4 +1,4 @@
-# v1_cam3 的遮挡覆盖版（V-degradation 遮挡组，2026-10-13，由 v1_cam3.yaml 单键派生）
+# v1_fold_S5S6S8.yaml 的时间断流覆盖版（2026-11-08，E5 时间退化；仅改 cache_root → cam3_gap_r020）
 # AnySole V1 配置（E3 基础，2026-09-16 起）
 #
 # 基础 = E3_nocontact 训练口径：
@@ -51,8 +51,8 @@ traj_deltas: [2, 4, 8, 19]
 config_probs: [0.50, 0.25, 0.25]
 cam_id: 3
 seq_root: shared://facts/sessions/cam3
-split_csv: protocol://splits/default/splits.csv
-cache_root: model-input://AnySole/adapter_v1/visual/hrnet/cam3_exp_g0020
+split_csv: protocol://splits/default/splits_test_S5S6S8_val_S7.csv
+cache_root: model-input://AnySole/adapter_v1/visual/hrnet/cam3_gap_r020
 use_insole_drift: false
 modal: anysolev1
 contact_method: f6_soft

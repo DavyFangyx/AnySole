@@ -1,0 +1,23 @@
+{
+  "date": "20260807",
+  "model": "sam3db",
+  "b": [
+    0.5660492433142917,
+    0.4037798991173001,
+    -0.4117382419742099
+  ],
+  "residual_rmse_mm": 143.44795227937746,
+  "n_sessions": 8,
+  "sessions": [
+    "S8011",
+    "S8012",
+    "S8013",
+    "S8021",
+    "S8023",
+    "S8032",
+    "S8062",
+    "S8063"
+  ],
+  "fit_source": "exported local_gen predictions (pre-correction) vs smpl GT pelvis, pooled least squares",
+  "note": "3-parameter global translation; per-date; same mechanism as MMVP drift points m/n (04_E §8.4)"
+}

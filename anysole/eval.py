@@ -318,6 +318,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Also write per-window and per-session metric detail JSONs next to the "
         "protocol file (window_detail_<split>.json / session_detail_<split>.json).",
     )
+    parser.add_argument(
+        "--dump-tokens",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Dump pre-pose tokens z_root/z_parts per session/window (V8 token fusion).",
+    )
     return parser.parse_args(argv)
 
 
@@ -899,6 +906,7 @@ def _evaluate_one(
         # 导出侧 tile 锚覆盖（修改 02 §B4）需要会话级 trans_global 查询；
         # 打包段会再次构建同名查询（覆盖前值，无副作用）。
         session_by_id = {s["session_id"]: s for s in loader.dataset.sessions}
+    token_exports = {}
     for config_value in config_values:
         exports = {}
         with torch.inference_mode():
@@ -1210,6 +1218,12 @@ def _evaluate_one(
                                     batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw,
                                     **({"obs_history": batch["obs_history"]} if "obs_history" in batch else {}))
                         pred_pose = out["x0_hat"]
+                        if args.dump_tokens is not None and config_value == CONFIG_VT:
+                            zr = out["z_root"].detach().cpu().numpy()
+                            zp = out["z_parts"].detach().cpu().numpy()
+                            for idx, sid in enumerate(batch["session_id"]):
+                                token_exports.setdefault(sid, []).append(
+                                    (int(batch["frame_start"][idx]), zr[idx], zp[idx]))
                     else:
                         cond = {
                             "V_feat": v_feat,
@@ -1411,6 +1425,16 @@ def _evaluate_one(
                     **smpl_archive_metadata(),
                 )
                 print("wrote %s" % output_path)
+    if args.dump_tokens is not None:
+        outdir = Path(args.dump_tokens)
+        outdir.mkdir(parents=True, exist_ok=True)
+        for sid, items in token_exports.items():
+            starts = np.asarray([it[0] for it in items], np.int64)
+            zr = np.stack([it[1] for it in items])
+            zp = np.stack([it[2] for it in items])
+            np.savez_compressed(outdir / ("%s_tokens.npz" % sid),
+                                frame_start=starts, z_root=zr, z_parts=zp)
+        print("dumped tokens ->", outdir)
     metrics_out = args.metrics_out
     if metrics_out is None:
         metrics_out = model_root / "metrics" / ("%s_brief.json" % args.split)

@@ -29,7 +29,9 @@ import numpy as np
 import torch
 
 ROOT = "/data/fangyuxuan/projects/gait"
-OUT = ROOT + "/results_display/Etest_crossfit/E9_TrajectorySceneOcc"
+OUT = os.environ.get("E9_OUT", ROOT + "/results_display/Etest_crossfit/E9_TrajectorySceneOcc")
+BASE_NAME = os.environ.get("E9_BASE", "V7_Cv5")
+IS_V7 = BASE_NAME.startswith("V7")
 DETAIL = os.path.join(OUT, "detail")
 SUPP = os.path.join(OUT, "supplementary")
 HYB = ROOT + "/results/diagnostics/20261108_hybrid"
@@ -39,6 +41,7 @@ sys.path.insert(0, HYB)
 import trajectory_scene_occlusion as T  # noqa: E402
 import hybrid_sceneocc_eval as H  # noqa: E402
 
+VT_DIR = os.environ.get("E9_VT_DIR", TRAJ + "/scene7/eval_motion")
 DEVICE = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 SIDS = ["S14033", "S14091", "S14092", "S14093",
         "S13082", "S13092", "S13093"]
@@ -66,7 +69,7 @@ ALL_ARMS = ["GT", "Step2Motion", "MotionPRO", "Anysolo-TI", "Anysolo-I",
 
 def load_session(sid):
     man = json.load(open(os.path.join(T.MANI, sid + ".json")))
-    zvt = np.load(os.path.join(T.SCENE7, sid + "_VT2M.npz"))
+    zvt = np.load(os.path.join(VT_DIR, sid + "_VT2M.npz"))
     gt = zvt["gt_pelvis_trans"].astype(np.float64)
     vt = zvt["pred_pelvis_trans"].astype(np.float64)
     ro = np.asarray(zvt["root_orient"])
@@ -385,8 +388,10 @@ def plot_blackout(rows):
 
 def write_report(rows, calib, decomp, black_rows):
     occ = agg_action(rows, "occ_ate_mm", ALL_ARMS)
-    lines = ["# E9 场景遮挡轨迹可视化（2026-11-08）", "",
+    lines = ["# E9 场景遮挡轨迹可视化（2026-11-08，%s）" % BASE_NAME, "",
              "## 口径", "",
+             "- 基座：%s；VT = 该基座在 `cam3_occ_scene` 上的输出。"
+             % BASE_NAME,
              "- 单视角 cam3；柱子按标定合成进 cam3（`cam3_occ_scene`），"
              "`full_event` = 人体可见度 ≤ 0.05 的连续区间。",
              "- 事件外 = VT；事件内从 VT 最后可见帧位置/朝向交接。",
@@ -469,10 +474,11 @@ def main():
     calib = calibration_ablation(arms, meta)
     write_csv(os.path.join(OUT, "Full_Table2_E9_SceneOcc_CalibAblation.csv"),
               calib)
-    decomp = modality_decomp()
-    write_csv(os.path.join(OUT, "Full_Table3_E9_SceneOcc_ModalityDecomp.csv"),
-              decomp)
-    black_rows, black_json = blackout_table()
+    decomp = modality_decomp() if IS_V7 else []
+    if decomp:
+        write_csv(os.path.join(OUT, "Full_Table3_E9_SceneOcc_ModalityDecomp.csv"),
+                  decomp)
+    black_rows, black_json = blackout_table() if IS_V7 else ([], {})
     if black_rows:
         write_csv(os.path.join(SUPP, "Supplementary_Table1_E9_Blackout_fS6S7.csv"),
                   black_rows)

@@ -186,27 +186,47 @@ def build_sequence_video(frame_paths: list[Path], unit_root: Path,
 
 
 def parse_degrade(spec: str) -> tuple[str, float]:
-    """--degrade grammar: none | occ:<lower-body occlusion %> | exp:<gain G> | gap:<stream-gap %>."""
+    """--degrade grammar: none | occ:<pct> | gap:<pct> | scene."""
     spec = (spec or "none").strip().lower()
     if spec == "none":
         return "none", 0.0
+    if spec == "scene":
+        return "scene", 0.0
     kind, _, value = spec.partition(":")
-    if kind not in ("occ", "exp", "gap") or not value:
-        raise SystemExit(f"bad --degrade {spec!r}: use none | occ:<pct> | exp:<gain> | gap:<pct>")
+    if kind not in ("occ", "gap") or not value:
+        raise SystemExit(f"bad --degrade {spec!r}: use none | occ:<pct> | gap:<pct> | scene")
     return kind, float(value)
 
 
 def degrade_tag(kind: str, level: float) -> str:
-    """Condition tag shared with the cache dirs (occ_lower010 / exp_g0005 / gap_r080)."""
-    from anysole.data.extract_hrnet import exposure_cache_dirname, occlusion_cache_dirname
+    """Condition tag shared with the cache dirs (occ_lower010 / gap_r080 / scene)."""
+    from anysole.data.extract_hrnet import occlusion_cache_dirname
     from anysole.data.make_gap_cache import gap_cache_dirname
+    if kind == "scene":
+        return "scene"
     if kind == "occ":
         name = occlusion_cache_dirname(3, level / 100.0)
-    elif kind == "exp":
-        name = exposure_cache_dirname(3, level)
     else:
         name = gap_cache_dirname(3, level)
     return name.split("_", 1)[1]
+
+
+SCENE_MANIFEST_DIR = (ROOT / "results" / "diagnostics" /
+                      "20261107_e5_sceneocc_full" / "manifests")
+SCENE_MASK_INDEX = (WORKSPACE / "shared" / "frontends" / "human_masks" /
+                    "sam31" / "v1" / "index.jsonl")
+
+
+def _scene_mask_index(session: str) -> dict[int, str]:
+    masks: dict[int, str] = {}
+    if not SCENE_MASK_INDEX.is_file():
+        return masks
+    with SCENE_MASK_INDEX.open(encoding="utf-8") as fh:
+        for line in fh:
+            row = json.loads(line)
+            if row.get("session") == session and row.get("camera") == "cam3":
+                masks[int(row["frame_id"])] = row["mask_path"]
+    return masks
 
 
 def cache_grid(session_id: str, cam: int) -> list[Path]:
@@ -236,13 +256,13 @@ def stage_frames(row: dict, cam: int, unit_paths: list[Path], stage_dir: Path,
                  kind: str, level: float) -> list[Path]:
     """Frame list for build_sequence_video under one E5 degradation.
 
-    Pixel and anchor math is the model cache's own (apply_exposure_gain,
-    occlude_lower_strip with the cache-side bbox of the same image, the
-    make_gap_cache anchor rule): imported, never re-implemented.  occ/exp write
-    lossless PNGs; gap writes nothing and points frozen frames at the anchor JPEG.
+    Pixel and anchor math is the model cache's own (occlude_lower_strip with
+    the cache-side bbox of the same image, the make_gap_cache anchor rule):
+    imported, never re-implemented.  occ writes lossless PNGs; gap writes
+    nothing and points frozen frames at the anchor JPEG.
     """
     import cv2
-    from anysole.data.extract_hrnet import apply_exposure_gain, occlude_lower_strip, read_rgb
+    from anysole.data.extract_hrnet import occlude_lower_strip, read_rgb
     from anysole.data.make_gap_cache import CYCLE_DEFAULT, SEED_DEFAULT, build_gap_array
     if cam != 3:
         raise SystemExit("--degrade is defined on the cam3 cache grid only")
@@ -254,6 +274,39 @@ def stage_frames(row: dict, cam: int, unit_paths: list[Path], stage_dir: Path,
         anchors = build_gap_array(index, level, CYCLE_DEFAULT, SEED_DEFAULT, session)[:, 0]
         return [path if int(anchors[cache_row]) == cache_row else grid[int(anchors[cache_row])]
                 for path, cache_row in zip(unit_paths, rows)]
+    if kind == "scene":
+        from anysole.data.make_scene_occ_cache import column_texture, composite
+        manifest_path = SCENE_MANIFEST_DIR / ("%s.json" % session)
+        if not manifest_path.is_file():
+            raise FileNotFoundError("scene manifest missing: %s" % manifest_path)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        active = np.asarray(manifest["frames"]["active"], dtype=bool)
+        behind = np.asarray(manifest["frames"]["behind"], dtype=bool)
+        poly = np.asarray(manifest["column_polygon_xy"], dtype=np.float32)
+        height, width = cv2.imread(str(unit_paths[0])).shape[:2]
+        texture = column_texture(height, width, seed=0)
+        masks = _scene_mask_index(session)
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        staged: dict[str, Path] = {}
+        frames = []
+        for path, cache_row in zip(unit_paths, rows):
+            if path.name not in staged:
+                rgb = read_rgb(path)
+                if active[cache_row]:
+                    mask_path = masks.get(cache_row)
+                    person = (cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE) > 0
+                              if mask_path and Path(mask_path).is_file()
+                              else np.zeros(rgb.shape[:2], dtype=bool))
+                    rgb = composite(rgb, person, poly, texture,
+                                    bool(behind[cache_row]))
+                # 全部写 PNG（含干净帧），保证 ffmpeg concat 输入格式统一；
+                # 混合 JPEG/PNG 时 concat 只吃到第一段格式。
+                target = stage_dir / (path.stem + ".png")
+                if not cv2.imwrite(str(target), np.ascontiguousarray(rgb[:, :, ::-1])):
+                    raise RuntimeError(f"failed to write {target}")
+                staged[path.name] = target
+            frames.append(staged[path.name])
+        return frames
     boxes = np.load(BBOX_CAM3_ROOT / f"{session}.npy")[:, 1:5] if kind == "occ" else None
     stage_dir.mkdir(parents=True, exist_ok=True)
     staged: dict[str, Path] = {}
@@ -261,10 +314,7 @@ def stage_frames(row: dict, cam: int, unit_paths: list[Path], stage_dir: Path,
     for path, cache_row in zip(unit_paths, rows):
         if path.name not in staged:
             rgb = read_rgb(path)
-            if kind == "exp":
-                rgb = apply_exposure_gain(rgb, level)
-            else:
-                rgb = occlude_lower_strip(rgb, boxes[cache_row], level / 100.0, "black")
+            rgb = occlude_lower_strip(rgb, boxes[cache_row], level / 100.0, "black")
             target = stage_dir / (path.stem + ".png")
             if not cv2.imwrite(str(target), np.ascontiguousarray(rgb[:, :, ::-1])):
                 raise RuntimeError(f"failed to write {target}")
@@ -342,7 +392,8 @@ def compact_wham(raw_results: dict, frames: int, unit_root: Path) -> Path:
     return result
 
 
-def generate_sam3db(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) -> Path:
+def generate_sam3db(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int,
+                    degrade: str = "none") -> Path:
     """Drive the SAM3DB worker in the vb_tactile environment (torch 2.10 stack)."""
     date, subject = session_parts(row)
     unit_root = work_dir / "reference_results" / "3_Result" / "SAM3DB_baseline" / f"{date}_m1_{row['session_id']}_c{cam}"
@@ -354,6 +405,7 @@ def generate_sam3db(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) -
         "--cam", str(cam),
         "--gpu", str(gpu),
         "--work-dir", str(unit_root),
+        "--degrade", degrade,
     ]
     completed = subprocess.run(command, check=False, capture_output=True, text=True)
     if completed.returncode != 0:
@@ -362,13 +414,22 @@ def generate_sam3db(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) -
     return unit_root / "result.pkl"
 
 
-def generate_gvhmr(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int) -> Path:
+def generate_gvhmr(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int,
+                   degrade: str = "none") -> Path:
     """Drive the migrated GVHMR worker (run_request) in the vb_gvhmr environment."""
     date, subject = session_parts(row)
     frames = unit_frame_paths(row, cam, unit)
+    kind, level = parse_degrade(degrade)
+    stage_dir = work_dir / date / subject / f"{row['session_id']}_c{cam}" / "frames"
+    if kind != "none":
+        frames = stage_frames(row, cam, frames, stage_dir, kind, level)
     unit_root = work_dir / "reference_results" / "3_Result" / "GVHMR_baseline" / f"{date}_m1_{row['session_id']}_c{cam}"
     unit_root.mkdir(parents=True, exist_ok=True)
-    video = build_sequence_video(frames, unit_root)
+    try:
+        video = build_sequence_video(frames, unit_root)
+    finally:
+        if kind != "none":
+            shutil.rmtree(stage_dir, ignore_errors=True)
     calibration, _, _ = common_loader().load_calibration(date)
     width, height = [int(v) for v in calibration["image_size_px"]]
     side = np.load(FRONTEND_BBOX / date / subject / row["session_id"] / "bbox.npz",
@@ -429,6 +490,15 @@ def common_loader():
     return _common
 
 
+def native_result(model: str, date: str, session: str, cam: int,
+                  work_dir: Path) -> Path:
+    short = "%s_m1_%s_c%d" % (date, session, cam)
+    sub = {"wham": "WHAM_baseline", "sam3db": "SAM3DB_baseline",
+           "gvhmr": "GVHMR_baseline"}[model]
+    suffix = "result.npz" if model == "gvhmr" else "result.pkl"
+    return work_dir / "reference_results" / "3_Result" / sub / short / suffix
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=("wham", "sam3db", "gvhmr"), default="wham")
@@ -439,12 +509,14 @@ def main() -> int:
     parser.add_argument("--work-dir", default="",
                         help="persistent work dir (default: work/visual_baselines_local)")
     parser.add_argument("--degrade", default="none",
-                        help="E5 degradation (wham, cam3 only): none | occ:<pct> | exp:<gain> | gap:<pct>; "
+                        help="E5 degradation (cam3 only): none | occ:<pct> | gap:<pct> | scene; "
                              "default work dir becomes work/visual_baselines_degraded/<cond>")
+    parser.add_argument("--split-csv", default="",
+                        help="split csv for --split (default: protocol/splits/default/splits.csv)")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="skip sessions whose native result already exists")
     args = parser.parse_args()
     kind, level = parse_degrade(args.degrade)
-    if kind != "none" and args.model != "wham":
-        raise SystemExit("--degrade is implemented for --model wham only")
     manifest = {}
     for line in (WORKSPACE / "protocol/manifests" / "session_manifest.jsonl").open(
             encoding="utf-8"):
@@ -455,8 +527,9 @@ def main() -> int:
         sessions = [args.session]
     else:
         sessions = []
-        with (WORKSPACE / "protocol/splits/default/splits.csv").open(
-                encoding="utf-8-sig", newline="") as handle:
+        split_path = (Path(args.split_csv) if args.split_csv else
+                      WORKSPACE / "protocol/splits/default/splits.csv")
+        with split_path.open(encoding="utf-8-sig", newline="") as handle:
             for row in csv.DictReader(handle):
                 columns = ("train", "val", "test") if args.split == "all" else (args.split,)
                 for column in columns:
@@ -468,19 +541,26 @@ def main() -> int:
         if session not in manifest:
             failures.append((session, "not in manifest"))
             continue
+        if kind == "scene" and not (SCENE_MANIFEST_DIR / ("%s.json" % session)).is_file():
+            print(f"SKIP {args.model} {session}: no scene manifest")
+            continue
         row = manifest[session]
         date, subject = session_parts(row)
         unit = unit_entry(unit_manifest, date, session, args.cam)
         tmp = Path(args.work_dir) if args.work_dir else (
             LOCAL_ROOT if kind == "none" else DEGRADED_ROOT / degrade_tag(kind, level))
         tmp.mkdir(parents=True, exist_ok=True)
+        if args.skip_existing and native_result(args.model, date, session,
+                                                args.cam, tmp).is_file():
+            print(f"SKIP {args.model} {session}: native result exists")
+            continue
         try:
             if args.model == "wham":
                 result = generate_wham(row, args.cam, unit, tmp, args.gpu, args.degrade)
             elif args.model == "sam3db":
-                result = generate_sam3db(row, args.cam, unit, tmp, args.gpu)
+                result = generate_sam3db(row, args.cam, unit, tmp, args.gpu, args.degrade)
             elif args.model == "gvhmr":
-                result = generate_gvhmr(row, args.cam, unit, tmp, args.gpu)
+                result = generate_gvhmr(row, args.cam, unit, tmp, args.gpu, args.degrade)
             else:
                 raise SystemExit(f"unknown model: {args.model}")
             print(f"wrote {result}")

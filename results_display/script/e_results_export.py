@@ -117,7 +117,7 @@ def write_csv(path: Path, header: list[str], rows: list[list]) -> None:
 def display_name(cell_id: str) -> str:
     """cell id → 展示模型名：V7_Cv5_s1_evalocc010 → V7_Cv5。"""
     for suffix in ("_s1", "_s2", "_s3", "_statistics_evalocc", "_evalbest_occ",
-                   "_evalocc", "_evalexp", "_evalgap", "_evalbest", "_statistics",
+                   "_evalocc", "_evalgap", "_evalbest", "_statistics",
                    "_sel_evalocc", "_sel"):
         if suffix in cell_id:
             return cell_id.split(suffix)[0]
@@ -205,7 +205,7 @@ def seeded_metrics(model_id: str, split=None) -> dict | None:
     # _sN 插在子后缀前（与 conf 层 seed_models 一致）：
     # V7_Cv5_evalocc010 → V7_Cv5_s2_evalocc010
     sub_pos = None
-    for sub in ("_evalocc", "_evalexp", "_evalgap", "_evalbest", "_precheck", "_sel",
+    for sub in ("_evalocc", "_evalgap", "_evalbest", "_precheck", "_sel",
                 "_statistics"):
         pos = key.rfind(sub)
         if pos != -1 and pos > 0:
@@ -586,12 +586,10 @@ def export_e5(models: list[str], ckpt: str) -> None:
     export_e5_visual_failure(models)
 
 
-# E5 视觉退化三轴扩展（2026-11-04，z_note/E5_视觉退化扩展说明.md §3）：
+# E5 视觉退化扩展（2026-11-04，z_note/E5_视觉退化扩展说明.md §3）：
 # 同一 ckpt、固定 VT 输入，只替换视觉特征缓存；单元格 = Δ(VT−V)，负值 =
-# 触觉有帮助（与 E6 的 ΔE 同号）。空间轴 = 现成 occ 缓存；光度轴 = 曝光
-# 增益；时间轴 = 连续断流（冻结）。总表只列 occ 10/20/40/60/80，其余 occ
-# 五档留给已有 Full_Table1_E5_Occlusion.csv 补充材料。
-E5_EXP_GAINS = ("0005", "0020", "0050", "0200", "0400", "0800")
+# 触觉有帮助（与 E6 的 ΔE 同号）。空间轴 = 现成 occ 缓存；时间轴 =
+# 连续断流（冻结）。光度/曝光轴 2026-11-08 用户裁定整组删除。
 E5_GAP_RHOS = ("010", "020", "040", "060", "080")
 E5_VISUAL_MAIN_METRICS = ["PA-MPJPE", "MPJPE", "GlobalMPJPE",
                           "FootSliding", "GroundPen"]
@@ -603,11 +601,6 @@ def _e5_visual_conditions(model: str) -> list[tuple[str, str, str, str]]:
     for occ in ("010", "020", "040", "060", "080"):
         conditions.append(("空间", "occ" + occ, "下肢截断 %d%%" % int(occ),
                            "%s_evalocc%s" % (model, occ)))
-    for gain in E5_EXP_GAINS:
-        value = int(gain) / 100.0
-        label = "%s G=%g" % ("欠曝" if value < 1.0 else "过曝", value)
-        conditions.append(("光度", "exp_g" + gain, label,
-                           "%s_evalexp%s" % (model, gain)))
     for rho in E5_GAP_RHOS:
         conditions.append(("时间", "gap_r" + rho, "连续断流 ρ=%d%%" % int(rho),
                            "%s_evalgap%s" % (model, rho)))
@@ -743,23 +736,22 @@ def _e5_pure_visual_figure(model: str, metrics: list[str],
     基线只有五主指标与 occ 10/20/40/60/80，故曲线按各轴**实际落地的档位**
     画，缺的点留空（不插值）。判读只读符号与排序。
 
-    只画**有数据的轴**：act8020 口径只有遮挡轴的 eval 格，光度/断流轴整行无点，
-    留着就是两行空白子图。"""
+    只画**有数据的轴**：act8020 口径只有遮挡轴的 eval 格，断流轴整行无点，
+    留着就是空白子图。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     baseline = E5_PURE_VISUAL_BASELINES[0]
-    # 三轴 ×（档位, x 值, x 轴标题）：x 用物理量，光度轴按 log2(G) 等距排布。
+    # 两轴 ×（档位, x 值, x 轴标题）：x 用物理量。
     axes_spec = [
         ("Occlusion (%)", [("occ%s" % o, float(int(o))) for o in ("010", "020", "040", "060", "080")], False),
-        ("Exposure gain G", [("exp_g%s" % g, int(g) / 100.0) for g in E5_EXP_GAINS], True),
         ("Dropout rho (%)", [("gap_r%s" % r, float(int(r))) for r in E5_GAP_RHOS], False),
     ]
     names = ("V", "VT", baseline)
 
     def xy(points: list, clean_x: float, name: str, col: int) -> tuple[list, list]:
-        # 干净档在每轴都作为参照：遮挡/断流的 0 点，光度的 G=1。
+        # 干净档在每轴都作为参照：遮挡/断流的 0 点。
         xs, ys = [], []
         for tag, xv in [("occ000", clean_x)] + points:
             value = (series.get(tag) or {}).get(name)

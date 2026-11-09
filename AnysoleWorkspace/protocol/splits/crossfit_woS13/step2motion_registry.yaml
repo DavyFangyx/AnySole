@@ -1,0 +1,112 @@
+# 四折 LSO woS13 的 Step2Motion 注册表（2026-11-08）
+#
+# Step2Motion 是逐折模型（每折一套 ckpt），与零样本视觉基线不同：同一会话
+# 在不同折的预测不同。预测根按交付包的命名约定
+#   results/baselines/Step2Motion/predictions/gait_model_smpl24_<fold>/eval_motion
+# 布置；评估时用 --model Step2Motion_<fold> --split <fold>，输出落到
+#   results/baselines/Step2Motion/metrics/<fold>_comparison.json
+# 供 results_display/script/e2_crossfit_export.py --with-baselines 读取。
+#
+# capabilities 与 results_display/models_modes.yaml 的 T2M/Step2Motion 条目一致：
+# translation head 从原点积分、无世界锚（漂移点 o），root_translation=false
+# ⇒ global_mpjpe / ground_pen / root_ate 由能力门控标 —；W-MPJPE 内部对齐保留。
+T2M:
+  - name: step2motion_fs5s6s11
+    family: baseline
+    display_name: Step2Motion
+    protocol: smpl24
+    prediction_root: results://baselines/Step2Motion/predictions/gait_model_smpl24_fS5S6S11/eval_motion
+    pattern: "{session_id}.npz"
+    color: "#5b7ac2"
+    capabilities:
+      joint_positions: true
+      joint_rotations: false
+      direct_joint_rotations: false
+      root_translation: false
+      root_rotation: true
+      surface: false
+      predicted_surface: false
+      predicted_shape: false
+      pressure: false
+      pressure_prediction: false
+      contact: false
+      contact_prediction: false
+    sources:
+      joint_positions: model_prediction
+      root_translation: model_prediction
+      root_rotation: model_prediction
+
+  - name: step2motion_fs5s11s12
+    family: baseline
+    display_name: Step2Motion
+    protocol: smpl24
+    prediction_root: results://baselines/Step2Motion/predictions/gait_model_smpl24_fS5S11S12/eval_motion
+    pattern: "{session_id}.npz"
+    color: "#5b7ac2"
+    capabilities:
+      joint_positions: true
+      joint_rotations: false
+      direct_joint_rotations: false
+      root_translation: false
+      root_rotation: true
+      surface: false
+      predicted_surface: false
+      predicted_shape: false
+      pressure: false
+      pressure_prediction: false
+      contact: false
+      contact_prediction: false
+    sources:
+      joint_positions: model_prediction
+      root_translation: model_prediction
+      root_rotation: model_prediction
+
+  - name: step2motion_fs6s7
+    family: baseline
+    display_name: Step2Motion
+    protocol: smpl24
+    prediction_root: results://baselines/Step2Motion/predictions/gait_model_smpl24_fS6S7/eval_motion
+    pattern: "{session_id}.npz"
+    color: "#5b7ac2"
+    capabilities:
+      joint_positions: true
+      joint_rotations: false
+      direct_joint_rotations: false
+      root_translation: false
+      root_rotation: true
+      surface: false
+      predicted_surface: false
+      predicted_shape: false
+      pressure: false
+      pressure_prediction: false
+      contact: false
+      contact_prediction: false
+    sources:
+      joint_positions: model_prediction
+      root_translation: model_prediction
+      root_rotation: model_prediction
+
+  - name: step2motion_fs5s6s8
+    family: baseline
+    display_name: Step2Motion
+    protocol: smpl24
+    prediction_root: results://baselines/Step2Motion/predictions/gait_model_smpl24_fS5S6S8/eval_motion
+    pattern: "{session_id}.npz"
+    color: "#5b7ac2"
+    capabilities:
+      joint_positions: true
+      joint_rotations: false
+      direct_joint_rotations: false
+      root_translation: false
+      root_rotation: true
+      surface: false
+      predicted_surface: false
+      predicted_shape: false
+      pressure: false
+      pressure_prediction: false
+      contact: false
+      contact_prediction: false
+    sources:
+      joint_positions: model_prediction
+      root_translation: model_prediction
+      root_rotation: model_prediction

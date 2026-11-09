@@ -41,7 +41,7 @@ Main_Fig1_E6_Phase_walk.png
 | `E6_ContactPhaseAnalysis` | 接触阶段与门控效果（逐帧相位分析） |
 | `E7_DynamicModalityInputs` | 动态输入配置下的运动重建（五阶段切换） |
 | `E8_ComplementarityProbe` | 模态互补信息探针（ridge 探针；主判据 = 踝足垂直分量互补，全部产物进 supplementary/） |
-| `E9_TrajectorySceneOcc` | 场景遮挡轨迹可视化（单视角 cam3）：S2M / Anysolo-TI / VT / Hybrid / Hybrid+VTα；遮挡内 ATE + teaser；产物在 `Etest_crossfit/` |
+| `E9_TrajectorySceneOcc` | 场景遮挡轨迹可视化（单视角 cam3）：**V7_Cv5 / V8_Cv5 双基座**；S2M / Anysolo-TI / VT / Hybrid / Hybrid+VTα；遮挡内 ATE + teaser。V7 → `Etest_crossfit/E9_TrajectorySceneOcc/V7_Cv5`；V8 → `Etest_crossfit_v8/E9_TrajectorySceneOcc/V8_Cv5`；四折 crossfit 拆到各自根 `crossfit/`，combined 在 `Etest_crossfit/E9_TrajectorySceneOcc/crossbase/` |
 
 ## 运行指令（display 层：统一参数约定；不进 queue、不经过 scheduler）
 
@@ -60,7 +60,8 @@ Cv 家族暂只 last）。表格数字来自 cells（评估由 conf 管线完成
 | E6 | `python anysole_tta/e6_phase_analysis.py --models V7_Cv4_s1,V7_Cv5_s1,V7_Cv7_s1 --ckpt last` | 模型固定三个；`--ckpt` 目前仅 last |
 | E7 | `python anysole_tta/e7_driver.py`（缺省 = canonical test 全部动作组） | 模型固定（V7_Cv5；Vi/ViT 直接读 E3 ③/④ 产物树，缺失空窗不阻断） |
 | E8 | （待做） | `--model` 可选（读冻结 ckpt 中间量 m_v/m_t + ridge 探针） |
-| E9 | `python results_display/script/e9_trajectory_export.py` | 固定口径（S13→fS5S11S12、S14→fS6S7 的 `_last` 模型；可见块帧标定 40 帧；脚本内 device=cuda:3）；产物 → `Etest_crossfit/E9_TrajectorySceneOcc/` |
+| E9 | V7：`E9_BASE=V7_Cv5 E9_VT_DIR=.../scene7/eval_motion E9_OUT=.../Etest_crossfit/E9_TrajectorySceneOcc/V7_Cv5 python results_display/script/e9_trajectory_export.py`；V8：`E9_BASE=V8_Cv5 E9_VT_DIR=.../v8_scene7/scene7_mixed E9_OUT=.../Etest_crossfit_v8/E9_TrajectorySceneOcc/V8_Cv5 python ...` | 固定口径（S13→fS5S11S12、S14→fS6S7 的 `_last` 模型；可见块帧标定 40 帧；脚本内 device=cuda:3）；V7/V8 各在自己的根目录 |
+| E9-crossfit | `python results_display/script/e9_crossfit_export.py` → `python results_display/script/e9_crossfit_split.py` | 四折 LSO（fS5S6S11/fS5S11S12/fS6S7/fS5S6S8）scene-occ 全量；V7/V8 scene + S2M per-fold + Hybrid `_last`；export 写 combined，split 拆到 `Etest_crossfit|Etest_crossfit_v8/E9_TrajectorySceneOcc/crossfit/`，combined 在 `Etest_crossfit/E9_TrajectorySceneOcc/crossbase/` |
 
 ## 数据来源与刷新
 

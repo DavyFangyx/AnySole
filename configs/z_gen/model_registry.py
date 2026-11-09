@@ -2008,21 +2008,13 @@ for _occ in OCC_LEVELS_10:
         "train": False, "which": "last", "eval_splits": ["val"],
         "config": "anysole/configs/v1_act8020_occ%s.yaml" % _occ}
 
-# E5 视觉退化三轴扩展（2026-11-04，z_note/E5_视觉退化扩展说明.md §3）：
-# 曝光 6 档 + 连续断流 5 档，eval-only（train False、which last）。同一
-# ckpt（V7_Cv5 s1）固定 VT 输入，只替换视觉特征缓存；yaml 与
-# v1_cam3_occ080.yaml 仅差 cache_root 一行。首轮只发 s1。
+# E5 视觉退化扩展（2026-11-04，z_note/E5_视觉退化扩展说明.md §3）：
+# 连续断流 5 档，eval-only（train False、which last）。同一 ckpt
+# （V7_Cv5 s1）固定 VT 输入，只替换视觉特征缓存。首轮只发 s1。
+# 2026-11-08 用户裁定：光度/曝光轴整组删除，不再注册。
 # 注意：本块必须留在 _drop_all_but_current() 之后（白名单不登记新格）。
-_E5_EXP_SUFFIXES = ("0005", "0020", "0050", "0200", "0400", "0800")
 _E5_GAP_SUFFIXES = ("010", "020", "040", "060", "080")
 _V7_E5_SPEC = MODELS["V7_Cv5_s1"]
-for _suffix in _E5_EXP_SUFFIXES:
-    MODELS["V7_Cv5_s1_evalexp%s" % _suffix] = {
-        **_V7_E5_SPEC,
-        "label": _V7_E5_SPEC["label"] + "-evalexp%s" % _suffix,
-        "train": False, "which": "last",
-        "eval_splits": ["val", "test"],
-        "config": "anysole/configs/v1_cam3_exp_g%s.yaml" % _suffix}
 for _suffix in _E5_GAP_SUFFIXES:
     MODELS["V7_Cv5_s1_evalgap%s" % _suffix] = {
         **_V7_E5_SPEC,
@@ -2273,3 +2265,58 @@ for _fam in ("V8_Cv5VG", "V8_Cv5ST", "V8_Cv5VGST"):
                 "eval_splits": ["test"],
                 "config": "anysole/configs/v1_occ%s_fold_%s.yaml"
                           % (_occ, _fold[1:])}
+
+# E5 场景遮挡补测格（2026-11-08 用户裁定）：7 个模型 × 4 折 ×（scene, clean）。
+# 排除：V7_Cv5SD2 / V7_Cv5SD2RT / V7_Cv5_tphys / V8_Cv5RM / V8_Cv5PO；
+# V7_Cv5 已在 2026-11-07 单独跑过正式 8 格，不在此表。
+# V7_Cv7 的 fS6S7 折沿用 S13-out 基座 cell（fS6S7S13），config 用 woS13 的
+# v1_sceneocc_fS6S7.yaml；V8 各折直接用 v1_sceneocc_<fold>.yaml。
+_E5_SCENE_MODELS = {
+    "V7_Cv7": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7S13", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv5": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv4": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv2": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv6": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv7": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv8": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+}
+for _fam, _foldmap in _E5_SCENE_MODELS.items():
+    for _fold, _base_fold in _foldmap.items():
+        _cell = "%s_%s_s1" % (_fam, _base_fold)
+        for _tag, _cfg in (
+            ("evalscene", "anysole/configs/v1_sceneocc_%s.yaml" % _fold),
+            ("evalsceneclean", "anysole/configs/v1_sceneocc_clean_%s.yaml" % _fold),
+        ):
+            MODELS["%s_%s" % (_cell, _tag)] = {
+                **MODELS[_cell],
+                "label": "%s-%s" % (MODELS[_cell]["label"], _tag),
+                "train": False, "which": "last",
+                "eval_splits": ["test"],
+                "config": _cfg,
+                "dump_detail": True,
+            }
+
+# V8 的 E5 时间退化（连续断流 / gap）评估格（2026-11-08 用户补充）：
+# 5 个正文模型 × 4 折 × ρ={10,20,40,60,80}%，eval-only、只评 test。
+# 缓存 = cam3_gap_r<rho>（已为 V8 四折 test 的 98 个唯一会话补齐）；
+# yaml = v1_gap_r<rho>_fold_<fold>（与 v1_fold_<fold>.yaml 仅差 cache_root）。
+_V8_GAP_FAMILIES = ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6", "V8_Cv7")
+_V8_GAP_LEVELS = ("010", "020", "040", "060", "080")
+for _fam in _V8_GAP_FAMILIES:
+    for _fold, _fconfig in _V8_FOLD_CONFIGS:
+        _cell = "%s_%s_s1" % (_fam, _fold)
+        for _rho in _V8_GAP_LEVELS:
+            MODELS["%s_evalgap%s" % (_cell, _rho)] = {
+                **MODELS[_cell],
+                "label": "%s-evalgap%s" % (MODELS[_cell]["label"], _rho),
+                "train": False, "which": "last",
+                "eval_splits": ["test"],
+                "config": "anysole/configs/v1_gap_r%s_fold_%s.yaml"
+                          % (_rho, _fold[1:])}

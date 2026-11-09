@@ -354,7 +354,7 @@ def concat_models(models: list[str], method: str) -> list[str]:
         target = model + suffix
         if target not in MODELS:
             # 子后缀（_stat/_evalocc 等）前插入版本后缀
-            for sub in ("_statistics", "_evalocc", "_evalexp", "_evalgap", "_evalbest",
+            for sub in ("_statistics", "_evalocc", "_evalgap", "_evalbest",
                         "_precheck", "_sel", "_drop", "_vonly", "_tonly", "_nodrop", "_smpl24"):
                 if sub in model:
                     target = model.replace(sub, suffix + sub, 1)
@@ -409,7 +409,7 @@ def seed_models(models: list[str], seeds: list[int]) -> list[str]:
             continue
         # 子后缀位置（_sN 插在子后缀前：V7_Cv5_evalocc010 → V7_Cv5_s2_evalocc010）
         sub_pos = None
-        for sub in ("_evalocc", "_evalexp", "_evalgap", "_evalbest", "_precheck", "_sel"):
+        for sub in ("_evalocc", "_evalgap", "_evalbest", "_precheck", "_sel"):
             pos = model.rfind(sub)
             if pos != -1 and pos > 0:
                 sub_pos = pos
@@ -759,15 +759,14 @@ EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
     "%s_fS6S7S13_s1_s13out_evalocc%s" % (_fam, _o)
     for _fam in _E5_FOLD_FAMILIES
     for _o in ("020", "040", "060", "080", "100")]
-# E5 视觉退化三轴扩展（2026-11-04，z_note/E5_视觉退化扩展说明.md）：曝光 6 档
-# （G=0.05/0.2/0.5/2/4/8）+ 连续断流 5 档（ρ=10/20/40/60/80%），eval-only，
-# 首轮只发 s1（cell = V7_Cv5_s1_evalexp*/evalgap*；注册见 model_registry.py 末尾）。
-_E5_VISUAL_IDS = (
-    ["V7_Cv5_s1_evalexp" + _g for _g in ("0005", "0020", "0050", "0200", "0400", "0800")]
-    + ["V7_Cv5_s1_evalgap" + _r for _r in ("010", "020", "040", "060", "080")])
+# E5 视觉退化扩展（2026-11-04，z_note/E5_视觉退化扩展说明.md）：
+# 连续断流 5 档（ρ=10/20/40/60/80%）仍走默认实验；光度/曝光轴按
+# 2026-11-08 用户裁定整组删除，不再注册、不再发射。
+_E5_GAP_IDS = ["V7_Cv5_s1_evalgap" + _r
+               for _r in ("010", "020", "040", "060", "080")]
 EXPERIMENTS["v7_eval_visual"] = {
     "KIND": "model_suite",
-    "MODEL_IDS": _E5_VISUAL_IDS,
+    "MODEL_IDS": _E5_GAP_IDS,
     "REQUIRES": [],
 }
 
@@ -816,6 +815,18 @@ EXPERIMENTS["v8_eval_occ_cv7"] = {
     "MODEL_IDS": ["V8_Cv7_%s_s1_evalocc%s" % (fold, o)
                   for fold in _V8_EVAL_FOLDS
                   for o in ("020", "040", "060", "080", "100")],
+    "REQUIRES": [],
+}
+
+# V8 E5 时间退化（连续断流 / gap，2026-11-08 用户补充）：5 个正文模型 ×
+# 4 折 × 5 档，eval-only、只评 test；缓存与 yaml 见 model_registry 末尾。
+_V8_GAP_FAMILIES = ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6", "V8_Cv7")
+EXPERIMENTS["v8_eval_gap"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1_evalgap%s" % (f, fold, rho)
+                  for f in _V8_GAP_FAMILIES
+                  for fold in _V8_EVAL_FOLDS
+                  for rho in ("010", "020", "040", "060", "080")],
     "REQUIRES": [],
 }
 
@@ -891,5 +902,36 @@ EXPERIMENTS["v8_gate2_vgst_eval_occ"] = {
     "MODEL_IDS": ["%s_%s_s1_evalocc%s" % (f, fold, o)
                   for f in _V8_GATE2_VGST
                   for fold in _V8_GATE2_FOLDS for o in _V8_GATE2_OCC],
+    "REQUIRES": [],
+}
+
+# E5 场景遮挡补测（2026-11-08 用户裁定）：7 模型 × 4 折 ×（scene, clean），
+# eval-only、只评 test；cell 注册见 model_registry.py 末尾。V7_Cv7 的 fS6S7
+# 折用 S13-out 基座 cell（fS6S7S13），其余四折名与 config 一致。
+_E5_SCENE_SUPP_MODELS = {
+    "V7_Cv7": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7S13", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv5": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv4": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv2": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv6": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv7": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+    "V8_Cv8": {"fS5S6S11": "fS5S6S11", "fS5S11S12": "fS5S11S12",
+               "fS6S7": "fS6S7", "fS5S6S8": "fS5S6S8"},
+}
+_E5_SCENE_SUPP_IDS = [
+    "%s_%s_s1_%s" % (_fam, _base_fold, _tag)
+    for _fam, _foldmap in _E5_SCENE_SUPP_MODELS.items()
+    for _fold, _base_fold in _foldmap.items()
+    for _tag in ("evalscene", "evalsceneclean")
+]
+EXPERIMENTS["e5_sceneocc_supp"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": _E5_SCENE_SUPP_IDS,
     "REQUIRES": [],
 }

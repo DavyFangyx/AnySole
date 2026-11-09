@@ -67,7 +67,7 @@ INK = "#0b0b0b"
 MUTED = "#52514e"
 COLORS = {"Gate": "#2a78d6", "V8_Cv5": "#eb6834", "V8_Cv7": "#52514e",
           "V8_Cv4": "#1baf7a", "V8_Cv2": "#eda100", "V8_Cv6": "#7a5af8"}
-LABELS = {"Gate": "V gate (T gate + V gate)",
+LABELS = {"Gate": "V gate (post-hoc diagnostic)",
           "V8_Cv5": "V8 / Cv5SD2 (T gate, no V gate)",
           "V8_Cv7": "V8 ablation: no gate",
           "V8_Cv4": "V8 ablation: single gate",
@@ -102,7 +102,28 @@ def gate_from_s(s, tau, width):
     return np.clip((s - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
 
 
+FPS = 40.0
+TW = 20
+
+
+def unanchored_root_ate(pred: np.ndarray, gt: np.ndarray, tw: int = TW) -> float:
+    """与 ``eval_protocol._session_metrics`` 的 ``root_ate_unanchored_mm`` 同式：
+    逐窗减 GT 上一帧锚后链式拼接，从 GT 起点出发。"""
+    gt_anchors = gt[:, 0]
+    total = pred.shape[0]
+    n_windows = (total + tw - 1) // tw
+    unanchored = np.zeros_like(pred[:, 0])
+    for w in range(n_windows):
+        start, stop = w * tw, min((w + 1) * tw, total)
+        anchor = gt_anchors[max(start - 1, 0)]
+        base = unanchored[start - 1] if start > 0 else gt_anchors[0]
+        unanchored[start:stop] = base + (pred[start:stop, 0] - anchor)
+    return float(np.linalg.norm(unanchored - gt_anchors, axis=-1).mean() * 1000.0)
+
+
 def session_metrics(pred, gt, times, floor_y):
+    # times = 均匀 40Hz（与 eval_protocol 的 np.arange(T)/FPS 一致）；
+    # FootSliding 依赖时间轴，不能用 source_frame_times_s（含缺帧/抖动）。
     pa = float(pa_mpjpe(pred, gt).mean())
     pa_p, _ = pelvis_align(pred)
     gt_p, _ = pelvis_align(gt)
@@ -112,7 +133,7 @@ def session_metrics(pred, gt, times, floor_y):
     fs, _ = foot_sliding_joints(pred[:, ANKLE_FOOT_JOINTS],
                                 gt[:, ANKLE_FOOT_JOINTS], times)
     gp = float(ground_penetration(pred, floor_y)["ground_pen_mean_mm"])
-    tr = float(root_trajectory_metrics(pred[:, 0, :], gt[:, 0, :])["root_ate_mm"])
+    tr = unanchored_root_ate(pred, gt)
     return {"PA-MPJPE": pa, "ankle_foot_mpjpe": ankle, "GlobalMPJPE": glob,
             "FootSliding": float(fs), "GroundPen": gp, "traj_ATE": tr}
 
@@ -131,6 +152,23 @@ def cell_values(fam: str, fold: str, level: str, cond: str) -> dict:
     p = cell_dir(fam, fold, level) / "metrics" / "test.json"
     d = json.loads(p.read_text(encoding="utf-8"))["metrics"][cond]
     return {m: float(d[k]) for m, k in CELL_KEYS.items()}
+
+
+def session_weights(fam: str, fold: str, level: str) -> dict[str, float]:
+    """session_id → scored_frames（cell 的逐帧池化权重）。"""
+    p = cell_dir(fam, fold, level) / "metrics" / "test.json"
+    d = json.loads(p.read_text(encoding="utf-8"))["evaluation_contract"]["sessions"]
+    return {str(e["session_id"]): float(e.get("scored_frames") or 0.0) for e in d}
+
+
+def weighted_mean(values: list[float], weights: list[float]) -> float:
+    values = np.asarray(values, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    if values.size == 0:
+        return float("nan")
+    if weights.size != values.size or float(weights.sum()) <= 0:
+        return float(values.mean())
+    return float(np.average(values, weights=weights))
 
 
 def collect_fold_level(fold: str, level: str) -> dict:
@@ -161,6 +199,11 @@ def collect_fold_level(fold: str, level: str) -> dict:
             out[group][metric].append(vals[metric])
 
     # ---- Gate：eval_motion T2M/VT2M 按 session 融合 ----------------------
+    # 聚合必须与 cell 同权：cell 的逐帧池化 = 按 scored_frames 加权，
+    # 不是按 session 等权（等权会把 fS5S6S11 的 PA 从 44.94 抬到 50.25）。
+    weights = session_weights("V8_Cv5", fold, level)
+    gate_vals = {m: [] for m in METRICS}
+    gate_w = []
     sessions = [s for s in np.unique(ses[lev == int(level)])]
     for session in sessions:
         m = (ses == session) & (lev == int(level))
@@ -177,7 +220,7 @@ def collect_fold_level(fold: str, level: str) -> dict:
         T_m = load_motion("V8_Cv5", fold, level, str(session), "T2M")
         if T_m is None:
             continue
-        indices, gt, times, gs = [], [], [], []
+        indices, gt, gs = [], [], []
         for wi, start in enumerate(starts):
             for j in range(gt_win.shape[1]):
                 idx = np.where(frames == (start + j))[0]
@@ -185,18 +228,26 @@ def collect_fold_level(fold: str, level: str) -> dict:
                     continue
                 indices.append(int(idx[0]))
                 gt.append(gt_win[wi, j])
-                times.append(T_m["time"][idx[0]])
                 gs.append(g_win[wi])
         if not indices:
             continue
         indices = np.asarray(indices)
-        gt = np.asarray(gt); times = np.asarray(times); gs = np.asarray(gs)
+        gt = np.asarray(gt); gs = np.asarray(gs)
         floor_y = float(estimate_floor_y(gt))
         pred_t = T_m["joint"][indices]
         pred_vt = P_vt[indices]
         gate_pred = (1.0 - gs)[:, None, None] * pred_t + gs[:, None, None] * pred_vt
-        for metric, v in session_metrics(gate_pred, gt, times, floor_y).items():
-            out["Gate"][metric].append(v)
+        times = np.arange(len(gate_pred), dtype=np.float64) / FPS
+        sm = session_metrics(gate_pred, gt, times, floor_y)
+        w = float(weights.get(str(session), 0.0))
+        if w <= 0:
+            # 该会话在 cell 里没有 scored frame；cell 也不计它。
+            continue
+        for metric in METRICS:
+            gate_vals[metric].append(sm[metric])
+        gate_w.append(w)
+    for metric in METRICS:
+        out["Gate"][metric].append(weighted_mean(gate_vals[metric], gate_w))
     return out
 
 
@@ -369,9 +420,33 @@ def export_tables(data: dict) -> None:
               ["fold", "level", "metric", "group", "mean", "std", "n"], rows)
 
 
+def assert_occ000(data: dict) -> None:
+    """occ000 时门恒为 1，Gate 必须逐位等于 V8_Cv5 的 VT 行。
+
+    不写复杂统计：只核对每折、每个指标，PA 容差 0.05mm；其余只打印残差，
+    便于下一轮决定指标口径。"""
+    print("[occ000 check] Gate vs V8_Cv5 VT")
+    max_pa = 0.0
+    for fold in FOLDS:
+        gate = data[fold]["000"]["Gate"]
+        vt = data[fold]["000"]["V8_Cv5"]
+        parts = []
+        for metric in METRICS:
+            gv, vv = float(gate[metric][0]), float(vt[metric][0])
+            delta = gv - vv
+            parts.append("%s %+.3f" % (metric, delta))
+            if metric == "PA-MPJPE":
+                max_pa = max(max_pa, abs(delta))
+        print("  %s: %s" % (fold, " | ".join(parts)))
+    if max_pa > 0.05:
+        raise AssertionError(
+            "occ000 Gate != V8_Cv5 VT: max |ΔPA|=%.3f > 0.05" % max_pa)
+
+
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     data = collect()
+    assert_occ000(data)
     export_tables(data)
     _fig_absolute(data)
     _fig_relative(data)

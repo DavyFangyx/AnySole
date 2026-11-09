@@ -1,4 +1,3 @@
-# v1_cam3 的遮挡覆盖版（V-degradation 遮挡组，2026-10-13，由 v1_cam3.yaml 单键派生）
 # AnySole V1 配置（E3 基础，2026-09-16 起）
 #
 # 基础 = E3_nocontact 训练口径：
@@ -51,8 +50,8 @@ traj_deltas: [2, 4, 8, 19]
 config_probs: [0.50, 0.25, 0.25]
 cam_id: 3
 seq_root: shared://facts/sessions/cam3
-split_csv: protocol://splits/default/splits.csv
-cache_root: model-input://AnySole/adapter_v1/visual/hrnet/cam3_exp_g0400
+split_csv: protocol://splits/default/splits_scene7_test.csv
+cache_root: model-input://AnySole/adapter_v1/visual/hrnet/cam3_occ_scene
 use_insole_drift: false
 modal: anysolev1
 contact_method: f6_soft

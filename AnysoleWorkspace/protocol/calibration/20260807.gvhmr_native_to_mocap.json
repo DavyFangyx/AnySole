@@ -1,0 +1,23 @@
+{
+  "date": "20260807",
+  "model": "gvhmr",
+  "b": [
+    -1.2644580233146492,
+    -1.5719905134609162,
+    0.7187198105741387
+  ],
+  "residual_rmse_mm": 245.8048660315265,
+  "n_sessions": 8,
+  "sessions": [
+    "S8011",
+    "S8012",
+    "S8013",
+    "S8021",
+    "S8023",
+    "S8032",
+    "S8062",
+    "S8063"
+  ],
+  "fit_source": "exported local_gen predictions (pre-correction) vs smpl GT pelvis, pooled least squares",
+  "note": "3-parameter global translation; per-date; same mechanism as MMVP drift points m/n (04_E §8.4)"
+}
