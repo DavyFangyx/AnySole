@@ -55,23 +55,23 @@ CONDS = (("V2M", "U@V"), ("T2M", "U@T"), ("VT2M", "U@VT"))
 # （Cv8）不进主表；需要时用 --models 显式指定。
 DEFAULT_MODELS = ("V8_Cv5", "V8_Cv7", "V8_Cv4", "V8_Cv2", "V8_Cv6")
 
-# 展示指标（十指标，顺序按论文表：物理 / 根 / 姿态 / 全局 / 轨迹）
+# 展示指标（十指标，顺序按用户 2026-11-08 裁定：姿态 → 轨迹/全局 → 物理 → 时序）
 METRICS = [
-    ("GroundPen", "GroundPen（GT Anchored）"),
-    ("FootSliding", "FootSliding（GT Anchored）"),
-    ("RootOrientationDrift", "RootOrientationDrift"),
     ("PA-MPJPE", "PA-MPJPE"),
     ("MPJPE", "MPJPE"),
     ("MPJRE", "MPJRE"),
-    ("W-MPJPE100", "W-MPJPE100"),          # 无锚，与基线同源
     ("GlobalMPJPE", "GlobalMPJPE"),        # 无锚，与基线同源
+    ("W-MPJPE100", "W-MPJPE100"),          # 无锚，与基线同源
     # 论文口径：traj_ATE = RootAbs（自锚逐帧绝对根，RMS），不是 cell 的
     # 链式无锚 traj_ATE（root_ate_unanchored_mm）。基线 root_ate_mm 同义。
     ("traj_ATE", "RootAbs"),
+    ("RootOrientationDrift", "RootOrientationDrift"),
+    ("GroundPen", "GroundPen（GT Anchored）"),
+    ("FootSliding", "FootSliding（GT Anchored）"),
     ("Jitter_pred", "Jitter_pred"),
 ]
-MAIN_METRICS = ("GroundPen", "FootSliding", "RootOrientationDrift",
-                "PA-MPJPE", "MPJPE", "GlobalMPJPE", "traj_ATE")
+MAIN_METRICS = ("PA-MPJPE", "MPJPE", "GlobalMPJPE", "traj_ATE",
+                "RootOrientationDrift", "GroundPen", "FootSliding")
 
 # 基线 summary key → 本表指标
 BASELINE_KEYS = {
@@ -196,7 +196,13 @@ def baseline_rows(min_folds: int = 4, min_sessions: int = 20) -> list[list]:
     rows = []
     for display, folder in BASELINE_FILES.items():
         if display in CANONICAL_SINGLE_FOLD:
-            continue
+            # 2026-11-09: MotionPRO now has a four-fold run; keep the canonical
+            # single-fold row only as a fallback until all folds are present.
+            available = sum(
+                (BASE_METRICS / folder / "metrics" / ("%s_comparison.json" % fold)).is_file()
+                for fold in FOLDS)
+            if available < min_folds:
+                continue
         per_fold = {name: [] for name, _ in METRICS}
         n_folds = 0
         last_mode = ""
@@ -233,6 +239,9 @@ def canonical_baseline_rows() -> list[list]:
     """Canonical 单折基线行（仅参照，显式标注，不参与四折 mean±std）。"""
     rows = []
     for display, folder in CANONICAL_SINGLE_FOLD.items():
+        if all((BASE_METRICS / folder / "metrics" / ("%s_comparison.json" % fold)).is_file()
+               for fold in FOLDS):
+            continue
         path = BASE_METRICS / folder / "metrics" / "test_comparison.json"
         if not path.is_file():
             print("[skip] canonical baseline %s: 无 %s" % (display, path))

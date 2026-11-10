@@ -287,7 +287,9 @@ def export_pressure(row: dict, args: argparse.Namespace, output: Path) -> None:
 def export_vp_mocap(row: dict, args: argparse.Namespace, output: Path) -> None:
     session = row["session_id"]
     date, subject = session_parts(row)
-    native_path = WORKSPACE / "work" / "VP-MoCap" / "v1" / "pose_optimization" / date / subject / session / "opt_result.pth"
+    native_root = (Path(args.native_root) if getattr(args, "native_root", None)
+                   else WORKSPACE / "work" / "VP-MoCap" / "v1" / "pose_optimization")
+    native_path = native_root / date / subject / session / "opt_result.pth"
     if not native_path.is_file():
         raise FileNotFoundError(f"PoseTransOpt output missing: {native_path}")
     import torch
@@ -445,6 +447,8 @@ def main() -> None:
                         help="camera manifest to export (cam3 = main manifest)")
     parser.add_argument("--variant", default="local_gen",
                         help="prediction variant subdir (visual baselines only)")
+    parser.add_argument("--native-root", default="",
+                        help="override native output root (vp_mocap per-fold trees)")
     parser.add_argument("--unit-manifest", default="",
                         help="override path to the package per-unit manifest.jsonl (visual baselines)")
     parser.add_argument("--force", action="store_true")
@@ -489,7 +493,12 @@ def main() -> None:
                     print(f"FAIL {model} {session}: {type(exc).__name__}: {exc}")
                     failures.append((model, session, f"{type(exc).__name__}: {exc}"))
                 continue
-            output = RESULTS / model_dir / "predictions" / "eval_motion" / f"{session}.npz"
+            if model == "vp_mocap" and args.variant and args.variant != "local_gen":
+                # 四折 LSO：逐折 VP-MoCap 预测隔离（同一会话在不同折由不同
+                # FPP 模型产生，不能共用一个 eval_motion 目录）。
+                output = RESULTS / model_dir / "predictions" / args.variant / "eval_motion" / f"{session}.npz"
+            else:
+                output = RESULTS / model_dir / "predictions" / "eval_motion" / f"{session}.npz"
             if output.is_file() and not args.force:
                 print(f"skip existing {output}")
                 continue

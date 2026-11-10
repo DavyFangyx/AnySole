@@ -434,7 +434,9 @@ def main():
         json.dumps(metrics_table, indent=1, ensure_ascii=False), encoding="utf-8")
     metric_desc = {"ankle_foot_mpjpe": "踝足 MPJPE，骨盆对齐",
                    "pa_mpjpe": "全身逐帧相似变换对齐 PA-MPJPE（项目 pa_mpjpe 口径，"
-                              "含尺度；左右行 = 同一全身误差分别按左/右脚相位条件统计）"}[args.metric]
+                              "含尺度；左右行 = 同一全身误差分别按左/右脚相位条件统计）",
+                   "global_mpjpe": "全局 MPJPE（世界系、无对齐；左右行 = 同一全身误差"
+                                   "分别按左/右脚相位条件统计）"}[args.metric]
     md_lines = ["# E6 接触相位下的触觉增益与门控效果\n",
                 "口径：canonical test（splits.csv，36 会话，按实际出现的动作分组）；ckpt = ckpt_last；"
                 "模型 = V7_Cv4（单门）/ V7_Cv5（双门）/ V7_Cv7（无门控，枚举）；"

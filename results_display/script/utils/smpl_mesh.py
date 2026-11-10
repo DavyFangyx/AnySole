@@ -251,6 +251,8 @@ def _overlay_2d(image: np.ndarray, uv: np.ndarray, edges: list, bone_color: str,
 def render_mesh_frame(verts: np.ndarray, faces: np.ndarray, *, joints: Optional[np.ndarray] = None,
                       edges: Optional[list] = None, title: str = "", frame_index: int = 0,
                       total: int = 1, mesh_color: tuple = (0.52, 0.63, 0.72),
+                      vertex_colors: Optional[np.ndarray] = None, ambient: float = 0.0,
+                      light_intensity: float = 3.0,
                       bone_color: str = "#AF5A3B", joint_color: str = "#355166",
                       title_color: str = "#333333", bg_color: str = "#F3E6D7",
                       size: tuple = (512, 512), elev: float = 18.0,
@@ -283,7 +285,8 @@ def render_mesh_frame(verts: np.ndarray, faces: np.ndarray, *, joints: Optional[
     ])
     camera_pose = _look_at(center + direction * distance, center)
 
-    scene = pyrender.Scene(bg_color=_hex_to_rgb01(bg_color), ambient_light=np.zeros(3))
+    scene = pyrender.Scene(bg_color=_hex_to_rgb01(bg_color),
+                           ambient_light=np.full(3, float(ambient)))
     scene.add(
         pyrender.IntrinsicsCamera(fx=focal, fy=focal, cx=width * 0.5, cy=height * 0.5),
         pose=camera_pose,
@@ -291,16 +294,38 @@ def render_mesh_frame(verts: np.ndarray, faces: np.ndarray, *, joints: Optional[
     for angle, axis in ((np.radians(-45), [1.0, 0.0, 0.0]), (np.radians(45), [0.0, 1.0, 0.0])):
         # CLIFF's light poses are camera-relative; compose them with the camera.
         scene.add(
-            pyrender.DirectionalLight(color=np.ones(3), intensity=3.0),
+            pyrender.DirectionalLight(color=np.ones(3), intensity=light_intensity),
             pose=camera_pose @ rotation_matrix(angle, axis),
         )
-    material = pyrender.MetallicRoughnessMaterial(
-        metallicFactor=0.2,
-        roughnessFactor=0.5,
-        baseColorFactor=[*mesh_color, 1.0],
-        alphaMode="OPAQUE",
-    )
-    scene.add(pyrender.Mesh.from_trimesh(trimesh.Trimesh(vertices=verts, faces=faces), material=material))
+    if vertex_colors is None:
+        material = pyrender.MetallicRoughnessMaterial(
+            metallicFactor=0.2,
+            roughnessFactor=0.5,
+            baseColorFactor=[*mesh_color, 1.0],
+            alphaMode="OPAQUE",
+        )
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+    else:
+        colors = np.asarray(vertex_colors)
+        if colors.shape != (verts.shape[0], 3):
+            raise ValueError(f"vertex_colors must be ({verts.shape[0]},3), got {colors.shape}")
+        colors = np.clip(colors, 0.0, 1.0)
+        # pyrender writes sRGB after treating ``color_0`` as linear; invert
+        # the transfer here so the rendered mesh reproduces the requested
+        # colormap instead of washing every hue toward white.
+        linear = np.where(colors <= 0.04045, colors / 12.92,
+                          ((colors + 0.055) / 1.055) ** 2.4)
+        rgba = np.concatenate([linear, np.ones((len(colors), 1))], axis=1)
+        rgba = (rgba * 255.0).round().astype(np.uint8)
+        # pyrender's trimesh converter ignores ``color_0`` when an explicit
+        # material is supplied, so let the vertex colors define the material.
+        material = None
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces, vertex_colors=rgba,
+                               process=False)
+    if material is None:
+        scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=True))
+    else:
+        scene.add(pyrender.Mesh.from_trimesh(mesh, material=material))
     color, depth = _renderer(width, height).render(scene)
     image = color[..., :3].copy()
 

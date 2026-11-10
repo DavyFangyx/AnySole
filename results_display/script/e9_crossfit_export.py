@@ -40,11 +40,9 @@ BASE_DIRS = {
     "V7_Cv5": os.path.join(E5, "%s_scene", "eval_motion"),
     "V8_Cv5": os.path.join(HYB, "v8_scene_%s", "eval_motion"),
 }
-ARMS = ["Step2Motion", "Anysolo-TI", "Anysolo-I", "VT",
-        "Hybrid", "Hybrid+VT0.50", "Hybrid+VT0.75"]
+ARMS = ["Step2Motion", "Anysolo-TI", "Anysolo-I", "VT", "Hybrid"]
 COLORS = {"Step2Motion": "#2a78d6", "Anysolo-TI": "#1baf7a",
-          "Anysolo-I": "#eda100", "VT": "#8a6d3b", "Hybrid": "#7b52ab",
-          "Hybrid+VT0.50": "#c58b2a", "Hybrid+VT0.75": "#d64545"}
+          "Anysolo-I": "#eda100", "VT": "#8a6d3b", "Hybrid": "#7b52ab"}
 CALIB_FRAMES = 40
 
 
@@ -162,10 +160,8 @@ def main():
                     m_s2m = valid
                 a["Anysolo-TI"] = T.assemble_anysolo(sid, "TI", vt, ro, gt, ev)
                 a["Anysolo-I"] = T.assemble_anysolo(sid, "I", vt, ro, gt, ev)
-                for alpha, name in ((1.0, "Hybrid"), (0.50, "Hybrid+VT0.50"),
-                                    (0.75, "Hybrid+VT0.75")):
-                    a[name] = H.assemble(sid, hr, model, mu, sd, vt, ro, ev,
-                                         D, alpha, calib="block",
+                a["Hybrid"] = H.assemble(sid, hr, model, mu, sd, vt, ro, ev,
+                                         D, 1.0, calib="block",
                                          calib_frames=CALIB_FRAMES)
                 for arm, tr in a.items():
                     vm = m_s2m if arm in ("Step2Motion", "Step2Motion-VT") else valid
@@ -213,11 +209,11 @@ def main():
     x = np.arange(len(acts)); width = 0.13
     for ax, base in zip(axes, BASES):
         rr = {r["action"]: r for r in mean_rows if r["base"] == base}
-        for k, arm in enumerate(["Step2Motion", "Anysolo-TI", "VT", "Hybrid",
-                                 "Hybrid+VT0.50", "Hybrid+VT0.75"]):
+        for k, arm in enumerate(["Step2Motion", "Anysolo-TI", "Anysolo-I",
+                                 "VT", "Hybrid"]):
             vals = [rr[a][arm + "_mean"] for a in acts]
             errs = [rr[a][arm + "_std"] for a in acts]
-            ax.bar(x + (k - 2.5) * width, vals, width, color=COLORS[arm],
+            ax.bar(x + (k - 2.0) * width, vals, width, color=COLORS[arm],
                    label=arm if base == BASES[0] else None,
                    yerr=errs, capsize=2)
         ax.set_xticks(x); ax.set_xticklabels(acts)

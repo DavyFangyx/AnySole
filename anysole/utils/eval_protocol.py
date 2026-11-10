@@ -1257,6 +1257,24 @@ def _evaluate_config(
                         key: (val.view(bsz, tw, *val.shape[1:])[b]
                               if val is not None else None)
                         for key, val in per_frame.items()}))
+                if _CAPTURE_WINDOWS is not None:
+                    v_all = out.get("v_hat")
+                    for b in range(bsz):
+                        rec = {
+                            "session_id": str(session_id),
+                            "config_value": int(config_value),
+                            "frame_start": int(raw[b]["frame_start"]),
+                            "anchor": batch["trans_anchor"][b].detach().float().cpu(),
+                            "v_hat": (v_all[b].detach().float().cpu()
+                                      if v_all is not None else None),
+                            "offsets": batch["offsets"][b].detach().float().cpu(),
+                            "parents": batch["parents"][b].detach().cpu(),
+                        }
+                        for key in ("pred_pose", "pred_trans", "gt_pose",
+                                    "gt_trans", "kp_gt"):
+                            val = parts[b][1].get(key)
+                            rec[key] = val.detach().float().cpu() if val is not None else None
+                        _CAPTURE_WINDOWS.append(rec)
                 seq, seq_frame_ids = assemble_overlap_seq(parts, tw)
                 seq.update({"floor_y": batch["floor_y"][0],
                             "offsets": batch["offsets"][0],
@@ -1396,6 +1414,11 @@ def prune_overlap_windows(valid_windows, tw: int) -> list:
     return [w for w in valid_windows
             if (w[0], (w[1] // tw) * tw) in tile_ok]
 
+
+# 诊断钩子（2026-11-09，重叠窗预测分歧 probe）：None = 关闭、行为逐位不变；
+# 置为 list 时，overlap_assemble 分支在组装前把每个窗的逐帧预测（含锚点、
+# 根速度、GT）追加进 list。只读出口，不改变 seq/指标/导出。
+_CAPTURE_WINDOWS = None
 
 _FRAME_PROJ6D_KEYS = ("pred_pose",)
 _FRAME_LINEAR_KEYS = ("pred_trans", "pos_corr", "pressure_pred")

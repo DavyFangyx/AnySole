@@ -38,8 +38,9 @@ CONTACT_METHOD = "f6_soft_time_accel_state_smpl24_v1"
 # - ankle_foot_mpjpe = 现行口径：骨盆对齐踝足 MPJPE（逐帧 mm/帧/侧）
 # - pa_mpjpe = 全关节逐帧相似变换对齐 MPJPE（项目 pa_mpjpe 口径，
 #   与 E2/E3/E5 表一致；含尺度，逐帧 mm，无左右分脚）
-METRICS = ("ankle_foot_mpjpe", "pa_mpjpe")
-METRIC_SERIES = {"ankle_foot_mpjpe": ("left", "right"), "pa_mpjpe": ("full",)}
+METRICS = ("ankle_foot_mpjpe", "pa_mpjpe", "global_mpjpe")
+METRIC_SERIES = {"ankle_foot_mpjpe": ("left", "right"), "pa_mpjpe": ("full",),
+                 "global_mpjpe": ("full",)}
 
 
 def load_contact(sid: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -136,6 +137,13 @@ def metric_error(pred: np.ndarray, gt: np.ndarray, metric: str,
     if metric == "ankle_foot_mpjpe":
         left, right = foot_mpjpe_per_frame(pred, gt)
         return {"left": left, "right": right}[series]
+    if metric == "global_mpjpe":
+        from anysole.utils.metrics import mean_point_error
+        out = np.full(len(pred), np.nan)
+        ok = np.isfinite(pred).all(axis=(1, 2))
+        if ok.any():
+            out[ok] = mean_point_error(pred[ok], gt[ok], scale=1000.0)
+        return out
     return pa_mpjpe_per_frame_safe(pred, gt)
 
 

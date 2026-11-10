@@ -1,0 +1,62 @@
+{
+ "motionpro_train_fS5S6S11": {
+  "status": "done",
+  "note": "LR-floor ckpt epoch 731 (lr 1.22e-8); predictions from last"
+ },
+ "motionpro_train_fS5S11S12": {
+  "status": "done",
+  "note": "LR-floor ckpt epoch 698 (lr 1.22e-8); predictions from last"
+ },
+ "motionpro_train_fS6S7": {
+  "status": "done",
+  "note": "manual continuation to LR floor in progress; predictions will be overwritten"
+ },
+ "motionpro_train_fS5S6S8": {
+  "status": "done",
+  "note": "LR-floor ckpt epoch 111 (lr 2.44e-8); predictions from last"
+ },
+ "fpp_train_fS5S6S11": {
+  "status": "done",
+  "note": "latest net_epoch_1099 (LR floor)"
+ },
+ "fpp_train_fS5S11S12": {
+  "status": "done",
+  "note": "latest net_epoch_999 (LR floor)"
+ },
+ "fpp_infer_fS5S6S11": {
+  "status": "done"
+ },
+ "fpp_infer_fS5S11S12": {
+  "status": "done"
+ },
+ "pto_build_fS5S6S11": {
+  "status": "done",
+  "at": 1794284217.640694,
+  "artifact": true
+ },
+ "pto_build_fS5S11S12": {
+  "status": "done",
+  "at": 1794284217.6447375,
+  "artifact": true
+ },
+ "pto_run_fS5S6S11": {
+  "status": "running",
+  "gpu": 5,
+  "at": 1794284217.9356046
+ },
+ "pto_run_fS5S11S12": {
+  "status": "running",
+  "gpu": 6,
+  "at": 1794284217.9370532
+ },
+ "fpp_train_fS6S7": {
+  "status": "running",
+  "gpu": 3,
+  "at": 1794284217.9386992
+ },
+ "fpp_train_fS5S6S8": {
+  "status": "running",
+  "gpu": 7,
+  "at": 1794284639.8291824
+ }
+}

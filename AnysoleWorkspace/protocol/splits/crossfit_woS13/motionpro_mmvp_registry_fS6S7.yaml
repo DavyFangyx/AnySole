@@ -1,0 +1,55 @@
+models:
+- name: motionpro_fs6s7
+  family: baseline
+  display_name: MotionPRO
+  protocol: smpl24
+  mode: VT2M
+  prediction_root: results://baselines/MotionPRO/predictions/carpet_v3_bvh24_fS6S7/eval_motion
+  pattern: '{session_id}.npz'
+  capabilities:
+    joint_positions: true
+    joint_rotations: true
+    direct_joint_rotations: true
+    root_translation: true
+    root_rotation: true
+    surface: true
+    predicted_surface: true
+    predicted_shape: true
+    pressure: false
+    pressure_prediction: false
+    contact: false
+    contact_prediction: false
+  sources:
+    joint_positions: model_prediction
+    joint_rotations: model_prediction
+    root_translation: model_prediction
+    root_rotation: model_prediction
+    surface: model_prediction
+    predicted_shape: model_prediction
+- name: mmvp_vp_mocap_fs6s7
+  family: baseline
+  display_name: VP-MoCap (FPP-Net + PoseTransOpt)
+  protocol: smpl24
+  mode: VT2M
+  prediction_root: results://baselines/VP-MoCap/predictions/vp_mocap_fS6S7/eval_motion
+  pattern: '{session_id}.npz'
+  capabilities:
+    joint_positions: true
+    joint_rotations: true
+    direct_joint_rotations: true
+    root_translation: true
+    root_rotation: true
+    surface: true
+    predicted_surface: true
+    predicted_shape: true
+    pressure: false
+    pressure_prediction: false
+    contact: false
+    contact_prediction: false
+  sources:
+    joint_positions: method_optimization
+    joint_rotations: method_optimization
+    root_translation: method_optimization
+    root_rotation: method_optimization
+    surface: method_optimization
+    predicted_shape: method_optimization

@@ -272,19 +272,43 @@ V8_Cv5 的 T 分支是**压力-only**，不是“压力 + IMU”：
 - `t_encoder="foot_conv"` 在 `encoders.py` 中**要求 `tactile_input="raw108"`**；raw108 没有 IMU 通道。
 - `T_s2m`（Step2Motion 口径 50 维）确实含 IMU：`S2M_IMU_COLUMNS = 16..21 + 41..46`（12 通道），`no_imu=True` 时删掉这些列得到 38 维。但它只在 `tactile_input="s2m50"` 的变体里进 T 编码器；V8_Cv5 的 forward 虽然接收 `T_s2m` 参数，**T 编码器不消费它**（V8_Cv5 没有 `route_router`；`T_s2m` 只在 V8_Cv8 的路由门特征、或 AR2 变体里使用）。
 
-因此，“视觉失效后”要区分三种路径：
+因此，“视觉失效后”要区分四条路径：
 
 | 路径 | V 输入 | T 输入 | IMU | 对应模型/条件 |
 |---|---|---|---|---|
 | **VT（遮挡缓存）** | `cam3_occ_scene` 的 HRNet（被柱子污染，**不是零**） | raw108 压力 | 无 | V8_Cv5 `VT2M` |
-| **T-only（干净视觉失效）** | 置零 + `v_present=0` 硬关闭 | raw108 压力 | 无 | V8_Cv5 `T2M`（`config_id=T`） |
-| **压力 + IMU 联合** | — | `T_s2m` 50 维（压力 + IMU 12） | 有 | `tactile_input="s2m50"` 变体（E6.6）；V8_Cv8 仅把 IMU 12 当路由门特征 |
-| **轨迹级 IMU+T** | — | 压力/接触 | 12 通道 | 独立 TI/GPSSM/Hybrid 轨迹模型，不在 V8_Cv5 主干内 |
+| **T-only（主模型 T 通道，干净视觉失效）** | 置零 + `v_present=0` 硬关闭 | raw108 压力 | 无 | V8_Cv5 `T2M`（`config_id=T`）；**不是 Anysolo-TI** |
+| **主模型 T 通道 + IMU（s2m50 变体）** | — | `T_s2m` 50 维（压力 + IMU 12） | 有 | `tactile_input="s2m50"` 的**主模型变体**（E6.6，T 编码器换成 50 维输入）；**不是 Anysolo-TI** |
+2. “压力 + IMU 联合 / T_s2m”是哪一个？是 Anysolo-TI 吗？
+不是 Anysolo-TI。 它指的是主模型的：
+tactile_input="s2m50" 的 V8_Cv5 变体（E6.6）
+  T 编码器输入 = T_s2m 50 维（压力 + 12 维 IMU）
+它仍然是主模型（有 V/T 解码器、姿态头、根头），只是把 T 编码器从 raw108 换成了 50 维 T_s2m。Anysolo-TI 完全不经过 V8_Cv5 主干，它是独立的 contact+ESKF 轨迹链。
 
-需要特别写清的两点：
+| **轨迹级 IMU+T（独立模型）** | — | 压力/接触 | 12 通道 | **Anysolo-TI（经典 contact+ESKF）/ GP-SSM / Hybrid（学习式）**；均不进 V8_Cv5 主干 |
+Hybrid 是其中一种，但不是只有 Hybrid。 这是一个类别：
+┌───────────────────┬───────────────────────────────────────┐
+│ 轨迹级 IMU+T 成员 │                 类型                  │
+├───────────────────┼───────────────────────────────────────┤
+│ Anysolo-TI        │ 经典 TI：压力 contact/step + IMU ESKF │
+├───────────────────┼───────────────────────────────────────┤
+│ GP-SSM            │ 压力相位 + IMU 的小状态模型           │
+├───────────────────┼───────────────────────────────────────┤
+│ Hybrid            │ 学习式 44 维 IMU+压力/F2 → yaw 帧位移 │
+└───────────────────┴───────────────────────────────────────┘
+
+
+**命名对照（避免混淆）**：
+
+- **T-only** = 主模型 V8_Cv5 的 `T2M` 条件，走主模型的 T 通道（pressure-only）；不是 Anysolo-TI。
+- **“压力 + IMU 联合 / T_s2m”** = 主模型的 `tactile_input="s2m50"` 变体：T 编码器吃 50 维 `T_s2m`（压力 + 12 IMU）；它仍然有主模型的 V/T 解码器和姿态头。**不是 Anysolo-TI**。
+- **“轨迹级 IMU+T”** 是一个类别：**Anysolo-TI** 是经典 contact+ESKF 轨迹链；**GP-SSM** 是压力相位 + IMU 的小状态模型；**Hybrid** 是学习式 44 维 yaw 帧位移模型。E9 表里的 `Anysolo-TI` 和 `Hybrid` 是两臂，均为独立轨迹模型，不经过 V8_Cv5 的 T 编码器。
+
+需要特别写清的三点：
 
 1. **遮挡 VT 不是 T-only**：`cam3_occ_scene` 只是把柱子合成进图像，V 分支仍然收到（被污染的）V 特征；所以它在全遮挡时的输出是 learned prior，不是“视觉关闭”。真正的视觉失效对照是 `config_id=T` / `T2M`。
-2. **V8_Cv5 主干没有 IMU+T 联合**：如果要在“视觉失效后”把 IMU 与压力一起喂进主模型，现有最近路径是 `tactile_input="s2m50"`（`T_s2m` 50 维，含 12 IMU）；V8_Cv5 本身仍是 raw108。轨迹级的 IMU+T 是另一套模型（TI/GPSSM/Hybrid），不经过 V8_Cv5 的 T 编码器。
+2. **V8_Cv5 主干没有 IMU+T 联合**：如果要在“视觉失效后”把 IMU 与压力一起喂进主模型，现有最近路径是 `tactile_input="s2m50"`（`T_s2m` 50 维，含 12 IMU）；V8_Cv5 本身仍是 raw108。轨迹级的 IMU+T 是另一套模型（Anysolo-TI / GP-SSM / Hybrid），不经过 V8_Cv5 的 T 编码器。
+3. **T-only ≠ Anysolo-TI**：T-only 是主模型的条件化前向；Anysolo-TI 是独立的经典轨迹链（contact/step + ESKF）。两者只在“都没有视觉”这一点上同类，输入/结构/输出都不同。
 
 ## 9. 损失（与结构相关的部分）
 

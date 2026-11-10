@@ -29,30 +29,43 @@ OUT = REPO / "results_display" / "Etest_crossfit_v8"
 # 2026-11-08 用户裁定：RM/PO 已判失败，从主表移除；Cv8 是候选路由，不进
 # 五模型消融。正文消融集 = Cv5/Cv7/Cv4/Cv2/Cv6。
 FAMS = ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6", "V8_Cv7")
+# E6 只做 Cv5（门控）vs Cv7（无门控）；单门/dropout/恒 VT 留给 E4 消融。
+E6_FAMS = ("V8_Cv5", "V8_Cv7")
 REFERENCE = "V8_Cv7"
 FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
 LEVELS = ("000", "020", "040", "060", "080", "100")
 
-E2_METRICS10 = ["GroundPen", "FootSliding", "RootOrientationDrift",
-                "PA-MPJPE", "MPJPE", "MPJRE", "W-MPJPE100",
-                "GlobalMPJPE", "traj_ATE", "Jitter_pred"]
-METRICS10 = ["PA-MPJPE", "MPJPE", "GlobalMPJPE", "W-MPJPE100", "MPJRE",
-             "traj_ATE", "RootOrientationDrift", "FootSliding", "GroundPen",
-             "Jitter_pred"]
-E5_TACTILE = [("traj_ATE", "↓"), ("GroundPenFrac", "↓"),
-              ("ground_pen_foot_mm", "↓"), ("PA-MPJPE_anklefoot", "↓"),
-              ("PA-MPJPE_l_foot", "↓"), ("PA-MPJPE_r_foot", "↓"),
-              ("MPJPE_anklefoot", "↓"), ("PA-MPJPE_upper", "↓")]
-E5_MAIN_METRICS = ["PA-MPJPE", "traj_ATE", "GroundPen", "FootSliding",
-                   "GlobalMPJPE", "RootOrientationDrift",
-                   "PA-MPJPE_anklefoot"]
+# 指标列序（2026-11-08 用户裁定）：姿态 → 轨迹/全局 → 物理 → 时序。
+METRICS10 = ["PA-MPJPE", "MPJPE", "MPJRE",
+             "GlobalMPJPE", "W-MPJPE100", "traj_ATE", "RootOrientationDrift",
+             "GroundPen", "FootSliding", "Jitter_pred"]
+E2_METRICS10 = METRICS10
+E5_TACTILE = [("PA-MPJPE_anklefoot", "↓"), ("PA-MPJPE_l_foot", "↓"),
+              ("PA-MPJPE_r_foot", "↓"), ("MPJPE_anklefoot", "↓"),
+              ("PA-MPJPE_upper", "↓"),
+              ("GroundPenFrac", "↓"), ("ground_pen_foot_mm", "↓"),
+              ("traj_ATE", "↓")]
+E5_MAIN_METRICS = ["PA-MPJPE", "PA-MPJPE_anklefoot",
+                   "GlobalMPJPE", "traj_ATE", "RootOrientationDrift",
+                   "GroundPen", "FootSliding"]
 COND_ZH = {"V2M": "U@V", "T2M": "U@T", "VT2M": "U@VT"}
 METRICS_E6 = {
-    "PA-MPJPE": "pa_mpjpe_mm", "MPJPE": "mpjpe_mm",
+    "PA-MPJPE": "pa_mpjpe_mm", "MPJPE": "mpjpe_mm", "MPJRE": "mpjae_deg",
     "GlobalMPJPE": "global_mpjpe_mm", "W-MPJPE100": "w_mpjpe100_mm",
-    "MPJRE": "mpjae_deg", "RootOrientationDrift": "root_orientation_drift_deg",
-    "FootSliding": "foot_sliding_mm", "GroundPen": "ground_pen_mm",
+    "RootOrientationDrift": "root_orientation_drift_deg",
+    "GroundPen": "ground_pen_mm", "FootSliding": "foot_sliding_mm",
     "Jitter_pred": "jitter_pred_m_s3",
+}
+# E6 主表只保留三层各一个代表指标（2026-11-09 用户裁定）。
+E6_MAIN_METRICS = ("PA-MPJPE", "GlobalMPJPE", "GroundPen")
+
+# E4 消融表的模型标签（用户裁定：模型名后标注对应消融项）
+FAM_LABEL = {
+    "V8_Cv5": "V8_Cv5（完整：双门 + 三条件枚举）",
+    "V8_Cv7": "V8_Cv7（无门控）",
+    "V8_Cv4": "V8_Cv4（单门：姿态/根共享）",
+    "V8_Cv2": "V8_Cv2（双门 + 随机模态 dropout）",
+    "V8_Cv6": "V8_Cv6（双门 + 始终 VT 训练）",
 }
 
 
@@ -149,17 +162,15 @@ def export_e2() -> None:
 
 
 # ---------------------------------------------------------------- E4
-def export_e4() -> None:
-    out = OUT / "E4_ComponentAblation"
-    detail = OUT / "detail"
-    header = ["模型", "条件"] + METRICS10
-    rows = []
-    per_fold = []
-    for fam in FAMS:
+def _e4_blocks(fams) -> list[list]:
+    """按条件分块（U@V / U@T / U@VT / Δ），块内列给定模型。"""
+    header = ["条件", "模型"] + METRICS10
+    blocks = {c: [] for c in ("U@V", "U@T", "U@VT", "Δ(VT−V)")}
+    for fam in fams:
+        label = FAM_LABEL.get(fam, fam)
         for cond in ("V2M", "T2M", "VT2M"):
-            rows.append([fam, COND_ZH[cond]]
-                        + [ms_across(fam, cond, k) for k in METRICS10])
-        # Δ(VT−V)
+            blocks[COND_ZH[cond]].append(
+                [COND_ZH[cond], label] + [ms_across(fam, cond, k) for k in METRICS10])
         delta = []
         for k in METRICS10:
             vals = []
@@ -169,13 +180,29 @@ def export_e4() -> None:
                 if vt is not None and v is not None:
                     vals.append(float(vt) - float(v))
             delta.append(mean_std(vals))
-        rows.append([fam, "Δ(VT−V)"] + delta)
+        blocks["Δ(VT−V)"].append(["Δ(VT−V)", label] + delta)
+    return [r for cond in ("U@V", "U@T", "U@VT", "Δ(VT−V)") for r in blocks[cond]]
+
+
+def export_e4() -> None:
+    out = OUT / "E4_ComponentAblation"
+    detail = OUT / "detail"
+    header = ["条件", "模型"] + METRICS10
+    # 全模型（补充材料）
+    write_csv(out / "Full_Table1_E4_Ablation_AllMetrics.csv", header, _e4_blocks(FAMS))
+    # 表 1：门控效果（固定三条件枚举；无门 / 单门 / 双门）
+    write_csv(out / "Main_Table1_E4_GateEffect.csv", header,
+              _e4_blocks(("V8_Cv7", "V8_Cv4", "V8_Cv5")))
+    # 表 2：训练条件 / 数据 dropout（固定双门；枚举 / 随机 dropout / 恒 VT）
+    write_csv(out / "Main_Table2_E4_TrainingCondition.csv", header,
+              _e4_blocks(("V8_Cv5", "V8_Cv2", "V8_Cv6")))
+    per_fold = []
+    for fam in FAMS:
         for fold in FOLDS:
             for cond in ("V2M", "T2M", "VT2M"):
                 per_fold.append([fam, fold, COND_ZH[cond]]
                                 + [round(float(v), 3) if (v := fold_metric(fam, fold, cond, k)) is not None else ""
                                    for k in METRICS10])
-    write_csv(out / "Full_Table1_E4_Ablation_AllMetrics.csv", header, rows)
     write_csv(detail / "PerFold_E4_Ablation_V8.csv",
               ["模型", "折", "条件"] + METRICS10, per_fold)
 
@@ -289,14 +316,14 @@ def export_e6b() -> None:
     out = OUT / "E6_ContactPhaseAnalysis" / "gate_tables"
     detail = OUT / "detail"
     data = {}
-    for fam in FAMS:
+    for fam in E6_FAMS:
         for fold in FOLDS:
             d = decompose(fam, fold)
             if d is not None:
                 data[(fam, fold)] = d
     per_fold = []
     for (fam, fold), d in data.items():
-        for metric in METRICS_E6:
+        for metric in E6_MAIN_METRICS:
             if metric not in d:
                 continue
             x = d[metric]
@@ -308,8 +335,8 @@ def export_e6b() -> None:
     h1 = ["模型", "指标", "ΔE⁺_mean±std(mm)", "抑制率_mean±std(%)", "n_folds"]
     h2 = ["模型", "指标", "ΔE⁻_mean±std(mm)", "保留率_mean±std(%)", "n_folds"]
     rows1, rows2 = [], []
-    for fam in FAMS:
-        for metric in METRICS_E6:
+    for fam in E6_FAMS:
+        for metric in E6_MAIN_METRICS:
             plus, minus, supp, pres = [], [], [], []
             for fold in FOLDS:
                 ref = data.get((REFERENCE, fold), {}).get(metric)
@@ -331,6 +358,43 @@ def export_e6b() -> None:
                           len(minus)])
     write_csv(out / "Full_Table1_E6_Crossfit_GateHarmSuppression.csv", h1, rows1)
     write_csv(out / "Full_Table2_E6_Crossfit_GateGainPreservation.csv", h2, rows2)
+
+    # 全指标合并表（补充材料）；主表只保留三层三个代表指标。
+    h3 = ["模型", "指标", "ΔE⁺有害(mm)", "抑制率(%)", "ΔE⁻有益(mm)", "保留率(%)", "净Δ(VT−V)"]
+
+    def combined(metrics):
+        rows = []
+        for fam in E6_FAMS:
+            for metric in metrics:
+                plus, minus, supp, pres, net = [], [], [], [], []
+                for fold in FOLDS:
+                    ref = data.get((REFERENCE, fold), {}).get(metric)
+                    cand = data.get((fam, fold), {}).get(metric)
+                    if not cand:
+                        continue
+                    plus.append(cand["plus"])
+                    minus.append(cand["minus"])
+                    net.append(cand["net"])
+                    if fam != REFERENCE and ref:
+                        if abs(ref["plus"]) >= 0.05:
+                            supp.append(100.0 * (1.0 - cand["plus"] / ref["plus"]))
+                        if abs(ref["minus"]) >= 0.05:
+                            pres.append(100.0 * cand["minus"] / ref["minus"])
+                rows.append([FAM_LABEL.get(fam, fam), metric,
+                             mean_std(plus),
+                             "" if fam == REFERENCE else mean_std(supp),
+                             mean_std(minus),
+                             "" if fam == REFERENCE else mean_std(pres),
+                             mean_std(net)])
+        return rows
+
+    write_csv(out / "Main_Table1_E6_Gate_ThreeLayers.csv", h3, combined(E6_MAIN_METRICS))
+    # 旧 9 指标 Main 表作废（避免主表口径混乱）
+    for stale_name in ("Main_Table2_E6_Gate_AllMetrics.csv",
+                       "Full_Table3_E6_Gate_AllMetrics.csv"):
+        stale = out / stale_name
+        if stale.exists():
+            stale.unlink()
 
 
 def main() -> int:

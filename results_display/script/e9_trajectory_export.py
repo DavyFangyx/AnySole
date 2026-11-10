@@ -3,7 +3,7 @@
 产物 → results_display/Etest_crossfit/E9_TrajectorySceneOcc/
   Main_Table1_E9_SceneOcc_OccAte.csv       遮挡内 ATE（动作均值）
   Main_Table2_E9_SceneOcc_FullAte.csv      全程 ATE（动作均值）
-  Main_Fig1-3_E9_SceneOcc_Teaser_action*.png/pdf
+  Main_Fig1-3_E9_SceneOcc_Teaser_action*.png
   Main_Fig4_E9_SceneOcc_OccAte.png         遮挡内 ATE 柱图
   Full_Table1_E9_SceneOcc_PerSession.csv
   Full_Table2_E9_SceneOcc_CalibAblation.csv
@@ -201,7 +201,7 @@ def plot_teaser(arms, meta, action):
                  % (action, LABEL[action], sid))
     ax.legend(loc="best", frameon=False, fontsize=8)
     fig.tight_layout()
-    for ext in ("png", "pdf"):
+    for ext in ("png",):
         fig.savefig(os.path.join(OUT, "Main_Fig%s_E9_SceneOcc_Teaser_action%s.%s"
                                  % ({"03": "1", "08": "2", "09": "3"}[action],
                                     action, ext)), dpi=220)

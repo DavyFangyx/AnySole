@@ -181,19 +181,34 @@ def carpet_grid_y() -> np.ndarray:
     return -(np.arange(CARPET_HW[0], dtype=np.float64) * CARPET_CELL_M + 0.5 * CARPET_CELL_M)
 
 
-def _joint_index(names: list[str], side: str, suffix: str) -> int:
-    """BVH joint index for e.g. ("left", "foot") -> LeftFoot.
+def _norm_joint_name(name: str) -> str:
+    """Case/underscore-insensitive joint key.
 
-    Exact name first (LeftFoot / LeftToeBase), else the first non-EndSite joint
-    whose lowercased name starts with the side+suffix prefix.
+    BVH-23 names (``LeftFoot`` / ``LeftToeBase``) and the 2026-10-24 BVH24
+    export (``left_foot`` / ``left_foot_EndSite0``) must resolve to the same
+    key so the frozen F6 / carpet conversions stay version-agnostic.
     """
-    lowered = [str(name).lower() for name in names]
+    return str(name).lower().replace("_", "")
+
+
+def _joint_index(names: list[str], side: str, suffix: str) -> int:
+    """BVH joint index for e.g. ("left", "foot") -> LeftFoot / left_foot.
+
+    Exact normalized name first (LeftFoot / LeftToeBase), else the first
+    non-EndSite joint whose normalized name starts with the side+suffix
+    prefix.  The BVH24 export has no toe joint; its toe is the foot End Site.
+    """
+    lowered = [_norm_joint_name(name) for name in names]
     for preferred in (f"{side}{suffix}", f"{side}{suffix}base"):
         if preferred in lowered:
             return lowered.index(preferred)
     for index, name in enumerate(lowered):
         if name.startswith(f"{side}{suffix}") and "endsite" not in name:
             return index
+    if suffix == "toe":
+        for index, name in enumerate(lowered):
+            if name.startswith(f"{side}foot") and "endsite" in name:
+                return index
     raise ValueError(f"no {side} {suffix} joint in BVH names: {names}")
 
 
@@ -368,7 +383,8 @@ def load_shared_session(session_id: str, cam: int = 3) -> dict:
 
 def _foot_signal(ctx: dict, side: str) -> tuple[np.ndarray, np.ndarray]:
     indices = [i for i, name in enumerate(ctx["names"])
-               if name.lower().startswith(f"{side}foot") or name.lower().startswith(f"{side}toe")]
+               if _norm_joint_name(name).startswith(f"{side}foot")
+               or _norm_joint_name(name).startswith(f"{side}toe")]
     if not indices:
         raise ValueError(f"no {side} foot joints in BVH")
     foot = ctx["pts"][:, indices, :]
@@ -380,7 +396,8 @@ def _foot_signal(ctx: dict, side: str) -> tuple[np.ndarray, np.ndarray]:
 
 def _f6_signals(ctx: dict, side: str) -> dict:
     indices = [i for i, name in enumerate(ctx["names"])
-               if name.lower().startswith(f"{side}foot") or name.lower().startswith(f"{side}toe")]
+               if _norm_joint_name(name).startswith(f"{side}foot")
+               or _norm_joint_name(name).startswith(f"{side}toe")]
     filtered = median_filter(ctx["pts"][:, indices, :], size=(3, 1, 1))
     center = filtered.mean(axis=1)
     velocity = np.zeros_like(center)
@@ -546,7 +563,7 @@ def _interp_to_grid(source_times: np.ndarray, values: np.ndarray,
     return out.reshape((len(query_times),) + values.shape[1:]), out_of_span
 
 
-def build_smpl_npy(session: dict, cam: int = 3) -> dict:
+def build_smpl_npy(session: dict, cam: int = 3, out_dir: Path | None = None) -> dict:
     """Write ``smpl.npy`` next to the other model inputs.
 
     Four-key contract consumed by ``lib/dataset/image_pressure.py`` (and
@@ -554,7 +571,7 @@ def build_smpl_npy(session: dict, cam: int = 3) -> dict:
     ``global_orient`` (T,3), ``transl`` (T,3), T == len(frame_id).  Kept
     independent of the carpet so it can be produced even where painting fails.
     """
-    out_dir = model_input_dir(session["session_id"], cam)
+    out_dir = Path(out_dir) if out_dir is not None else model_input_dir(session["session_id"], cam)
     out_dir.mkdir(parents=True, exist_ok=True)
     source = load_smpl_source(session)
     query = np.asarray(session["frames"]["mocap_time_s"], dtype=np.float64)

@@ -146,11 +146,23 @@ def index_segments(count: int, segments: list[list[int]]) -> list[list[int]]:
     return result
 
 
-def build_join(row: dict, cam: int, force: bool) -> dict:
+def build_join(row: dict, cam: int, force: bool, input_root: Path | None = None,
+               fpp_predictions: Path | None = None) -> dict:
     date, subject, sid = session_parts(row)
     n = int(row["n_frames"])
-    session_root = adapter_root(cam) / date / subject / sid
+    session_root = ((input_root or adapter_root(cam)) / date / subject / sid).resolve()
     session_root.mkdir(parents=True, exist_ok=True)
+
+    # DepthPro RGB-D template is fold-independent (first-valid-frame scene);
+    # per-fold trees link the frozen adapter_v1 copy instead of regenerating it.
+    template = session_root / "template_scene_rgbd.npy"
+    if not template.exists():
+        source = INPUT_ROOT / date / subject / sid / "template_scene_rgbd.npy"
+        if source.is_file():
+            link_one(source, template, force)
+        else:
+            raise FileNotFoundError(
+                f"{sid}: template_scene_rgbd.npy missing (run depth/make_template_scene.py)")
 
     frames = np.load(facts_root(cam) / date / subject / sid / "frames.npz")
     shared_valid = np.asarray(frames["valid"], dtype=np.uint8).astype(bool)
@@ -168,6 +180,14 @@ def build_join(row: dict, cam: int, force: bool) -> dict:
         raise FileNotFoundError(
             f"{sid}: {cliff_name} missing; run "
             f"mmvp_series/cliff/run_cliff.py --cam {cam} first")
+    if cam == 3:
+        # PoseTransOpt's native dataset reads the legacy cam3 name
+        # ``CLIFF_results.npz``; keep it as a sibling link in per-fold trees.
+        legacy = session_root / "CLIFF_results.npz"
+        if not legacy.exists():
+            source = CLIFF_ROOT / date / subject / sid / "CLIFF_results.npz"
+            if source.is_file():
+                link_one(source, legacy, force)
     cliff = np.load(cliff_path, allow_pickle=False)
     cliff_frame = np.asarray(cliff["frame_id"], dtype=np.int64)
     cliff_valid = np.asarray(cliff["valid"], dtype=np.uint8).astype(bool)
@@ -177,9 +197,10 @@ def build_join(row: dict, cam: int, force: bool) -> dict:
 
     # stream 2: RTMPose keypoints（cam3 沿用前端刷新链接；cam!=3 自取 per-camera 目录）
     kp_dir = session_root / "keypoints"
-    if cam != 3 and not kp_dir.is_symlink():
-        link_dir(RTMPOSE_ROOT / date / subject / sid / f"keypoints_cam{cam}",
-                 kp_dir, force)
+    if not kp_dir.exists():
+        source = RTMPOSE_ROOT / date / subject / sid / (
+            "keypoints" if cam == 3 else f"keypoints_cam{cam}")
+        link_dir(source, kp_dir, force)
     kp_present = np.zeros(n, dtype=bool)
     kp_bad_frame = []
     for i in range(n):
@@ -193,7 +214,8 @@ def build_join(row: dict, cam: int, force: bool) -> dict:
         kp_present[i] = True
 
     # stream 3: FPP pred_contact_smpl
-    fpp_src = FPP_PREDICTIONS / date / subject / sid / "pred_contact_smpl"
+    fpp_src = (Path(fpp_predictions).resolve() if fpp_predictions is not None
+               else FPP_PREDICTIONS) / date / subject / sid / "pred_contact_smpl"
     fpp_dir = session_root / "pred_contact_smpl"
     fpp_present = np.zeros(n, dtype=bool)
     fpp_bad_frame = []
@@ -319,11 +341,15 @@ def main() -> None:
     parser.add_argument("--cam", default="3",
                         help="camera(s) to build adapter inputs for: 'all' or "
                              "comma list (1,2,3,4), default 3")
+    parser.add_argument("--input-root", type=Path, default=None,
+                        help="override the adapter output root (per-fold trees)")
+    parser.add_argument("--fpp-root", type=Path, default=None,
+                        help="override the FPP pred_contact_smpl root (per-fold predictions)")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     rows = read_manifest()
     sessions = [s for s in args.sessions.split(",") if s] if args.sessions else split_sessions(args.split)
-    reports = [build_join(rows[sid], cam, args.force)
+    reports = [build_join(rows[sid], cam, args.force, args.input_root, args.fpp_root)
                for cam in _cam_list(args.cam)
                for sid in sessions]
     summary = [

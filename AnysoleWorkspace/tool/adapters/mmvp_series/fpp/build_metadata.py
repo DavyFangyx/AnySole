@@ -115,9 +115,9 @@ def read_manifest() -> dict[str, dict]:
     return rows
 
 
-def read_split() -> dict[str, str]:
+def read_split(split_csv: Path = SPLITS) -> dict[str, str]:
     result = {}
-    with SPLITS.open(encoding="utf-8-sig", newline="") as handle:
+    with Path(split_csv).open(encoding="utf-8-sig", newline="") as handle:
         for row in csv.DictReader(handle):
             for split in ("train", "val", "test"):
                 session = (row.get(split) or "").strip()
@@ -318,12 +318,14 @@ def sequence_frames(row: dict, window: int = 5) -> list[str]:
     return frames
 
 
-def build_metadata(force: bool = False) -> dict:
+def build_metadata(force: bool = False, split_csv: Path = SPLITS,
+                   out_root: Path = FPP_ROOT, fold_name: str = "",
+                   reuse_sub_info: bool = False) -> dict:
     manifest = read_manifest()
-    split_of = read_split()
+    split_of = read_split(split_csv)
     selected = [row for sid, row in manifest.items() if sid in split_of]
     if not selected:
-        raise RuntimeError("canonical split selected no manifest rows")
+        raise RuntimeError(f"split {split_csv} selected no manifest rows")
 
     mask_l, mask_r = insole_mask()
 
@@ -337,6 +339,8 @@ def build_metadata(force: bool = False) -> dict:
     standing_reports = {}
     no_temporal_window_sessions = []
     for subject, row in sorted(first_by_subject.items()):
+        if reuse_sub_info:
+            break
         report = choose_standing(row, mask_l, mask_r)
         date = session_date(row)
         sub_info_by_date[date][subject] = {
@@ -377,10 +381,10 @@ def build_metadata(force: bool = False) -> dict:
     # 2026-10-22: val 与 test 分离（92/12/36）；split_tree 直接按
     # splits.csv 的 val 列落位，不再镜像 test。
 
-    FPP_ROOT.mkdir(parents=True, exist_ok=True)
+    out_root.mkdir(parents=True, exist_ok=True)
     sub_info_paths = {}
     for date, info in sub_info_by_date.items():
-        out = FPP_ROOT / date / "sub_info.npy"
+        out = out_root / date / "sub_info.npy"
         out.parent.mkdir(parents=True, exist_ok=True)
         if out.exists() and not force:
             old = np.load(out, allow_pickle=True).item()
@@ -389,13 +393,18 @@ def build_metadata(force: bool = False) -> dict:
         else:
             np.save(out, info)
         sub_info_paths[date] = str(out)
+    if reuse_sub_info:
+        for date_dir in sorted(path for path in out_root.iterdir() if path.is_dir()):
+            sub_info_paths[date_dir.name] = str(date_dir / "sub_info.npy")
 
     tree = {
         "train": {date: {sub: dict(seqs) for sub, seqs in subjects.items()} for date, subjects in split_tree["train"].items()},
         "val": {date: {sub: dict(seqs) for sub, seqs in subjects.items()} for date, subjects in split_tree["val"].items()},
         "test": {date: {sub: dict(seqs) for sub, seqs in subjects.items()} for date, subjects in split_tree["test"].items()},
     }
-    split_path = FPP_ROOT / "dataset_split_temporal5.npy"
+    split_name = (f"dataset_split_temporal5_{fold_name}.npy" if fold_name
+                  else "dataset_split_temporal5.npy")
+    split_path = out_root / split_name
     if split_path.exists() and not force:
         old = np.load(split_path, allow_pickle=True).item()
         if old != tree:
@@ -453,7 +462,9 @@ def build_metadata(force: bool = False) -> dict:
                 if r["sigmoid_saturation_lt005"] > 0.10),
         },
     }
-    report_path = FPP_ROOT / "fpp_metadata_report.json"
+    report_name = (f"fpp_metadata_report_{fold_name}.json" if fold_name
+                   else "fpp_metadata_report.json")
+    report_path = out_root / report_name
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
     return report
 
@@ -461,8 +472,18 @@ def build_metadata(force: bool = False) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--force", action="store_true", help="replace generated metadata")
+    parser.add_argument("--split-csv", type=Path, default=SPLITS,
+                        help="train/val/test split table; default canonical splits.csv")
+    parser.add_argument("--out-root", type=Path, default=FPP_ROOT,
+                        help="output adapter root; default model_inputs/FPP-Net/adapter_v1")
+    parser.add_argument("--fold-name", default="",
+                        help="suffix for dataset_split_temporal5_<fold>.npy and report")
+    parser.add_argument("--reuse-sub-info", action="store_true",
+                        help="do not recompute subject weights; only build the split tree")
     args = parser.parse_args()
-    report = build_metadata(force=args.force)
+    report = build_metadata(force=args.force, split_csv=args.split_csv,
+                            out_root=args.out_root, fold_name=args.fold_name,
+                            reuse_sub_info=args.reuse_sub_info)
     print(json.dumps({k: report[k] for k in (
         "split_path", "sub_info_paths", "session_counts", "frame_counts",
         "no_temporal5_window_sessions", "standing_selection",
