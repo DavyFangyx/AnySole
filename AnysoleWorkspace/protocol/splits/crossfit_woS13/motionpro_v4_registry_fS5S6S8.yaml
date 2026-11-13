@@ -1,0 +1,28 @@
+models:
+- name: motionpro_v4_fs5s6s8
+  family: baseline
+  display_name: MotionPRO
+  protocol: smpl24
+  mode: VT2M
+  prediction_root: results://baselines/MotionPRO/predictions/carpet_v4_anysolebbox_fS5S6S8/eval_motion
+  pattern: '{session_id}.npz'
+  capabilities:
+    joint_positions: true
+    joint_rotations: true
+    direct_joint_rotations: true
+    root_translation: true
+    root_rotation: true
+    surface: true
+    predicted_surface: true
+    predicted_shape: true
+    pressure: false
+    pressure_prediction: false
+    contact: false
+    contact_prediction: false
+  sources:
+    joint_positions: model_prediction
+    joint_rotations: model_prediction
+    root_translation: model_prediction
+    root_rotation: model_prediction
+    surface: model_prediction
+    predicted_shape: model_prediction

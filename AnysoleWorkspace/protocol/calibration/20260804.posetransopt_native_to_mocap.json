@@ -1,0 +1,76 @@
+{
+  "schema": "posetransopt_native_to_mocap.v1",
+  "date": "20260804",
+  "A": [
+    [
+      -0.7710034329606624,
+      0.18597600800903652,
+      0.6090703003820216
+    ],
+    [
+      0.020464946014318242,
+      0.9631497255679933,
+      -0.2681861147087133
+    ],
+    [
+      -0.6365020756816158,
+      -0.19430782429664054,
+      -0.7463977338320208
+    ]
+  ],
+  "b": [
+    -2.2527,
+    1.3293,
+    3.3927
+  ],
+  "method": "rotation from calibration chain Rm.T @ Rc.T @ diag(-1,-1,1); translation least-squares fitted over the date's PoseTransOpt work outputs vs smpl GT pelvis (session means)",
+  "n_sessions": 33,
+  "sessions": [
+    "S5011",
+    "S5012",
+    "S5013",
+    "S5031",
+    "S5033",
+    "S5061",
+    "S5062",
+    "S5063",
+    "S5071",
+    "S5072",
+    "S5073",
+    "S5081",
+    "S5083",
+    "S5091",
+    "S5092",
+    "S5093",
+    "S5101",
+    "S5102",
+    "S5103",
+    "S5111",
+    "S5112",
+    "S5113",
+    "S6011",
+    "S6012",
+    "S6013",
+    "S6021",
+    "S6022",
+    "S6023",
+    "S6031",
+    "S6041",
+    "S6061",
+    "S6062",
+    "S6063",
+    "S6071",
+    "S6073",
+    "S6091",
+    "S6093",
+    "S6102",
+    "S6113"
+  ],
+  "residual_rmse_mm": 123.6,
+  "residual_max_mm": 283.2,
+  "calibration_source": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/protocol/calibration/20260804.json",
+  "created": "2026-10-08",
+  "drift_point": "Baselines/\u51b3\u7b56/04_E_\u8bc4\u4f30\u6536\u5c3e.md \u00a73.5 \u6f02\u79fb\u70b9 m",
+  "n_candidates": 39,
+  "fit_note": "robust mean over sessions with residual < 300 mm; excluded S6102/S6011 and other >300mm outliers (PoseTransOpt model failures, not calibration)"
+}

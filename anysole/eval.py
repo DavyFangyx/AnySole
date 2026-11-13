@@ -523,6 +523,10 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
             build_cfg["carrier_from"] = str(saved_config["carrier_from"])
         if saved_config.get("g_floor_src"):
             build_cfg["g_floor_src"] = str(saved_config["g_floor_src"])
+        # V8_Cv7_PhysIMU_Gate: runtime gV floor is recorded in the ckpt config
+        # (ablation gv_min=0 vs 0.2); it does not change the state dict.
+        if saved_config.get("v7_gate_gv_min") is not None:
+            build_cfg["v7_gate_gv_min"] = float(saved_config["v7_gate_gv_min"])
         # model_name is structural provenance for entry-based builds
         # (2026-10-19 V3_Hv2 incident: V3_Hv2/v3 heads are selected by
         # the model_name prefix — dropping it built a headless model and the

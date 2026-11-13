@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """E2 主性能：四折 LSO woS13（协议 A）+ 外部基线。
 
+T 行后处理（2026-11-13）：所有 V8 模型/消融的 U@T 行 = 各模型 T2M 姿态 +
+共享 BiFoot 轨迹（无 TTA/Ramp）。本脚本生成 cell 版 T 行后，必须再跑
+``results_display/script/e2_t_bifoot_table_replace.py`` 覆盖。
+
 数据源
 ------
 - 主模型 = ``results/cells/<model>_<fold>_s1/metrics/test.json``。
@@ -23,7 +27,7 @@
 
 产物（``results_display/Etest_crossfit_v8/E2_MainPerformance/``）
 --------------------------------------------------------------
-  Full_Table1_E2_Crossfit_Main_test.csv   模型×条件×折 + mean±std（十指标）
+  detail/Full_Table1_E2_Crossfit_Main_test.csv   模型×条件×折 + mean±std（十指标）
   Full_Table2_E2_Crossfit_Delta_test.csv  Δ(VT−V) × 折 + mean±std
   Main_Table1_E2_MainPerformance.csv      V/T/VT 三块紧凑表（主模型 + 基线）
 
@@ -31,6 +35,10 @@
   python results_display/script/e2_crossfit_export.py
   python results_display/script/e2_crossfit_export.py --models V8_Cv5,V8_Cv7
   python results_display/script/e2_crossfit_export.py --with-baselines
+  # 重叠 s10 口径（2026-11-12）：读 metrics/overlap_s10/test.json，输出到新根
+  python results_display/script/e2_crossfit_export.py --models V8_Cv5 \
+      --metrics-subdir overlap_s10 --with-baselines \
+      --out-dir results_display/Etest_crossfit_v8_s10/E2_MainPerformance
 """
 from __future__ import annotations
 
@@ -92,7 +100,7 @@ BASELINE_FILES = {
     "WHAM": "WHAM",
     "Step2Motion": "Step2Motion",
     "MotionPRO": "MotionPRO",
-    "VP-MoCap": "VP-MoCap",
+    "MMVP (FPP-Net + PoseTransOpt)": "VP-MoCap",
     "MMVP pressure_toolkit": "pressure_toolkit",
 }
 BASELINE_BLOCK = {"V2M": "V", "T2M": "T", "VT2M": "VT"}
@@ -101,12 +109,15 @@ BASELINE_BLOCK = {"V2M": "V", "T2M": "T", "VT2M": "VT"}
 CANONICAL_SINGLE_FOLD = {"MotionPRO": "MotionPRO"}
 
 
-def cell_path(model: str, fold: str) -> Path:
-    return CELLS / ("%s_%s_s1" % (model, fold)) / "metrics" / "test.json"
+def cell_path(model: str, fold: str, metrics_subdir: str | None = None) -> Path:
+    root = CELLS / ("%s_%s_s1" % (model, fold)) / "metrics"
+    if metrics_subdir:
+        root = root / metrics_subdir
+    return root / "test.json"
 
 
-def read_cell(model: str, fold: str) -> dict | None:
-    path = cell_path(model, fold)
+def read_cell(model: str, fold: str, metrics_subdir: str | None = None) -> dict | None:
+    path = cell_path(model, fold, metrics_subdir)
     if not path.is_file():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -136,7 +147,7 @@ def fmt(ms: tuple[float | None, float | None, int]) -> str:
     return "%.3f±%.3f" % (mean, std) if n > 1 else "%.3f" % mean
 
 
-def build_rows(models: list[str]) -> tuple[list[list], list[list], dict]:
+def build_rows(models: list[str], metrics_subdir: str | None = None) -> tuple[list[list], list[list], dict]:
     """返回 (主表行, Δ表行, 缺失清单)。"""
     main_rows: list[list] = []
     delta_rows: list[list] = []
@@ -147,7 +158,7 @@ def build_rows(models: list[str]) -> tuple[list[list], list[list], dict]:
         }
         fold_blocks: dict[str, dict] = {}
         for fold in FOLDS:
-            payload = read_cell(model, fold)
+            payload = read_cell(model, fold, metrics_subdir)
             if payload is None:
                 missing.setdefault(model, []).append(fold)
                 continue
@@ -229,7 +240,14 @@ def baseline_rows(min_folds: int = 4, min_sessions: int = 20) -> list[list]:
             continue
         block = BASELINE_BLOCK.get(last_mode)
         cond = {"V": "U@V", "T": "U@T", "VT": "U@VT"}.get(block, "外部基线")
-        row = ["外部基线", display, cond, "mean±std", n_folds]
+        # 2026-11-10: Step2Motion has no world anchor; GlobalMPJPE / traj_ATE /
+        # GroundPen are filled from its own inferred trajectory (the world-frame
+        # translation head), rigidly aligned once at the first valid frame to the
+        # GT root (position + hip-line yaw) — the same start alignment as the E9
+        # Step2Motion arm.  Anchor-invariant metrics are unchanged; the row label
+        # makes the trajectory口径 explicit.
+        display_out = "Step2Motion（轨迹 GT-start Anchored）" if display == "Step2Motion" else display
+        row = ["外部基线", display_out, cond, "mean±std", n_folds]
         row += [fmt(mean_std(per_fold[name])) for name, _ in METRICS]
         rows.append(row)
     return rows
@@ -271,10 +289,16 @@ def main() -> int:
                     help="逗号分隔 cell 家族名")
     ap.add_argument("--with-baselines", action="store_true",
                     help="追加外部基线行（需要 results/baselines/<M>/metrics/<fold>_comparison.json）")
+    ap.add_argument("--metrics-subdir", default=None,
+                    help="metrics 子目录：默认读 metrics/test.json；"
+                    "传 overlap_s10 读 metrics/overlap_s10/test.json")
+    ap.add_argument("--out-dir", default=str(OUT),
+                    help="输出目录，默认 %(default)s")
     args = ap.parse_args()
     models = [m.strip() for m in args.models.split(",") if m.strip()]
+    out_dir = Path(args.out_dir)
 
-    main_rows, delta_rows, missing = build_rows(models)
+    main_rows, delta_rows, missing = build_rows(models, args.metrics_subdir)
     header = ["模型类型", "模型", "条件", "折", "n"] + [name for name, _ in METRICS]
     if args.with_baselines:
         for row in baseline_rows() + canonical_baseline_rows():
@@ -285,8 +309,8 @@ def main() -> int:
     main_rows.sort(key=lambda row: (cond_rank.get(row[2], 9),
                                     0 if row[0] == "外部基线" else 1,
                                     row[1], fold_rank.get(row[3], 9)))
-    write_csv(OUT / "Full_Table1_E2_Crossfit_Main_test.csv", header, main_rows)
-    write_csv(OUT / "Full_Table2_E2_Crossfit_Delta_test.csv",
+    write_csv(out_dir / "detail" / "Full_Table1_E2_Crossfit_Main_test.csv", header, main_rows)
+    write_csv(out_dir / "detail" / "Full_Table2_E2_Crossfit_Delta_test.csv",
               ["模型", "折", "n"] + [name for name, _ in METRICS], delta_rows)
 
     # 紧凑主表（论文 Table 1）：每块 = 外部基线 + 主模型 U，不是全部消融五模型。
@@ -301,7 +325,7 @@ def main() -> int:
         compact.append([row[1], row[2], row[4]] +
                        [row[5 + i] for i, (name, _) in enumerate(METRICS)
                         if name in MAIN_METRICS])
-    write_csv(OUT / "Main_Table1_E2_MainPerformance.csv",
+    write_csv(out_dir / "Main_Table1_E2_MainPerformance.csv",
               ["模型", "条件", "n"] + [name for name, _ in METRICS if name in MAIN_METRICS],
               compact)
     if missing:

@@ -211,8 +211,9 @@ def model_observation_kwargs(batch: dict) -> dict:
 def condition_inputs(batch: dict, config_id: torch.Tensor, t_s2m_dim: int = T_S2M_DIM) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Zero absent modalities without modifying reconstruction targets in batch.
 
-    Returns (v_feat, t_raw, t_phys, t_s2m); t_s2m is only consumed when the
-    model was trained with tactile_input="s2m50" and is zeroed for V-only rows.
+    Returns (v_feat, t_raw, t_phys, t_s2m); t_s2m is consumed when the model
+    was trained with tactile_input in ("s2m50", "raw108_imu", "raw96_phys_imu")
+    (the latter two use only its 12 IMU columns) and is zeroed for V-only rows.
     ``t_s2m_dim`` selects the fallback width for hand-built batches that omit
     the E6.6 channel (50 by default, 38 for --no-imu checkpoints).
     """
@@ -518,6 +519,10 @@ def backward_v7_enum(model, batch, config, ctx_ss_p: float = 0.0,
         losses = compute_losses(out, loss_batch, cid, mode_config)
         if not bool(torch.isfinite(losses["loss"]) & torch.isfinite(out["F"]).all()):
             # The caller discards all accumulated gradients on failure.
+            bad_loss = {k: float(v) for k, v in losses.items()
+                        if torch.is_tensor(v) and not torch.isfinite(v)}
+            print("enum non-finite mode=%d F_finite=%s bad_loss=%s"
+                  % (mode, bool(torch.isfinite(out["F"]).all()), bad_loss))
             return out, losses
         (probability * losses["loss"]).backward()
         for key, value in losses.items():
@@ -961,6 +966,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="V3-3: fraction of total steps where sigma is frozen at 0 "
         "(gate runs on the tau_p prior bias alone, plan §3 'first 10%% sigma "
         "fixed'). Default 0.1 with --gate sigma.",
+    )
+    parser.add_argument(
+        "--lambda-unc-v", type=float, default=None,
+        help="V8_Cv8U: weight of the V-only heteroscedastic NLL that trains "
+        "s_V (per-slot log-variance; default 0 = off).",
+    )
+    parser.add_argument(
+        "--lambda-unc-t", type=float, default=None,
+        help="V8_Cv8U: weight of the T-only heteroscedastic NLL that trains "
+        "s_T (per-slot log-variance; default 0 = off).",
     )
     parser.add_argument(
         "--lr-warmup-frac",
@@ -1914,6 +1929,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         config["lambda_sigma"] = float(args.lambda_sigma)
     if args.sigma_freeze_frac is not None:
         config["sigma_freeze_frac"] = float(args.sigma_freeze_frac)
+    if args.lambda_unc_v is not None:
+        config["lambda_unc_v"] = float(args.lambda_unc_v)
+    if args.lambda_unc_t is not None:
+        config["lambda_unc_t"] = float(args.lambda_unc_t)
     if args.assign_cluster:
         # assign_cluster is part of the V4A entry's identity (its STRUCTURE
         # already carries it); the CLI flag stays only to pass the runtime

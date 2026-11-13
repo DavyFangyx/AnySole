@@ -1,8 +1,10 @@
 """40 Hz motion windows with cached HRNet features and raw insole tokens.
 
 AnySole motion targets are native SMPL-24.  The directly exported BVH remains
-the trusted source for precomputed contact labels and, only for the historical
-``s2m50`` input, Step2Motion-compatible synthetic IMU channels.
+the trusted source for precomputed contact labels.  The ``s2m50`` input and
+the ``raw108_imu`` / ``raw96_phys_imu`` variants build Step2Motion-layout
+tactile channels; their IMU columns come from the virtual-IMU facts by
+default (legacy BVH synthesis only as a fallback for sessions without facts).
 """
 
 from __future__ import annotations
@@ -53,12 +55,15 @@ from anysole.data.occ_mix import (
     load_occ_session,
 )
 from anysole.data.workspace_adapter import (
-    WORKSPACE_ROOT,
     load_contact_label,
     load_shared_session,
     shared_smpl_path,
 )
-from anysole.data.tactile_s2m import build_t_s2m, resolve_legacy_bvh_path
+from anysole.data.tactile_s2m import (
+    build_t_s2m,
+    load_virtual_imu_facts,
+    resolve_legacy_bvh_path,
+)
 from anysole.utils.geometry import (
     deyaw_rotmat_np,
     fk_pose6d_np,
@@ -260,8 +265,11 @@ class AnySoleDataset(Dataset):
         # --cam-id N 的落盘布局；默认值指向 cam3，显式传入的 cache_root 不动）。
         if cache_root == HRNET_CACHE_ROOT:
             cache_root = HRNET_CACHE_ROOT.parent / ("cam%d" % self.cam_id)
-        if self.tactile_input not in ("raw108", "s2m50"):
-            raise ValueError("tactile_input must be 'raw108' or 's2m50'")
+        if self.tactile_input not in ("raw108", "s2m50", "raw108_imu",
+                                      "raw96_phys_imu"):
+            raise ValueError(
+                "tactile_input must be 'raw108', 's2m50', 'raw108_imu' or "
+                "'raw96_phys_imu'")
         if no_imu and self.tactile_input != "s2m50":
             raise ValueError("no_imu requires tactile_input='s2m50'")
         # --no-imu: T_s2m is built without the synthesized IMU channels
@@ -473,20 +481,17 @@ class AnySoleDataset(Dataset):
             # 原始传感器局部系、含噪声，无世界系泄漏）。缺 facts 的会话回退
             # 历史 BVH-23/ToeBase 合成（旧口径）。Default raw108 runs do not
             # parse BVH or synthesize IMU at all.
-            if self.tactile_input == "s2m50":
+            # raw108_imu / raw96_phys_imu（2026-11-12）：T_s2m 只为模型提供
+            # IMU 12 列（后者压力走 raw96 + 独立 T_phys MLP），因此也必须构建。
+            if self.tactile_input in ("s2m50", "raw108_imu", "raw96_phys_imu"):
                 imu_facts = None
                 if not self.no_imu:
-                    facts_path = (
-                        WORKSPACE_ROOT / "shared/facts/virtual_imu"
-                        / str(meta.get("date", "")) / session_id / "imu_instep.npz"
-                    )
-                    if facts_path.is_file():
-                        imu_facts = dict(np.load(facts_path, allow_pickle=False))
-                    else:
+                    imu_facts = load_virtual_imu_facts(meta.get("date", ""), session_id)
+                    if imu_facts is None:
                         print(
-                            "s2m50 %s: virtual IMU facts missing (%s); "
+                            "%s %s: virtual IMU facts missing; "
                             "falling back to legacy BVH-23 synthesis"
-                            % (session_id, facts_path)
+                            % (self.tactile_input, session_id)
                         )
                 t_s2m = build_t_s2m(
                     t_raw_norm,

@@ -6,7 +6,8 @@ the 40 Hz T_raw/T_phys pipeline is already fully processed).  What F4a adds
 is the per-foot structured ENCODING (plan items 3-6):
 
 Input: ``(B, tw, 108)`` — cat([T_raw 96, T_phys 12]), the same tensor the
-raw108 path consumes.
+raw108 path consumes.  ``raw_only=True`` accepts ``(B, tw, 96)`` instead and
+leaves T_phys to a separate MLP (PhysIMU variant).
 
 Per foot (left = cells 0:48, right = 48:96 of T_raw; T_phys 6 dims per foot):
   - grid: the foot's 48 cells reshaped to 4×12 (rows = medial-lateral,
@@ -46,13 +47,18 @@ FPS = 40.0  # dF/dt per second
 class FootConvEncoder(nn.Module):
     def __init__(self, embeddings=None, dim=D_MODEL, tw=TW, nhead=8,
                  temporal_layers=4, dim_feedforward=1024, dropout=0.1,
-                 t_phys_v2: bool = False):
+                 t_phys_v2: bool = False, raw_only: bool = False):
         super().__init__()
         self.t_phys_v2 = bool(t_phys_v2)
+        self.raw_only = bool(raw_only)
+        if self.raw_only and self.t_phys_v2:
+            raise ValueError("raw_only and t_phys_v2 are mutually exclusive")
         # v2: 9 phys（6 基础 + 3 着地几何）+ 2 全局（双足关系）
         # + 2 编码器内（area、dF/dt）= 13；v1 = FEAT_PER_FOOT（8）。
-        feat_per_foot = (T_PHYS_PER_FOOT + 3 + 2 + 2) if self.t_phys_v2 \
-            else FEAT_PER_FOOT
+        # raw_only: only the two in-encoder grid features (area, dF/dt);
+        # T_phys is encoded by its own MLP in the PhysIMU fusion variant.
+        feat_per_foot = 2 if self.raw_only else (
+            (T_PHYS_PER_FOOT + 3 + 2 + 2) if self.t_phys_v2 else FEAT_PER_FOOT)
         if embeddings is None:
             embeddings = SharedEmbeddings(dim=dim, tw=tw)
         self.embeddings = embeddings
@@ -104,15 +110,22 @@ class FootConvEncoder(nn.Module):
         self.stream_norm = nn.LayerNorm(dim)
 
     def _per_foot_inputs(self, x: torch.Tensor):
-        """(B, tw, 108) -> grids (B, tw, 2, 4, 12), feats (B, tw, 2, FEAT_PER_FOOT)."""
-        expect = T_RAW_DIM + (20 if self.t_phys_v2 else T_PHYS_DIM)
+        """(B, tw, C) -> grids (B, tw, 2, 4, 12), feats (B, tw, 2, feat_per_foot).
+
+        ``raw_only=True`` (PhysIMU variant): input is (B, tw, 96) and the
+        feat vector is only the two grid-derived features (area, dF/dt);
+        T_phys is consumed by its own MLP outside this encoder.
+        """
+        expect = T_RAW_DIM if self.raw_only else (
+            T_RAW_DIM + (20 if self.t_phys_v2 else T_PHYS_DIM))
         if x.shape[-1] != expect:
             raise ValueError(
-                "FootConvEncoder expects the raw108(+v2 phys) channel "
-                "(%d-dim), got %d" % (expect, x.shape[-1]))
+                "FootConvEncoder expects the %s channel (%d-dim), got %d"
+                % ("raw-only" if self.raw_only else "raw108(+v2 phys)",
+                   expect, x.shape[-1]))
         batch, tw = x.shape[0], x.shape[1]
         t_raw = x[..., :T_RAW_DIM]
-        t_phys = x[..., T_RAW_DIM:]
+        t_phys = None if self.raw_only else x[..., T_RAW_DIM:]
         grids = torch.stack(
             [t_raw[..., :GRID_CELLS], t_raw[..., GRID_CELLS:]],
             dim=2,
@@ -122,7 +135,9 @@ class FootConvEncoder(nn.Module):
         area = (grids > CONTACT_AREA_THRESH).float().mean(dim=(-1, -2))  # (B,tw,2)
         force = grids.sum(dim=(-1, -2))  # (B,tw,2)
         dfdt = torch.diff(force, dim=1, prepend=force[:, :1]) * FPS  # (B,tw,2)
-        if self.t_phys_v2:
+        if self.raw_only:
+            feats = torch.stack([area, dfdt], dim=-1)  # (B,tw,2,2)
+        elif self.t_phys_v2:
             # 维度 2 布局：base L[0:6]/R[6:12] + hull L[12:15]/R[15:18]
             # + 全局 [18:20]（力比、CoP 距离，两足共享）
             phys = torch.stack(
@@ -141,7 +156,7 @@ class FootConvEncoder(nn.Module):
         return grids, feats
 
     def _per_foot_tokens(self, x: torch.Tensor) -> torch.Tensor:
-        """(B, tw, 108) -> (B, tw, 2, dim): shared conv per foot, right mirrored."""
+        """(B, tw, C) -> (B, tw, 2, dim): shared conv per foot, right mirrored."""
         batch, tw = x.shape[0], x.shape[1]
         grids, feats = self._per_foot_inputs(x)
         # Right foot (index 1) mirrored along the medial-lateral rows so the
@@ -159,7 +174,7 @@ class FootConvEncoder(nn.Module):
         return tokens
 
     def _stream_raw(self, x: torch.Tensor) -> torch.Tensor:
-        """(B, tw, 108) -> (B, tw, 3, dim) RAW token stream after the temporal
+        """(B, tw, C) -> (B, tw, 3, dim) RAW token stream after the temporal
         transformer (no output LayerNorm).  ``forward()`` consumes this so the
         F4a/F2p4 forward path is byte-identical to the pre-fix computation."""
         batch, tw = x.shape[0], x.shape[1]
@@ -176,7 +191,7 @@ class FootConvEncoder(nn.Module):
         return seq.reshape(batch, tw, 3, self.dim)
 
     def encode_stream(self, x: torch.Tensor) -> torch.Tensor:
-        """(B, tw, 108) -> (B, tw, 3, dim) token stream after the temporal
+        """(B, tw, C) -> (B, tw, 3, dim) token stream after the temporal
         transformer (left/right/global).  ARCHIVED alongside part_decoder
         (v2 §F5 作废, fix_plan_v3); the LayerNorm here is the hygiene fix —
         the un-normalized stream was the F5 failure root cause.  ``forward()``
@@ -185,7 +200,8 @@ class FootConvEncoder(nn.Module):
         return self.stream_norm(self._stream_raw(x))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        expect = T_RAW_DIM + (20 if self.t_phys_v2 else T_PHYS_DIM)
+        expect = T_RAW_DIM if self.raw_only else (
+            T_RAW_DIM + (20 if self.t_phys_v2 else T_PHYS_DIM))
         if x.ndim != 3 or x.shape[-1] != expect:
             raise ValueError(
                 "FootConvEncoder expects (B, tw, %d), got %s"

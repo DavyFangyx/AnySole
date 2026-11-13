@@ -57,8 +57,11 @@ def split_sessions(split: str) -> list[str]:
 
 
 def eval_motionpro(args: argparse.Namespace) -> None:
-    run([TOUCH_GAIT, "-m", "app.test_frappe"], cwd=BASELINES / "MotionPRO")
-    root = ROOT / "results" / "baselines" / "MotionPRO" / "predictions" / "carpet_v2" / "eval_motion"
+    # 2026-11-13: MotionPRO now has fold-specific v4 AnySole-bbox models; there
+    # is no single global checkpoint. Do NOT run the legacy default test_frappe
+    # config (it points at adapter_v1 / carpet_v2). Verify the v4 held-out tree.
+    # The old carpet_v2 tree is archived under MotionPRO/archive_20261113/.
+    root = ROOT / "results" / "baselines" / "MotionPRO" / "predictions" / "carpet_v4_anysolebbox_heldout" / "eval_motion"
     missing = [s for s in split_sessions(args.split) if not (root / f"{s}.npz").is_file()]
     if missing:
         raise SystemExit(f"motionpro eval_motion missing {len(missing)}: {missing[:10]}")

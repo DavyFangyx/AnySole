@@ -43,6 +43,20 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V3_2": ModelEntry("V3_2", "v3_2", "9-part pose head"),
     "V3_3A": ModelEntry("V3_3A", "v3_3a", "9-part + soft A"),
     "V3_Bv1": ModelEntry("V3_Bv1", "v3_3b", "9-part + soft A + sigma gate"),
+    "V3_Bv1_IMU": ModelEntry(
+        "V3_Bv1_IMU", "v3_3b_imu",
+        "V3_Bv1 + S2M-style IMU: 12ch MLP embedding concatenated with the "
+        "FootConv tactile token (zero-init concat projection, 2026-11-12)"),
+    "V3_Bv1_PhysIMU": ModelEntry(
+        "V3_Bv1_PhysIMU", "v3_3b_physimu",
+        "V3_Bv1 + fusion 2: T_raw FootConv + T_phys MLP + IMU MLP, "
+        "two-stage [T_phys,IMU] -> [T_raw,.] 2d->d fusion (2026-11-12)"),
+    "V3_Bv1_IMU_NG": ModelEntry(
+        "V3_Bv1_IMU_NG", "v3_3b_imu_nogate",
+        "V3_Bv1_IMU with pose-head gate='none' (no-gate control)"),
+    "V3_Bv1_PhysIMU_NG": ModelEntry(
+        "V3_Bv1_PhysIMU_NG", "v3_3b_physimu_nogate",
+        "V3_Bv1_PhysIMU with pose-head gate='none' (no-gate control)"),
     "V3_Bv2": ModelEntry("V3_Bv2", "v3_3b_query", "Bv1 + query pressure readout (Q-DIRECT / Q-NN)"),
     "V3_Bv3": ModelEntry("V3_Bv3", "v3_3b_query", "Bv2 + Q-FACT factored readout"),
     "V3_Cv1": ModelEntry("V3_Cv1", "v3_3c", "frozen-V (V3_Bv1_vonly base) + zero-init T-residual"),
@@ -190,6 +204,40 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V8_Cv2": ModelEntry("V8_Cv2", "v8_cv5", "V8 消融：双门+随机 dropout+SD2+锚头"),
     "V8_Cv6": ModelEntry("V8_Cv6", "v8_cv5", "V8 消融：双门+始终 VT+SD2+锚头"),
     "V8_Cv7": ModelEntry("V8_Cv7", "v8_cv7", "V8 消融：无门+枚举+SD2+锚头"),
+    # V8 + IMU（2026-11-12）：融合方式 1（S2M 式 IMU MLP + concat）与
+    # 融合方式 2（T_raw/T_phys/IMU 三支两级融合），各带 Cv5 门控 / Cv7 无门。
+    "V8_Cv5_IMU": ModelEntry(
+        "V8_Cv5_IMU", "v8_cv5_imu",
+        "V8_Cv5 + S2M-style IMU (fusion 1, raw108_imu)"),
+    "V8_Cv5_PhysIMU": ModelEntry(
+        "V8_Cv5_PhysIMU", "v8_cv5_physimu",
+        "V8_Cv5 + PhysIMU (fusion 2, raw96_phys_imu)"),
+    "V8_Cv7_IMU": ModelEntry(
+        "V8_Cv7_IMU", "v8_cv7_imu",
+        "V8_Cv7 (no gate) + S2M-style IMU (fusion 1)"),
+    "V8_Cv7_PhysIMU": ModelEntry(
+        "V8_Cv7_PhysIMU", "v8_cv7_physimu",
+        "V8_Cv7 (no gate) + PhysIMU (fusion 2)"),
+    # V8_Cv8U（2026-11-12）：NLL 校准的 per-slot precision router。
+    "V8_Cv8U": ModelEntry(
+        "V8_Cv8U", "v8_cv8u",
+        "V8_Cv8 + per-slot precision router (s_V/s_T NLL-calibrated, K stop-grad)"),
+    "V8_Cv8U_SG": ModelEntry(
+        "V8_Cv8U_SG", "v8_cv8u_sg",
+        "V8_Cv8U with stop-grad off (VT task loss can close K)"),
+    "V8_Cv8U_PhysIMU_SG": ModelEntry(
+        "V8_Cv8U_PhysIMU_SG", "v8_cv8u_physimu_sg",
+        "V8_Cv8U-SG on PhysIMU (raw96_phys_imu) tactile encoding"),
+    "V8_Cv8U_PhysIMU": ModelEntry(
+        "V8_Cv8U_PhysIMU", "v8_cv8u_physimu",
+        "V8_Cv8U on PhysIMU (raw96_phys_imu), stop-grad on (NLL-only K)"),
+    "V8_Cv7_PhysIMU_Gate": ModelEntry(
+        "V8_Cv7_PhysIMU_Gate", "v8_cv7_physimu_gate",
+        "frozen V8_Cv7_PhysIMU + four-group independent V/T gate (2026-11-12)"),
+    "V8_Cv7_PhysIMU_TGate": ModelEntry(
+        "V8_Cv7_PhysIMU_TGate", "v8_cv7_physimu_tgate",
+        "frozen V8_Cv7_PhysIMU + frozen V gate + independent T gate "
+        "(window base + frame correction, 2026-11-13)"),
     # T 运动轴 T1（2026-11-06）：方向载体 = 同帧根 6D 前向轴 + 标量 φ。
     "V8_Cv5T1": ModelEntry("V8_Cv5T1", "v8_cv5t1", "V8 基座 + T1 方向载体（根6D前向轴+φ，2026-11-06）"),
     "V8_Cv5T1_precheck": ModelEntry("V8_Cv5T1_precheck", "v8_cv5t1", "V8_Cv5T1 六轮预检"),
@@ -279,6 +327,32 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V4A": ModelEntry("V4A", "v4a", "24-slot gradient clustering"),
     "V4B": ModelEntry("V4B", "v4b", "learned hard partition (--part-json)"),
 }
+
+# V3_Bv1 IMU / PhysIMU 4 折（2026-11-12，woS13 四折）：每族 4 折，
+# fS6S7 = S13-out（与 V8 当前四折同表）。
+for _fam, _mod in (("V3_Bv1_IMU", "v3_3b_imu"),
+                   ("V3_Bv1_PhysIMU", "v3_3b_physimu"),
+                   ("V3_Bv1_IMU_NG", "v3_3b_imu_nogate"),
+                   ("V3_Bv1_PhysIMU_NG", "v3_3b_physimu_nogate")):
+    for _fold in ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8"):
+        _name = "%s_%s" % (_fam, _fold)
+        MODEL_REGISTRY[_name] = ModelEntry(
+            _name, _mod, "%s 折 %s（woS13 四折，2026-11-12）" % (_fam, _fold))
+
+# V8 + IMU 4 折（2026-11-12，woS13 四折，主模型 V8_Cv5 / 无门 V8_Cv7）。
+for _fam, _mod in (("V8_Cv5_IMU", "v8_cv5_imu"),
+                   ("V8_Cv5_PhysIMU", "v8_cv5_physimu"),
+                   ("V8_Cv7_IMU", "v8_cv7_imu"),
+                   ("V8_Cv7_PhysIMU", "v8_cv7_physimu"),
+                   ("V8_Cv8U", "v8_cv8u"),
+                   ("V8_Cv8U_SG", "v8_cv8u_sg"),
+                   ("V8_Cv8U_PhysIMU_SG", "v8_cv8u_physimu_sg"),
+                   ("V8_Cv8U_PhysIMU", "v8_cv8u_physimu"),
+                   ("V8_Cv7_PhysIMU_Gate", "v8_cv7_physimu_gate")):
+    for _fold in ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8"):
+        _name = "%s_%s" % (_fam, _fold)
+        MODEL_REGISTRY[_name] = ModelEntry(
+            _name, _mod, "%s 折 %s（woS13 四折，2026-11-12）" % (_fam, _fold))
 
 # 协议 A 主表 4 折（2026-11-05）：Cv5 折已在上方；其余四族同 split 逐折配对。
 for _fam, _mod in (("V7_Cv5SD2", "v7_c2sd2"), ("V7_Cv5SD2RT", "v7_c2sd2rt"),

@@ -27,8 +27,10 @@ S2M_ROOT = ROOT + "/results/baselines/Step2Motion/predictions"
 TRAJ = ROOT + "/results/diagnostics/20261108_traj_sceneocc"
 sys.path.insert(0, TRAJ)
 sys.path.insert(0, HYB)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import trajectory_scene_occlusion as T  # noqa: E402
 import hybrid_sceneocc_eval as H  # noqa: E402
+from e9_crossfit_export import s2m_vt_glue  # noqa: E402
 
 FOLDS = ["fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8"]
 BASES = {"V7_Cv5": V7, "V8_Cv5": V8}
@@ -43,8 +45,8 @@ REPS = [
     ("08", "fS5S6S8", "S5081"),
     ("09", "fS6S7", "S6091"),
 ]
-COLORS = {"Step2Motion": "#2a78d6", "VT": "#8a6d3b", "Hybrid": "#7b52ab",
-          "GT": "#0b0b0b"}
+COLORS = {"Step2Motion": "#2a78d6", "Step2Motion-VT": "#5b7ac2",
+          "VT": "#8a6d3b", "Hybrid": "#7b52ab", "GT": "#0b0b0b"}
 DEVICE = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 _CACHE = {}
 
@@ -102,11 +104,14 @@ def arms_for(fold, sid, base):
     hr = by_sid.get(sid)
     if ck.get("feat_mode", "full") == "tilearn" and hr is not None:
         hr = dict(hr); hr["X"] = hr["X"][:, :15]
+    vis = np.asarray(man["frames"]["vis"], float)
     hyb = H.assemble(sid, hr, model, mu, sd, vt, ro, ev, DEVICE, 1.0,
-                     calib="block", calib_frames=40)
+                     calib="block", calib_frames=40,
+                     vis=vis, end_glue=True)
+    s2m_vt = s2m_vt_glue(s2m[:, [0, 2]], vt, vis, ev)
     return man, ev, gt, {
-        "GT": gt, "Step2Motion": s2m, "VT": vt[:, [0, 2]],
-        "Hybrid": hyb,
+        "GT": gt, "Step2Motion": s2m, "Step2Motion-VT": s2m_vt,
+        "VT": vt[:, [0, 2]], "Hybrid": hyb,
     }
 
 
@@ -125,11 +130,11 @@ def plot(out_path, base, action, fold, sid, man, ev, gt, arms):
     samples = np.linspace(5, n - 6, 7).astype(int)
     for i in samples:
         g = gt[i, [0, 2]]
-        for arm in ("Step2Motion", "Hybrid", "VT"):
+        for arm in ("Step2Motion-VT", "Hybrid", "VT"):
             p = p2(arms[arm])[i]
             ax.plot([g[0], p[0]], [g[1], p[1]], color="#9b9a94", lw=0.4,
                     alpha=0.45, zorder=2)
-    for arm in ("Step2Motion", "VT", "Hybrid", "GT"):
+    for arm in ("Step2Motion-VT", "VT", "Hybrid", "GT"):
         tr = p2(arms[arm])
         ls = "--" if arm == "GT" else "-"
         ax.plot(tr[:, 0], tr[:, 1], color=COLORS[arm],
@@ -141,7 +146,7 @@ def plot(out_path, base, action, fold, sid, man, ev, gt, arms):
     ax.set_aspect("equal", adjustable="box")
     # 以 GT/各臂 + 柱脚为视图范围；楔形 fill 由 axes 裁剪，避免被 12m 楔形拉爆
     xs, ys = [], []
-    for arm in ("GT", "Step2Motion", "VT", "Hybrid"):
+    for arm in ("GT", "Step2Motion-VT", "VT", "Hybrid"):
         tr = p2(arms[arm])
         xs.extend(tr[:, 0]); ys.extend(tr[:, 1])
     xs.extend(foot[:, 0]); ys.extend(foot[:, 1])
@@ -168,8 +173,8 @@ def read_csv(p):
 def per_session_ate(root, base):
     src = os.path.join(root, "Full_Table1_E9_Crossfit_PerSession.csv")
     rows = [r for r in read_csv(src) if r["base"] == base]
-    arms = ["Step2Motion", "Hybrid", "VT"]
-    colors = {"Step2Motion": COLORS["Step2Motion"], "Hybrid": COLORS["Hybrid"],
+    arms = ["Step2Motion-VT", "Hybrid", "VT"]
+    colors = {"Step2Motion-VT": COLORS["Step2Motion-VT"], "Hybrid": COLORS["Hybrid"],
               "VT": COLORS["VT"]}
     sessions = sorted({(r["fold"], r["action"], r["session"]) for r in rows})
     fig, ax = plt.subplots(figsize=(14, 4.8))

@@ -33,7 +33,7 @@ from anysole_tta.phase_common import (CELL_ROOT, LEFT_ANKLE_FOOT,  # noqa: E402
                                       RIGHT_ANKLE_FOOT,
                                       load_contact, load_gt_joints,
                                       load_pred_joints, metric_error,
-                                      phase_labels)
+                                      phase_labels, pred_subdir)
 from anysole.data.smpl_io import estimate_floor_y  # noqa: E402
 
 OUT_BASE = PROJECT_ROOT / "results_display/Etest/E6_ContactPhaseAnalysis"
@@ -56,7 +56,7 @@ GROUP_ZH = {"walk": "走路", "run": "跑步", "squat": "深蹲",
 # 多指标相位表（2026-11-02 扩展）：位置误差之外，逐相位统计足垂直误差 /
 # 地面穿透 / 接触准确率。G = VT − V；vert/pen 为负 = 触觉有帮助，
 # contact 为正 = 触觉有帮助（方向随指标）。
-METRICS_EXTRA = ("vert", "pen", "contact")
+METRICS_EXTRA = ("vert", "pen", "contact", "root_abs")
 
 
 def foot_vertical_error_per_frame(pred: np.ndarray, gt: np.ndarray,
@@ -127,7 +127,7 @@ def require_cells(model: str) -> list[str]:
     for sids in build_session_sets().values():
         for sid in sids:
             for cond in CONDS:
-                p = CELL_ROOT / model / "predictions/eval_motion" / f"{sid}_{cond}.npz"
+                p = CELL_ROOT / model / "predictions" / pred_subdir() / f"{sid}_{cond}.npz"
                 if not p.exists():
                     missing.append(str(p))
     return missing
@@ -178,6 +178,11 @@ def load_session(model: str, sid: str, metric: str = "ankle_foot_mpjpe") -> dict
             foot_ground_pen_per_frame(aligned, floor, RIGHT_ANKLE_FOOT)],
             axis=1)  # (T,2) mm
         out[cond + "_cpred"] = predicted_contact_per_frame(aligned, floor)
+        # 轨迹层的相位条件版本：逐帧根关节绝对位置误差（mm），与 E2 的
+        # traj_ATE（RootAbs）同一根误差定义，只是按相位条件聚合。
+        root_err = np.linalg.norm(aligned[:, 0] - gt[:, 0], axis=-1) * 1000.0
+        # 根误差与左右脚无关；复制成 (T,2) 以复用按脚相位条件的聚合。
+        out[cond + "_root_abs"] = np.stack([root_err, root_err], axis=1)
     return out
 
 
@@ -220,7 +225,7 @@ def aggregate_extra(sessions: dict[str, dict]) -> dict:
                 sel = (phase == ph) & valid
                 if not sel.any():
                     continue
-                for m in ("vert", "pen"):
+                for m in ("vert", "pen", "root_abs"):
                     v = data["V2M_" + m][:n][sel, fi]
                     vt = data["VT2M_" + m][:n][sel, fi]
                     acc[ph][m]["V"].append(v.mean())
@@ -366,7 +371,7 @@ def main():
         pruned = {}
         for action, sids in session_sets.items():
             keep = [s for s in sids
-                    if all((CELL_ROOT / m / "predictions/eval_motion" /
+                    if all((CELL_ROOT / m / "predictions" / pred_subdir() /
                             ("%s_%s.npz" % (s, c))).is_file()
                            for m in models for c in CONDS)]
             if len(keep) != len(sids):

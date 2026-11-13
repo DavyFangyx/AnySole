@@ -1,5 +1,7 @@
 # V8_Cv5 模型结构与设计
 
+> 轨迹生成正式方法（仅 T2M 分支）：见 `V8_BiFoot_轨迹生成正式方法.md`（2026-11-11）。
+
 日期：2026-11-08。范围：当前 `SMPL_Motion` 分支的 V8 基座。本文只说明**结构**与结构相关的设计契约，不展开实验结果。
 
 主要来源：
@@ -112,7 +114,7 @@ T_phys(B,tw,12)  ─┴─ foot_conv ── t_temporal(4L) ── M_T (B,tw,d)
          z_root (B,tw,1,d), z_parts (B,tw,9,d)
            ├─ root_head  → [s, dx, dz, vy] → v_hat (B,tw,3)
            ├─ out_parts  → 6D/part → pose (B,tw,144)
-           ├─ contact_head(M_T) → contact_logits (B,tw,2)
+           ├─ contact_head(t_tok[:, -tw:]) → contact_logits (B,tw,2)
            └─ anchor_trans_off(mean(M_V)) → anchor_trans (B,3)  # 旁路
 ```
 
@@ -120,17 +122,17 @@ T_phys(B,tw,12)  ─┴─ foot_conv ── t_temporal(4L) ── M_T (B,tw,d)
 
 ### 4.1 视觉分支
 
-- `ModalEncoders` 的 V 编码器读 HRNet 2051 维/帧，投影到 `d=256`。
-- `v_temporal = _temporal_encoder(d=256, layers=4, nhead=8, dropout=0.1)`，输出 `v_tok (B,tw,256)`。
-- 再经 `m_v = self.v_temporal(v_tok)`，作为运动解码器的 V memory。
+- `ModalEncoders` 的 V 编码器读 HRNet 2051 维/帧，投影到 `d=256`，输出 `v_tok (B,tw,256)`。
+- `v_temporal = _temporal_encoder(d=256, layers=4, nhead=8, dropout=0.1)`。
+- `m_v = self.v_temporal(v_tok)`，作为运动解码器的 V memory。
 - V 的在场由 `v_present` 控制；V 不在场时 V 交叉注意力输出乘 0（硬关闭）。
 
 ### 4.2 触觉分支
 
 - `T_tac = cat([T_raw (96), T_phys (12)], dim=-1)`，108 维/帧。
-- `t_encoder="foot_conv"`：FootConv 编码器（左右足 + global token，内部融合后输出逐帧 token）。
-- `t_temporal = _temporal_encoder(d=256, layers=4, nhead=8, dropout=0.1)`，输出 `t_tok (B,tw,256)`。
-- 再经 `m_t = self.t_temporal(t_tok)`，作为运动解码器的 T memory。
+- `t_encoder="foot_conv"`：FootConv 编码器（左右足 + global token，内部融合后输出逐帧 token `t_tok (B,tw,256)`）。
+- `t_temporal = _temporal_encoder(d=256, layers=4, nhead=8, dropout=0.1)`。
+- `m_t = self.t_temporal(t_tok)`，作为运动解码器的 T memory。
 - T 的在场由 `t_present` 控制；T 不在场时 T 交叉注意力输出乘 0。
 
 ### 4.3 时间嵌入
@@ -177,12 +179,11 @@ h  = LayerNorm(h + FFN(h))
 门的计算（`AnySoleModelV7._route_gate`）：
 
 ```text
-x = cat(v_tok, t_tok)                    # (B, tw, 2d)
-x = mean_t(x)                            # (B, 2d)  窗口级
-g_root = sigmoid(route_root_mlp(x))      # (B, 1)
-g_pose = sigmoid(route_mlp(x))           # (B, 1)
-gates  = cat([g_root, g_pose × 9], -1)   # (B, 1, 10)
-gates  = expand → (B, tw, 10, 1)
+x = cat(v_tok, t_tok).mean(dim=1)          # (B, 2d) 窗口级
+g_root = sigmoid(route_root_mlp(x))        # (B, 1)
+g_pose = sigmoid(route_mlp(x))             # (B, 1)
+gates  = cat([g_root, g_pose.expand(-1, 9)], dim=-1)   # (B, 10)
+gates  = _expand_gate(gates)               # (B, tw, 10, 1)
 ```
 
 - `route_mlp` 是姿态门；`route_root_mlp` 在 `task_routes` 下由 `route_mlp` 深拷贝，初始化相同、训练后独立。

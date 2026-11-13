@@ -1,0 +1,27 @@
+models:
+- name: step2motion_fs5s6s8
+  family: baseline
+  display_name: Step2Motion
+  protocol: smpl24
+  prediction_root: results://baselines/Step2Motion/predictions/gait_model_smpl24_fS5S6S8/eval_motion
+  pattern: '{session_id}.npz'
+  color: '#5b7ac2'
+  capabilities:
+    joint_positions: true
+    joint_rotations: false
+    direct_joint_rotations: false
+    root_translation: false
+    root_rotation: true
+    surface: false
+    predicted_surface: false
+    predicted_shape: false
+    pressure: false
+    pressure_prediction: false
+    contact: false
+    contact_prediction: false
+  sources:
+    joint_positions: model_prediction
+    root_translation: model_prediction
+    root_rotation: model_prediction
+  mode: T2M
+  translation_anchor: gt_previous_frame_per_window

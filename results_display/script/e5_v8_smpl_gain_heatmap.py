@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -52,9 +53,14 @@ from utils.smpl_mesh import (_body_model, render_mesh_frame, smpl_faces,  # noqa
 CELLS = REPO / "results" / "cells"
 SPLITS = REPO / "AnysoleWorkspace" / "protocol" / "splits" / "default"
 SESSIONS = REPO / "AnysoleWorkspace" / "shared" / "facts" / "sessions" / "cam3"
-OUT = REPO / "results_display" / "Etest_crossfit_v8" / "E5_OcclusionRobustness" / "SMPLHeatmap"
-E5_GAIN_TABLE = (REPO / "results_display" / "Etest_crossfit_v8" /
-                 "E5_OcclusionRobustness" / "Full_Table2_E5_TactileGain.csv")
+OUT = Path(os.environ.get(
+    "E5_HEATMAP_OUT",
+    REPO / "results_display" / "Etest_crossfit_v8" / "E5_OcclusionRobustness" / "SMPLHeatmap"))
+E5_GAIN_TABLE = Path(os.environ.get(
+    "E5_GAIN_TABLE",
+    REPO / "results_display" / "Etest_crossfit_v8" /
+    "E5_OcclusionRobustness" / "Full_Table2_E5_TactileGain.csv"))
+PRED_SUBDIR = os.environ.get("E5_PRED_SUBDIR", "eval_motion")
 
 FOLDS = {
     "fS5S6S11": "splits_test_S5S6S11_val_S12.csv",
@@ -162,7 +168,8 @@ def compute_level(model: str, level: str, cache: SessionCache) -> list:
         for sid in _test_ids(fold):
             info = cache.get(sid)
             cell = CELLS / ("%s_%s_s1%s" % (model, fold, suffix))
-            paths = {cond: cell / "predictions" / "eval_motion" / ("%s_%s.npz" % (sid, cond))
+            paths = {cond: cell / "predictions" / PRED_SUBDIR
+                     / ("%s_%s.npz" % (sid, cond))
                      for cond in ("V2M", "VT2M")}
             if not all(path.is_file() for path in paths.values()):
                 continue

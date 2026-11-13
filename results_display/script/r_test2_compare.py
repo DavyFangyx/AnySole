@@ -318,8 +318,13 @@ def registry_baselines(results_root: Path,
 def _model_result_root(prediction_root: Path) -> Path:
     """Return the owning ``<model>`` directory for metric provenance."""
     prediction_root = Path(prediction_root)
-    if prediction_root.name == "eval_motion" and prediction_root.parent.name == "predictions":
-        return prediction_root.parent.parent
+    if prediction_root.name == "eval_motion":
+        # flat layout: .../predictions/eval_motion
+        if prediction_root.parent.name == "predictions":
+            return prediction_root.parent.parent
+        # variant layout: .../predictions/<variant>/eval_motion
+        if prediction_root.parent.parent.name == "predictions":
+            return prediction_root.parent.parent.parent
     if prediction_root.name == "predictions":
         return prediction_root.parent
     return prediction_root
@@ -394,6 +399,7 @@ def write_model_metrics(
         },
         "capabilities_denied": sorted(denied),
         "applicable_metrics": sorted(applicable),
+        "translation_anchor": model.get("translation_anchor", ""),
         "gt_source": gt_source,
         "surface_metrics": bool(surface_metrics),
         "evaluation_fps": float(summary.get("eval_fps", 40.0)),
@@ -739,6 +745,30 @@ def evaluate_motion_row(model: dict[str, Any], row: dict[str, str],
         # Post-gate: metrics the capability contract does not permit stay
         # blank with an explicit reason (never silently kept).
         mask_metrics(base, applicable, reasons)
+        # GT-anchored trajectory fill for baselines without a world anchor
+        # (Step2Motion: root = cumsum(displacement) from origin).  Same anchor
+        # as the main model's "（GT Anchored）" columns: one GT root per
+        # non-overlapping 20-frame tile, taken at max(tile_start-1, 0).
+        anchor_mode = str(model.get("translation_anchor") or "")
+        if anchor_mode == "gt_previous_frame_per_window":
+            anchored = np.asarray(pred[:n_eval], dtype=np.float64).copy()
+            window = 20
+            for left in range(0, n_eval, window):
+                anchor_index = max(left - 1, 0)
+                shift = (np.asarray(gt[anchor_index, 0], dtype=np.float64)
+                         - anchored[left, 0])
+                anchored[left:left + window] += shift
+            anchored_values = metrics(
+                anchored, gt[:n_eval], keep, eval_fps,
+                protocol=protocol, names=pred_names, times=times,
+                forward_axis=PROTOCOL_FORWARD_AXIS[protocol],
+            )
+            for key in ("global_mpjpe_mm", "root_ate_mm", "ground_pen_mm"):
+                base[key] = float(anchored_values[key])
+                reasons.pop(key, None)
+                reasons[key] = "gt_anchored: gt_previous_frame_per_window"
+            base["translation_anchor"] = anchor_mode
+            base["gt_anchor_count"] = int(np.ceil(n_eval / window))
         base["n_valid_frames"] = int(keep.sum())
         for metric in METRICS:
             if not math.isfinite(float(base[metric])) and metric in applicable:
@@ -869,7 +899,8 @@ def main() -> int:
                   "eval_fps": args.fps, "checkpoint": model.get("checkpoint", ""),
                   "mode": mode, "family": family})
         summaries.append(s)
-        if args.write_model_metrics and model_rows and model_rows[0].get("protocol"):
+        if args.write_model_metrics and model_rows and any(
+                r.get("protocol") for r in model_rows):
             caps = capability_map(model)
             denied = denied_capabilities(model)
             applicable = applicable_for(caps, denied, approved=model.get("approved", ()))

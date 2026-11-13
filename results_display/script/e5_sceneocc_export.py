@@ -1,5 +1,9 @@
 """E5 scene-occlusion full-run export (4-fold LSO, V7_Cv5).
 
+T2M reference rows: after this exporter, run
+``results_display/script/e5_t_bifoot_reference_replace.py`` to replace the
+legacy T2M reference with the shared BiFoot branch.
+
 Reads:
   results/diagnostics/20261107_e5_sceneocc_full/<fold>_{scene,clean}/metrics/
       test.json, window_detail_test.json, session_detail_test.json

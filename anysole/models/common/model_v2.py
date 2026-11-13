@@ -45,6 +45,13 @@ class AnySoleModelV2(nn.Module):
         self.tactile_input = str(tactile_input)
         self.tactile_direct = bool(tactile_direct)
         self.no_imu = bool(no_imu)
+        # raw108_imu: pressure stays on raw108; the 12 IMU columns of T_s2m
+        # are encoded by their own MLP and concatenated with the tactile token
+        # (S2M-style fetch, 2026-11-12).
+        self.imu_input = self.tactile_input == "raw108_imu"
+        # raw96_phys_imu (fusion 2): T_raw 96 -> FootConv, T_phys 12 -> MLP,
+        # IMU 12 -> MLP, then a two-stage [T_phys, IMU] -> [T_raw, .] fusion.
+        self.phys_imu = self.tactile_input == "raw96_phys_imu"
         self.v_input = str(v_input)
         self.t_encoder = str(t_encoder)
         self.f2_repr = bool(f2_repr)
@@ -59,12 +66,17 @@ class AnySoleModelV2(nn.Module):
             raise ValueError("position_head requires f2_repr=False (V3_Dv1)")
         if self.v_input not in ("hrnet", "hmr_gvhmr"):
             raise ValueError("v_input must be 'hrnet' or 'hmr_gvhmr', got %r" % self.v_input)
-        if self.tactile_input not in ("raw108", "s2m50"):
-            raise ValueError("tactile_input must be 'raw108' or 's2m50', got %r" % self.tactile_input)
+        if self.tactile_input not in ("raw108", "s2m50", "raw108_imu", "raw96_phys_imu"):
+            raise ValueError(
+                "tactile_input must be 'raw108', 's2m50', 'raw108_imu' or "
+                "'raw96_phys_imu', got %r" % self.tactile_input)
         if self.t_encoder not in ("linear", "foot_conv"):
             raise ValueError("t_encoder must be 'linear' or 'foot_conv', got %r" % self.t_encoder)
-        if self.t_encoder == "foot_conv" and self.tactile_input != "raw108":
-            raise ValueError("t_encoder='foot_conv' requires tactile_input='raw108' (F4a)")
+        if self.t_encoder == "foot_conv" and self.tactile_input not in (
+                "raw108", "raw108_imu", "raw96_phys_imu"):
+            raise ValueError(
+                "t_encoder='foot_conv' requires tactile_input in "
+                "'raw108'/'raw108_imu'/'raw96_phys_imu' (F4a)")
         if self.tactile_direct and self.tactile_input != "s2m50":
             raise ValueError("tactile_direct requires tactile_input='s2m50'")
         if self.no_imu and self.tactile_input != "s2m50":
@@ -92,14 +104,20 @@ class AnySoleModelV2(nn.Module):
             if self.position_head else None
 
     def forward(self, V_feat, T_raw, T_phys, config_id, subject_ids=None, T_s2m=None,
-                V_hmr=None, mask_v=None, mask_t=None, h_override=None):
+                V_hmr=None, mask_v=None, mask_t=None, h_override=None,
+                prev_ctx=None, prev_state=None, causal=False, z_src=None,
+                obs_history=None, gate_override=None, **kwargs):
         """F0b: same inputs as V1 minus the diffusion pair (x_tau, tau).
 
         The visual stream follows ``v_input``: hrnet = V_feat (2051-d);
         hmr_gvhmr (F1) = V_hmr (1156-d GVHMR channel).  The tactile stream
         follows ``tactile_input``: raw108 = cat([T_raw, T_phys]) (encoded by
         LinearTemporalEncoder or FootConvEncoder per t_encoder); s2m50 =
-        T_s2m.  ``mask_v/mask_t`` (bool, B×tw) are the ρ-grid per-frame
+        T_s2m; raw108_imu = raw108 pressure + the 12 IMU columns of T_s2m
+        (S2M-style IMU MLP concatenated with the tactile token);
+        raw96_phys_imu = T_raw 96 -> FootConv, T_phys 12 -> MLP, IMU 12 ->
+        MLP, fused as [T_phys, IMU] -> [T_raw, physical].
+        ``mask_v/mask_t`` (bool, B×tw) are the ρ-grid per-frame
         null-token masks (missing-rate 实验 1); None = old path.
 
         ``h_override``（TTA 实验注入点，2026-10-26）：给定 (B,tw*n_tokens,dim)
@@ -111,12 +129,20 @@ class AnySoleModelV2(nn.Module):
             if T_s2m is None:
                 raise ValueError("T_s2m is required when tactile_input='s2m50'")
             T_tac = T_s2m
+        elif self.phys_imu:
+            # raw96_phys_imu: T_phys is encoded by its own MLP branch; the
+            # FootConv path receives only the 96 pressure cells.
+            T_tac = T_raw
         else:
+            # raw108 / raw108_imu: pressure keeps the 108-dim raw path; the
+            # latter additionally consumes T_s2m's 12 IMU columns in the
+            # encoder (S2M-style IMU MLP + concat).
             T_tac = torch.cat([T_raw, T_phys], dim=-1)
         if self.v_input == "hmr_gvhmr" and V_hmr is None:
             raise ValueError("V_hmr is required when v_input='hmr_gvhmr'")
         v_tok, t_tok = self.encoders(V_feat, T_tac, config_id, V_hmr=V_hmr,
-                                     mask_v=mask_v, mask_t=mask_t)
+                                     mask_v=mask_v, mask_t=mask_t,
+                                     T_s2m=T_s2m, T_phys=T_phys)
         if self.t_residual is not None or self.position_head is not None:
             # V3_Cv1/V3_Dv1: the frozen base never sees the real tactile stream
             # — it runs in its V-only regime under every condition (the fused

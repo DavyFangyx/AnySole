@@ -686,6 +686,10 @@ EXPERIMENTS["v7_eval_occ"]["MODEL_IDS"] += [
     for s in ("_s1", "_s2", "_s3") for o in ("010", "020", "030", "050")]
 EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
     "V3_Bv1" + s for s in ("_s1", "_s2", "_s3")]
+# V3_Bv1_IMU / V3_Bv1_PhysIMU（2026-11-12）：S2M 式 IMU 接入与融合方式 2。
+# 首轮只发 s1。
+EXPERIMENTS["v7_train"]["MODEL_IDS"] += [
+    "V3_Bv1_IMU_s1", "V3_Bv1_PhysIMU_s1"]
 # 阶段 3 触觉泛化（2026-10-31，E6 门控重设计）：G-b 增益偏置 / G-c token
 # dropout，首轮只发 s1。evalocc 交叉评估格同 v7_train 门控组。
 _V7_TACTILE_BASES = ("V7_Cv7_gb", "V7_Cv7_gc")
@@ -933,5 +937,74 @@ _E5_SCENE_SUPP_IDS = [
 EXPERIMENTS["e5_sceneocc_supp"] = {
     "KIND": "model_suite",
     "MODEL_IDS": _E5_SCENE_SUPP_IDS,
+    "REQUIRES": [],
+}
+
+# V8 E5 2D 遮挡奇数档（2026-11-11 用户指定）：5 个正文模型 × 4 折 ×
+# occ010/030/050/070/090，eval-only、只评 test。注册见 model_registry 末尾。
+EXPERIMENTS["v8_eval_occ_odd"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["%s_%s_s1_evalocc%s" % (fam, fold, occ)
+                  for fam in ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6", "V8_Cv7")
+                  for fold in ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
+                  for occ in ("010", "030", "050", "070", "090")],
+    "REQUIRES": [],
+}
+
+# V3_Bv1 IMU / PhysIMU woS13 四折（2026-11-12）：gate × 融合方式 2×2，
+# 每族 4 折，共 16 个训练格；fS6S7 = S13-out，与 V8 四折同表。
+EXPERIMENTS["v3b_imu_folds"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": [
+        "%s_%s_s1" % (fam, fold)
+        for fam in ("V3_Bv1_IMU", "V3_Bv1_PhysIMU",
+                    "V3_Bv1_IMU_NG", "V3_Bv1_PhysIMU_NG")
+        for fold in ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
+    ],
+    "REQUIRES": [],
+}
+
+# V8_Cv5/Cv7 + IMU 融合 1/2 的 woS13 四折（2026-11-12）：主模型 V8_Cv5 +
+# 无门 V8_Cv7，每族 4 折，共 16 个训练格；fS6S7 = S13-out。
+EXPERIMENTS["v8_imu_folds"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": [
+        "%s_%s_s1" % (fam, fold)
+        for fam in ("V8_Cv5_IMU", "V8_Cv5_PhysIMU",
+                    "V8_Cv7_IMU", "V8_Cv7_PhysIMU")
+        for fold in ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
+    ],
+    "REQUIRES": [],
+}
+
+# V8_Cv8U 单折 pilot（2026-11-12）：先验 NLL 校准 precision router 是否能
+# 跑通、K 是否按部位分化；通过后再扩四折。
+EXPERIMENTS["v8_cv8u_pilot"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V8_Cv8U_fS5S6S11_s1"],
+    "REQUIRES": [],
+}
+
+# V8_Cv8U_SG 单折 pilot（2026-11-12）：在 Cv8U pilot（K~0.5、VT 退步）之后，
+# 允许 VT 任务损失训练 K，并把 NLL 权重提到 0.5。仍只跑 fS5S6S11。
+EXPERIMENTS["v8_cv8u_sg_pilot"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V8_Cv8U_SG_fS5S6S11_s1"],
+    "REQUIRES": [],
+}
+
+# V8_Cv8U_PhysIMU_SG 单折 pilot（2026-11-12）：门控 + PhysIMU + SG。
+# 回答「门控是否应建立在 IMU/PhysIMU 触觉编码上」；仍只跑 fS5S6S11。
+EXPERIMENTS["v8_cv8u_physimu_sg_pilot"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V8_Cv8U_PhysIMU_SG_fS5S6S11_s1"],
+    "REQUIRES": [],
+}
+
+# V8_Cv8U_PhysIMU 单折 pilot（2026-11-12）：PhysIMU + stop-grad on 对照，
+# 与 V8_Cv8U_PhysIMU_SG 只差 SG。
+EXPERIMENTS["v8_cv8u_physimu_pilot"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": ["V8_Cv8U_PhysIMU_fS5S6S11_s1"],
     "REQUIRES": [],
 }

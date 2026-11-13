@@ -5,7 +5,7 @@
 - E1：z_note/E_Test/C版本对照/E1_同架构专家对比.md 表格 → E1_.../Full_Table1_E1_Experts.csv
 - E2：cells（Cv1–7 last / V7_Cv1_evalbest）+ 基线公共评估产物（results/baselines/*/metrics/test_comparison.json）→ Full_Table1_E2_Performance.csv
 - E3：Etest/10_21/e3_multiview.json → Full_Table1_E3_MultiView.csv
-- E4：cells（Cv1–7 stat，三条件十指标 + Δ）→ Full_Table1_E4_Ablation_AllMetrics.csv
+- E4：cells（Cv1–7 stat，三条件十指标 + Δ）→ detail/Full_Table1_E4_Ablation_AllMetrics.csv
 - E5：主模型 V7_Cv5（last/best × occ000-100 十一档）→ Full_Table1_E5_Occlusion.csv
 - E6：E6_接触相位/e6_table.json + PNG → Full_Table1_E6_PhaseGain.csv
   （+ 相位简表 Full_Table1_E6_PhaseGain_Simple.csv，四相位 × 双门/无门）
@@ -402,13 +402,13 @@ def export_e2(models: list[str], ckpt: str) -> None:
                         + metric_row(m, cond, keys=E2_METRICS10))
     out = ETEST / "E2_MainPerformance"
     for table_no, block in enumerate(("V", "T", "VT"), 1):
-        write_csv(out / ("Full_Table%d_E2_Performance_%s.csv" % (table_no, block)),
+        write_csv(out / "detail" / ("Full_Table%d_E2_Performance_%s.csv" % (table_no, block)),
                   header, dedupe(rows_by_block.get(block, [])))
     summary = []
     for block in ("V", "T", "VT"):
         for r in rows_by_block.get(block, []):
             summary.append([block] + r)
-    write_csv(out / "Full_Table4_E2_Performance_Summary.csv",
+    write_csv(out / "detail" / "Full_Table4_E2_Performance_Summary.csv",
               ["块"] + header, dedupe(summary))
     # 旧的单表文件已拆分为四张
     legacy = out / "Full_Table1_E2_Performance.csv"
@@ -441,7 +441,7 @@ def export_e4(models: list[str], ckpt: str) -> None:
         if cell_id == "V7_Cv6":
             continue
         rows.append([display_name(cell_id), "Δ(VT−V)"] + delta_row(m))
-    write_csv(ETEST / "E4_ComponentAblation" / "Full_Table1_E4_Ablation_AllMetrics.csv",
+    write_csv(ETEST / "E4_ComponentAblation" / "detail" / "Full_Table1_E4_Ablation_AllMetrics.csv",
               header, rows)
 
 

@@ -175,6 +175,12 @@ T_S2M_DIM = 50
 # --no-imu：真删 IMU 通道后的布局（每脚 19 维 = 16 压力池化 + 总力1 + CoP2）。
 # 数据侧不合成、模型侧不编码 IMU；编码器按 38 维分组（无 IMU 组）。
 T_S2M_NOIMU_DIM = 38
+# T_s2m 的 IMU 列（Step2Motion 布局）：左脚 16:22、右脚 41:47，
+# 每脚 acc3 + gyro3 = 6，共 12 维。tactile_input="raw108_imu" 时压力仍走
+# raw108 的 96 格 + T_phys；"raw96_phys_imu" 时压力只走 96 格，T_phys
+# 由独立 MLP 分支编码。两种模式下模型都按此列从 T_s2m 取 IMU。
+T_S2M_IMU_COLUMNS = tuple(range(16, 22)) + tuple(range(41, 47))
+T_S2M_IMU_DIM = len(T_S2M_IMU_COLUMNS)
 V_FEAT_DIM = 2051  # HRNet 2048 + normalized CLIFF bbox_info [cx, cy, b]
 # F1: GVHMR visual channel (v_input="hmr_gvhmr").  Per frame:
 #   body_pose aa 63 (SMPL-X 21 body joints) + global_orient 3 + betas 10

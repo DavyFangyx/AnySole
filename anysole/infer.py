@@ -21,7 +21,11 @@ from anysole.data.dataset import (
 )
 from anysole.data.pressure import normalize_raw
 from anysole.data.workspace_adapter import load_shared_session, shared_smpl_path
-from anysole.data.tactile_s2m import build_t_s2m, resolve_legacy_bvh_path
+from anysole.data.tactile_s2m import (
+    build_t_s2m,
+    load_virtual_imu_facts,
+    resolve_legacy_bvh_path,
+)
 from anysole.utils.diffusion import GaussianDiffusion
 from anysole.utils.geometry import (
     f2_to_world_np,
@@ -359,7 +363,10 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
     continuation = bool(config.get("continuation", False)) and pos_mode
     warm_start = bool(config.get("warm_start", False))
     f2_repr = bool(saved_config.get("f2_repr", False))
-    uses_synthetic_imu = tactile_input == "s2m50" and config_value in (CONFIG_VT, CONFIG_T)
+    # raw108_imu (2026-11-12): T_s2m is consumed only for its 12 IMU columns
+    # by the model; infer must therefore build it exactly like the dataset.
+    uses_imu = tactile_input in ("s2m50", "raw108_imu", "raw96_phys_imu") \
+        and config_value in (CONFIG_VT, CONFIG_T)
     # Standard F4 (6D + raw108) must not read its SMPL target during inference
     # merely to obtain betas for serialization. Position/F2 need explicit SMPL
     # anchors; historical synthetic IMU is a separate BVH-derived input.
@@ -379,20 +386,25 @@ def _run_one(args: argparse.Namespace, config_value: int, output_override: Optio
             "WARNING: this checkpoint branch uses GT-SMPL-derived inference state "
             "(pos/f2); it is an evaluation protocol, not mocap-free deployment."
         )
-    if uses_synthetic_imu:
-        # E6.6a: preserve the original Step2Motion BVH-23/ToeBase IMU source.
-        # This GT-BVH-derived input is experimental and never used by raw108 F4.
+    if uses_imu:
+        # E6.6a: s2m50 / raw108_imu.  Prefer the virtual-IMU facts (same source
+        # as the dataset, 2026-11-06 new caliber); fall back to the legacy
+        # BVH-23/ToeBase synthesis only for sessions without facts.
         t_mocap = session_time_grid(meta) - float(meta["offset_s"])
+        imu_facts = None if no_imu else load_virtual_imu_facts(
+            meta.get("date", ""), args.session)
         t_s2m = build_t_s2m(
             t_raw,
             bvh_path=None if no_imu else resolve_legacy_bvh_path(meta),
             query_t=None if no_imu else t_mocap,
             no_imu=no_imu,
+            imu_facts=imu_facts,
         )
         if not no_imu:
+            source = "virtual-IMU facts" if imu_facts is not None else "legacy BVH-23 synthesis"
             print(
-                "WARNING: s2m50 uses synthetic IMU derived from the directly exported GT BVH; "
-                "it is an evaluation protocol, not mocap-free deployment."
+                "WARNING: %s uses IMU from %s (evaluation input, not a pressure-only run)."
+                % (tactile_input, source)
             )
     psi_array = None
     trans_world_array = None

@@ -1,0 +1,59 @@
+{
+  "schema": "posetransopt_native_to_mocap.v1",
+  "date": "20260808",
+  "A": [
+    [
+      -0.7649589652621218,
+      0.1889633227193359,
+      0.6157358558120181
+    ],
+    [
+      -0.045450084713616556,
+      0.9377741229973642,
+      -0.34425860052574453
+    ],
+    [
+      -0.6424734012118084,
+      -0.29132894964775397,
+      -0.7087703237519093
+    ]
+  ],
+  "b": [
+    -2.2964560742009055,
+    1.5346049248762832,
+    3.5237808430703885
+  ],
+  "method": "rotation from calibration chain Rm.T @ Rc.T @ diag(-1,-1,1); translation least-squares fitted over the date's PoseTransOpt work outputs vs smpl GT pelvis (session means)",
+  "n_sessions": 24,
+  "sessions": [
+    "S11011",
+    "S11012",
+    "S11013",
+    "S11021",
+    "S11022",
+    "S11023",
+    "S11031",
+    "S11032",
+    "S11051",
+    "S11053",
+    "S11061",
+    "S11062",
+    "S11063",
+    "S11071",
+    "S11072",
+    "S11073",
+    "S11091",
+    "S11093",
+    "S11101",
+    "S11102",
+    "S11103",
+    "S11111",
+    "S11112",
+    "S11113"
+  ],
+  "residual_rmse_mm": 44.514145701525756,
+  "residual_max_mm": 158.50377977904057,
+  "calibration_source": "/data/fangyuxuan/projects/gait/AnysoleWorkspace/protocol/calibration/20260808.json",
+  "created": "2026-10-08",
+  "drift_point": "Baselines/\u51b3\u7b56/04_E_\u8bc4\u4f30\u6536\u5c3e.md \u00a73.5 \u6f02\u79fb\u70b9 m"
+}

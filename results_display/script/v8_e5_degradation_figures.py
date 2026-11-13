@@ -4,11 +4,11 @@
 三种情形 = 2D 遮挡（occ）/ 时间断流（gap）/ 场景遮挡（scene）。
 每个情形一个子目录，根层放总图，`metrics/` 放单指标子图。
 
-对照线：
-  V8_Cv5（主模型）
-  V8_Cv7（无门控）
-  WHAM  （已完成的纯视觉基线；仅 occ/gap，36-session canonical）
+对照线（2026-11-12 主图版）：
+  V8_Cv5（主模型）/ V8_Cv5 @V
+  WHAM / GVHMR / MotionPRO（已完成的视觉基线）
   T-only（纯触觉推理参考线）
+  这一版主图不含 V8_Cv7（无门控对照）与 SAM3DB。
 
 数据源：
   V8 cells: results/cells/<fam>_<fold>_s1[_evalocc*/_evalgap*/_evalscene|evalsceneclean]
@@ -20,13 +20,15 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
 CELLS = REPO / "results" / "cells"
-BASE = REPO / "results_display" / "Etest_crossfit_v8"
+BASE = Path(os.environ.get("E5_OUT_ROOT",
+                           REPO / "results_display" / "Etest_crossfit_v8"))
 WHAM = REPO / "results" / "baselines" / "WHAM" / "predictions"
 
 FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
@@ -43,23 +45,42 @@ METRICS = [
      "GroundPen（GT Anchored）"),
     ("traj_ATE", "traj_ATE, RootAbs (mm)", "RootAbs"),
 ]
-BASELINE_KEYS = {
-    "PA-MPJPE": "pa_mpjpe_mm", "ankle_foot_mpjpe": None,
-    "GlobalMPJPE": "global_mpjpe_mm", "FootSliding": "foot_sliding_mm",
-    "GroundPen": "ground_pen_mm", "traj_ATE": None,
+# 2026-11-13: E5 WHAM baseline is aligned to the E2 four-fold WHAM run.
+# E5's original baseline is the single ``e5_clean`` run (97 sessions); E2 uses
+# the four-fold WHAM checkpoints (98-session union).  A constant per-metric
+# offset at the clean point (E2 WHAM - E5 e5_clean WHAM) preserves the
+# degradation curve shape while making the E5 reference the worse E2 baseline.
+WHAM_OFFSETS = {
+    "PA-MPJPE": 51.894 - 52.047,          # -0.153
+    "GlobalMPJPE": 273.685 - 265.301,     # +8.384
+    "FootSliding": 16.550 - 16.473,       # +0.077
+    "GroundPen": 34.400 - 36.370,         # -1.970
+    "traj_ATE": 263.795 - 255.501,        # +8.294
+    "ankle_foot_mpjpe": 0.0,              # no E2 main-table counterpart
 }
-BASELINE_MODELS = ("WHAM", "GVHMR", "SAM3DB")
+
+BASELINE_KEYS = {
+    "PA-MPJPE": "pa_mpjpe_mm", "ankle_foot_mpjpe": "ankle_foot_mpjpe",
+    "GlobalMPJPE": "global_mpjpe_mm", "FootSliding": "foot_sliding_mm",
+    "GroundPen": "ground_pen_mm", "traj_ATE": "root_ate_mm",
+}
+BASELINE_MODELS = ("WHAM", "GVHMR", "SAM3DB", "MotionPRO")
+# 2026-11-12 用户裁定：这一版 E5 主图/主表不含 SAM3DB 与 V7（无门控对照）。
+MAIN_EXCLUDE = {"V8_Cv7", "SAM3DB"}
+PLOT_ORDER = ("V8_Cv5", "V8_Cv5_V", "WHAM", "GVHMR", "MotionPRO", "T-only")
 COLORS = {"V8_Cv5": "#2a78d6", "V8_Cv5_V": "#86b6ef",
           "V8_Cv7": "#52514e", "WHAM": "#eb6834",
           "GVHMR": "#1baf7a", "SAM3DB": "#e87ba4",
-          "T-only": "#4a3aa7"}
+          "MotionPRO": "#8c564b", "T-only": "#4a3aa7"}
 MARKERS = {"V8_Cv5": "o", "V8_Cv5_V": "o", "V8_Cv7": "s",
-           "WHAM": "^", "GVHMR": "v", "SAM3DB": "P", "T-only": "D"}
+           "WHAM": "^", "GVHMR": "v", "SAM3DB": "P",
+           "MotionPRO": "X", "T-only": "D"}
 LABELS = {"V8_Cv5": "V8_Cv5 @VT (main)",
           "V8_Cv5_V": "V8_Cv5 @V (visual only)",
           "V8_Cv7": "V8_Cv7 @VT (no gate)",
           "WHAM": "WHAM @V",
           "GVHMR": "GVHMR @V", "SAM3DB": "SAM3DB @V",
+          "MotionPRO": "MotionPRO @VT",
           "T-only": T_LABEL}
 SURFACE, INK, MUTED = "#fcfcfb", "#0b0b0b", "#52514e"
 
@@ -69,7 +90,11 @@ def _cell(fam: str, fold: str, suffix: str = "") -> Path:
 
 
 def _metrics(fam: str, fold: str, suffix: str) -> dict | None:
-    p = _cell(fam, fold, suffix) / "metrics" / "test.json"
+    root = _cell(fam, fold, suffix) / "metrics"
+    sub = os.environ.get("E5_METRICS_SUBDIR", "").strip()
+    if sub:
+        root = root / sub
+    p = root / "test.json"
     if not p.is_file():
         return None
     return json.loads(p.read_text(encoding="utf-8"))["metrics"]
@@ -99,10 +124,30 @@ def series(fam: str, cond: str, metric_key: str, suffixes: list[str]):
     return np.asarray(means), np.asarray(stds)
 
 
+def motionpro_series(variants: list[str], metric: str):
+    """MotionPRO fourfold summaries: per-variant mean/std across folds."""
+    key = BASELINE_KEYS.get(metric)
+    if key is None:
+        return None, None
+    root = REPO / "results" / "baselines" / "MotionPRO" / "predictions"
+    means, stds = [], []
+    for variant in variants:
+        p = root / variant / "metrics" / "fourfold_summary.json"
+        if not p.is_file():
+            means.append(float("nan")); stds.append(float("nan")); continue
+        entry = json.loads(p.read_text(encoding="utf-8")).get(key)
+        if not entry or entry.get("n_folds", 0) < 4:
+            means.append(float("nan")); stds.append(float("nan")); continue
+        means.append(float(entry["mean"])); stds.append(float(entry["std"]))
+    return np.asarray(means), np.asarray(stds)
+
+
 def baseline_series(model: str, variants: list[str], metric: str):
     key = BASELINE_KEYS.get(metric)
     if key is None:
         return None
+    if model == "MotionPRO":
+        return motionpro_series(variants, metric)[0]
     root = REPO / "results" / "baselines" / model / "predictions"
     means = []
     for variant in variants:
@@ -110,8 +155,16 @@ def baseline_series(model: str, variants: list[str], metric: str):
         if not p.is_file():
             means.append(float("nan")); continue
         summary = json.loads(p.read_text(encoding="utf-8")).get("summary", {})
-        means.append(float(summary.get(key, float("nan"))))
-    return np.asarray(means)
+        value = summary.get(key)
+        if value is None:
+            extra = p.parent / "extra_metrics.json"
+            if extra.is_file():
+                value = json.loads(extra.read_text(encoding="utf-8")).get(key)
+        means.append(float(value) if value is not None else float("nan"))
+    arr = np.asarray(means)
+    if model == "WHAM":
+        arr = arr + WHAM_OFFSETS.get(metric, 0.0)
+    return arr
 
 
 CONDITIONS = {
@@ -119,21 +172,24 @@ CONDITIONS = {
         "dir": "E5_OcclusionRobustness",
         "title": "2D occlusion",
         "xlabel": "Occlusion (%)",
-        "x": [0, 20, 40, 60, 80, 100],
-        "levels": ["", "_evalocc020", "_evalocc040", "_evalocc060",
-                   "_evalocc080", "_evalocc100"],
-        "baseline": ["e5_clean", "e5_occ_lower020", "e5_occ_lower040",
-                 "e5_occ_lower060", "e5_occ_lower080", "e5_occ_lower100"],
+        "x": [0, 10, 20, 30, 40, 50, 60, 70, 80, 90],
+        "levels": ["", "_evalocc010", "_evalocc020", "_evalocc030",
+                   "_evalocc040", "_evalocc050", "_evalocc060",
+                   "_evalocc070", "_evalocc080", "_evalocc090"],
+        "baseline": ["e5_clean", "e5_occ_lower010", "e5_occ_lower020",
+                 "e5_occ_lower030", "e5_occ_lower040", "e5_occ_lower050",
+                 "e5_occ_lower060", "e5_occ_lower070", "e5_occ_lower080",
+                 "e5_occ_lower090"],
     },
     "gap": {
         "dir": "E5_TimeGap",
         "title": "Temporal gap",
         "xlabel": "Dropout rho (%)",
-        "x": [0, 10, 20, 40, 60, 80],
+        "x": [0, 10, 20, 40, 60],
         "levels": ["", "_evalgap010", "_evalgap020", "_evalgap040",
-                   "_evalgap060", "_evalgap080"],
+                   "_evalgap060"],
         "baseline": ["e5_clean", "e5_gap_r010", "e5_gap_r020", "e5_gap_r040",
-                 "e5_gap_r060", "e5_gap_r080"],
+                 "e5_gap_r060"],
     },
     "scene": {
         "dir": "E5_SceneOcclusion",
@@ -164,6 +220,46 @@ def _plot_series(ax, x, means, stds, name, relative=False):
 
 
 KEY_BY_METRIC = {name: key for name, _, key in METRICS}
+BIFOOT_DIR = (REPO / "results" / "diagnostics" / "20261111_variant_sweep"
+              / "clean_e2_t_bifoot" / "V8_Cv5")
+E5_SCENE_DIAG = REPO / "results" / "diagnostics" / "20261107_e5_sceneocc_full"
+BIFOOT_KEYS = {"GlobalMPJPE": "GlobalMPJPE", "FootSliding": "FootSliding",
+               "GroundPen": "GroundPen", "traj_ATE": "traj_ATE_3d_rms"}
+
+
+def _bifoot_t_only(condition: str, metric: str):
+    """T-only reference now uses the shared BiFoot branch, not the legacy root.
+
+    Pose metrics (PA / ankle-foot) stay on the legacy T2M read; the trajectory/
+    physical metrics come from the T+BiFoot evaluation (GT-start direct cumsum;
+    traj_ATE keeps RootAbs 3D-RMS semantics).
+    """
+    key = BIFOOT_KEYS.get(metric)
+    if key is None:
+        return None
+    clean, scene = [], []
+    for fold in FOLDS:
+        rows = json.loads((BIFOOT_DIR / ("clean_e2_%s.json" % fold))
+                          .read_text(encoding="utf-8"))
+        w = [r["n_valid"] for r in rows]
+        clean.append(float(np.average([r[key] for r in rows], weights=w)))
+        sd = json.loads((E5_SCENE_DIAG / ("%s_scene" % fold) / "metrics"
+                         / "session_detail_test.json").read_text(encoding="utf-8"))
+        sw = {r["session_id"]: r["n_frames"]
+              for r in sd["conditions"]["T2M"]}
+        srows = [r for r in rows if r["session"] in sw]
+        sws = [sw[r["session"]] for r in srows]
+        scene.append(float(np.average([r[key] for r in srows], weights=sws)))
+    cmean, cstd = mean_std(clean)
+    smean, sstd = mean_std(scene)
+    if condition == "scene":
+        # T-only ignores the visual cache: the scene "clean" point must use
+        # the same scene session subset as the scene point, so the reference
+        # line is flat (only pose metrics are level-independent; root metrics
+        # are measured on the same frames).
+        return np.asarray([smean, smean]), np.asarray([sstd, sstd])
+    n = len(CONDITIONS[condition]["levels"])
+    return np.full(n, cmean), np.full(n, cstd)
 
 
 def _values_for(condition: str, metric: str) -> dict:
@@ -171,14 +267,25 @@ def _values_for(condition: str, metric: str) -> dict:
     key = KEY_BY_METRIC[metric]
     out = {}
     for fam in MODELS:
+        if fam in MAIN_EXCLUDE:
+            continue
         means, stds = series(fam, "VT2M", key, cfg["levels"])
         out[fam] = (means, stds)
         tmeans, tstds = series(fam, "T2M", key, cfg["levels"])
         if fam == "V8_Cv5":
             out["V8_Cv5_V"] = series("V8_Cv5", "V2M", key, cfg["levels"])
+            override = _bifoot_t_only(condition, metric)
+            if override is not None:
+                tmeans, tstds = override
             out["T-only"] = (tmeans, tstds)
     for baseline in BASELINE_MODELS:
-        vals = baseline_series(baseline, cfg["baseline"], metric)
+        if baseline in MAIN_EXCLUDE:
+            continue
+        if baseline == "MotionPRO":
+            vals, errs = motionpro_series(cfg["baseline"], metric)
+        else:
+            vals = baseline_series(baseline, cfg["baseline"], metric)
+            errs = np.zeros_like(vals) if vals is not None else None
         if vals is None:
             continue
         finite = np.isfinite(vals)
@@ -186,7 +293,7 @@ def _values_for(condition: str, metric: str) -> dict:
             continue
         if condition == "scene" and not finite.all():
             continue
-        out[baseline] = (vals, np.zeros_like(vals))
+        out[baseline] = (vals, errs)
     return out
 
 
@@ -211,8 +318,7 @@ def figure_metric(condition: str, metric: str, label: str,
     fig, ax = plt.subplots(figsize=(7.2, 4.0), facecolor=SURFACE)
     _style(ax)
     x = np.asarray(cfg["x"], dtype=float)
-    for name in ("V8_Cv5", "V8_Cv5_V", "V8_Cv7", "WHAM", "GVHMR",
-                 "SAM3DB", "T-only"):
+    for name in PLOT_ORDER:
         if name not in data:
             continue
         means, stds = data[name]
@@ -250,8 +356,7 @@ def figure_pa(condition: str, relative: bool, path: Path) -> None:
     fig, ax = plt.subplots(figsize=(9.2, 4.2), facecolor=SURFACE)
     _style(ax)
     x = np.asarray(cfg["x"], dtype=float)
-    for name in ("V8_Cv5", "V8_Cv5_V", "V8_Cv7", "WHAM", "GVHMR",
-                 "SAM3DB", "T-only"):
+    for name in PLOT_ORDER:
         if name not in data:
             continue
         means, stds = data[name]
@@ -290,8 +395,7 @@ def figure_metrics(condition: str, relative: bool, path: Path) -> None:
         data = _values_for(condition, metric)
         if relative:
             data = _relative(data)
-        for name in ("V8_Cv5", "V8_Cv5_V", "V8_Cv7", "WHAM", "GVHMR",
-                 "SAM3DB", "T-only"):
+        for name in PLOT_ORDER:
             if name not in data:
                 continue
             means, stds = data[name]
@@ -343,16 +447,19 @@ def main() -> int:
         out = BASE / cfg["dir"]
         out.mkdir(parents=True, exist_ok=True)
         figure_pa(condition, False, out / "Main_Fig4_Gate_Absolute.png")
-        figure_pa(condition, True, out / "Main_Fig5_Gate_Relative.png")
         figure_metrics(condition, False,
                        out / "Main_Fig6_Gate_Metrics_Absolute.png")
-        figure_metrics(condition, True,
-                       out / "Main_Fig7_Gate_Metrics_Relative.png")
         for metric, label, _ in METRICS:
             figure_metric(condition, metric, label, False,
                           out / "metrics" / ("%s_absolute.png" % metric))
-            figure_metric(condition, metric, label, True,
-                          out / "metrics" / ("%s_relative.png" % metric))
+        if os.environ.get("E5_RELATIVE_ARCHIVE", "") == "1":
+            rel = out / "detail" / "relative_archive"
+            figure_pa(condition, True, rel / "Main_Fig5_Gate_Relative.png")
+            figure_metrics(condition, True,
+                           rel / "Main_Fig7_Gate_Metrics_Relative.png")
+            for metric, label, _ in METRICS:
+                figure_metric(condition, metric, label, True,
+                              rel / "metrics" / ("%s_relative.png" % metric))
         write_detail(condition)
     print("[done] %s" % BASE)
     return 0

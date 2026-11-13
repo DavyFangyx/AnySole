@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -39,11 +40,14 @@ import e5_v8_smpl_gain_heatmap as heat  # noqa: E402
 from anysole.utils.metrics import similarity_align  # noqa: E402
 from anysole_tta.phase_common import (CELL_ROOT, load_contact,  # noqa: E402
                                       load_gt_joints, load_pred_joints,
-                                      metric_error, phase_labels, PHASE_NAMES)
+                                      metric_error, phase_labels, PHASE_NAMES,
+                                      pred_subdir)
 
-BASE = REPO / "results_display" / "Etest_crossfit_v8" / "E6_ContactPhaseAnalysis" / "pa_mpjpe"
+BASE = Path(os.environ.get(
+    "E6_TEASER_BASE",
+    REPO / "results_display" / "Etest_crossfit_v8" / "E6_ContactPhaseAnalysis" / "pa_mpjpe"))
 PICKS = BASE / "detail" / "E6_BestSessions_V8.csv"
-OUT = BASE / "teaser"
+OUT = Path(os.environ.get("E6_TEASER_OUT", str(BASE / "teaser")))
 MODELS = ("V8_Cv5", "V8_Cv7")
 MODEL_LABEL = {"V8_Cv5": "V8_Cv5 (double gate)", "V8_Cv7": "V8_Cv7 (no gate)"}
 MODEL_COLOR = {"V8_Cv5": "#2a78d6", "V8_Cv7": "#52514e"}
@@ -78,7 +82,7 @@ def _load(sid: str, fold: str) -> dict:
         cell = "%s_%s_s1" % (model, fold)
         pv, _, vv = load_pred_joints(cell, sid, "V2M")
         pt, _, vt = load_pred_joints(cell, sid, "VT2M")
-        npz = np.load(CELL_ROOT / cell / "predictions/eval_motion"
+        npz = np.load(CELL_ROOT / cell / "predictions" / pred_subdir()
                       / ("%s_VT2M.npz" % sid), allow_pickle=True)
         poses = np.asarray(npz["poses"], dtype=np.float64).reshape(-1, 24, 3)
         trans = np.asarray(npz["pred_pelvis_trans"], dtype=np.float64)

@@ -38,6 +38,9 @@ TRAIN_ARG_FLAG_MAP = {
     "assign_lr_mult": "--assign-lr-mult",
     "lambda_sigma": "--lambda-sigma",
     "sigma_freeze_frac": "--sigma-freeze-frac",
+    # V8_Cv8U: V-only / T-only heteroscedastic NLL for the uncertainty router.
+    "lambda_unc_v": "--lambda-unc-v",
+    "lambda_unc_t": "--lambda-unc-t",
     "lr_warmup_frac": "--lr-warmup-frac",
     "grad_clip": "--grad-clip",
     "ctx_ss": "--ctx-ss",

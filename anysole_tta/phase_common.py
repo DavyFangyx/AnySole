@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -100,6 +101,11 @@ def load_gt_joints(sid: str) -> np.ndarray:
     return fk_pose6d_np(pose, smpl["trans_m"], smpl["offsets_m"], smpl["parents"])
 
 
+def pred_subdir() -> str:
+    """E6 prediction subdir; default eval_motion, s10 = overlap_s10."""
+    return os.environ.get("E6_PRED_SUBDIR", "eval_motion")
+
+
 def load_pred_joints(cell: str, sid: str, cond: str
                      ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """cell 预测 npz → (joints (T,24,3) native SMPL 系, frame_indices, valid_mask)。
@@ -108,7 +114,8 @@ def load_pred_joints(cell: str, sid: str, cond: str
     口径）；评估与 GT（facts FK）都在 native 帧（+Y up）——此处逆变换
     display→native：(x, z, −y)。
     """
-    d = np.load(CELL_ROOT / cell / "predictions/eval_motion" / f"{sid}_{cond}.npz")
+    d = np.load(CELL_ROOT / cell / "predictions" / pred_subdir()
+                / f"{sid}_{cond}.npz")
     disp = d["joint_xyz_world"]
     native = np.stack((disp[..., 0], disp[..., 2], -disp[..., 1]), axis=-1)
     return native, d["frame_indices"], d["valid_mask"]

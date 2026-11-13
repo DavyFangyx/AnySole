@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 from pathlib import Path
@@ -168,11 +169,11 @@ def g_fmt(bucket: dict | None) -> str:
     return "%.3f±%.3f" % (g.mean(), g.std(ddof=0)) if len(g) > 1 else "%.3f" % g.mean()
 
 
-def write_three_layers() -> None:
-    """相位增益总表：PA / GlobalMPJPE / pen 三层各一个代表指标。"""
+def write_two_layers() -> None:
+    """相位增益总表：PA + pen。E2 的 traj_ATE 是 full-session，不能相位分解；
+    相位版 root abs 只作 supplementary 诊断。"""
     acc = {
         "PA-MPJPE": collect("pa_mpjpe"),
-        "GlobalMPJPE": collect("global_mpjpe"),
         "pen（GroundPen）": collect_extra("pen"),
     }
     rows = []
@@ -180,30 +181,44 @@ def write_three_layers() -> None:
         for _, phase_name in PHASES:
             row = [model, phase_name]
             n = 0
-            for name in ("PA-MPJPE", "GlobalMPJPE", "pen（GroundPen）"):
+            for name in ("PA-MPJPE", "pen（GroundPen）"):
                 bucket = acc[name].get((model, phase_name))
                 row.append(g_fmt(bucket))
                 if bucket:
                     n = max(n, len(bucket["G"]))
             row.append(n)
             rows.append(row)
-    path = OUT / "Main_Table1_E6_PhaseGain_ThreeLayers.csv"
+    path = OUT / "Main_Table1_E6_PhaseGain_TwoLayers.csv"
     with path.open("w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
-        w.writerow(["模型", "相位", "G_PA-MPJPE", "G_GlobalMPJPE",
-                    "G_pen（GroundPen）", "n_folds"])
+        w.writerow(["模型", "相位", "G_PA-MPJPE", "G_pen（GroundPen）", "n_folds"])
         w.writerows(rows)
     print("[csv] %s (%d rows)" % (path, len(rows)))
 
 
 def main() -> int:
+    global ROOT, OUT
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--root", default=str(ROOT),
+                    help="E6_ContactPhaseAnalysis 根目录，默认 %(default)s")
+    ap.add_argument("--out-dir", default=None,
+                    help="输出目录，默认同 --root")
+    ap.add_argument("--main-only", action="store_true",
+                    help="只写三张主表，不写 supplementary")
+    args = ap.parse_args()
+    ROOT = Path(args.root)
+    OUT = Path(args.out_dir) if args.out_dir else ROOT
     supp = OUT / "supplementary"
-    # 主表：姿态 PA + 物理 pen（GroundPen 的相位版）；其余下沉 supplementary。
+    # 主表：姿态 PA + 轨迹 traj_ATE(RootAbs) + 物理 pen；其余下沉 supplementary。
     write("pa_mpjpe", "Main_Table1_E6_Crossfit_PhaseGainV8_pa_mpjpe.csv")
-    write("global_mpjpe", "Main_Table1_E6_Crossfit_PhaseGainV8_global_mpjpe.csv")
     write_extra("pen", "负=有帮助（mm，GroundPen 相位版）",
                 "Main_Table1_E6_Crossfit_PhaseGainV8_pen.csv")
-    write_three_layers()
+    write_two_layers()
+    if args.main_only:
+        return 0
+    write("global_mpjpe", "E6_PhaseGainV8_global_anchored.csv", supp)
+    write_extra("root_abs", "负=有帮助（mm，相位条件 root abs；非 E2 traj_ATE）",
+                "E6_PhaseGainV8_root_abs_phasecond.csv", supp)
     write("ankle_foot_mpjpe", "E6_PhaseGainV8_ankle_foot.csv", supp)
     write_extra("vert", "负=有帮助（mm）", "E6_PhaseGainV8_vert.csv", supp)
     write_extra("contact", "正=有帮助（%）", "E6_PhaseGainV8_contact.csv", supp)
@@ -211,6 +226,9 @@ def main() -> int:
         "Main_Table1_E6_Crossfit_PhaseGainV8_ankle_foot_mpjpe.csv",
         "Main_Table1_E6_Crossfit_PhaseGainV8_vert.csv",
         "Main_Table1_E6_Crossfit_PhaseGainV8_contact.csv",
+        "Main_Table1_E6_Crossfit_PhaseGainV8_global_mpjpe.csv",
+        "Main_Table1_E6_Crossfit_PhaseGainV8_root_abs.csv",
+        "Main_Table1_E6_PhaseGain_ThreeLayers.csv",
     ):
         p = OUT / stale
         if p.exists():

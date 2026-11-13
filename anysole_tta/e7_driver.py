@@ -84,7 +84,9 @@ TTA_DUMP_ROOT = RESULTS_ROOT / "predictions"   # E3 全量 TTA 产物树（E7 �
 DUMP_SUB = {"Vi": "1,2,3,4", "ViT": "1,2,3,4_contact"}
 SMPL_ANKLE_FOOT = (7, 8, 10, 11)
 S2M_ROOT = PROJECT_ROOT / "results/baselines/Step2Motion/predictions/gait_model_smpl24/eval_motion"
-MPRO_ROOT = PROJECT_ROOT / "results/baselines/MotionPRO/predictions/carpet_v2/eval_motion"
+# 2026-11-13: MotionPRO v4 AnySole-bbox held-out predictions (canonical test 36:
+# S13 -> fS5S11S12 ckpt, S14 -> fS6S7 ckpt). Replaces the retired carpet_v2 tree.
+MPRO_ROOT = PROJECT_ROOT / "results/baselines/MotionPRO/predictions/carpet_v4_anysolebbox_heldout/eval_motion"
 WHAM_ROOT = PROJECT_ROOT / "results/baselines/WHAM/predictions/local_gen/eval_motion"
 EMC_ROOT = RESULTS_ROOT / "predictions/easymocap"   # EasyMocap n=4 四相机缓存
 

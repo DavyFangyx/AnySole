@@ -1662,6 +1662,77 @@ for _n in (1, 2, 3):
         eval_splits=["val", "test"],
         train_args=_V3B_TA)
 
+# V3_Bv1 + IMU（2026-11-12，用户指定「参考 S2M 的 IMU 加入模式」）：
+# 12 通道 IMU（T_s2m 左/右 acc3+gyro3）→ 3 层 MLP → IMU 嵌入，
+# 与 FootConv 的触觉 token 在特征维 concat 后线性投回 d；concat 投影
+# 初始化为 [I | 0]，step-0 与 V3_Bv1 逐位一致（零税契约）。压力仍走
+# raw108，不改动 TactileEncoder / FusionTransformer 的 2*tw 契约。
+# 配方与 V3_Bv1_s1 逐项一致（v1.yaml canonical split、740ep、ckpt_last）。
+_V3B_IMU_S1 = dict(
+    label="V3-3B-IMU-s1", name="V3_Bv1_IMU", which="last", train=True,
+    epochs=740, seed=1,
+    contact_method="f6_soft_time_accel_state_smpl24_v1",
+    provides=("base", "foot_conv", "pose_parts9", "soft_parts",
+              "gate_sigma", "imu_concat"),
+    config="anysole/configs/v1.yaml",
+    eval_splits=["val", "test"],
+    train_args=_V3B_TA)
+MODELS["V3_Bv1_IMU_s1"] = _V3B_IMU_S1
+
+# V3_Bv1 + PhysIMU（融合方式 2，2026-11-12）：T_raw 96 → raw-only FootConv；
+# T_phys 12 → 3 层 MLP + LayerNorm；IMU 12 → 3 层 MLP + LayerNorm；随后
+# 两级融合 [T_phys, IMU] → d，[T_raw, physical] → d（均 2d→d + LayerNorm）。
+# 压力通路不再把 T_phys 拼进 FootConv；配方同 V3_Bv1_s1（v1.yaml、740ep）。
+_V3B_PHYSIMU_S1 = dict(
+    label="V3-3B-PhysIMU-s1", name="V3_Bv1_PhysIMU", which="last", train=True,
+    epochs=740, seed=1,
+    contact_method="f6_soft_time_accel_state_smpl24_v1",
+    provides=("base", "foot_conv", "pose_parts9", "soft_parts",
+              "gate_sigma", "imu_phys_fusion"),
+    config="anysole/configs/v1.yaml",
+    eval_splits=["val", "test"],
+    train_args=_V3B_TA)
+MODELS["V3_Bv1_PhysIMU_s1"] = _V3B_PHYSIMU_S1
+
+# 无门控对照（2026-11-12）：同融合结构，pose head gate="none"，
+# lambda_sigma=0（不出 sigma 监督项）。
+_V3B_IMU_NG_S1 = {**_V3B_IMU_S1,
+                  "label": "V3-3B-IMU-NG-s1", "name": "V3_Bv1_IMU_NG",
+                  "provides": ("base", "foot_conv", "pose_parts9",
+                               "soft_parts", "imu_concat"),
+                  "train_args": {**_V3B_TA, "lambda_sigma": 0.0}}
+_V3B_PHYSIMU_NG_S1 = {**_V3B_PHYSIMU_S1,
+                      "label": "V3-3B-PhysIMU-NG-s1",
+                      "name": "V3_Bv1_PhysIMU_NG",
+                      "provides": ("base", "foot_conv", "pose_parts9",
+                                   "soft_parts", "imu_phys_fusion"),
+                      "train_args": {**_V3B_TA, "lambda_sigma": 0.0}}
+MODELS["V3_Bv1_IMU_NG_s1"] = _V3B_IMU_NG_S1
+MODELS["V3_Bv1_PhysIMU_NG_s1"] = _V3B_PHYSIMU_NG_S1
+
+# woS13 四折（2026-11-12）：IMU / PhysIMU × gate / no-gate，共 16 个训练格。
+# 第 4 折 fS6S7 = S13-out，与 V8 当前四折同表；config 用 v1_fold_*.yaml。
+_V3B_IMU_FOLD_CONFIGS = (
+    ("fS5S6S11",  "anysole/configs/v1_fold_S5S6S11.yaml"),
+    ("fS5S11S12", "anysole/configs/v1_fold_S5S11S12.yaml"),
+    ("fS6S7",     "anysole/configs/v1_fold_S6S7.yaml"),
+    ("fS5S6S8",   "anysole/configs/v1_fold_S5S6S8.yaml"),
+)
+for _fam, _base in (("V3_Bv1_IMU", "V3_Bv1_IMU_s1"),
+                    ("V3_Bv1_PhysIMU", "V3_Bv1_PhysIMU_s1"),
+                    ("V3_Bv1_IMU_NG", "V3_Bv1_IMU_NG_s1"),
+                    ("V3_Bv1_PhysIMU_NG", "V3_Bv1_PhysIMU_NG_s1")):
+    for _fold, _fconfig in _V3B_IMU_FOLD_CONFIGS:
+        _fname = "%s_%s" % (_fam, _fold)
+        MODELS["%s_s1" % _fname] = {
+            **MODELS[_base],
+            "label": "%s-s1" % _fname.replace("_", "-"),
+            "name": _fname,
+            "config": _fconfig,
+            "eval_splits": ["val", "test"],
+            "seed": 1,
+        }
+
 # 阶段 3 触觉泛化（2026-10-31，E6 门控重设计）：以 V7_Cv7（无门 v7_a 入口）
 # 为基座，训练侧单点数据增强。配方与 V7_Cv7_s1 逐项一致（contact =
 # f6_soft_time_accel_state_smpl24_v1、v1.yaml canonical split、三条件枚举、
@@ -2114,6 +2185,26 @@ MODELS["V8_Cv4"] = {**MODELS["V7_Cv4_s1"], "label": "V8-Cv4", "name": "V8_Cv4"}
 MODELS["V8_Cv2"] = {**MODELS["V7_Cv2_s1"], "label": "V8-Cv2", "name": "V8_Cv2"}
 MODELS["V8_Cv6"] = {**MODELS["V7_Cv6_s1"], "label": "V8-Cv6", "name": "V8_Cv6"}
 MODELS["V8_Cv7"] = {**MODELS["V7_Cv7_s1"], "label": "V8-Cv7", "name": "V8_Cv7"}
+# V8 + IMU（2026-11-12）：融合方式 1/2 × 门控 Cv5 / 无门 Cv7。
+# 结构由新入口 v8_cv5_imu / v8_cv5_physimu / v8_cv7_imu / v8_cv7_physimu 携带；
+# 训练配方逐项沿用对应 V8 基座（枚举三条件、SD2、锚头、740ep、ckpt_last）。
+for _name, _base in (("V8_Cv5_IMU", "V8_Cv5"),
+                     ("V8_Cv5_PhysIMU", "V8_Cv5"),
+                     ("V8_Cv7_IMU", "V8_Cv7"),
+                     ("V8_Cv7_PhysIMU", "V8_Cv7")):
+    MODELS[_name] = {
+        **MODELS[_base],
+        "label": _name.replace("_", "-"),
+        "name": _name,
+        # Main-table metrics only: skip the expensive session/window detail
+        # dump (V8_E5/E6 caches read dump_detail; these new cells do not).
+        "dump_detail": False,
+    }
+    MODELS["%s_s1" % _name] = {
+        **MODELS[_name],
+        "label": "%s-s1" % _name.replace("_", "-"),
+        "seed": 1,
+    }
 # T1：V8_Cv5 的方向载体替换（根头 4→3 通道；结构由入口 v8_cv5t1 携带）。
 MODELS["V8_Cv5T1"] = {**MODELS["V8_Cv5"], "label": "V8-Cv5T1", "name": "V8_Cv5T1"}
 MODELS["V8_Cv5T1_precheck"] = {
@@ -2163,6 +2254,33 @@ MODELS["V8_Cv8_precheck"] = {
     "name": "V8_Cv8_precheck", "epochs": 6,
     "train_args": {**MODELS["V8_Cv8"]["train_args"],
                    "wandb_experiment_tag": "v8_precheck"}}
+# V8_Cv8U（2026-11-12）：NLL 校准 per-slot precision router；s_V/s_T 只在
+# V-only/T-only 行由异方差 NLL 训练，VT 行 K stop-grad。先做单折 pilot。
+MODELS["V8_Cv8U"] = {
+    **MODELS["V8_Cv8"], "label": "V8-Cv8U", "name": "V8_Cv8U",
+    "train_args": {**MODELS["V8_Cv8"]["train_args"],
+                   "lambda_unc_v": 0.1, "lambda_unc_t": 0.1}}
+MODELS["V8_Cv8U_s1"] = {**MODELS["V8_Cv8U"], "label": "V8-Cv8U-s1", "seed": 1}
+# V8_Cv8U_SG：stop-grad 关（VT 任务损失可关小 K），NLL 权重提高到 0.5。
+MODELS["V8_Cv8U_SG"] = {
+    **MODELS["V8_Cv8U"], "label": "V8-Cv8U-SG", "name": "V8_Cv8U_SG",
+    "train_args": {**MODELS["V8_Cv8U"]["train_args"],
+                   "lambda_unc_v": 0.5, "lambda_unc_t": 0.5}}
+MODELS["V8_Cv8U_SG_s1"] = {**MODELS["V8_Cv8U_SG"],
+                           "label": "V8-Cv8U-SG-s1", "seed": 1}
+# 同一门控 + PhysIMU（raw96_phys_imu），SG 设置不变。
+MODELS["V8_Cv8U_PhysIMU_SG"] = {
+    **MODELS["V8_Cv8U_SG"], "label": "V8-Cv8U-PhysIMU-SG",
+    "name": "V8_Cv8U_PhysIMU_SG"}
+MODELS["V8_Cv8U_PhysIMU_SG_s1"] = {
+    **MODELS["V8_Cv8U_PhysIMU_SG"],
+    "label": "V8-Cv8U-PhysIMU-SG-s1", "seed": 1}
+# PhysIMU + stop-grad on：NLL-only 校准的对照臂。
+MODELS["V8_Cv8U_PhysIMU"] = {
+    **MODELS["V8_Cv8U_PhysIMU_SG"], "label": "V8-Cv8U-PhysIMU",
+    "name": "V8_Cv8U_PhysIMU"}
+MODELS["V8_Cv8U_PhysIMU_s1"] = {
+    **MODELS["V8_Cv8U_PhysIMU"], "label": "V8-Cv8U-PhysIMU-s1", "seed": 1}
 _V8_FOLD_CONFIGS = (
     ("fS5S6S11",  "anysole/configs/v1_fold_S5S6S11.yaml"),
     ("fS5S11S12", "anysole/configs/v1_fold_S5S11S12.yaml"),
@@ -2172,7 +2290,10 @@ _V8_FOLD_CONFIGS = (
 _V8_FOLD_FAMILIES = ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6", "V8_Cv7",
                      "V8_Cv5T1", "V8_Cv5RM", "V8_Cv5PO",
                      "V8_Cv5VG", "V8_Cv5ST", "V8_Cv5VGST", "V8_Cv5VIG",
-                     "V8_Cv8")
+                     "V8_Cv8", "V8_Cv8U", "V8_Cv8U_SG",
+                     "V8_Cv8U_PhysIMU_SG", "V8_Cv8U_PhysIMU",
+                     "V8_Cv5_IMU", "V8_Cv5_PhysIMU",
+                     "V8_Cv7_IMU", "V8_Cv7_PhysIMU")
 for _fam in _V8_FOLD_FAMILIES:
     for _fold, _fconfig in _V8_FOLD_CONFIGS:
         _fname = "%s_%s" % (_fam, _fold)
@@ -2320,3 +2441,19 @@ for _fam in _V8_GAP_FAMILIES:
                 "eval_splits": ["test"],
                 "config": "anysole/configs/v1_gap_r%s_fold_%s.yaml"
                           % (_rho, _fold[1:])}
+
+# V8 E5 2D 遮挡奇数档（2026-11-11 用户指定）：occ010/030/050/070/090，
+# 5 个正文模型 × 4 折，eval-only、只评 test；yaml 与 fold yaml 仅差 cache_root。
+_V8_ODD_FAMS = ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6", "V8_Cv7")
+_V8_ODD_LEVELS = ("010", "030", "050", "070", "090")
+for _fam in _V8_ODD_FAMS:
+    for _fold, _fconfig in _V8_FOLD_CONFIGS:
+        _cell = "%s_%s_s1" % (_fam, _fold)
+        for _occ in _V8_ODD_LEVELS:
+            MODELS["%s_evalocc%s" % (_cell, _occ)] = {
+                **MODELS[_cell],
+                "label": "%s-evalocc%s" % (MODELS[_cell]["label"], _occ),
+                "train": False, "which": "last",
+                "eval_splits": ["test"],
+                "config": "anysole/configs/v1_occ%s_fold_%s.yaml"
+                          % (_occ, _fold[1:])}

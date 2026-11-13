@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -50,7 +51,9 @@ FOLDS = {
     "fS5S6S8": "splits_test_S5S6S8_val_S7.csv",
 }
 SPLITS = REPO / "AnysoleWorkspace" / "protocol" / "splits" / "default"
-OUT = REPO / "results_display" / "Etest_crossfit_v8" / "E6_ContactPhaseAnalysis" / "pa_mpjpe"
+OUT = Path(os.environ.get(
+    "E6_FIG_OUT",
+    REPO / "results_display" / "Etest_crossfit_v8" / "E6_ContactPhaseAnalysis" / "pa_mpjpe"))
 DETAIL = OUT / "detail"
 PER_SESSION = DETAIL / "per_session"
 
@@ -386,6 +389,8 @@ def main() -> int:
                         help="symmetric y limit in mm (default: 30, as old E6)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    DETAIL.mkdir(parents=True, exist_ok=True)
+    PER_SESSION.mkdir(parents=True, exist_ok=True)
     cache = Cache()
     series = collect(cache)
     picks = select(series)

@@ -38,6 +38,7 @@ from anysole.utils.geometry import fk_local_np
 from anysole.types import (
     FPS,
     T_S2M_DIM,
+    T_S2M_IMU_COLUMNS,
     T_S2M_NOIMU_DIM,
     WORKSPACE_ROOT,
 )
@@ -46,7 +47,8 @@ G = 9.81
 
 # --no-imu：T_s2m 里被真删的 IMU 列（左脚 acc/gyro、右脚 acc/gyro），
 # 删除后每脚 19 维 = pressure16 + force1 + cop2，共 38 维。
-S2M_IMU_COLUMNS = tuple(range(16, 22)) + tuple(range(41, 47))
+# 与模型侧 raw108_imu / raw96_phys_imu 的取列共用 anysole.types 的唯一定义。
+S2M_IMU_COLUMNS = T_S2M_IMU_COLUMNS
 
 # Frozen verbatim from Baselines/Step2Motion/src/process_gait.py.  These are
 # deliberately local: importing AnySole's SMPL-24 JOINT_* constants here would
@@ -67,6 +69,21 @@ LEGACY_LEFT_FOOT = LEGACY_BVH_JOINT_NAMES.index("LeftFoot")
 LEGACY_LEFT_TOE = LEGACY_BVH_JOINT_NAMES.index("LeftToeBase")
 LEGACY_RIGHT_FOOT = LEGACY_BVH_JOINT_NAMES.index("RightFoot")
 LEGACY_RIGHT_TOE = LEGACY_BVH_JOINT_NAMES.index("RightToeBase")
+
+
+def load_virtual_imu_facts(date, session_id) -> dict | None:
+    """Load the virtual-IMU facts for one session, or None when absent.
+
+    Mirrors the dataset lookup (``AnysoleWorkspace/shared/facts/virtual_imu``)
+    so infer/eval use the same new-caliber IMU as training.
+    """
+    path = (
+        WORKSPACE_ROOT / "shared/facts/virtual_imu"
+        / str(date or "") / str(session_id) / "imu_instep.npz"
+    )
+    if not path.is_file():
+        return None
+    return dict(np.load(path, allow_pickle=False))
 
 
 def resolve_legacy_bvh_path(meta: dict) -> Path:

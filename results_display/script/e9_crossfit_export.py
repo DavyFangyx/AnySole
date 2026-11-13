@@ -40,9 +40,10 @@ BASE_DIRS = {
     "V7_Cv5": os.path.join(E5, "%s_scene", "eval_motion"),
     "V8_Cv5": os.path.join(HYB, "v8_scene_%s", "eval_motion"),
 }
-ARMS = ["Step2Motion", "Anysolo-TI", "Anysolo-I", "VT", "Hybrid"]
-COLORS = {"Step2Motion": "#2a78d6", "Anysolo-TI": "#1baf7a",
-          "Anysolo-I": "#eda100", "VT": "#8a6d3b", "Hybrid": "#7b52ab"}
+ARMS = ["Step2Motion", "Step2Motion-VT", "Anysolo-TI", "Anysolo-I", "VT", "Hybrid"]
+COLORS = {"Step2Motion": "#2a78d6", "Step2Motion-VT": "#5b7ac2",
+          "Anysolo-TI": "#1baf7a", "Anysolo-I": "#eda100",
+          "VT": "#8a6d3b", "Hybrid": "#7b52ab"}
 CALIB_FRAMES = 40
 
 
@@ -116,6 +117,36 @@ def metrics(tr, gt, valid, ev):
     return full, occ
 
 
+def s2m_vt_glue(s2m2, vt, vis, ev):
+    """S2M 用同一套 VT 前后锚：起点按 VT 可见块 course 对齐，终点按 VT[e0]
+    做位置 ramp 粘合。保证与 Hybrid 的 VT→T+IMU→VT 接口公平。"""
+    n = len(vt)
+    traj = vt[:, [0, 2]].copy()
+    for e in ev:
+        a = max(int(e["start"]), 1)
+        b = min(int(e["end"]), n - 1)
+        n0 = a - 1
+        e0 = b + 1
+        found = False
+        for k in range(b + 1, min(n - 1, b + 1 + 40) + 1):
+            if vis is not None and k < len(vis) and vis[k] > 0.5:
+                e0 = k; found = True; break
+        if not found:
+            e0 = min(b + 1, n - 1)
+        j0 = max(n0 - 20, 0)
+        vs = s2m2[n0] - s2m2[j0]
+        vv = vt[n0, [0, 2]] - vt[j0, [0, 2]]
+        th = np.arctan2(vv[0], vv[1]) - np.arctan2(vs[0], vs[1])
+        rel = s2m2[n0:min(e0 + 1, n)] - s2m2[n0]
+        pos = T.rot2(rel, th) + vt[n0, [0, 2]]
+        delta = vt[e0, [0, 2]] - pos[e0 - n0]
+        for i, t in enumerate(range(n0, e0 + 1)):
+            w = (t - n0) / max(e0 - n0, 1)
+            traj[t] = pos[i] + w * delta
+        traj[e0] = vt[e0, [0, 2]]
+    return traj
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     os.makedirs(DETAIL, exist_ok=True)
@@ -155,6 +186,9 @@ def main():
                                         "eval_motion", sid + ".npz")
                 if os.path.isfile(s2m_path):
                     a["Step2Motion"], m_s2m = T.load_baseline(s2m_path, gt, hips)
+                    a["Step2Motion-VT"] = s2m_vt_glue(
+                        a["Step2Motion"][:, [0, 2]], vt,
+                        np.asarray(man["frames"]["vis"], float), ev)
                 else:
                     print("  missing S2M", fold, sid)
                     m_s2m = valid
@@ -162,7 +196,9 @@ def main():
                 a["Anysolo-I"] = T.assemble_anysolo(sid, "I", vt, ro, gt, ev)
                 a["Hybrid"] = H.assemble(sid, hr, model, mu, sd, vt, ro, ev,
                                          D, 1.0, calib="block",
-                                         calib_frames=CALIB_FRAMES)
+                                         calib_frames=CALIB_FRAMES,
+                                         vis=np.asarray(man["frames"]["vis"], float),
+                                         end_glue=True)
                 for arm, tr in a.items():
                     vm = m_s2m if arm in ("Step2Motion", "Step2Motion-VT") else valid
                     full, occ = metrics(tr, gt, vm, ev)

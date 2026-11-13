@@ -103,9 +103,9 @@ def check_fpp_metadata() -> dict:
 
 
 def check_motionpro_cache(session: str) -> dict:
-    # 2026-10-22: 用安装到 adapter 目录的 carpet_v2 任务配置（与 test_frappe.py
-    # 同口径：OmegaConf 加载 -> URI 解析 -> apply_cam_seq_root），读 canonical
-    # splits.csv 的 test 列。旧 ad-hoc cfg（seq_root=shared facts）已过时。
+    # 与 test_frappe.py 同口径：OmegaConf 加载 -> URI 解析 -> apply_cam_seq_root，
+    # 读 canonical splits.csv 的 test 列。2026-11-13 起使用最终 v4 AnySole-bbox
+    # 任务配置（旧 carpet_v2 配置已封存到 MotionPRO/archive_20261113/configs/）。
     motion_root = ROOT / "Baselines/MotionPRO"
     if str(motion_root) not in sys.path:
         sys.path.insert(0, str(motion_root))
@@ -113,7 +113,8 @@ def check_motionpro_cache(session: str) -> dict:
     from lib.dataset.image_pressure import ImagePressureDataset, apply_cam_seq_root  # noqa: E402
     from lib.util.workspace import resolve_path  # noqa: E402
 
-    yaml_path = WORKSPACE / "model_inputs/MotionPRO/adapter_v2_carpet/imagepressure2smpl_carpet_v2_cam3.yaml"
+    # 2026-11-13: final v4 AnySole-bbox task config (legacy carpet_v2 config archived).
+    yaml_path = motion_root / "config/task/imagepressure2smpl_carpet_v4_anysolebbox_cam3.yaml"
     cfg = OmegaConf.load(yaml_path)
     apply_cam_seq_root(cfg)
     for key in ("split_csv", "seq_root", "train_data_dir", "eval_data_dir",

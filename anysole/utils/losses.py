@@ -22,6 +22,7 @@ from anysole.types import (
     LEFT_FOOT_JOINT,
     LEFT_TOE_JOINT,
     N_JOINTS,
+    PART_JOINTS,
     RIGHT_FOOT_JOINT,
     RIGHT_TOE_JOINT,
 )
@@ -1292,6 +1293,44 @@ def _compute_losses_v7_ar2(out, batch, config_id, weights):
     }
 
 
+def _uncertainty_nll(out, batch, config_id, pose_gt):
+    """Heteroscedastic NLL for the V8_Cv8U precision router.
+
+    s_V is trained only on V-only rows, s_T only on T-only rows:
+        L = 0.5 * exp(-s) * e + 0.5 * s
+    e is per-slot (10): root = normalized root-velocity squared error
+    (÷0.5 m/s), 9 pose parts = ``pose_std``-normalized 6D MSE.  VT rows are
+    deliberately not supervised here (the task loss only trains the paths;
+    K is stop-grad in the forward when ``unc_stopgrad=True``).
+    """
+    s_v = out.get("unc_s_v")
+    s_t = out.get("unc_s_t")
+    if s_v is None or s_t is None:
+        return None, None
+    pose_std = out.get("pose_std")
+    if pose_std is None:
+        pose_std = pose_gt.new_ones(pose_gt.shape[-1])
+    # fit_pose_stats does not floor zero-variance dims; the task MSE does not
+    # mind, but the NLL normalization would divide by zero.
+    pose_std = pose_std.to(dtype=pose_gt.dtype, device=pose_gt.device).clamp(min=1e-2)
+    err = ((out["x0_hat"] - pose_gt) / pose_std).square()
+    err = err.view(pose_gt.shape[0], pose_gt.shape[1], N_JOINTS, 6).mean(dim=-1)
+    root = ((out["v_hat"] - batch["vel_gt"]) / 0.5).square().mean(dim=-1)
+    parts = [err[..., list(joints)].mean(dim=-1) for joints in PART_JOINTS]
+    e = torch.stack([root] + parts, dim=-1)                 # (B,tw,10)
+
+    def _nll(s, mask):
+        val = 0.5 * torch.exp(-s.squeeze(-1)) * e + 0.5 * s.squeeze(-1)
+        m = mask.to(device=val.device, dtype=torch.bool)
+        if not bool(m.any()):
+            # A fresh zero: the masked modality is absent and must not leak
+            # any (possibly non-finite) value from the other rows.
+            return s.new_zeros(())
+        return val[m].mean()
+
+    return _nll(s_v, config_id == CONFIG_V), _nll(s_t, config_id == CONFIG_T)
+
+
 def compute_losses_v7(out, batch, config_id, weights) -> dict:
     """V7 训练损失（2026-10-25，模型设计思路 §4）。
 
@@ -1419,6 +1458,11 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
             bce = F.binary_cross_entropy(g4, y, reduction="none")
             l_s_gate = (bce * mask.float()).sum() / mask.float().sum().clamp(min=1.0)
 
+    l_unc_v, l_unc_t = _uncertainty_nll(out, batch, config_id, pose_gt)
+    if l_unc_v is None:
+        l_unc_v = l_pose.new_zeros(())
+        l_unc_t = l_pose.new_zeros(())
+
     total = (
         _weight(weights, "lambda_pose", 3.0) * l_pose
         + _weight(weights, "lambda_traj", 1.0) * l_traj
@@ -1430,6 +1474,8 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
         + _weight(weights, "lambda_foot", 0.0) * l_foot
         + _weight(weights, "lambda_route", 0.0) * l_route
         + _weight(weights, "lambda_s", 0.0) * l_s_gate
+        + _weight(weights, "lambda_unc_v", 0.0) * l_unc_v
+        + _weight(weights, "lambda_unc_t", 0.0) * l_unc_t
     )
     zero = l_pose.new_zeros(())
     losses = {
@@ -1463,6 +1509,8 @@ def compute_losses_v7(out, batch, config_id, weights) -> dict:
         "L_foot": l_foot,
         "L_route": l_route,
         "L_s_gate": l_s_gate,
+        "L_unc_v": l_unc_v,
+        "L_unc_t": l_unc_t,
         "loss": total,
     }
     if l_traj_speed is not None:
