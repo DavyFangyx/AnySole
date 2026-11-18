@@ -976,6 +976,15 @@ EXPERIMENTS["v8_imu_folds"] = {
     ],
     "REQUIRES": [],
 }
+# V8_Cv7_PhysIMU_NoEnum（2026-11-14）：router 消融的无 enum 基座，四折。
+EXPERIMENTS["v8_imu_noenum_folds"] = {
+    "KIND": "model_suite",
+    "MODEL_IDS": [
+        "V8_Cv7_PhysIMU_NoEnum_%s_s1" % fold
+        for fold in ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
+    ],
+    "REQUIRES": [],
+}
 
 # V8_Cv8U 单折 pilot（2026-11-12）：先验 NLL 校准 precision router 是否能
 # 跑通、K 是否按部位分化；通过后再扩四折。

@@ -16,6 +16,9 @@ STRUCTURE = {**BASE_STRUCTURE, "tactile_input": "raw96_phys_imu",
              "v7_external_gate": True,
              "v7_t_gate": True,
              "v7_t_gate_g0": 0.9,
+             "v7_t_gate_action": False,
+             "v7_t_gate_num_actions": 9,
+             "v7_t_gate_gv_thr": None,
              "v7_gate_g0": [[1.0, 1.0], [1.0, 1.0],
                             [1.0, 1.0], [1.0, 1.0]]}
 CONFIG_EXTRA: dict = {"lambda_tanchor": 0.0}
@@ -36,4 +39,7 @@ def build(config: dict, part_joints=None):
         trans_anchor_head=bool(config.get("v7_trans_anchor_head", True)),
         tactile_input=str(config.get("tactile_input", "raw96_phys_imu")),
         t_gate=True,
-        t_gate_g0=float(config.get("v7_t_gate_g0", 0.9)))
+        t_gate_g0=float(config.get("v7_t_gate_g0", 0.9)),
+        t_gate_action=bool(config.get("v7_t_gate_action", False)),
+        t_gate_num_actions=int(config.get("v7_t_gate_num_actions", 9)),
+        t_gate_gv_thr=config.get("v7_t_gate_gv_thr"))

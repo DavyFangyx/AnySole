@@ -37,4 +37,6 @@ def build(config: dict, part_joints=None):
         trans_anchor_head=bool(config.get("v7_trans_anchor_head", False)),
         tactile_input=str(config.get("tactile_input", "raw96_phys_imu")),
         gate_gv_min=float(config.get("v7_gate_gv_min", 0.2)),
-        gate_smooth=bool(config.get("v7_gate_smooth", False)))
+        gate_smooth=bool(config.get("v7_gate_smooth", False)),
+        decision_gate=bool(config.get("v7_decision_gate", False)),
+        decision_p0=float(config.get("v7_decision_p0", 0.8)))

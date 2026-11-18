@@ -218,6 +218,34 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
     "V8_Cv7_PhysIMU": ModelEntry(
         "V8_Cv7_PhysIMU", "v8_cv7_physimu",
         "V8_Cv7 (no gate) + PhysIMU (fusion 2)"),
+    "V8_Cv7_PhysIMU_NoEnum": ModelEntry(
+        "V8_Cv7_PhysIMU_NoEnum", "v8_cv7_physimu",
+        "V8_Cv7_PhysIMU pretrained without V/T/VT enum (VT-only; "
+        "router ablation 2026-11-14)"),
+    "V8_Cv7_PhysIMU_NoEnum_fS5S6S11": ModelEntry(
+        "V8_Cv7_PhysIMU_NoEnum_fS5S6S11", "v8_cv7_physimu",
+        "V8_Cv7_PhysIMU_NoEnum fold fS5S6S11"),
+    "V8_Cv7_PhysIMU_NoEnum_fS5S11S12": ModelEntry(
+        "V8_Cv7_PhysIMU_NoEnum_fS5S11S12", "v8_cv7_physimu",
+        "V8_Cv7_PhysIMU_NoEnum fold fS5S11S12"),
+    "V8_Cv7_PhysIMU_NoEnum_fS6S7": ModelEntry(
+        "V8_Cv7_PhysIMU_NoEnum_fS6S7", "v8_cv7_physimu",
+        "V8_Cv7_PhysIMU_NoEnum fold fS6S7"),
+    "V8_Cv7_PhysIMU_NoEnum_fS5S6S8": ModelEntry(
+        "V8_Cv7_PhysIMU_NoEnum_fS5S6S8", "v8_cv7_physimu",
+        "V8_Cv7_PhysIMU_NoEnum fold fS5S6S8"),
+    "V8_Cv7_PhysIMU_NoEnum_fS5S6S11_s1": ModelEntry(
+        "V8_Cv7_PhysIMU_NoEnum_fS5S6S11_s1", "v8_cv7_physimu",
+        "V8_Cv7_PhysIMU_NoEnum fold fS5S6S11 seed 1"),
+    "V8_Cv7_PhysIMU_NoEnum_fS5S11S12_s1": ModelEntry(
+        "V8_Cv7_PhysIMU_NoEnum_fS5S11S12_s1", "v8_cv7_physimu",
+        "V8_Cv7_PhysIMU_NoEnum fold fS5S11S12 seed 1"),
+    "V8_Cv7_PhysIMU_NoEnum_fS6S7_s1": ModelEntry(
+        "V8_Cv7_PhysIMU_NoEnum_fS6S7_s1", "v8_cv7_physimu",
+        "V8_Cv7_PhysIMU_NoEnum fold fS6S7 seed 1"),
+    "V8_Cv7_PhysIMU_NoEnum_fS5S6S8_s1": ModelEntry(
+        "V8_Cv7_PhysIMU_NoEnum_fS5S6S8_s1", "v8_cv7_physimu",
+        "V8_Cv7_PhysIMU_NoEnum fold fS5S6S8 seed 1"),
     # V8_Cv8U（2026-11-12）：NLL 校准的 per-slot precision router。
     "V8_Cv8U": ModelEntry(
         "V8_Cv8U", "v8_cv8u",
@@ -238,6 +266,68 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
         "V8_Cv7_PhysIMU_TGate", "v8_cv7_physimu_tgate",
         "frozen V8_Cv7_PhysIMU + frozen V gate + independent T gate "
         "(window base + frame correction, 2026-11-13)"),
+    "V8_Cv7_PhysIMU_DecGate": ModelEntry(
+        "V8_Cv7_PhysIMU_DecGate", "v8_cv7_physimu_decgate",
+        "frozen V8_Cv7_PhysIMU + frozen V gate + V/VT decision gate "
+        "(gain-weighted BCE, 2026-11-14)"),
+    "V8_Cv7_PhysIMU_Router": ModelEntry(
+        "V8_Cv7_PhysIMU_Router", "v8_cv7_physimu_router",
+        "V8_Cv7_PhysIMU + competitive V/T router gate, joint fine-tune "
+        "(k=sigmoid(s_v-s_t), 2026-11-14)"),
+    "V8_Cv7_PhysIMU_FT": ModelEntry(
+        "V8_Cv7_PhysIMU_FT", "v8_cv7_physimu",
+        "V8_Cv7_PhysIMU VT fine-tune only (no router, no V gate; "
+        "router ablation 2026-11-14)"),
+    "V8_Cv7_PhysIMU_Router_Frozen": ModelEntry(
+        "V8_Cv7_PhysIMU_Router_Frozen", "v8_cv7_physimu_router",
+        "router only: frozen V8_Cv7_PhysIMU base, learn k "
+        "(router ablation 2026-11-14)"),
+    "V8_Cv7_PhysIMU_Router_NoEnum": ModelEntry(
+        "V8_Cv7_PhysIMU_Router_NoEnum", "v8_cv7_physimu_router",
+        "router + joint fine-tune on the base without V/T/VT enum "
+        "pretraining (router ablation 2026-11-14)"),
+    # ------------------------------------------------------------------
+    # V8_IMU_* canonical naming (2026-11-15).  Main model = residual
+    # fusion (gV=gT=1) with enum pretraining + occlusion-aware fine-tune
+    # (20 ep, best-val).  The old V8_Cv7_PhysIMU* / V8_Cv5_PhysIMU names
+    # above stay registered as historical aliases; new plans and tables
+    # use these names only.
+    # ------------------------------------------------------------------
+    "V8_IMU_Residual": ModelEntry(
+        "V8_IMU_Residual", "v8_cv7_physimu",
+        "Residual fusion (gV=gT=1), enum pretrain + occlusion-aware FT "
+        "(20 ep, best-val); main model"),
+    "V8_IMU_Residual_woAdapt": ModelEntry(
+        "V8_IMU_Residual_woAdapt", "v8_cv7_physimu",
+        "Residual fusion enum base (740 ep ckpt_last) without adaptation; "
+        "w/o adaptation ablation and start point for all FT arms"),
+    "V8_IMU_Router": ModelEntry(
+        "V8_IMU_Router", "v8_cv7_physimu_router",
+        "Competitive routing, router-only on the frozen residual base; "
+        "main-text fusion comparison"),
+    "V8_IMU_Router_Full": ModelEntry(
+        "V8_IMU_Router_Full", "v8_cv7_physimu_router",
+        "Competitive routing with full joint fine-tune; supplementary"),
+    "V8_IMU_TGate": ModelEntry(
+        "V8_IMU_TGate", "v8_cv5_physimu",
+        "Sensing-branch gating: gV=1, gT=sigma(s_T) (Cv5 dual T gate + PhysIMU)"),
+    "V8_IMU_DualGate": ModelEntry(
+        "V8_IMU_DualGate", "v8_cv7_physimu_gate",
+        "Independent dual-branch gating: gV=sigma(s_V), gT=sigma(s_T); "
+        "post-stage gate on the frozen base"),
+    "V8_IMU_Base_woEnum": ModelEntry(
+        "V8_IMU_Base_woEnum", "v8_cv7_physimu",
+        "Enum base without V/T/VT pretraining (VT-only); start point for "
+        "the no-enum FT ablation"),
+    "V8_IMU_Residual_woEnum": ModelEntry(
+        "V8_IMU_Residual_woEnum", "v8_cv7_physimu",
+        "Residual fusion + enum FT from the no-enum base (training ablation)"),
+    "V8_IMU_Residual_DecoderOnly": ModelEntry(
+        "V8_IMU_Residual_DecoderOnly", "v8_cv7_physimu",
+        "Residual fusion, fine-tune pose_head only (training ablation)"),
+    "V8_IMU_Residual_CleanOnly": ModelEntry(
+        "V8_IMU_Residual_CleanOnly", "v8_cv7_physimu",
+        "Residual fusion, clean-only fine-tune (training ablation)"),
     # T 运动轴 T1（2026-11-06）：方向载体 = 同帧根 6D 前向轴 + 标量 φ。
     "V8_Cv5T1": ModelEntry("V8_Cv5T1", "v8_cv5t1", "V8 基座 + T1 方向载体（根6D前向轴+φ，2026-11-06）"),
     "V8_Cv5T1_precheck": ModelEntry("V8_Cv5T1_precheck", "v8_cv5t1", "V8_Cv5T1 六轮预检"),
@@ -353,6 +443,22 @@ for _fam, _mod in (("V8_Cv5_IMU", "v8_cv5_imu"),
         _name = "%s_%s" % (_fam, _fold)
         MODEL_REGISTRY[_name] = ModelEntry(
             _name, _mod, "%s 折 %s（woS13 四折，2026-11-12）" % (_fam, _fold))
+
+# V8_IMU_* canonical four-fold cells (2026-11-15).
+for _fam, _mod in (("V8_IMU_Residual", "v8_cv7_physimu"),
+                   ("V8_IMU_Residual_woAdapt", "v8_cv7_physimu"),
+                   ("V8_IMU_TGate", "v8_cv5_physimu"),
+                   ("V8_IMU_DualGate", "v8_cv7_physimu_gate")):
+    for _fold in ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8"):
+        _name = "%s_%s" % (_fam, _fold)
+        MODEL_REGISTRY[_name] = ModelEntry(
+            _name, _mod, "%s 折 %s（V8_IMU 四折 ckpt）" % (_fam, _fold))
+# Single-fold pilots (2026-11-15, fS5S6S11 only).
+for _fam in ("V8_IMU_Residual_woEnum", "V8_IMU_Residual_DecoderOnly",
+             "V8_IMU_Residual_CleanOnly"):
+    _name = _fam + "_fS5S6S11"
+    MODEL_REGISTRY[_name] = ModelEntry(
+        _name, "v8_cv7_physimu", "%s 单折试点 fS5S6S11（2026-11-15）" % _fam)
 
 # 协议 A 主表 4 折（2026-11-05）：Cv5 折已在上方；其余四族同 split 逐折配对。
 for _fam, _mod in (("V7_Cv5SD2", "v7_c2sd2"), ("V7_Cv5SD2RT", "v7_c2sd2rt"),

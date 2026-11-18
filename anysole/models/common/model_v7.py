@@ -114,15 +114,22 @@ class _V7DecoderLayer(nn.Module):
         self.ln_f = nn.LayerNorm(dim)
 
     def forward(self, q, m_v, m_t, v_present, t_present, tw, gate=None,
-                gate_fn=None, attn_mask=None, gate_v=None):
+                gate_fn=None, attn_mask=None, gate_v=None,
+                self_mask=None, t_mask=None, t_keep=None):
         # q / m_v / m_t: (B, seq, d)；v_present/t_present: (B,) float01。
         # attn_mask：帧级 AR（2026-11-01）的因果掩码（仅 T 行）。
         # gate_fn（Q，§6）：第一层以「视觉更新后的 query h 与未乘门的 T
         # 注意力输出 a_T」为条件计算门——本层使用，并返回供后续层复用。
         # gate_v（修改 14 §5）：V 侧信任门，乘在 V 交叉注意力输出上；
         # 与 T 门同形状契约（(B,tw,1,1) 或 (B,tw,nq,1)）。
+        # self_mask / t_mask / t_keep（2026-11-14，严格局部诊断）：query
+        # 自注意力的时间块掩码、T 交叉注意力的 query→memory 时间掩码、
+        # 以及逐帧 T 分支置零；默认 None = 原行为逐位不变。
+        _sa_mask = attn_mask
+        if self_mask is not None:
+            _sa_mask = self_mask if _sa_mask is None else _sa_mask + self_mask
         h = self.ln_q(q + self.self_attn(q, q, q, need_weights=False,
-                                         attn_mask=attn_mask)[0])
+                                         attn_mask=_sa_mask)[0])
         v_out = self.xattn_v(h, m_v, m_v, need_weights=False)[0]
         if gate_v is not None:
             batch, queries, dim = v_out.shape
@@ -138,7 +145,14 @@ class _V7DecoderLayer(nn.Module):
                 raise ValueError("V gate query axis must be 1 or nq")
             v_out = (v_out.view(batch, tw, nq, dim) * gv).view(batch, queries, dim)
         h = self.ln_v(h + v_out * v_present.view(-1, 1, 1))
-        t_out = self.xattn_t(h, m_t, m_t, need_weights=False)[0]
+        t_out = self.xattn_t(h, m_t, m_t, need_weights=False,
+                             attn_mask=t_mask)[0]
+        if t_keep is not None:
+            batch, queries, dim = t_out.shape
+            nq = queries // tw
+            t_out = (t_out.view(batch, tw, nq, dim)
+                     * t_keep.view(batch, tw, 1, 1).to(t_out.dtype)
+                     ).view(batch, queries, dim)
         if gate_fn is not None:
             gate = gate_fn(h, t_out)
         if gate is not None:
@@ -294,7 +308,8 @@ class V7MotionHead(nn.Module):
                 t_only_mask=None, t_only_adapters=None, vt_mask=None,
                 vt_adapters=None, z_override=None,
                 gate_fn=None, ctx_vec=None, ctx_pose=None, ctx_block=None,
-                ctx_emb=None, prev_state=None, causal=False, max_frames=None):
+                ctx_emb=None, prev_state=None, causal=False, max_frames=None,
+                self_mask=None, t_mask=None, t_keep=None):
         """→ (pose (B,tw,POSE_DIM), v_hat (B,tw,3), z_root, z_parts)
 
         ``z_override``（TTA 注入点，2026-10-27）：给定 (B, tw*(1+n_parts), d)
@@ -392,7 +407,8 @@ class V7MotionHead(nn.Module):
         for layer in self.layers:
             q, gate = layer(q, m_v, m_t, v_present, t_present, frames,
                             gate=gate, gate_fn=gate_fn, attn_mask=_mask,
-                            gate_v=gate_v)
+                            gate_v=gate_v, self_mask=self_mask, t_mask=t_mask,
+                            t_keep=t_keep)
             gate_fn = None  # Q：第一层计算的同一组门供后续五层复用（§6）
         if z_override is not None:
             q = z_override  # TTA 注入点（decoder 输出 / out_parts·root_head 前）
@@ -635,21 +651,31 @@ class TGateController(nn.Module):
     IMU_IDX = PHYS_IDX
     CONTACT_IDX = ((0, 1), (0, 1), (0,), (1,))
 
-    def __init__(self, dim, tw, hidden=128, dropout=0.1, g0=0.9):
+    def __init__(self, dim, tw, hidden=128, dropout=0.1, g0=0.9,
+                 action_gate=False, num_actions=9, gv_threshold=None):
         super().__init__()
         self.dim = int(dim)
         self.tw = int(tw)
         self.g0 = float(g0)
+        self.action_gate = bool(action_gate)
+        self.num_actions = int(num_actions)
+        self.gv_threshold = (None if gv_threshold is None
+                             else float(gv_threshold))
+        self.register_buffer("group_idx",
+                             torch.tensor(_GATE4_GROUP_IDX, dtype=torch.long))
+        bias0 = float(torch.log(torch.tensor(g0 / (1.0 - g0))))
+        if self.action_gate:
+            # Action-conditioned table: one logit per (action, group).
+            self.action_logits = nn.Parameter(
+                torch.full((self.num_actions, self.N_GROUPS), bias0))
+            return
         self.query = nn.Parameter(torch.randn(1, tw, 10, dim) * 0.02)
         self.time_pe = nn.Parameter(torch.randn(1, tw, 1, dim) * 0.02)
         self.probe_v = nn.MultiheadAttention(
             dim, 8, dropout=dropout, batch_first=True)
         self.probe_t = nn.MultiheadAttention(
             dim, 8, dropout=dropout, batch_first=True)
-        self.register_buffer("group_idx",
-                             torch.tensor(_GATE4_GROUP_IDX, dtype=torch.long))
         self.win_mlps = nn.ModuleList()
-        bias0 = float(torch.log(torch.tensor(g0 / (1.0 - g0))))
         for g in range(self.N_GROUPS):
             feat_dim = (2 * dim + 1 + len(self.PHYS_IDX[g])
                         + len(self.IMU_IDX[g]) + len(self.CONTACT_IDX[g]))
@@ -659,6 +685,92 @@ class TGateController(nn.Module):
             nn.init.zeros_(win[-1].weight)
             nn.init.constant_(win[-1].bias, bias0)
             self.win_mlps.append(win)
+
+    def forward(self, m_v, m_t, T_phys, T_s2m, contact_prob,
+                v_present, t_present, mask_v=None, mask_t=None,
+                action_id=None, gv=None):
+        b, tw, _ = m_v.shape
+        if self.action_gate:
+            if action_id is None:
+                raise ValueError("action_id required for action-gated T gate")
+            gt4 = torch.sigmoid(self.action_logits[action_id])  # (B,4)
+            if self.gv_threshold is not None and gv is not None:
+                # Reliability-conditioned table: use the learned action table
+                # only when the V gate trusts V (gV >= threshold); otherwise
+                # keep T always-on.
+                g = gv.reshape(gv.shape[0], -1).mean(dim=1)
+                keep = (g >= self.gv_threshold).to(gt4.dtype).unsqueeze(1)
+                gt4 = keep * gt4 + (1.0 - keep)
+            gt = gt4.unsqueeze(1).expand(-1, tw, -1)             # (B,tw,4)
+            vp = v_present.view(-1, 1, 1).expand(-1, tw, 1).to(m_v.dtype)
+            gt_slots = gt[..., self.group_idx].clone()          # (B,tw,10)
+            gt_slots[..., 0] = 1.0
+            gt_slots = 1.0 - vp * (1.0 - gt_slots)
+            self.last_win = None
+            self.last_feat = None
+            return gt_slots.unsqueeze(-1), gt
+        imu = (m_v.new_zeros(b, tw, 12) if T_s2m is None
+               else T_s2m[..., list(T_S2M_IMU_COLUMNS)])
+        q = self.query + self.time_pe
+        q = q.expand(b, -1, -1, -1).reshape(b, tw * 10, self.dim)
+        a_v = self.probe_v(q, m_v, m_v, need_weights=False)[0].view(
+            b, tw, 10, self.dim)
+        a_t = self.probe_t(q, m_t, m_t, need_weights=False)[0].view(
+            b, tw, 10, self.dim)
+        vp = v_present.view(-1, 1, 1).expand(-1, tw, 1).to(m_v.dtype)
+        outs = []
+        wins, feats = [], []
+        for g in range(self.N_GROUPS):
+            slots = list(self.GROUPS[g])
+            av = a_v[:, :, slots, :].mean(dim=2)
+            at = a_t[:, :, slots, :].mean(dim=2)
+            logn = torch.log(at.norm(dim=-1, keepdim=True) + 1e-6)
+            phys = T_phys[..., list(self.PHYS_IDX[g])]
+            im = imu[..., list(self.IMU_IDX[g])]
+            con = contact_prob[..., list(self.CONTACT_IDX[g])].to(m_v.dtype)
+            feat = torch.cat([av, at, logn, phys, im, con], -1)
+            win = torch.cat([feat.mean(dim=1),
+                             feat.std(dim=1, unbiased=False)], -1)
+            wins.append(win.detach())
+            feats.append(feat.detach())
+            a = self.win_mlps[g](win)                       # (B,1)
+            # window-level gate: constant over the window
+            outs.append(torch.sigmoid(a).unsqueeze(1).expand(-1, tw, -1))
+        self.last_win = wins
+        self.last_feat = feats
+        gt = torch.cat(outs, dim=-1)                        # (B,tw,4)
+        gt_slots = gt[..., self.group_idx].clone()          # (B,tw,10)
+        gt_slots[..., 0] = 1.0
+        gt_slots = 1.0 - vp * (1.0 - gt_slots)
+        return gt_slots.unsqueeze(-1), gt
+
+
+class DecisionGate(nn.Module):
+    """Window-level V/VT routing gate.
+
+    s = MLP([mean, std] of V/T probe features + T_phys + IMU + contact);
+    p = sigmoid(s) is the probability of selecting the complete VT output.
+    The features are NOT detached: the decision loss can shape the T
+    encoder/temporal representation jointly with the gate.
+    """
+
+    def __init__(self, dim, tw, hidden=128, dropout=0.1, p0=0.8):
+        super().__init__()
+        self.dim = int(dim)
+        self.tw = int(tw)
+        self.query = nn.Parameter(torch.randn(1, tw, 10, dim) * 0.02)
+        self.time_pe = nn.Parameter(torch.randn(1, tw, 1, dim) * 0.02)
+        self.probe_v = nn.MultiheadAttention(
+            dim, 8, dropout=dropout, batch_first=True)
+        self.probe_t = nn.MultiheadAttention(
+            dim, 8, dropout=dropout, batch_first=True)
+        feat_dim = 2 * dim + 1 + 12 + 12 + 2
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * feat_dim, hidden), nn.GELU(),
+            nn.Dropout(dropout), nn.Linear(hidden, 1))
+        nn.init.zeros_(self.mlp[-1].weight)
+        bias0 = float(torch.log(torch.tensor(p0 / (1.0 - p0))))
+        nn.init.constant_(self.mlp[-1].bias, bias0)
 
     def forward(self, m_v, m_t, T_phys, T_s2m, contact_prob,
                 v_present, t_present, mask_v=None, mask_t=None):
@@ -671,27 +783,14 @@ class TGateController(nn.Module):
             b, tw, 10, self.dim)
         a_t = self.probe_t(q, m_t, m_t, need_weights=False)[0].view(
             b, tw, 10, self.dim)
-        vp = v_present.view(-1, 1, 1).expand(-1, tw, 1).to(m_v.dtype)
-        outs = []
-        for g in range(self.N_GROUPS):
-            slots = list(self.GROUPS[g])
-            av = a_v[:, :, slots, :].mean(dim=2)
-            at = a_t[:, :, slots, :].mean(dim=2)
-            logn = torch.log(at.norm(dim=-1, keepdim=True) + 1e-6)
-            phys = T_phys[..., list(self.PHYS_IDX[g])]
-            im = imu[..., list(self.IMU_IDX[g])]
-            con = contact_prob[..., list(self.CONTACT_IDX[g])].to(m_v.dtype)
-            feat = torch.cat([av, at, logn, phys, im, con], -1)
-            win = torch.cat([feat.mean(dim=1),
-                             feat.std(dim=1, unbiased=False)], -1)
-            a = self.win_mlps[g](win)                       # (B,1)
-            # window-level gate: constant over the window
-            outs.append(torch.sigmoid(a).unsqueeze(1).expand(-1, tw, -1))
-        gt = torch.cat(outs, dim=-1)                        # (B,tw,4)
-        gt_slots = gt[..., self.group_idx].clone()          # (B,tw,10)
-        gt_slots[..., 0] = 1.0
-        gt_slots = 1.0 - vp * (1.0 - gt_slots)
-        return gt_slots.unsqueeze(-1), gt
+        av = a_v.mean(dim=2)
+        at = a_t.mean(dim=2)
+        logn = torch.log(at.norm(dim=-1, keepdim=True) + 1e-6)
+        feat = torch.cat([av, at, logn, T_phys,
+                          imu, contact_prob.to(m_v.dtype)], -1)
+        win = torch.cat([feat.mean(dim=1),
+                         feat.std(dim=1, unbiased=False)], -1)
+        return self.mlp(win)                                   # (B,1)
 
 
 class AnySoleModelV7(nn.Module):
@@ -741,7 +840,10 @@ class AnySoleModelV7(nn.Module):
                  t_phys_v2: bool = False, tactile_input: str = "raw108",
                  external_gate: bool = False, gate_g0=None,
                  gate_gv_min: float = 0.2, gate_smooth: bool = False,
-                 t_gate: bool = False, t_gate_g0: float = 0.9):
+                 t_gate: bool = False, t_gate_g0: float = 0.9,
+                 t_gate_action: bool = False, t_gate_num_actions: int = 9,
+                 t_gate_gv_thr=None, decision_gate: bool = False,
+                 decision_p0: float = 0.8):
         super().__init__()
         self.d = d
         self.tw = tw
@@ -938,7 +1040,14 @@ class AnySoleModelV7(nn.Module):
                 "time_pe", self.embeddings.time_pe[-tw:].clone())
             if t_gate:
                 self.t_gate = TGateController(
-                    dim=d, tw=tw, dropout=dropout, g0=float(t_gate_g0))
+                    dim=d, tw=tw, dropout=dropout, g0=float(t_gate_g0),
+                    action_gate=bool(t_gate_action),
+                    num_actions=int(t_gate_num_actions),
+                    gv_threshold=t_gate_gv_thr)
+        self.decision_gate = None
+        if decision_gate:
+            self.decision_gate = DecisionGate(
+                dim=d, tw=tw, dropout=dropout, p0=float(decision_p0))
         self.contact_head = V41ContactHead(dim=d)
         if ar2:
             # 视觉航向观测分支（方案 §2/§4，仅 V/VT 生效；T 行 v_present=0
@@ -1325,7 +1434,9 @@ class AnySoleModelV7(nn.Module):
                 v_present=None, t_present=None, z_override=None,
                 gate_override=None, gate_v_override=None,
                 prev_ctx=None, prev_state=None,
-                causal=False, obs_history=None):
+                causal=False, obs_history=None, t_mask=None,
+                strict_local=False, t_off=None, strict_self=True,
+                action_id=None):
         """三条件 = 同一前向的三种输入组合。存在掩码默认由 config_id 决定
         （与输入置零同一决定，设计思路 §4）；v_present/t_present 允许调用
         侧覆盖（诊断/干预用）；gate_override（§7 干预诊断钩子）非 None 时
@@ -1378,7 +1489,8 @@ class AnySoleModelV7(nn.Module):
                     v_present=select(v_present), t_present=select(t_present),
                     z_override=select(z_override), gate_override=select(gate_override),
                     gate_v_override=select(gate_v_override),
-                    prev_ctx=select(prev_ctx), prev_state=select(prev_state), causal=causal))
+                    prev_ctx=select(prev_ctx), prev_state=select(prev_state),
+                    causal=causal, action_id=select(action_id)))
                 order.extend(indices)
             restore = torch.tensor(order, device=V_feat.device).argsort()
             return {key: (torch.cat([out[key] for out in outputs], dim=0).index_select(0, restore)
@@ -1398,7 +1510,20 @@ class AnySoleModelV7(nn.Module):
                                      mask_v=mask_v, mask_t=mask_t,
                                      T_s2m=T_s2m, T_phys=T_phys)
         m_v = self.v_temporal(v_tok)
-        m_t = self.t_temporal(t_tok)
+        if strict_local:
+            # 严格局部诊断（2026-11-14，用户设计）：T 时序编码器只允许
+            # 同帧混合；V 的全窗时序编码保持原样。权重不变，只改读取关系。
+            if t_tok.shape[1] != self.tw:
+                raise ValueError("strict_local requires the current window "
+                                 "length == tw (no extended context)")
+            eye = torch.eye(self.tw, device=t_tok.device, dtype=torch.bool)
+            src_mask = torch.where(
+                eye, torch.zeros((), dtype=t_tok.dtype, device=t_tok.device),
+                torch.full((), float("-inf"), dtype=t_tok.dtype,
+                           device=t_tok.device))
+            m_t = self.t_temporal(t_tok, mask=src_mask)
+        else:
+            m_t = self.t_temporal(t_tok)
         anchor_rot = None
         if self.ctx4b:
             # v4-b：锚估计头（V/VT 行出口组合用；T 行锚 = 链/恒等，头输入
@@ -1458,6 +1583,7 @@ class AnySoleModelV7(nn.Module):
                     ctx_pose = self.ctx_pose_emb(prev_ctx.to(m_v.dtype))  # (B, 6)
         unc_s_v = unc_s_t = unc_k = None
         ext_gate_v = ext_gate_t = ext_gate_g4 = ext_gate_logits4 = None
+        decision_logits = None
         if self.external_gate:
             tw_cur = self.tw
             tphys = T_phys[:, -tw_cur:] if T_phys is not None else None
@@ -1476,9 +1602,16 @@ class AnySoleModelV7(nn.Module):
                 # The V gate above stays frozen and unchanged.
                 ext_gate_t, gt_group = self.t_gate(
                     m_v[:, -tw_cur:].detach(), m_t[:, -tw_cur:].detach(),
-                    tphys, ts2m, contact_prob, v_present, t_present, mv, mt)
+                    tphys, ts2m, contact_prob, v_present, t_present, mv, mt,
+                    action_id=action_id, gv=ext_gate_v)
                 ext_gate_g4 = torch.stack(
                     [ext_gate_g4[..., 0], gt_group], dim=-1)
+            if self.decision_gate is not None:
+                # V/VT routing logits; features carry T-side gradients so the
+                # decision loss can shape the T representation jointly.
+                decision_logits = self.decision_gate(
+                    m_v[:, -tw_cur:], m_t[:, -tw_cur:], tphys, ts2m,
+                    contact_prob, v_present, t_present, mv, mt)
             if gate_override is not None:
                 gate = gate_override
             else:
@@ -1528,15 +1661,42 @@ class AnySoleModelV7(nn.Module):
         vt_adapters = ((self.vt_root_adapter, self.vt_pose_adapter)
                        if self.vt_t_residual else None)
         vt_both = v_present.bool() & t_present.bool()
+        m_t_head = m_t
+        if t_mask is not None:
+            # 诊断/干预钩子（2026-11-14）：逐帧 T-token 掩码，只作用于解码器
+            # 交叉注意力输入；门控计算仍用未掩码 m_t（避免混淆冻结 V 门）。
+            tm = t_mask
+            if tm.dim() != 2:
+                raise ValueError("t_mask must be (B, T)")
+            if tm.shape[1] != m_t.shape[1]:
+                tm = tm[:, -m_t.shape[1]:]
+            m_t_head = m_t * tm.to(m_t.dtype).unsqueeze(-1)
+        self_mask = t_attn_mask = t_keep = None
+        if strict_local:
+            frames_ = m_t.shape[1]
+            nq_ = 1 + self.pose_head.n_parts
+            t_idx = torch.arange(frames_, device=m_t.device).repeat_interleave(nq_)
+            zeros = torch.zeros((), dtype=m_t.dtype, device=m_t.device)
+            ninf = torch.full((), float("-inf"), dtype=m_t.dtype,
+                              device=m_t.device)
+            if strict_self:
+                self_mask = torch.where(t_idx[:, None] == t_idx[None, :],
+                                        zeros, ninf)
+            t_attn_mask = torch.where(
+                t_idx[:, None] == torch.arange(frames_, device=m_t.device)[None, :],
+                zeros, ninf)
+            if t_off is not None:
+                t_keep = 1.0 - t_off[:, -frames_:].to(m_t.dtype)
         head_out = self.pose_head(
-            m_v, m_t, v_present, t_present, gate=gate, gate_v=gate_v,
+            m_v, m_t_head, v_present, t_present, gate=gate, gate_v=gate_v,
             gate_fn=gate_fn,
             t_only_mask=t_only, t_only_adapters=adapters,
             vt_mask=vt_both, vt_adapters=vt_adapters,
             z_override=z_override, ctx_vec=ctx_vec, ctx_pose=ctx_pose,
             ctx_block=ctx_block, ctx_emb=(self.ctx_emb if self.ctx3 else None),
             prev_state=prev_state,
-            causal=bool(causal) and (self.ar or self.ar2))
+            causal=bool(causal) and (self.ar or self.ar2),
+            self_mask=self_mask, t_mask=t_attn_mask, t_keep=t_keep)
         if self.root_sd:
             pose, v_hat, dyaw_hat, z_root, z_parts, sd_out = head_out
             s_hat, d_hat, vy_hat, sd_dir_norm = sd_out
@@ -1570,6 +1730,7 @@ class AnySoleModelV7(nn.Module):
             "external_gate_t": ext_gate_t,
             "external_gate_g4": ext_gate_g4,
             "external_gate_logits4": ext_gate_logits4,
+            "decision_logits": decision_logits,
             # V8_Cv8U：per-slot precision router 的 K 与两路 log-variance
             # （NLL 只在 V-only/T-only 行使用；VT 行 K 不接收任务梯度）。
             "unc_gate": unc_k,

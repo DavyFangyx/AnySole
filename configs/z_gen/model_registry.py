@@ -2205,6 +2205,167 @@ for _name, _base in (("V8_Cv5_IMU", "V8_Cv5"),
         "label": "%s-s1" % _name.replace("_", "-"),
         "seed": 1,
     }
+# V8_Cv7_PhysIMU_NoEnum（2026-11-14）：同基座结构，但不做 V/T/VT 枚举预训练
+# （config_probs [1,0,0]，只走 VT）；供 router 消融的“无 enum 基座”起点。
+MODELS["V8_Cv7_PhysIMU_NoEnum"] = {
+    **MODELS["V8_Cv7_PhysIMU"],
+    "label": "V8-Cv7-PhysIMU-NoEnum",
+    "name": "V8_Cv7_PhysIMU_NoEnum",
+    "train_args": {**MODELS["V8_Cv7_PhysIMU"].get("train_args", {}),
+                   "config_probs": [1.0, 0.0, 0.0]},
+}
+MODELS["V8_Cv7_PhysIMU_NoEnum_s1"] = {
+    **MODELS["V8_Cv7_PhysIMU_NoEnum"],
+    "label": "V8-Cv7-PhysIMU-NoEnum-s1",
+    "seed": 1,
+}
+# Router 消融三臂（2026-11-14）：FT / Router_Frozen / Router_NoEnum。
+# 结构与主模型同；训练协议由 finetune_router_enum.py 的开关区分。
+MODELS["V8_Cv7_PhysIMU_FT"] = {
+    **MODELS["V8_Cv7_PhysIMU"],
+    "label": "V8-Cv7-PhysIMU-FT", "name": "V8_Cv7_PhysIMU_FT",
+}
+MODELS["V8_Cv7_PhysIMU_FT_s1"] = {
+    **MODELS["V8_Cv7_PhysIMU_FT"], "label": "V8-Cv7-PhysIMU-FT-s1",
+    "seed": 1,
+}
+MODELS["V8_Cv7_PhysIMU_Router"] = {
+    **MODELS["V8_Cv7_PhysIMU"],
+    "label": "V8-Cv7-PhysIMU-Router", "name": "V8_Cv7_PhysIMU_Router",
+}
+MODELS["V8_Cv7_PhysIMU_Router_s1"] = {
+    **MODELS["V8_Cv7_PhysIMU_Router"], "label": "V8-Cv7-PhysIMU-Router-s1",
+    "seed": 1,
+}
+MODELS["V8_Cv7_PhysIMU_Router_Frozen"] = {
+    **MODELS["V8_Cv7_PhysIMU_Router"],
+    "label": "V8-Cv7-PhysIMU-Router-Frozen",
+    "name": "V8_Cv7_PhysIMU_Router_Frozen",
+}
+MODELS["V8_Cv7_PhysIMU_Router_Frozen_s1"] = {
+    **MODELS["V8_Cv7_PhysIMU_Router_Frozen"],
+    "label": "V8-Cv7-PhysIMU-Router-Frozen-s1", "seed": 1,
+}
+MODELS["V8_Cv7_PhysIMU_Router_NoEnum"] = {
+    **MODELS["V8_Cv7_PhysIMU_Router"],
+    "label": "V8-Cv7-PhysIMU-Router-NoEnum",
+    "name": "V8_Cv7_PhysIMU_Router_NoEnum",
+}
+MODELS["V8_Cv7_PhysIMU_Router_NoEnum_s1"] = {
+    **MODELS["V8_Cv7_PhysIMU_Router_NoEnum"],
+    "label": "V8-Cv7-PhysIMU-Router-NoEnum-s1", "seed": 1,
+}
+# ======================================================================
+# V8_IMU_* canonical naming (2026-11-15)
+# Main model = V8_IMU_Residual: residual fusion (gV=gT=1) + enum
+# pretraining + occlusion-aware fine-tune (20 ep, best-val).
+# Fine-tune arms are trained by finetune_router_enum.py, not train.py;
+# their cells are eval/registry entries (train=False) with the recipe in
+# ``finetune_args``.  Old V8_Cv7_PhysIMU* cells above stay as historical
+# aliases.
+# ======================================================================
+MODELS["V8_IMU_Residual_woAdapt"] = {
+    **MODELS["V8_Cv7_PhysIMU"],
+    "label": "V8-IMU-Residual-woAdapt",
+    "name": "V8_IMU_Residual_woAdapt",
+    "train": False, "which": "last",
+}
+MODELS["V8_IMU_Residual"] = {
+    **MODELS["V8_Cv7_PhysIMU"],
+    "label": "V8-IMU-Residual",
+    "name": "V8_IMU_Residual",
+    "epochs": 20, "which": "best", "train": False,
+    "finetune_args": {
+        "base": "V8_IMU_Residual_woAdapt",
+        "cond_mode": "sequential", "val_mode": "batch",
+        "conditions": "clean,occ020,occ050,occ100",
+        "lr": 1e-4, "batch_size": 64, "lambda_clean_rel": 1.0,
+        "train_prefixes": "pose_head,t_temporal,encoders.t_enc,encoders.t_phys",
+    },
+}
+MODELS["V8_IMU_Router"] = {
+    **MODELS["V8_Cv7_PhysIMU_Router"],
+    "label": "V8-IMU-Router",
+    "name": "V8_IMU_Router",
+    "epochs": 20, "which": "best", "train": False,
+    "finetune_args": {
+        "base": "V8_IMU_Residual_woAdapt",
+        "cond_mode": "joint",
+        "conditions": "clean,occ020,occ050,occ100",
+        "lr": 1e-4, "batch_size": 64, "lambda_clean_rel": 1.0,
+        "freeze_backbone": True, "train_prefixes": "router",
+    },
+}
+MODELS["V8_IMU_Router_Full"] = {
+    **MODELS["V8_Cv7_PhysIMU_Router"],
+    "label": "V8-IMU-Router-Full",
+    "name": "V8_IMU_Router_Full",
+    "epochs": 20, "which": "best", "train": False,
+    "finetune_args": {
+        "base": "V8_IMU_Residual_woAdapt",
+        "cond_mode": "joint",
+        "conditions": "clean,occ020,occ050,occ100",
+        "lr": 1e-4, "batch_size": 64, "lambda_clean_rel": 1.0,
+        "train_prefixes": "router,pose_head,t_temporal,encoders.t_enc,encoders.t_phys",
+    },
+}
+MODELS["V8_IMU_TGate"] = {
+    **MODELS["V8_Cv5_PhysIMU"],
+    "label": "V8-IMU-TGate",
+    "name": "V8_IMU_TGate",
+    "train": False, "which": "last",
+}
+MODELS["V8_IMU_DualGate"] = {
+    **MODELS["V8_Cv7_PhysIMU"],
+    "label": "V8-IMU-DualGate",
+    "name": "V8_IMU_DualGate",
+    "train": False, "which": "best",
+}
+MODELS["V8_IMU_Base_woEnum"] = {
+    **MODELS["V8_Cv7_PhysIMU_NoEnum"],
+    "label": "V8-IMU-Base-woEnum",
+    "name": "V8_IMU_Base_woEnum",
+    "train": False, "which": "last",
+}
+MODELS["V8_IMU_Residual_woEnum"] = {
+    **MODELS["V8_Cv7_PhysIMU"],
+    "label": "V8-IMU-Residual-woEnum",
+    "name": "V8_IMU_Residual_woEnum",
+    "epochs": 20, "which": "best", "train": False,
+    "finetune_args": {
+        "base": "V8_IMU_Base_woEnum",
+        "cond_mode": "sequential", "val_mode": "batch",
+        "conditions": "clean,occ020,occ050,occ100",
+        "lr": 1e-4, "batch_size": 64, "lambda_clean_rel": 1.0,
+        "train_prefixes": "pose_head,t_temporal,encoders.t_enc,encoders.t_phys",
+    },
+}
+MODELS["V8_IMU_Residual_DecoderOnly"] = {
+    **MODELS["V8_Cv7_PhysIMU"],
+    "label": "V8-IMU-Residual-DecoderOnly",
+    "name": "V8_IMU_Residual_DecoderOnly",
+    "epochs": 20, "which": "best", "train": False,
+    "finetune_args": {
+        "base": "V8_IMU_Residual_woAdapt",
+        "cond_mode": "sequential", "val_mode": "batch",
+        "conditions": "clean,occ020,occ050,occ100",
+        "lr": 1e-4, "batch_size": 64, "lambda_clean_rel": 1.0,
+        "decoder_only": True, "train_prefixes": "pose_head",
+    },
+}
+MODELS["V8_IMU_Residual_CleanOnly"] = {
+    **MODELS["V8_Cv7_PhysIMU"],
+    "label": "V8-IMU-Residual-CleanOnly",
+    "name": "V8_IMU_Residual_CleanOnly",
+    "epochs": 20, "which": "best", "train": False,
+    "finetune_args": {
+        "base": "V8_IMU_Residual_woAdapt",
+        "cond_mode": "sequential", "val_mode": "batch",
+        "conditions": "clean",
+        "lr": 1e-4, "batch_size": 64, "lambda_clean_rel": 1.0,
+        "train_prefixes": "pose_head,t_temporal,encoders.t_enc,encoders.t_phys",
+    },
+}
 # T1：V8_Cv5 的方向载体替换（根头 4→3 通道；结构由入口 v8_cv5t1 携带）。
 MODELS["V8_Cv5T1"] = {**MODELS["V8_Cv5"], "label": "V8-Cv5T1", "name": "V8_Cv5T1"}
 MODELS["V8_Cv5T1_precheck"] = {
@@ -2293,7 +2454,10 @@ _V8_FOLD_FAMILIES = ("V8_Cv5", "V8_Cv4", "V8_Cv2", "V8_Cv6", "V8_Cv7",
                      "V8_Cv8", "V8_Cv8U", "V8_Cv8U_SG",
                      "V8_Cv8U_PhysIMU_SG", "V8_Cv8U_PhysIMU",
                      "V8_Cv5_IMU", "V8_Cv5_PhysIMU",
-                     "V8_Cv7_IMU", "V8_Cv7_PhysIMU")
+                     "V8_Cv7_IMU", "V8_Cv7_PhysIMU",
+                     "V8_Cv7_PhysIMU_NoEnum", "V8_Cv7_PhysIMU_FT",
+                     "V8_Cv7_PhysIMU_Router_Frozen",
+                     "V8_Cv7_PhysIMU_Router_NoEnum")
 for _fam in _V8_FOLD_FAMILIES:
     for _fold, _fconfig in _V8_FOLD_CONFIGS:
         _fname = "%s_%s" % (_fam, _fold)
@@ -2305,6 +2469,50 @@ for _fam in _V8_FOLD_FAMILIES:
             "eval_splits": ["val", "test"],
             "seed": 1,
         }
+
+# V8_IMU_* fold cells (2026-11-15): eval-only, explicit checkpoints.
+# The FT/gate weights live in flat diagnostics paths, not in
+# results/AnySole/<name>, so each cell pins its checkpoint explicitly.
+_V8_IMU_FOLD_CKPT = {
+    "V8_IMU_Residual":
+        "results/diagnostics/20261112_v8_gate_frozen/router_ft_only_{fold}_v2rerun.pt",
+    "V8_IMU_Residual_woAdapt":
+        "results/AnySole/V8_Cv7_PhysIMU_{fold}_f6_soft_time_accel_state_smpl24_v1/"
+        "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
+        "checkpoints/ckpt_last.pt",
+    "V8_IMU_TGate":
+        "results/AnySole/V8_Cv5_PhysIMU_{fold}_f6_soft_time_accel_state_smpl24_v1/"
+        "tw20_st20_lr0.0001_lp3_lt1_lk1_wu0.05_gc5_ep740_bs256_sd1/"
+        "checkpoints/ckpt_last.pt",
+    "V8_IMU_DualGate":
+        "results/diagnostics/20261112_v8_gate_frozen/gate_4fold_{fold}.pt",
+}
+for _fam, _tmpl in _V8_IMU_FOLD_CKPT.items():
+    for _fold, _fconfig in _V8_FOLD_CONFIGS:
+        _fname = "%s_%s" % (_fam, _fold)
+        MODELS[_fname] = {
+            **MODELS[_fam],
+            "label": _fname.replace("_", "-"),
+            "name": _fname,
+            "config": _fconfig,
+            "checkpoint": _tmpl.format(fold=_fold),
+            "train": False,
+            "eval_splits": ["test"],
+        }
+# Single-fold FT ablation pilots (2026-11-15, fS5S6S11 only).
+for _fam in ("V8_IMU_Residual_woEnum", "V8_IMU_Residual_DecoderOnly",
+             "V8_IMU_Residual_CleanOnly"):
+    _fname = _fam + "_fS5S6S11"
+    MODELS[_fname] = {
+        **MODELS[_fam],
+        "label": _fname.replace("_", "-"),
+        "name": _fname,
+        "config": "anysole/configs/v1_fold_S5S6S11.yaml",
+        "checkpoint": ("results/diagnostics/20261114_imu_ft_ablation_v2/"
+                       "%s.pt" % _fname),
+        "train": False,
+        "eval_splits": ["test"],
+    }
 
 # V8 的 E5/E6 评估格（2026-11-06 用户指定）：6 族 × 4 折。
 #   E5 = occ020/040/060/080/100，eval-only、只评 test；
