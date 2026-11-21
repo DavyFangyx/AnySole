@@ -74,7 +74,8 @@ def value_at(condition: str, metric: str, series_name: str, idx: int):
     vals = baseline_series(base, cfg["baseline"], metric)
     if vals is None:
         return float("nan"), None
-    return vals[idx], None
+    means, stds = vals
+    return means[idx], (stds[idx] if stds is not None else None)
 
 
 def fmt(mean: float, std: float | None, digits=1) -> str:

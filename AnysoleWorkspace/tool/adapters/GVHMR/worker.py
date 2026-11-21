@@ -293,6 +293,7 @@ def run_request(request_path: str | Path, output_path: str | Path) -> None:
                 "global": global_fit.metadata,
             },
             "static_camera": bool(request.get("static_camera", True)),
+            "intrinsics_source": "estimate_K(diagonal FOV)",
             "model_video_fps": 30,
         },
     )

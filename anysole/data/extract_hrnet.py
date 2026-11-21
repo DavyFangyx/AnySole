@@ -15,6 +15,7 @@ import torch
 
 from anysole.data.crop import CROP_IMG_HEIGHT, CROP_IMG_WIDTH, process_image
 from anysole.data.dataset import find_session_dir, hrnet_cache_path
+from anysole.data.occlusion_textures import parse_fill, texture_canvas
 from anysole.data.workspace_adapter import load_shared_session, write_cache_provenance
 from anysole.types import (
     CLIFF_CKPT,
@@ -57,16 +58,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                          help="Occlude the bottom fraction (0-1) of the person bbox before HRNet "
                               "(V-degradation experiment); default cache root becomes "
                               "cam{id}_occ_lower{FFF}.")
-    parser.add_argument("--occlude-fill", choices=("black", "blur"), default="black",
-                        help="Fill for the occluded strip (default black).")
+    parser.add_argument("--occlude-fill", default="black",
+                        help="Fill for the occluded strip: black | blur | texture:<asset> "
+                             "(wood/fabric/crate; default black).")
+    parser.add_argument("--demo-dir", type=Path, default=None,
+                        help="Optional directory for a few degraded full-frame preview JPGs.")
     parser.add_argument("--limit-sessions", type=int, default=None)
     return parser.parse_args(argv)
 
 
-def occlusion_cache_dirname(cam_id: int, frac: float) -> str:
+def occlusion_cache_dirname(cam_id: int, frac: float, fill: str = "black") -> str:
     """Cache dir name for one occlusion level: cam{id}_occ_lower{FFF} with
-    FFF = round(frac * 100) zero-padded (0.1 -> cam3_occ_lower010)."""
-    return "cam%d_occ_lower%03d" % (int(cam_id), int(round(frac * 100)))
+    FFF = round(frac * 100) zero-padded (0.1 -> cam3_occ_lower010);
+    texture fills append _tex{asset} (cam3_occ_lower050_tex_wood)."""
+    name = "cam%d_occ_lower%03d" % (int(cam_id), int(round(frac * 100)))
+    kind, asset = parse_fill(fill)
+    if kind == "texture":
+        name += "_tex_" + asset
+    return name
 
 
 def resolve_roots(
@@ -74,12 +83,14 @@ def resolve_roots(
     cache_root: Optional[Path] = None,
     seq_root: Optional[Path] = None,
     occlude_lower: Optional[float] = None,
+    occlude_fill: str = "black",
 ) -> tuple:
     resolved_seq_root = seq_root or SEQ_ROOT.parent / ("cam%d" % int(cam_id))
     if cache_root is not None:
         resolved_cache_root = cache_root
     elif occlude_lower is not None:
-        resolved_cache_root = HRNET_CACHE_ROOT.parent / occlusion_cache_dirname(cam_id, occlude_lower)
+        resolved_cache_root = HRNET_CACHE_ROOT.parent / occlusion_cache_dirname(
+            cam_id, occlude_lower, occlude_fill)
     else:
         resolved_cache_root = HRNET_CACHE_ROOT.parent / ("cam%d" % int(cam_id))
     return resolved_seq_root, resolved_cache_root
@@ -155,10 +166,13 @@ def occlude_lower_strip(rgb: np.ndarray, box, frac: float, fill: str) -> np.ndar
     if cut <= 0 or cut >= rgb.shape[0] - 1:
         return rgb
     out = rgb.copy()
-    if fill == "black":
+    kind, asset = parse_fill(fill)
+    if kind == "black":
         out[cut:] = 0
-    else:  # blur: keep local color statistics, remove texture
+    elif kind == "blur":  # keep local color statistics, remove texture
         out[cut:] = cv2.GaussianBlur(rgb, (0, 0), 24)[cut:]
+    else:  # texture: real surface below the cut (Q14 texture-occlusion variant)
+        out[cut:] = texture_canvas(asset, rgb.shape[0], rgb.shape[1])[cut:]
     return out
 
 
@@ -173,6 +187,10 @@ def session_frame_paths(seq_dir: Path, n_frames: int) -> List[Path]:
     return paths
 
 
+def demo_indices(n_frames: int, picks: int = 4) -> set:
+    return {int(n_frames * (i + 1) / (picks + 1)) for i in range(picks)}
+
+
 def extract_session(
     seq_dir: Path,
     cache_path: Path,
@@ -182,6 +200,7 @@ def extract_session(
     bbox_root: Optional[Path] = None,
     occlude_lower: Optional[float] = None,
     occlude_fill: str = "black",
+    demo_dir: Optional[Path] = None,
 ) -> None:
     if (seq_dir / "session.json").is_file():
         meta = json.loads((seq_dir / "session.json").read_text())
@@ -205,6 +224,12 @@ def extract_session(
             box = bbox[idx][1:5]
             if occlude_lower is not None:
                 rgb = occlude_lower_strip(rgb, box, occlude_lower, occlude_fill)
+                if demo_dir is not None and idx in demo_indices(n_frames):
+                    demo_dir.mkdir(parents=True, exist_ok=True)
+                    tag = "%g_%s" % (occlude_lower, occlude_fill.replace(":", "_"))
+                    cv2.imwrite(
+                        str(demo_dir / ("%s_%s_%06d.jpg" % (seq_dir.name, tag, idx))),
+                        np.ascontiguousarray(rgb[:, :, ::-1]))
             norm_img, center, scale, _, _, _ = process_image(
                 rgb, box, crop_height=CROP_IMG_HEIGHT, crop_width=CROP_IMG_WIDTH
             )
@@ -273,8 +298,13 @@ def extract_session(
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    try:
+        parse_fill(args.occlude_fill)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
     seq_root, cache_root = resolve_roots(args.cam_id, args.cache_root, args.seq_root,
-                                         occlude_lower=args.occlude_lower)
+                                         occlude_lower=args.occlude_lower,
+                                         occlude_fill=args.occlude_fill)
     session_dirs = select_session_dirs(seq_root, args)
     if args.limit_sessions is not None:
         if args.limit_sessions <= 0:
@@ -296,7 +326,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             model = load_encoder(device)
         print("extract %s" % seq_dir)
         extract_session(seq_dir, cache_path, model, device, int(args.batch_size), args.bbox_root,
-                        args.occlude_lower, args.occlude_fill)
+                        args.occlude_lower, args.occlude_fill, args.demo_dir)
     return 0
 
 

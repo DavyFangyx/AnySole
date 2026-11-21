@@ -28,12 +28,18 @@ from anysole.data.dataset import find_session_dir, hrnet_cache_path  # noqa: E40
 from anysole.data.extract_hrnet import (  # noqa: E402
     BBOX_INFO_DIM, CLIFF_FOCAL_LENGTH, HRNET_FEAT_DIM, V_FEAT_DIM,
     load_encoder, process_image, read_rgb, session_frame_paths)
+from anysole.data.make_static_occ_manifest import COLUMN  # noqa: E402
+from anysole.data.occlusion_textures import tile_texture  # noqa: E402
+from anysole.data.rgb_smpl.coordinates import checkerboard_to_camera  # noqa: E402
 from anysole.data.workspace_adapter import load_shared_session  # noqa: E402
 from anysole.types import HRNET_CACHE_ROOT, SEQ_ROOT, V_FEAT_DIM as _V  # noqa: E402
 
 CROP_H = 256
 CROP_W = 192
 BBOX_ROOT = ROOT / "AnysoleWorkspace/model_inputs/AnySole/adapter_v1/visual/hrnet/bbox_cam3"
+
+# Concrete texture resolution on the column surface (px per world metre).
+TEX_PER_M = 1024.0
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -44,6 +50,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--demo-dir", type=Path, default=None,
                    help="Optional directory for a few composited preview JPGs.")
+    p.add_argument("--fill", choices=("gray", "concrete"), default="gray",
+                   help="Column surface: gray gradient (E5 main) or concrete texture (Q14).")
+    p.add_argument("--session", default="", help="smoke: single session id")
     return p.parse_args(argv)
 
 
@@ -74,8 +83,90 @@ def composite(rgb: np.ndarray, person: np.ndarray, poly: np.ndarray,
     return out
 
 
+def column_face_quads(cam: dict, K: np.ndarray, D: np.ndarray) -> list:
+    """Per-face image quads of the fixed column (Q14 concrete variant).
+
+    Corners are stored top-left, top-right, bottom-right, bottom-left of the
+    face UV rect, so index i pairs with texture rect [(0,0),(w,0),(w,h),(0,h)].
+    Visibility = signed area of the projected quad (backface culling on a
+    consistently wound convex solid); depth_m = camera depth of the face
+    centre (sort far -> near before painting).
+    """
+    x0, y0 = COLUMN["center_xy"]
+    w, d = COLUMN["size_xy"]
+    top = COLUMN["height_m"]
+
+    def corners(*quads):
+        return [np.array(q, dtype=np.float64) for q in quads]
+
+    faces = [
+        ("px", corners((x0 + w / 2, y0 - d / 2, -top), (x0 + w / 2, y0 + d / 2, -top),
+                       (x0 + w / 2, y0 + d / 2, 0.0), (x0 + w / 2, y0 - d / 2, 0.0)),
+         (0.0, 0.0, d, top), np.array([1.0, 0.0, 0.0])),
+        ("nx", corners((x0 - w / 2, y0 + d / 2, -top), (x0 - w / 2, y0 - d / 2, -top),
+                       (x0 - w / 2, y0 - d / 2, 0.0), (x0 - w / 2, y0 + d / 2, 0.0)),
+         (0.0, 0.0, d, top), np.array([-1.0, 0.0, 0.0])),
+        ("py", corners((x0 - w / 2, y0 + d / 2, -top), (x0 + w / 2, y0 + d / 2, -top),
+                       (x0 + w / 2, y0 + d / 2, 0.0), (x0 - w / 2, y0 + d / 2, 0.0)),
+         (0.0, 0.0, w, top), np.array([0.0, 1.0, 0.0])),
+        ("ny", corners((x0 + w / 2, y0 - d / 2, -top), (x0 - w / 2, y0 - d / 2, -top),
+                       (x0 - w / 2, y0 - d / 2, 0.0), (x0 + w / 2, y0 - d / 2, 0.0)),
+         (0.0, 0.0, w, top), np.array([0.0, -1.0, 0.0])),
+        ("top", corners((x0 - w / 2, y0 - d / 2, -top), (x0 + w / 2, y0 - d / 2, -top),
+                        (x0 + w / 2, y0 + d / 2, -top), (x0 - w / 2, y0 + d / 2, -top)),
+         (0.0, 0.0, w, d), np.array([0.0, 0.0, -1.0])),
+    ]
+    quads = []
+    for name, verts, uv, normal in faces:
+        verts = np.asarray(verts, dtype=np.float64)
+        proj = np.asarray([cv2.projectPoints(
+            checkerboard_to_camera(v[None, :], cam).reshape(-1, 1, 3),
+            np.zeros(3), np.zeros(3), K, D)[0].reshape(2) for v in verts],
+            dtype=np.float32)
+        centre_cam = checkerboard_to_camera(verts.mean(axis=0)[None, :], cam)[0]
+        normal_cam = (checkerboard_to_camera(
+            (verts.mean(axis=0) + normal)[None, :], cam)[0] - centre_cam)
+        # Front-facing: outward normal points toward the camera origin.
+        visible = float(np.dot(normal_cam, centre_cam)) < 0.0
+        quads.append({
+            "name": name,
+            "corners_xy": proj.tolist(),
+            "visible": bool(visible),
+            "depth_m": float(centre_cam[2]),
+            "uv_m": [float(x) for x in uv],
+        })
+    return quads
+
+
+def composite_textured(rgb: np.ndarray, person: np.ndarray, faces: list,
+                       behind: bool) -> np.ndarray:
+    """Perspective-map the concrete texture onto each visible column face."""
+    out = rgb.copy()
+    for face in sorted([f for f in faces if f["visible"]],
+                       key=lambda f: -f["depth_m"]):
+        quad = np.asarray(face["corners_xy"], dtype=np.float32)
+        paint = polygon_mask(rgb.shape, quad)
+        if behind:
+            pass
+        else:
+            paint &= ~person
+        if not paint.any():
+            continue
+        u0, v0, u1, v1 = face["uv_m"]
+        w_tex = max(2, int(round((u1 - u0) * TEX_PER_M)))
+        h_tex = max(2, int(round((v1 - v0) * TEX_PER_M)))
+        tile = np.ascontiguousarray(tile_texture("concrete", h_tex, w_tex))
+        src = np.float32([[0, 0], [w_tex, 0], [w_tex, h_tex], [0, h_tex]])
+        hom = cv2.getPerspectiveTransform(src, quad)
+        warped = cv2.warpPerspective(tile, hom, (rgb.shape[1], rgb.shape[0]),
+                                     flags=cv2.INTER_LINEAR)
+        out[paint] = warped[paint]
+    return out
+
+
 def build_session(manifest_path: Path, out_root: Path, model, device,
-                  batch_size: int, demo_dir: Path | None) -> None:
+                  batch_size: int, demo_dir: Path | None,
+                  fill: str = "gray") -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     sid = manifest["session_id"]
     sess = load_shared_session(sid)
@@ -106,6 +197,15 @@ def build_session(manifest_path: Path, out_root: Path, model, device,
 
     H, W = cv2.imread(str(paths[0])).shape[:2]
     texture = column_texture(H, W, seed=0)
+    faces = None
+    if fill == "concrete":
+        cal = json.loads(Path(manifest["calibration"]).read_text(encoding="utf-8"))
+        cam = cal["cameras"]["cam3"]
+        K = np.asarray(cam["K"], dtype=np.float64)
+        D = np.asarray(cam["D"], dtype=np.float64)
+        faces = column_face_quads(cam, K, D)
+        print("%s: %d/%d visible column faces"
+              % (sid, sum(f["visible"] for f in faces), len(faces)))
     active_ids = np.where(active)[0].tolist()
     print("%s: %d/%d active frames" % (sid, len(active_ids), n_frames))
 
@@ -130,7 +230,10 @@ def build_session(manifest_path: Path, out_root: Path, model, device,
             mpath = index.get(idx)
             person = (cv2.imread(mpath, cv2.IMREAD_GRAYSCALE) > 0
                       if mpath and Path(mpath).is_file() else np.zeros(rgb.shape[:2], bool))
-            rgb = composite(rgb, person, poly, texture, bool(behind[idx]))
+            if faces is None:
+                rgb = composite(rgb, person, poly, texture, bool(behind[idx]))
+            else:
+                rgb = composite_textured(rgb, person, faces, bool(behind[idx]))
             if demo_dir is not None and idx in demo_frames(manifest):
                 demo_dir.mkdir(parents=True, exist_ok=True)
                 cv2.imwrite(str(demo_dir / ("%s_%04d_vis%.2f.jpg" % (
@@ -177,8 +280,13 @@ def main(argv=None) -> int:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     model = load_encoder(device)
     manifests = sorted(args.manifest_dir.glob("*.json"))
+    if args.session:
+        manifests = [p for p in manifests if p.stem == args.session]
+        if not manifests:
+            raise FileNotFoundError("no manifest for session %s" % args.session)
     for mpath in manifests:
-        build_session(mpath, args.out, model, device, int(args.batch_size), args.demo_dir)
+        build_session(mpath, args.out, model, device, int(args.batch_size),
+                      args.demo_dir, fill=args.fill)
     return 0
 
 

@@ -15,7 +15,7 @@ package itself can be deleted.
 
 Usage (touch_gait):
   python AnysoleWorkspace/tool/adapters/visual_baselines/generate.py \
-      --model wham --session S13011 [--cam 3] [--gpu 0]
+      --model wham --session S13011 [--cam 3] [--gpu 2]
 """
 from __future__ import annotations
 
@@ -185,27 +185,45 @@ def build_sequence_video(frame_paths: list[Path], unit_root: Path,
     return video
 
 
-def parse_degrade(spec: str) -> tuple[str, float]:
-    """--degrade grammar: none | occ:<pct> | gap:<pct> | scene."""
+def parse_degrade(spec: str) -> tuple[str, float, str]:
+    """--degrade grammar: none | occ:<pct>[:<fill>] | gap:<pct> | scene[:<fill>].
+
+    occ fill: black (default) | blur | tex:<asset> (wood/fabric/crate);
+    scene fill: gray (default) | tex (concrete column).
+    """
     spec = (spec or "none").strip().lower()
     if spec == "none":
-        return "none", 0.0
-    if spec == "scene":
-        return "scene", 0.0
-    kind, _, value = spec.partition(":")
-    if kind not in ("occ", "gap") or not value:
-        raise SystemExit(f"bad --degrade {spec!r}: use none | occ:<pct> | gap:<pct> | scene")
-    return kind, float(value)
+        return "none", 0.0, "black"
+    kind, _, rest = spec.partition(":")
+    if kind == "scene":
+        fill = rest or "gray"
+        if fill not in ("gray", "tex"):
+            raise SystemExit(f"bad --degrade {spec!r}: scene fill must be gray | tex")
+        return "scene", 0.0, fill
+    if kind not in ("occ", "gap") or not rest:
+        raise SystemExit(f"bad --degrade {spec!r}: use none | occ:<pct>[:<fill>] | "
+                         f"gap:<pct> | scene[:<fill>]")
+    value, _, fill = rest.partition(":")
+    fill = fill or "black"
+    if kind == "occ":
+        if fill.startswith("tex:"):
+            fill = "texture:" + fill.split(":", 1)[1]
+        from anysole.data.occlusion_textures import parse_fill
+        try:
+            parse_fill(fill)
+        except ValueError as exc:
+            raise SystemExit(f"bad --degrade {spec!r}: {exc}")
+    return kind, float(value), fill
 
 
-def degrade_tag(kind: str, level: float) -> str:
-    """Condition tag shared with the cache dirs (occ_lower010 / gap_r080 / scene)."""
+def degrade_tag(kind: str, level: float, fill: str = "black") -> str:
+    """Condition tag shared with the cache dirs (occ_lower010 / gap_r080 / scene[_tex])."""
     from anysole.data.extract_hrnet import occlusion_cache_dirname
     from anysole.data.make_gap_cache import gap_cache_dirname
     if kind == "scene":
-        return "scene"
+        return "scene" if fill == "gray" else "scene_tex"
     if kind == "occ":
-        name = occlusion_cache_dirname(3, level / 100.0)
+        name = occlusion_cache_dirname(3, level / 100.0, fill)
     else:
         name = gap_cache_dirname(3, level)
     return name.split("_", 1)[1]
@@ -253,7 +271,7 @@ def unit_cache_rows(unit_paths: list[Path], grid: list[Path]) -> list[int]:
 
 
 def stage_frames(row: dict, cam: int, unit_paths: list[Path], stage_dir: Path,
-                 kind: str, level: float) -> list[Path]:
+                 kind: str, level: float, fill: str = "black") -> list[Path]:
     """Frame list for build_sequence_video under one E5 degradation.
 
     Pixel and anchor math is the model cache's own (occlude_lower_strip with
@@ -275,7 +293,8 @@ def stage_frames(row: dict, cam: int, unit_paths: list[Path], stage_dir: Path,
         return [path if int(anchors[cache_row]) == cache_row else grid[int(anchors[cache_row])]
                 for path, cache_row in zip(unit_paths, rows)]
     if kind == "scene":
-        from anysole.data.make_scene_occ_cache import column_texture, composite
+        from anysole.data.make_scene_occ_cache import (
+            column_face_quads, column_texture, composite, composite_textured)
         manifest_path = SCENE_MANIFEST_DIR / ("%s.json" % session)
         if not manifest_path.is_file():
             raise FileNotFoundError("scene manifest missing: %s" % manifest_path)
@@ -285,6 +304,13 @@ def stage_frames(row: dict, cam: int, unit_paths: list[Path], stage_dir: Path,
         poly = np.asarray(manifest["column_polygon_xy"], dtype=np.float32)
         height, width = cv2.imread(str(unit_paths[0])).shape[:2]
         texture = column_texture(height, width, seed=0)
+        faces = None
+        if fill == "tex":
+            cal = json.loads(Path(manifest["calibration"]).read_text(encoding="utf-8"))
+            cam = cal["cameras"]["cam3"]
+            faces = column_face_quads(
+                cam, np.asarray(cam["K"], dtype=np.float64),
+                np.asarray(cam["D"], dtype=np.float64))
         masks = _scene_mask_index(session)
         stage_dir.mkdir(parents=True, exist_ok=True)
         staged: dict[str, Path] = {}
@@ -297,8 +323,12 @@ def stage_frames(row: dict, cam: int, unit_paths: list[Path], stage_dir: Path,
                     person = (cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE) > 0
                               if mask_path and Path(mask_path).is_file()
                               else np.zeros(rgb.shape[:2], dtype=bool))
-                    rgb = composite(rgb, person, poly, texture,
-                                    bool(behind[cache_row]))
+                    if faces is None:
+                        rgb = composite(rgb, person, poly, texture,
+                                        bool(behind[cache_row]))
+                    else:
+                        rgb = composite_textured(rgb, person, faces,
+                                                 bool(behind[cache_row]))
                 # 全部写 PNG（含干净帧），保证 ffmpeg concat 输入格式统一；
                 # 混合 JPEG/PNG 时 concat 只吃到第一段格式。
                 target = stage_dir / (path.stem + ".png")
@@ -314,7 +344,7 @@ def stage_frames(row: dict, cam: int, unit_paths: list[Path], stage_dir: Path,
     for path, cache_row in zip(unit_paths, rows):
         if path.name not in staged:
             rgb = read_rgb(path)
-            rgb = occlude_lower_strip(rgb, boxes[cache_row], level / 100.0, "black")
+            rgb = occlude_lower_strip(rgb, boxes[cache_row], level / 100.0, fill)
             target = stage_dir / (path.stem + ".png")
             if not cv2.imwrite(str(target), np.ascontiguousarray(rgb[:, :, ::-1])):
                 raise RuntimeError(f"failed to write {target}")
@@ -324,15 +354,15 @@ def stage_frames(row: dict, cam: int, unit_paths: list[Path], stage_dir: Path,
 
 
 def generate_wham(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int,
-                  degrade: str = "none") -> Path:
+                  degrade: str = "none", checkpoint: str | Path | None = None) -> Path:
     """Drive Baselines/WHAM/demo.py and compact to the saved-prediction contract."""
     import joblib
     date, subject = session_parts(row)
     frames = unit_frame_paths(row, cam, unit)
-    kind, level = parse_degrade(degrade)
+    kind, level, fill = parse_degrade(degrade)
     stage_dir = work_dir / date / subject / f"{row['session_id']}_c{cam}" / "frames"
     if kind != "none":
-        frames = stage_frames(row, cam, frames, stage_dir, kind, level)
+        frames = stage_frames(row, cam, frames, stage_dir, kind, level, fill)
     unit_root = work_dir / "reference_results" / "3_Result" / "WHAM_baseline" / f"{date}_m1_{row['session_id']}_c{cam}"
     unit_root.mkdir(parents=True, exist_ok=True)
     try:
@@ -354,6 +384,8 @@ def generate_wham(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int,
         "--save_pkl",
         "--estimate_local_only",
     ]
+    if checkpoint is not None:
+        command.extend(["--checkpoint", str(Path(checkpoint).expanduser().resolve())])
     env = {**__import__("os").environ, **GENERATION_ENV,
            "CUDA_VISIBLE_DEVICES": str(gpu)}
     completed = subprocess.run(command, cwd=BASELINES / "WHAM", env=env, check=False,
@@ -415,14 +447,14 @@ def generate_sam3db(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int,
 
 
 def generate_gvhmr(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int,
-                   degrade: str = "none") -> Path:
+                   degrade: str = "none", checkpoint: str | Path | None = None) -> Path:
     """Drive the migrated GVHMR worker (run_request) in the vb_gvhmr environment."""
     date, subject = session_parts(row)
     frames = unit_frame_paths(row, cam, unit)
-    kind, level = parse_degrade(degrade)
+    kind, level, fill = parse_degrade(degrade)
     stage_dir = work_dir / date / subject / f"{row['session_id']}_c{cam}" / "frames"
     if kind != "none":
-        frames = stage_frames(row, cam, frames, stage_dir, kind, level)
+        frames = stage_frames(row, cam, frames, stage_dir, kind, level, fill)
     unit_root = work_dir / "reference_results" / "3_Result" / "GVHMR_baseline" / f"{date}_m1_{row['session_id']}_c{cam}"
     unit_root.mkdir(parents=True, exist_ok=True)
     try:
@@ -447,7 +479,7 @@ def generate_gvhmr(row: dict, cam: int, unit: dict, work_dir: Path, gpu: int,
     request = {
         "work_dir": str(unit_root),
         "upstream_root": str(gvhmr_config.UPSTREAM_ROOT),
-        "checkpoint_path": str(gvhmr_config.DEFAULT_CHECKPOINT),
+        "checkpoint_path": str(checkpoint or gvhmr_config.DEFAULT_CHECKPOINT),
         "smplx_model_path": str(gvhmr_config.DEFAULT_SMPLX_MODEL),
         "smpl_model_path": str(gvhmr_config.DEFAULT_SMPL_MODEL),
         "mapper_path": str(gvhmr_config.DEFAULT_SMPLX_TO_SMPL),
@@ -505,9 +537,13 @@ def main() -> int:
     parser.add_argument("--session", default="", help="single session (overrides --split)")
     parser.add_argument("--split", choices=("train", "val", "test", "all"), default="test")
     parser.add_argument("--cam", type=int, choices=(1, 2, 3, 4), default=3)
-    parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--gpu", type=int, default=2)
     parser.add_argument("--work-dir", default="",
                         help="persistent work dir (default: work/visual_baselines_local)")
+    parser.add_argument("--gvhmr-checkpoint", default="",
+                        help="GVHMR checkpoint override (fine-tuned fold checkpoint)")
+    parser.add_argument("--wham-checkpoint", default="",
+                        help="WHAM checkpoint override (fine-tuned fold checkpoint)")
     parser.add_argument("--degrade", default="none",
                         help="E5 degradation (cam3 only): none | occ:<pct> | gap:<pct> | scene; "
                              "default work dir becomes work/visual_baselines_degraded/<cond>")
@@ -516,7 +552,9 @@ def main() -> int:
     parser.add_argument("--skip-existing", action="store_true",
                         help="skip sessions whose native result already exists")
     args = parser.parse_args()
-    kind, level = parse_degrade(args.degrade)
+    if args.gpu not in (1, 2, 3, 4):
+        raise SystemExit(f"--gpu must be one of (1, 2, 3, 4), got {args.gpu}")
+    kind, level, fill = parse_degrade(args.degrade)
     manifest = {}
     for line in (WORKSPACE / "protocol/manifests" / "session_manifest.jsonl").open(
             encoding="utf-8"):
@@ -548,7 +586,7 @@ def main() -> int:
         date, subject = session_parts(row)
         unit = unit_entry(unit_manifest, date, session, args.cam)
         tmp = Path(args.work_dir) if args.work_dir else (
-            LOCAL_ROOT if kind == "none" else DEGRADED_ROOT / degrade_tag(kind, level))
+            LOCAL_ROOT if kind == "none" else DEGRADED_ROOT / degrade_tag(kind, level, fill))
         tmp.mkdir(parents=True, exist_ok=True)
         if args.skip_existing and native_result(args.model, date, session,
                                                 args.cam, tmp).is_file():
@@ -556,11 +594,17 @@ def main() -> int:
             continue
         try:
             if args.model == "wham":
-                result = generate_wham(row, args.cam, unit, tmp, args.gpu, args.degrade)
+                result = generate_wham(
+                    row, args.cam, unit, tmp, args.gpu, args.degrade,
+                    checkpoint=args.wham_checkpoint or None,
+                )
             elif args.model == "sam3db":
                 result = generate_sam3db(row, args.cam, unit, tmp, args.gpu, args.degrade)
             elif args.model == "gvhmr":
-                result = generate_gvhmr(row, args.cam, unit, tmp, args.gpu, args.degrade)
+                result = generate_gvhmr(
+                    row, args.cam, unit, tmp, args.gpu, args.degrade,
+                    checkpoint=args.gvhmr_checkpoint or None,
+                )
             else:
                 raise SystemExit(f"unknown model: {args.model}")
             print(f"wrote {result}")

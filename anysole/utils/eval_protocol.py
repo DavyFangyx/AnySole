@@ -175,6 +175,7 @@ METRIC_DISPLAY_NAMES = {
     "global_mpjpe_selfanchor_mm": "GlobalMPJPE",
     "w_mpjpe100_selfanchor_mm": "W-MPJPE100",
     "root_abs_rmse_selfanchor_mm": "RootAbs",
+    "root_mae_selfanchor_mm": "MeanRootPositionError",
     "anchor_err_mm": "AnchorErr",
     "anchor_seam_jump_mm": "AnchorSeamJump",
 }
@@ -200,7 +201,7 @@ ANCHOR_FREE_METRIC_KEYS = frozenset({
     "window_disp_mag_mm", "window_disp_angle_deg",
     "root_ate_unanchored_mm", "traj_rel_ate_mm",
     "global_mpjpe_selfanchor_mm", "w_mpjpe100_selfanchor_mm",
-    "root_abs_rmse_selfanchor_mm",
+    "root_abs_rmse_selfanchor_mm", "root_mae_selfanchor_mm",
     "anchor_err_mm", "anchor_seam_jump_mm",
     "ground_pen_gt_mm",
 })
@@ -381,7 +382,8 @@ def _metric_anchor_provenance(metrics: Dict[str, Dict[str, float]],
                         entry["min_disp_m"] = 0.0
                 if key in ("global_mpjpe_selfanchor_mm",
                            "w_mpjpe100_selfanchor_mm",
-                           "root_abs_rmse_selfanchor_mm", "anchor_err_mm"):
+                           "root_abs_rmse_selfanchor_mm",
+                           "root_mae_selfanchor_mm", "anchor_err_mm"):
                     # joint = 联合训练；post_hoc = 冻结 ckpt 事后拟合（修改 10 A）
                     entry["anchor_source"] = anchor_source
                 out[name] = entry
@@ -569,6 +571,10 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
         root_abs = np.linalg.norm(pred_self_np[:, 0] - gt_np[:, 0], axis=-1)
         accum.add_rms("root_abs_rmse_selfanchor_mm",
                       torch.from_numpy(root_abs), 1000.0)
+        # 2026-11-19：统一的 Mean Root Position Error（与基线 root_ate_mm
+        # 同公式，逐帧平均，零 GT 锚）。
+        accum.add("root_mae_selfanchor_mm",
+                  torch.from_numpy(root_abs), 1000.0)
         if T > tw:
             # 接缝跳跃（C4）：相邻窗锚的绝对位置差 = pred[seam] − pred[seam−1]
             # （窗内相对位移已含在 pred_trans_self 里）。不做任何平滑。

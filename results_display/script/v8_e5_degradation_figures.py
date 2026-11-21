@@ -147,13 +147,22 @@ def baseline_series(model: str, variants: list[str], metric: str):
     if key is None:
         return None
     if model == "MotionPRO":
-        return motionpro_series(variants, metric)[0]
+        return motionpro_series(variants, metric)
     root = REPO / "results" / "baselines" / model / "predictions"
-    means = []
+    means, stds = [], []
     for variant in variants:
+        # Q10（2026-11-19）：GVHMR 改用统一协议四折数字（折级钉定帧 +
+        # canonical solver，q10_unified_fourfold_summary.json）；旧单次
+        # session-manifest 评估（test_comparison.json）仅作历史对照。
+        p = root / variant / "eval_motion" / "metrics" / "q10_unified_fourfold_summary.json"
+        if p.is_file():
+            entry = json.loads(p.read_text(encoding="utf-8")).get(key)
+            if entry and entry.get("n_folds", 0) >= 4:
+                means.append(float(entry["mean"])); stds.append(float(entry["std"])); continue
+            means.append(float("nan")); stds.append(float("nan")); continue
         p = root / variant / "eval_motion" / "metrics" / "test_comparison.json"
         if not p.is_file():
-            means.append(float("nan")); continue
+            means.append(float("nan")); stds.append(float("nan")); continue
         summary = json.loads(p.read_text(encoding="utf-8")).get("summary", {})
         value = summary.get(key)
         if value is None:
@@ -161,10 +170,12 @@ def baseline_series(model: str, variants: list[str], metric: str):
             if extra.is_file():
                 value = json.loads(extra.read_text(encoding="utf-8")).get(key)
         means.append(float(value) if value is not None else float("nan"))
+        stds.append(float("nan"))
     arr = np.asarray(means)
     if model == "WHAM":
         arr = arr + WHAM_OFFSETS.get(metric, 0.0)
-    return arr
+    arr_std = np.asarray(stds) if np.isfinite(stds).any() else None
+    return arr, arr_std
 
 
 CONDITIONS = {
@@ -284,8 +295,9 @@ def _values_for(condition: str, metric: str) -> dict:
         if baseline == "MotionPRO":
             vals, errs = motionpro_series(cfg["baseline"], metric)
         else:
-            vals = baseline_series(baseline, cfg["baseline"], metric)
-            errs = np.zeros_like(vals) if vals is not None else None
+            vals, errs = baseline_series(baseline, cfg["baseline"], metric)
+            if errs is None:
+                errs = np.zeros_like(vals) if vals is not None else None
         if vals is None:
             continue
         finite = np.isfinite(vals)

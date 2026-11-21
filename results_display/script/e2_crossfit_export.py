@@ -107,6 +107,9 @@ BASELINE_BLOCK = {"V2M": "V", "T2M": "T", "VT2M": "VT"}
 # 只有 canonical 单折（default splits，test=S13+S14=36）的基线：不能进四折
 # mean±std，但 2026-11-08 用户要求暂时以「仅参照」行放进主表并显式标注。
 CANONICAL_SINGLE_FOLD = {"MotionPRO": "MotionPRO"}
+# Q10（2026-11-19）：统一协议（折级钉定帧 + canonical solver）四折 comparison
+# 文件后缀。MotionPRO 主表行改用统一值；GVHMR 旧四折与统一逐位一致，无需换源。
+UNIFIED_SUFFIX = {"MotionPRO": "_q10_unified"}
 
 
 def cell_path(model: str, fold: str, metrics_subdir: str | None = None) -> Path:
@@ -217,8 +220,9 @@ def baseline_rows(min_folds: int = 4, min_sessions: int = 20) -> list[list]:
         per_fold = {name: [] for name, _ in METRICS}
         n_folds = 0
         last_mode = ""
+        suffix = UNIFIED_SUFFIX.get(display, "")
         for fold in FOLDS:
-            path = BASE_METRICS / folder / "metrics" / ("%s_comparison.json" % fold)
+            path = BASE_METRICS / folder / "metrics" / ("%s%s_comparison.json" % (fold, suffix))
             if not path.is_file():
                 continue
             payload = json.loads(path.read_text(encoding="utf-8"))

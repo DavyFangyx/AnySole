@@ -42,6 +42,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # AnySole is the project root package after the repository layout migration.
 ANYSOLE_ROOT = REPO_ROOT
+sys.path.insert(0, str(REPO_ROOT))
+
+from anysole.data.extract_hrnet import occlusion_cache_dirname  # noqa: E402
+from anysole.data.occlusion_textures import parse_fill  # noqa: E402
 
 WORKSPACE = REPO_ROOT / "AnysoleWorkspace"
 DEFAULT_SEQ_ROOT = WORKSPACE / "shared/facts/sessions/cam3"
@@ -101,8 +105,11 @@ def parse_args() -> argparse.Namespace:
                         help="Occlude the bottom fraction (0-1) of the person bbox before HRNet "
                              "(V-degradation experiment); default cache root becomes "
                              "cam{id}_occ_lower{FFF}.")
-    parser.add_argument("--occlude-fill", choices=("black", "blur"), default="black",
-                        help="Fill for the occluded strip (default black).")
+    parser.add_argument("--occlude-fill", default="black",
+                        help="Fill for the occluded strip: black | blur | texture:<asset> "
+                             "(wood/fabric/crate; default black).")
+    parser.add_argument("--demo-dir", type=Path, default=None,
+                        help="Optional directory for a few degraded full-frame preview JPGs.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--skip-existing", action="store_true", help="Skip sessions whose cache exists.")
     mode.add_argument("--force", "--overwrite", dest="force", action="store_true", help="Recompute and overwrite existing caches.")
@@ -131,9 +138,8 @@ def resolved_roots(cam_id: int, args: argparse.Namespace) -> tuple[Path, Path, P
     if args.cache_root is not None:
         cache_root = args.cache_root
     elif args.occlude_lower is not None:
-        cache_root = DEFAULT_CACHE_ROOT.parent / (
-            "cam%d_occ_lower%03d" % (cam_id, int(round(args.occlude_lower * 100)))
-        )
+        cache_root = DEFAULT_CACHE_ROOT.parent / occlusion_cache_dirname(
+            cam_id, args.occlude_lower, args.occlude_fill)
     else:
         cache_root = DEFAULT_CACHE_ROOT.parent / ("cam%d" % cam_id)
     # D5 unified: every camera including cam3 addresses bbox_cam<id>;
@@ -171,11 +177,17 @@ def base_command(cam_id: int, seq_root: Path, bbox_root: Path, cache_root: Path,
     if args.occlude_lower is not None:
         command += ["--occlude-lower", str(args.occlude_lower),
                     "--occlude-fill", str(args.occlude_fill)]
+    if args.demo_dir is not None:
+        command += ["--demo-dir", str(args.demo_dir)]
     return command
 
 
 def main() -> int:
     args = parse_args()
+    try:
+        parse_fill(args.occlude_fill)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(ANYSOLE_ROOT), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
 

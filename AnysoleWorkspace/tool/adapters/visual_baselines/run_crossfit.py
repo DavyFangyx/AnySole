@@ -16,7 +16,7 @@ Two stages, both resumable (skip existing artifacts):
 
     # native inference (model subprocesses), 1 job per GPU
     python AnysoleWorkspace/tool/adapters/visual_baselines/run_crossfit.py \
-        --models sam3db --workers 2 --gpus 3,5
+        --models sam3db --workers 2 --gpus 2,3
 
     # export to the unified eval_motion contract (CPU, applies per-date b if present)
     python .../run_crossfit.py --models wham,gvhmr,sam3db --phase export
@@ -46,6 +46,8 @@ GENERATE_PY = WORKSPACE / "tool/adapters/visual_baselines/generate.py"
 EXPORT_PY = WORKSPACE / "tool/export_baseline_motion.py"
 SPLITS = WORKSPACE / "protocol/splits/crossfit_woS13"
 LOCAL_ROOT = WORKSPACE / "work/visual_baselines_local"
+NATIVE_ROOT = LOCAL_ROOT
+VARIANT = "local_gen"
 RESULTS = ROOT / "results/baselines"
 MODEL_DIR = {"wham": "WHAM", "sam3db": "SAM3DB", "gvhmr": "GVHMR"}
 NATIVE_SUFFIX = {"wham": "result.pkl", "sam3db": "result.pkl", "gvhmr": "result.npz"}
@@ -167,12 +169,13 @@ def session_parts(row: dict) -> tuple[str, str]:
 
 
 def native_result(model: str, date: str, session: str, cam: int) -> Path:
-    return (LOCAL_ROOT / "reference_results/3_Result" / ("%s_baseline" % MODEL_DIR[model])
+    return (NATIVE_ROOT / "reference_results/3_Result" / ("%s_baseline" % MODEL_DIR[model])
             / ("%s_m1_%s_c%d" % (date, session, cam)) / NATIVE_SUFFIX[model])
 
 
 def prediction(model: str, session: str) -> Path:
-    return RESULTS / MODEL_DIR[model] / "predictions/local_gen/eval_motion" / ("%s.npz" % session)
+    return (RESULTS / MODEL_DIR[model] / "predictions" / VARIANT / "eval_motion"
+            / ("%s.npz" % session))
 
 
 class GpuPool:
@@ -195,7 +198,8 @@ class GpuPool:
 
 
 def generate_one(gen, model: str, session: str, row: dict, unit: dict,
-                 cam: int, gpus: GpuPool, retries: int) -> tuple[str, str, str]:
+                 cam: int, gpus: GpuPool, retries: int,
+                 checkpoint: str | None = None) -> tuple[str, str, str]:
     date, _subject = session_parts(row)
     result = native_result(model, date, session, cam)
     if result.is_file():
@@ -203,14 +207,16 @@ def generate_one(gen, model: str, session: str, row: dict, unit: dict,
     gpu = gpus.acquire()
     try:
         for attempt in range(1, retries + 1):
-            work = LOCAL_ROOT
+            work = NATIVE_ROOT
             try:
                 if model == "wham":
-                    gen.generate_wham(row, cam, unit, work, int(gpu))
+                    gen.generate_wham(row, cam, unit, work, int(gpu),
+                                      checkpoint=checkpoint)
                 elif model == "sam3db":
                     gen.generate_sam3db(row, cam, unit, work, int(gpu))
                 elif model == "gvhmr":
-                    gen.generate_gvhmr(row, cam, unit, work, int(gpu))
+                    gen.generate_gvhmr(row, cam, unit, work, int(gpu),
+                                       checkpoint=checkpoint)
                 else:
                     raise ValueError(model)
                 if result.is_file():
@@ -232,7 +238,7 @@ def export_one(model: str, session: str, retries: int, force: bool = False) -> t
     if output.is_file() and not force:
         return model, session, "pred-exists"
     command = [TOUCH_GAIT, str(EXPORT_PY), "--model", model, "--session", session,
-               "--variant", "local_gen"]
+               "--package-root", str(NATIVE_ROOT), "--variant", VARIANT]
     if force:
         command.append("--force")
     for attempt in range(1, retries + 1):
@@ -255,12 +261,25 @@ def main() -> int:
     parser.add_argument("--phase", choices=("generate", "export", "eval", "both", "all"),
                         default="generate")
     parser.add_argument("--workers", type=int, default=2)
-    parser.add_argument("--gpus", default="5,3")
+    parser.add_argument("--gpus", default="2,3")
+    parser.add_argument("--native-root", default=str(LOCAL_ROOT),
+                        help="native result root (absolute; new variants must not reuse local_gen)")
+    parser.add_argument("--variant", default="local_gen",
+                        help="prediction/metrics variant name")
     parser.add_argument("--cam", type=int, default=3)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--force-export", action="store_true",
                         help="re-export sessions whose eval_motion npz already exists")
+    parser.add_argument("--wham-checkpoint", default="",
+                        help="WHAM checkpoint override (per-fold fine-tuned checkpoint)")
+    parser.add_argument("--gvhmr-checkpoint", default="",
+                        help="GVHMR checkpoint override (per-fold fine-tuned checkpoint)")
     args = parser.parse_args()
+    global NATIVE_ROOT, VARIANT
+    NATIVE_ROOT = Path(args.native_root).expanduser().resolve()
+    VARIANT = str(args.variant).strip()
+    if not VARIANT or "/" in VARIANT or ":" in VARIANT:
+        raise SystemExit("--variant must be a safe non-empty name")
 
     models = [value.strip() for value in args.models.split(",") if value.strip()]
     unknown = [m for m in models if m not in MODEL_DIR]
@@ -273,6 +292,9 @@ def main() -> int:
     if missing:
         raise SystemExit("sessions absent from session manifest: %s" % missing)
     gpus = [g.strip() for g in args.gpus.split(",") if g.strip()]
+    bad_gpus = [g for g in gpus if not g.isdigit() or int(g) not in (1, 2, 3, 4)]
+    if not gpus or bad_gpus:
+        raise SystemExit(f"--gpus must be a non-empty subset of (1, 2, 3, 4), got {args.gpus!r}")
     log("models=%s sessions=%d gpus=%s workers=%d phase=%s"
         % (models, len(sessions), gpus, args.workers, args.phase))
 
@@ -293,9 +315,11 @@ def main() -> int:
         log("generate tasks=%d" % len(tasks))
         pool = GpuPool(gpus)
         counts: dict[str, int] = {}
+        checkpoints = {"wham": args.wham_checkpoint, "gvhmr": args.gvhmr_checkpoint}
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             futures = [executor.submit(generate_one, gen, model, session, row, unit,
-                                       args.cam, pool, args.retries)
+                                       args.cam, pool, args.retries,
+                                       checkpoints.get(model) or None)
                        for model, session, row, unit in tasks]
             done = 0
             for future in as_completed(futures):
@@ -357,10 +381,17 @@ def main() -> int:
             for fold in FOLDS:
                 cmd = [TOUCH_GAIT, "-m", "Baselines.utils.evaluate", "--model", model,
                        "--split", fold, "--split-csv", str(SPLITS / ("%s.csv" % fold)),
-                       "--manifest", str(fold_manifests[fold]), "--force"]
+                       "--manifest", str(fold_manifests[fold])]
+                if VARIANT != "local_gen":
+                    cmd.extend(["--prediction-root",
+                                "results/baselines/%s/predictions/%s/eval_motion"
+                                % (MODEL_DIR[model], VARIANT),
+                                "--result-tag", VARIANT])
+                cmd.append("--force")
                 completed = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
-                metrics_path = (RESULTS / MODEL_DIR[model] / "metrics"
-                                / ("%s_comparison.json" % fold))
+                metrics_name = ("%s_comparison.json" % fold) if VARIANT == "local_gen" else (
+                    "%s_%s_comparison.json" % (fold, VARIANT))
+                metrics_path = RESULTS / MODEL_DIR[model] / "metrics" / metrics_name
                 if completed.returncode != 0 or not metrics_path.is_file():
                     failures.append((model, fold, (completed.stderr or "")[-400:]))
                     log("EVAL FAIL %s %s: %s" % (model, fold, failures[-1][2]))

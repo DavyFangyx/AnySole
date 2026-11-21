@@ -56,7 +56,8 @@ from anysole.data.make_gap_cache import (  # noqa: E402
     CYCLE_DEFAULT, SEED_DEFAULT, build_gap_array,
 )
 from anysole.data.make_scene_occ_cache import (  # noqa: E402
-    column_texture, composite, polygon_mask,
+    column_face_quads, column_texture, composite, composite_textured,
+    polygon_mask,
 )
 
 V3_BASE = WORKSPACE / "model_inputs/MotionPRO/adapter_v3_bvh24/cam3"
@@ -216,11 +217,14 @@ def encode_frames(device, model, base_dir, bbox, paths, mask_fn=None,
     return torch.cat(feats, dim=0)
 
 
-def build_occ(device, model, force: bool, level: str = "") -> None:
+def build_occ(device, model, force: bool, level: str = "",
+              asset: str = "") -> None:
     levels = [level] if level else OCC_LEVELS
+    fill = ("texture:" + asset) if asset else "black"
     for lv in levels:
         frac = int(lv) / 100.0
-        tree = OUT / f"{BASE.parent.name}_occ{lv}/cam3"
+        suffix = "_tex_" + asset if asset else ""
+        tree = OUT / f"{BASE.parent.name}_occ{lv}{suffix}/cam3"
         for sid in union_sessions():
             base_dir, v1_dir, rel = session_dirs(sid)
             out_dir = tree / rel
@@ -234,12 +238,12 @@ def build_occ(device, model, force: bool, level: str = "") -> None:
             feat = encode_frames(
                 device, model, base_dir, bbox, paths,
                 mask_fn=lambda rgb, box, idx: occlude_lower_strip(
-                    rgb, box, frac, "black"),
+                    rgb, box, frac, fill),
                 strip_bbox=anysole_bbox)
             if tuple(feat.shape) != tuple(clean.shape):
                 raise ValueError(f"{sid} occ{lv}: {tuple(feat.shape)} vs clean {tuple(clean.shape)}")
             link_inputs(base_dir, out_dir, feat, force)
-            print(f"[occ{lv}] {sid} {tuple(feat.shape)}", flush=True)
+            print(f"[occ{lv}{suffix}] {sid} {tuple(feat.shape)}", flush=True)
 
 
 def build_gap(force: bool, level: str = "") -> None:
@@ -258,15 +262,17 @@ def build_gap(force: bool, level: str = "") -> None:
             print(f"[gap{lv}] {sid}", flush=True)
 
 
-def build_scene(device, model, force: bool) -> None:
-    tree = OUT / f"{BASE.parent.name}_scene/cam3"
+def build_scene(device, model, force: bool, fill: str = "gray",
+                sessions: list | None = None) -> None:
+    suffix = "_tex" if fill == "tex" else ""
+    tree = OUT / f"{BASE.parent.name}_scene{suffix}/cam3"
     sam = {}
     if SAM_INDEX.is_file():
         for line in SAM_INDEX.read_text().splitlines():
             row = json.loads(line)
             if row.get("camera") == "cam3":
                 sam.setdefault(row["session"], {})[int(row["frame_id"])] = row["mask_path"]
-    for sid in scene_sessions():
+    for sid in (sessions or scene_sessions()):
         manifest_path = SCENE_MANIFESTS / f"{sid}.json"
         if not manifest_path.is_file():
             raise FileNotFoundError(manifest_path)
@@ -287,6 +293,13 @@ def build_scene(device, model, force: bool) -> None:
         import cv2
         h, w = cv2.imread(str(paths[0])).shape[:2]
         texture = column_texture(h, w, seed=0)
+        faces = None
+        if fill == "tex":
+            cal = json.loads(Path(manifest["calibration"]).read_text(encoding="utf-8"))
+            cam = cal["cameras"]["cam3"]
+            faces = column_face_quads(
+                cam, np.asarray(cam["K"], dtype=np.float64),
+                np.asarray(cam["D"], dtype=np.float64))
         index = sam.get(sid, {})
         active_ids = np.where(active)[0].tolist()
 
@@ -295,7 +308,9 @@ def build_scene(device, model, force: bool) -> None:
             person = (cv2.imread(mpath, cv2.IMREAD_GRAYSCALE) > 0
                       if mpath and Path(mpath).is_file()
                       else np.zeros(rgb.shape[:2], bool))
-            return composite(rgb, person, poly, texture, bool(behind[idx]))
+            if faces is None:
+                return composite(rgb, person, poly, texture, bool(behind[idx]))
+            return composite_textured(rgb, person, faces, bool(behind[idx]))
 
         feat = clean.clone()
         if active_ids:
@@ -306,22 +321,28 @@ def build_scene(device, model, force: bool) -> None:
             for pos, idx in enumerate(active_ids):
                 feat[idx] = rows[pos]
         link_inputs(base_dir, out_dir, feat, force)
-        print(f"[scene] {sid} active={len(active_ids)}/{n}", flush=True)
+        print(f"[scene{suffix}] {sid} active={len(active_ids)}/{n}", flush=True)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--build", choices=("occ", "gap", "scene", "all"), default="all")
+    parser.add_argument("--build", choices=("occ", "occ-tex", "gap", "scene",
+                                           "scene-tex", "all"), default="all")
     parser.add_argument("--base", choices=("v3", "v4"), default="v3",
                         help="clean feature base tree (v4 = AnySole-bbox features)")
     parser.add_argument("--crop-anysole", action="store_true",
                         help="crop with the AnySole bbox (v4 pipeline)")
     parser.add_argument("--level", default="",
                         help="occ: single level (e.g. 010); gap: single rho")
+    parser.add_argument("--asset", default="", choices=("wood", "fabric", "crate"),
+                        help="occ-tex: surface texture asset (required)")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--session", default="", help="smoke: single session id")
     args = parser.parse_args()
+
+    if args.build == "occ-tex" and not args.asset:
+        raise SystemExit("--build occ-tex requires --asset wood|fabric|crate")
 
     global UNION_SESSIONS
     if args.session:
@@ -332,14 +353,19 @@ def main() -> int:
     CROP_ANYSOLE = args.crop_anysole
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = None
-    if args.build in ("occ", "scene", "all"):
+    if args.build in ("occ", "occ-tex", "scene", "scene-tex", "all"):
         model = load_encoder(device)
     if args.build in ("occ", "all"):
         build_occ(device, model, args.force, args.level)
+    if args.build == "occ-tex":
+        build_occ(device, model, args.force, args.level, asset=args.asset)
     if args.build in ("gap", "all"):
         build_gap(args.force, args.level)
     if args.build in ("scene", "all"):
         build_scene(device, model, args.force)
+    if args.build == "scene-tex":
+        build_scene(device, model, args.force, fill="tex",
+                    sessions=[args.session] if args.session else None)
     print("done")
     return 0
 
