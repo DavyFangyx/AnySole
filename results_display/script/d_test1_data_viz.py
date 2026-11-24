@@ -2,14 +2,14 @@
 
 Per session the GT source is auto-detected: native SMPL-24 NPZ when the
 session has one (the current protocol), falling back to the legacy BVH-23
-path (``--protocol bvh23`` forces it).  SMPL data is read through
+path (``--protocol smp24`` forces it).  SMPL data is read through
 ``utils.motion_io.load_session_gt`` (display frame, z-up meters); the BVH
 path uses the original MocapVideoAligner_0811 conversion.  This script does
 not touch either existing MotionPRO or Step2Motion renderer.
 
 Outputs are written below ``results_display/DataTest/D1Test_data_viz/``:
-    <session-or-stem>/<smp24|bvh23>/skeleton_zup.npz   data file (always written)
-    <session-or-stem>/<smp24|bvh23>/{gif,mp4}/skeleton_zup.* animation (--gen)
+    <session-or-stem>/smp24/skeleton_zup.npz          data file (always written)
+    <session-or-stem>/smp24/{gif,mp4}/skeleton_zup.*  animation (--gen)
     <session-or-stem>/smp24/mesh_zup.npz + {gif,mp4}/mesh_zup.* (--mesh)
 
 ``ANYSOLE_RESULTSDISPLAY`` overrides the display root.
@@ -23,7 +23,6 @@ Example:
     python results_display/script/d_test1_data_viz.py
     python results_display/script/d_test1_data_viz.py --session S7013 --gen gif
     python results_display/script/d_test1_data_viz.py --session S7013 --mesh --gen mp4
-    python results_display/script/d_test1_data_viz.py --protocol bvh23
     python results_display/script/d_test1_data_viz.py --bvh /path/to/single.bvh --gen mp4
 """
 from __future__ import annotations
@@ -65,10 +64,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bvh", default="", help="Optional single BVH path. Default processes all test samples.")
     parser.add_argument(
         "--protocol",
-        choices=("auto", "smp24", "bvh23"),
+        choices=("auto", "smp24"),
         default="auto",
         help="GT source per session: auto = SMPL-24 when available else BVH-23 (default); "
-        "smp24 / bvh23 force one protocol and skip sessions that lack it.",
+        "smp24 forces the SMPL-24 protocol and skips sessions that lack it.",
     )
     parser.add_argument(
         "--mesh",
@@ -104,7 +103,7 @@ def discover_test_sessions(session_ids: list, seq_root: Path) -> list[tuple[str,
 
 
 def session_source(seq_dir: Path, protocol: str) -> str:
-    """'smp24' / 'bvh23' per the requested protocol and what the session has."""
+    """'smp24' per the requested protocol and what the session has."""
     meta = json.loads((Path(seq_dir) / "align_meta.json").read_text())
     has_smpl = False
     try:
@@ -114,10 +113,7 @@ def session_source(seq_dir: Path, protocol: str) -> str:
         pass
     if protocol == "smp24":
         return "smp24" if has_smpl else ""
-    if protocol == "bvh23":
-        bvh = Path(str(meta.get("bvh_path", ""))).expanduser()
-        return "bvh23" if bvh.is_file() else ""
-    return "smp24" if has_smpl else "bvh23"
+    return "smp24" if has_smpl else ""
 
 
 def render_frame(positions: np.ndarray, edges: list[tuple[int, int]], frame_index: int, total: int, title: str) -> np.ndarray:
@@ -249,7 +245,7 @@ def convert_session(seq_dir: Path, output_root: Path, sample_id: str, source: st
 
 
 def convert_one(bvh_path: Path, output_root: Path, sample_id: str, args: argparse.Namespace) -> None:
-    """Single-file BVH render (--bvh mode), protocol forced to bvh23."""
+    """Single-file BVH render (--bvh mode; BVH24/legacy 通吃，协议名不落标签)."""
     if args.mesh:
         print("[warn] single-BVH mode has no SMPL params; --mesh falls back to skeleton-only")
     stride = max(1, int(args.stride))
@@ -265,8 +261,8 @@ def convert_one(bvh_path: Path, output_root: Path, sample_id: str, args: argpars
         for child, parent in enumerate(parsed["parents"])
         if parent >= 0
     ]
-    _write_outputs(output_root / sample_id / "bvh23", positions, edges,
-                   np.asarray(frame_ids), args, parsed["fps"], len(parsed["joints"]), "GT BVH-23")
+    _write_outputs(output_root / sample_id / "bvh", positions, edges,
+                   np.asarray(frame_ids), args, parsed["fps"], len(parsed["joints"]), "GT BVH")
     print(f"BVH: {bvh_path}")
 
 

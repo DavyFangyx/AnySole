@@ -232,26 +232,28 @@ def test_16ch_parity() -> None:
 
 
 def test_public_metrics_zero() -> None:
-    print("== pred=GT BVH-23 public metrics zero + name-based foot groups ==")
+    print("== pred=GT SMPL-24 public metrics zero + name-based foot groups ==")
     # 公共评估层 2026-10-12 起为 Baselines 库内真实目录 Baselines/utils（H13 执行，
     # 符号链接桥与 Baselines_old 移除）；直接导入，不再需要别名 shim。
-    from Baselines.utils.protocols import BVH_JOINT_NAMES, PROTOCOL_FORWARD_AXIS, PROTOCOL_FOOT_NAMES
+    # 2026-11-24：bvh23 历史协议退役，本测试改走 SMPL-24 口径（不变量不变）。
+    from Baselines.utils.protocols import SMPL_JOINT_NAMES, PROTOCOL_FORWARD_AXIS, PROTOCOL_FOOT_NAMES
     from Baselines.utils.solver import metrics as public_metrics
 
     n = 200
     fps = 40.0
     t = np.arange(n, dtype=np.float64) / fps
-    names = BVH_JOINT_NAMES
-    rots = np.tile(np.eye(3), (n, 23, 1, 1))
+    names = SMPL_JOINT_NAMES
+    n_joints = len(names)
+    rots = np.tile(np.eye(3), (n, n_joints, 1, 1))
 
     def run(root: np.ndarray) -> dict:
-        jitter = np.random.default_rng(7).normal(0, 1e-6, (n, 23, 3))
-        joints = root[:, None, :] + np.zeros((n, 23, 3)) + jitter
+        jitter = np.random.default_rng(7).normal(0, 1e-6, (n, n_joints, 3))
+        joints = root[:, None, :] + np.zeros((n, n_joints, 3)) + jitter
         return public_metrics(
             joints.copy(), joints.copy(), np.ones(n, dtype=bool), fps,
-            protocol="bvh23", names=names,
+            protocol="smpl24", names=names,
             pred_rotations=rots, gt_rotations=rots,
-            times=t, forward_axis=PROTOCOL_FORWARD_AXIS["bvh23"],
+            times=t, forward_axis=PROTOCOL_FORWARD_AXIS["smpl24"],
         )
 
     # Static trajectory: every metric that compares motion must be zero.
@@ -276,20 +278,20 @@ def test_public_metrics_zero() -> None:
           abs(float(moving["root_rte_percent"])) <= 1e-3, f"{moving['root_rte_percent']}")
     check("pred=GT moving root_ate_mm zero",
           abs(float(moving["root_ate_mm"])) <= 1e-3, f"{moving['root_ate_mm']}")
-    # foot groups are selected by BVH-23 joint names: shuffled names must give
+    # foot groups are selected by SMPL-24 joint names: shuffled names must give
     # the same result (selection by name), missing names must raise.
-    foot_ids = [names.index(j) for j in PROTOCOL_FOOT_NAMES["bvh23"]]
-    check("bvh23 foot names resolve", foot_ids == [17, 21, 18, 22], str(foot_ids))
+    foot_ids = [names.index(j) for j in PROTOCOL_FOOT_NAMES["smpl24"]]
+    check("smpl24 foot names resolve", foot_ids == [7, 8, 10, 11], str(foot_ids))
     from Baselines.utils.solver import _foot_joint_indices
     shuffled = list(names)
-    shuffled[0], shuffled[1] = shuffled[1], shuffled[0]  # swap Hips/Spine positions
-    ids = _foot_joint_indices(tuple(shuffled), "bvh23")
+    shuffled[0], shuffled[1] = shuffled[1], shuffled[0]  # swap pelvis/left_hip positions
+    ids = _foot_joint_indices(tuple(shuffled), "smpl24")
     check("foot selection follows names, not positions",
           ids.tolist() == foot_ids, str(ids.tolist()))
     bad_names = tuple(name + "_x" for name in names)
     try:
-        _foot_joint_indices(bad_names, "bvh23")
-        raise AssertionError("expected ValueError for unknown BVH-23 foot names")
+        _foot_joint_indices(bad_names, "smpl24")
+        raise AssertionError("expected ValueError for unknown SMPL-24 foot names")
     except ValueError:
         check("unknown foot names raise", True)
 
@@ -312,9 +314,9 @@ def _write_smoke_registry() -> Path:
         "  - name: Step2Motion\n"
         "    family: baseline\n"
         "    display_name: Step2MotionSmoke\n"
-        "    protocol: bvh23\n"
+        "    protocol: smpl24\n"
         "    prediction_root: results://baselines/Step2Motion/smoke/predictions\n"
-        "    pattern: \"{session_id}_gen.bvh\"\n"
+        "    pattern: \"{session_id}.npz\"\n"
         "    capabilities:\n"
         "      joint_positions: true\n"
         "      direct_joint_rotations: false\n"
@@ -359,124 +361,6 @@ def _write_smoke_split(sid: str) -> Path:
     smoke_split = SMOKE_ROOT / "smoke_splits.csv"
     smoke_split.write_text(f"index,train,val,test\n0,,,{sid}\n", encoding="utf-8")
     return smoke_split
-
-
-def _run_evaluator(sid: str) -> tuple[Path, dict]:
-    smoke_registry = _write_smoke_registry()
-    smoke_manifest = _write_smoke_manifest(sid)
-    smoke_split = _write_smoke_split(sid)
-    cmd = [
-        sys.executable, "-m", "Baselines.utils.evaluate",
-        "--model", "step2motion", "--split", "test",
-        "--registry", str(smoke_registry),
-        "--manifest", str(smoke_manifest),
-        "--split-csv", str(smoke_split),
-        "--sessions", sid,
-        "--no-surface-metrics", "--force",
-    ]
-    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
-    check("public evaluator CLI exits 0", result.returncode == 0,
-          result.stdout[-800:] + result.stderr[-800:])
-    comparison = SMOKE_ROOT / "metrics" / "test_comparison.json"
-    check("comparison file written", comparison.is_file())
-    return comparison, json.loads(comparison.read_text())
-
-
-def test_export_and_evaluator_smoke() -> None:
-    print("== export smoke (native pred_to_bvh path) + public evaluator ==")
-    import torch
-    import prefer_env_site  # noqa: F401  # must run before pymotion imports
-    from dataset import MotionDataset
-    from bvh_export import write_bvh
-
-    # Native export code path (test.py::pred_to_bvh) on the new dataset.
-    db = MotionDataset.load(str(ADAPTER_ROOT / "gait/gait_test.pt"), torch.device("cpu"))
-    normalizer = torch.load(str(ADAPTER_ROOT / "gait/normalizer_gait.pth"), weights_only=False)
-    clip_db = db.isolate_clip(0)
-    import test as test_mod
-    with tempfile.TemporaryDirectory() as tmp:
-        pred_path = Path(tmp) / "native_path_pred.bvh"
-        data = normalizer.normalize_poses(clip_db.poses[0])  # native input contract
-        test_mod.pred_to_bvh(data, 0, clip_db, normalizer, str(pred_path))
-        check("pred_to_bvh writes a BVH", pred_path.is_file())
-        cs_path = Path(tmp) / "cs.json"
-        test_mod.cs_to_json(normalizer.normalize_insole(clip_db.insole[0]),
-                            clip_db, normalizer, str(cs_path))
-        check("cs_to_json writes condition JSON", cs_path.is_file())
-
-    # Pred=GT export on the full canonical grid (frame 0 included) so the
-    # public evaluator can read it and the metrics must come out zero.
-    # Rotations are written directly from the grid-time native eulers: the
-    # upstream export recovery (utils.skeleton_pos_to_rot) is direction-only
-    # and loses the joint twists (measured 263 mm mean roundtrip error on
-    # S13073) — an upstream-native limitation recorded in the delivery
-    # report, not silently fixed (总控 §2.3).
-    sid = _short_test_session()
-    session = bg.load_shared_session(sid)
-    manifest = manifest_by_id()
-    check("smoke session has no fake frames",
-          not np.asarray(session["frames"]["fake"], dtype=bool).any())
-    n = int(manifest[sid]["n_frames"])
-    mocap_t = np.asarray(session["frames"]["mocap_time_s"], dtype=np.float64)
-    fps = float(session["meta"]["fps"])
-    motion, frame_time, src_offsets = bg.parse_bvh(bg.shared_bvh_path(session))
-    sampled = bg.interp_motion(motion, frame_time, mocap_t)
-    root_pos = sampled[:, :3] * 0.01  # true absolute root positions
-    src_local = np.zeros((n, 23, 3, 3), dtype=np.float64)
-    src_local[:, 0] = bg.euler_yxz_to_rotmat(sampled[:, 3:6])
-    src_local[:, 1:] = bg.euler_yxz_to_rotmat(sampled[:, 6:].reshape(n, 22, 3))
-    offsets_m, _ = bg.remap_skeleton(src_offsets, src_local)
-    local_quats = bg.rotmat_to_quat_wxyz(src_local)
-    out_dir = SMOKE_ROOT / "predictions" / "gt_export"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    pred_bvh = out_dir / f"{sid}_gen.bvh"
-    write_bvh(pred_bvh, bg.SRC_JOINTS, bg.SRC_PARENTS, offsets_m, local_quats,
-              root_pos, 1.0 / fps)
-    check("GT-export BVH written", pred_bvh.is_file())
-    (SMOKE_ROOT / "predictions" / f"{sid}_gen.bvh").parent.mkdir(parents=True, exist_ok=True)
-    (SMOKE_ROOT / "predictions" / f"{sid}_gen.bvh").write_bytes(pred_bvh.read_bytes())
-    # 2026-10-22 evaluator frame-map contract (Baselines/utils/prediction_grid):
-    # generated BVH must carry a canonical .frames.npz sidecar.  This smoke
-    # exports pred=GT on the full grid (frame 0 included, no fake frames),
-    # so the sidecar covers every frame.
-    np.savez_compressed(
-        SMOKE_ROOT / "predictions" / f"{sid}_gen.frames.npz",
-        frame_indices=np.arange(n, dtype=np.int64),
-        valid_mask=np.ones(n, dtype=bool),
-        session_id=np.asarray(sid),
-    )
-
-    # Public evaluator CLI (smoke registry + canonical-resolved manifest row).
-    _, payload = _run_evaluator(sid)
-    row_result = payload["sessions"][0]
-    check("evaluator session status ok", row_result["status"] == "ok", row_result.get("reason", ""))
-    csv_rows = list(csv.DictReader((SMOKE_ROOT / "metrics" / "test_comparison.csv").open(encoding="utf-8")))
-    check("evaluator read the GT-export prediction",
-          csv_rows[0]["prediction"].endswith(f"{sid}_gen.bvh"), csv_rows[0]["prediction"])
-    # Zero metrics through the evaluator's own read+solve functions.  The
-    # public evaluate.py currently queries prediction BVHs at the GT
-    # recording-time grid (bvh_joints(pred_path, row)), which shifts a
-    # grid-aligned prediction by mocap_start (~151 mm on S13073); that public
-    # alignment defect is recorded in the delivery report.  The correct read
-    # is the prediction's own axis (it already sits on the canonical grid).
-    from Baselines.utils.gt_loading import bvh_joints as _bj, protocol_gt as _pgt
-    from Baselines.utils.solver import metrics as _pub_metrics
-    pred_own, pred_names, _ = _bj(pred_bvh)
-    gt_own, gt_names = _pgt({**manifest[sid], "bvh_path": str(resolve_uri(manifest[sid]["bvh_path"]))},
-                            "bvh23")
-    keep = np.ones(len(pred_own), dtype=bool)
-    values = _pub_metrics(
-        pred_own, gt_own, keep, 40.0, protocol="bvh23", names=pred_names,
-        pred_rotations=None, gt_rotations=None,
-    )
-    for key in ("mpjpe_mm", "pa_mpjpe_mm", "root_ate_mm"):
-        check(f"pred=GT public {key} ~ 0 (evaluator read path)",
-              abs(float(values[key])) <= 0.05, str(values[key]))
-    # foot_sliding with pred==GT equals the GT's own contact-frame drift
-    # (stance foot moves ~2 mm/frame in real walking), so only finiteness
-    # and pred/gt symmetry are asserted here.
-    check("pred=GT foot_sliding finite (evaluator read path)",
-          np.isfinite(float(values["foot_sliding_mm"])), str(values["foot_sliding_mm"]))
 
 
 def test_train_smoke() -> None:

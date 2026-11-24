@@ -72,7 +72,7 @@ SEQ_ROOT = cli_common.WORKSPACE_ROOT / "shared/facts/sessions/cam3"
 DEFAULT_VIZ_DIR = cli_common.DISPLAY_ROOT / "ResultTest/R1Test_visualize/Step2Motion/gait_model"
 MIN_FRAMES = 101
 TARGET_HZ = 40.0
-DEFAULT_PRED_DIR = cli_common.RESULTS_ROOT / "baselines/Step2Motion/predictions/gait_model"
+DEFAULT_PRED_DIR = cli_common.RESULTS_ROOT / "baselines/Step2Motion/predictions/gait_model_smpl24"
 
 
 def load_font(size: int):
