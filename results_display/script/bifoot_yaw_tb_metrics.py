@@ -19,7 +19,7 @@ sys.path.insert(0, str(VAR)); sys.path.insert(0, str(YAW)); sys.path.insert(0, s
 from bifoot_standalone import load_standalone  # noqa: E402
 from bifoot_yaw_train import clip_arrays, infer_starts, _pad  # noqa: E402
 from bifoot_clean_e2_row import metrics_for_session  # noqa: E402
-import anysole_tta.phase_common as PC  # noqa: E402
+import anysole.phase_common as PC  # noqa: E402
 from scipy.spatial.transform import Rotation  # noqa: E402
 
 ADAPTER = REPO / "AnysoleWorkspace/model_inputs/Step2Motion/adapter_v3_folds"

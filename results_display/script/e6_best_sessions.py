@@ -24,9 +24,8 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "z_note/HMR2.0/hmr2_gait"))
-from anysole_tta.e6_phase_analysis import build_session_sets, load_session  # noqa: E402
-from anysole_tta.phase_common import METRICS  # noqa: E402
+from anysole.e6_phase_analysis import build_session_sets, load_session  # noqa: E402
+from anysole.phase_common import METRICS  # noqa: E402
 
 E6_BASE = REPO / "results_display/Etest/E6_ContactPhaseAnalysis"
 # 位置误差指标文件夹（2026-11-02 裁定：逐指标同模式生成）

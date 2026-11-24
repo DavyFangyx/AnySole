@@ -38,7 +38,6 @@ from torch.utils.data import DataLoader
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "z_note/HMR2.0/hmr2_gait"))
 
 from anysole.data.dataset import AnySoleDataset, collate_windows  # noqa: E402
 from anysole.data.contact_package import (  # noqa: E402
@@ -47,7 +46,7 @@ from anysole.registry import get_builder, infer_anysole_paths  # noqa: E402
 from configs.tools.common import effective_variant, load_registry  # noqa: E402
 from anysole.train import load_config  # noqa: E402
 from anysole.utils.geometry import fk_pose6d  # noqa: E402
-from anysole_tta.phase_common import load_contact  # noqa: E402
+from anysole.phase_common import load_contact  # noqa: E402
 
 OUT = REPO / "results_display/Etest/S_GateDiag"
 MODEL = "V7_Cv5TLR"           # 参照（ckpt_last；--model 可换 V7_Cv7 重参照）

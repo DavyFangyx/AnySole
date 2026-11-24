@@ -11,9 +11,9 @@
   results_display/Etest/E6_ContactPhaseAnalysis/{ankle_foot_mpjpe,pa_mpjpe}/…）
 
 用法（touch_gait env）：
-  python anysole_tta/e6_phase_analysis.py --models V7_Cv4_s1,V7_Cv5_s1,V7_Cv7_s1
-  python anysole_tta/e6_phase_analysis.py --models V7_Cv5_s1 --actions walk
-  python anysole_tta/e6_phase_analysis.py --metric pa_mpjpe
+  python anysole/e6_phase_analysis.py --models V7_Cv4_s1,V7_Cv5_s1,V7_Cv7_s1
+  python anysole/e6_phase_analysis.py --models V7_Cv5_s1 --actions walk
+  python anysole/e6_phase_analysis.py --metric pa_mpjpe
 """
 from __future__ import annotations
 
@@ -26,14 +26,13 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # 仓库根
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # hmr2_gait 根（anysole_tta 命名空间包）
-from hmr2_tta.paths import PROJECT_ROOT  # noqa: E402
-from anysole_tta.phase_common import (CELL_ROOT, LEFT_ANKLE_FOOT,  # noqa: E402
-                                      METRICS, PHASE_NAMES, PHASE_NAMES_ZH,
-                                      RIGHT_ANKLE_FOOT,
-                                      load_contact, load_gt_joints,
-                                      load_pred_joints, metric_error,
-                                      phase_labels, pred_subdir)
+from anysole.paths import PROJECT_ROOT  # noqa: E402
+from anysole.phase_common import (CELL_ROOT, LEFT_ANKLE_FOOT,  # noqa: E402
+                                  METRICS, PHASE_NAMES, PHASE_NAMES_ZH,
+                                  RIGHT_ANKLE_FOOT,
+                                  load_contact, load_gt_joints,
+                                  load_pred_joints, metric_error,
+                                  phase_labels, pred_subdir)
 from anysole.data.smpl_io import estimate_floor_y  # noqa: E402
 
 OUT_BASE = PROJECT_ROOT / "results_display/Etest/E6_ContactPhaseAnalysis"
@@ -345,7 +344,7 @@ def main():
     if args.ckpt != "last":
         raise SystemExit("E6 目前只支持 --ckpt last（best 口径 stat cells 未注册）")
 
-    from anysole_tta import phase_common
+    from anysole import phase_common
     phase_common.CONTACT_METHOD = args.contact_method
     if args.contact_method != "f6_soft_time_accel_state_smpl24_v1" and Path(args.out_dir) == OUT_BASE / args.metric:
         args.out_dir = str(OUT_BASE / (args.metric + "_" + args.contact_method))

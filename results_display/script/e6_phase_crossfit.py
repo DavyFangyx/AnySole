@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """E6 四折 LSO 接触相位增益汇总（Etest_crossfit 口径，2026-11-05）。
 
-读取 anysole_tta/e6_phase_analysis.py 逐折产物：
+读取 anysole/e6_phase_analysis.py 逐折产物：
   results_display/Etest_crossfit/E6_ContactPhaseAnalysis/<metric>/fold_<fold>/
       detail/e6_table.json
 四折按 动作 × 模型 × 脚 × 相位 聚合为 mean±std。

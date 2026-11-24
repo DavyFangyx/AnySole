@@ -28,9 +28,8 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "z_note/HMR2.0/hmr2_gait"))
-from anysole_tta.e6_phase_analysis import FPS, build_session_sets, load_session  # noqa: E402
-from anysole_tta.phase_common import METRICS  # noqa: E402
+from anysole.e6_phase_analysis import FPS, build_session_sets, load_session  # noqa: E402
+from anysole.phase_common import METRICS  # noqa: E402
 
 E6_BASE = REPO / "results_display/Etest/E6_ContactPhaseAnalysis"
 # 构图阈值随指标缩放（2026-11-02：pa_mpjpe 全身误差量级约为踝足 1/4）

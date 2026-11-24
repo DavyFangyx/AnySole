@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from anysole_tta.phase_common import load_contact, phase_labels  # noqa: E402
+from anysole.phase_common import load_contact, phase_labels  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 CELLS = REPO / "results" / "cells"
@@ -54,7 +54,7 @@ def session_vlat(sid: str) -> np.ndarray:
 
     朝向 = 骨盆→脊柱水平投影（GT 关节，世界系 +Y up，无需再载 smpl）。
     """
-    from anysole_tta.phase_common import load_gt_joints
+    from anysole.phase_common import load_gt_joints
     j = load_gt_joints(sid)                      # (T,24,3) m
     root = j[:, 0]
     v = np.diff(root, axis=0, prepend=root[:1])  # (T,3) m/frame

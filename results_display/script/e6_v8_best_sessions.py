@@ -40,7 +40,7 @@ for _entry in (REPO, SCRIPT_DIR):
     if str(_entry) not in sys.path:
         sys.path.insert(0, str(_entry))
 
-from anysole_tta.phase_common import (action_of, load_contact, load_gt_joints,  # noqa: E402
+from anysole.phase_common import (action_of, load_contact, load_gt_joints,  # noqa: E402
                                       load_pred_joints, metric_error, phase_labels,
                                       PHASE_NAMES)
 

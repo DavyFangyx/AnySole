@@ -9,7 +9,7 @@ run_one() {
   E6_SPLIT_CSV="../crossfit_woS13/fS6S7.csv" \
   E6_SPLIT_COLUMN="fS6S7" \
   E6_PRED_SUBDIR="overlap_s10/eval_motion" \
-  "$PY" "$REPO/anysole_tta/e6_phase_analysis.py" \
+  "$PY" "$REPO/anysole/e6_phase_analysis.py" \
     --models "V8_Cv5_fS6S7_s1,V8_Cv7_fS6S7_s1" \
     --metric "$metric" \
     --contact-method f6_soft_time_accel_state_smpl24_v1 \

@@ -38,7 +38,7 @@ for _entry in (REPO, SCRIPT_DIR):
 
 import e5_v8_smpl_gain_heatmap as heat  # noqa: E402
 from anysole.utils.metrics import similarity_align  # noqa: E402
-from anysole_tta.phase_common import (CELL_ROOT, load_contact,  # noqa: E402
+from anysole.phase_common import (CELL_ROOT, load_contact,  # noqa: E402
                                       load_gt_joints, load_pred_joints,
                                       metric_error, phase_labels, PHASE_NAMES,
                                       pred_subdir)

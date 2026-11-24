@@ -22,7 +22,7 @@ for entry in (REPO, SCRIPT_DIR):
 import e6_ft_contribution as e6  # noqa: E402
 from anysole.data.dataset import AnySoleDataset, load_split_ids  # noqa: E402
 from anysole.types import CONFIG_VT, PART_JOINTS  # noqa: E402
-from anysole_tta.phase_common import load_contact  # noqa: E402
+from anysole.phase_common import load_contact  # noqa: E402
 from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
 SURFACE, INK, MUTED = e6.SURFACE, e6.INK, e6.MUTED

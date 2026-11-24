@@ -27,7 +27,6 @@ from torch.utils.data import DataLoader
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
-sys.path.insert(0, str(REPO / "z_note/HMR2.0/hmr2_gait"))
 
 from anysole.data.dataset import (AnySoleDataset, collate_windows,  # noqa: E402
                                   load_split_ids)

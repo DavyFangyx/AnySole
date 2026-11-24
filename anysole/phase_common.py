@@ -9,14 +9,13 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # 仓库根
-from hmr2_tta.paths import PROJECT_ROOT, facts_session_dir, resolve_uri  # noqa: E402
-from hmr2_tta.data.assemble_npz import load_manifest_rows  # noqa: E402
+from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
+from anysole.paths import PROJECT_ROOT, facts_session_dir  # noqa: E402
+from anysole.data.manifest import load_manifest_rows  # noqa: E402
 from anysole.types import ANKLE_FOOT_JOINTS  # noqa: E402
 
 LABELS_ROOT = (PROJECT_ROOT / "AnysoleWorkspace/model_inputs/AnySole/"

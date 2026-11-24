@@ -45,7 +45,7 @@ for _entry in (REPO, SCRIPT_DIR):
 from anysole.data.dataset import AnySoleDataset  # noqa: E402
 from anysole.data.smpl_io import load_smpl  # noqa: E402
 from anysole.types import CONFIG_VT  # noqa: E402
-from anysole_tta.phase_common import action_of, load_contact  # noqa: E402
+from anysole.phase_common import action_of, load_contact  # noqa: E402
 from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
 DIAG = REPO / "results" / "diagnostics" / "20261112_v8_gate_frozen"

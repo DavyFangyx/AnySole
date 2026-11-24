@@ -9,7 +9,7 @@ REPO = Path(__file__).resolve().parents[2]
 DIAG = REPO / "results/diagnostics/20261111_variant_sweep"
 sys.path.insert(0, str(DIAG)); sys.path.insert(0, str(REPO))
 from bifoot_clean_e2_row import metrics_for_session  # noqa: E402
-import anysole_tta.phase_common as PC  # noqa: E402
+import anysole.phase_common as PC  # noqa: E402
 
 MOTION = REPO / "results/diagnostics/20261114_imu_eval_v2_motion"
 CACHE = DIAG / "clean_e2_t_bifoot/_cache"

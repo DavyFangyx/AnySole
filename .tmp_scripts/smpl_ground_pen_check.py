@@ -47,7 +47,7 @@ from anysole.data.workspace_adapter import (  # noqa: E402
 )
 from anysole.utils.geometry import fk_pose6d_np  # noqa: E402
 from contact_labels import _smpl_foot_heights, SMPL_CONTACT_DZ  # noqa: E402
-from anysole_tta.phase_common import phase_labels  # noqa: E402
+from anysole.phase_common import phase_labels  # noqa: E402
 
 LABEL_ROOT = REPO / "AnysoleWorkspace/model_inputs/AnySole/adapter_v1/labels"
 LABEL_SETS = {

@@ -40,7 +40,7 @@ from anysole.data.dataset import AnySoleDataset, load_split_ids  # noqa: E402
 from anysole.data.smpl_io import load_smpl  # noqa: E402
 from anysole.types import (CONFIG_T, CONFIG_V, CONFIG_VT, JOINT_NAMES,  # noqa: E402
                            PART_JOINTS, PART_NAMES)
-from anysole_tta.phase_common import load_contact  # noqa: E402
+from anysole.phase_common import load_contact  # noqa: E402
 from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
 DIAG = REPO / "results" / "diagnostics" / "20261112_v8_gate_frozen"

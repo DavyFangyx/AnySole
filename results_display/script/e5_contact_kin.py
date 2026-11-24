@@ -29,7 +29,7 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
-from anysole_tta.e6_phase_analysis import build_session_sets, load_session  # noqa: E402
+from anysole.e6_phase_analysis import build_session_sets, load_session  # noqa: E402
 
 OUT = REPO / "results_display/Etest/E5_OcclusionRobustness/detail/e5_contact_kin.json"
 OCC_CELLS = {"occ000": "V7_Cv5_s1"}

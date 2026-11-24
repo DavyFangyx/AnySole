@@ -11,7 +11,7 @@ run_fold() {
   E6_SPLIT_CSV="../crossfit_woS13/${fold}.csv" \
   E6_SPLIT_COLUMN="$fold" \
   E6_PRED_SUBDIR="overlap_s10/eval_motion" \
-  "$PY" "$REPO/anysole_tta/e6_phase_analysis.py" \
+  "$PY" "$REPO/anysole/e6_phase_analysis.py" \
     --models "V8_Cv5_${fold}_s1,V8_Cv7_${fold}_s1" \
     --metric pa_mpjpe \
     --contact-method f6_soft_time_accel_state_smpl24_v1 \

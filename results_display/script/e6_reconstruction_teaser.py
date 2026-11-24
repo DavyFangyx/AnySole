@@ -18,7 +18,7 @@ for entry in (REPO, SCRIPT_DIR):
     if str(entry) not in sys.path:
         sys.path.insert(0, str(entry))
 import e6_ft_contribution as e6
-from anysole_tta.phase_common import load_contact  # noqa: E402
+from anysole.phase_common import load_contact  # noqa: E402
 from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
 
 SURFACE, INK, MUTED = e6.SURFACE, e6.INK, e6.MUTED

@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from anysole_tta.phase_common import load_contact, phase_labels  # noqa: E402
+from anysole.phase_common import load_contact, phase_labels  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 CELLS = REPO / "results" / "cells"
