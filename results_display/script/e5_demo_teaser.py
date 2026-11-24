@@ -29,10 +29,10 @@ from Baselines.utils.motion_io import load_surface  # noqa: E402
 
 MOTION = REPO / "results/diagnostics/20261116_e5_teaser_motion/V8_IMU_Residual"
 BASE = REPO / "results/baselines"
-OUT = REPO / "results_display/Etest_crossfit_physimu_vgate/1demo"
+OUT = REPO / "results_display/Etest_crossfit_physimu_vgate/demo"
 SCENE_DIR = {"occ020": "occ020", "occ090": "occ090",
              "gap060": "dropout", "gap080": "dropout"}
-SMPL_PATH = "/data/fangyuxuan/projects/TacAnchor/HeatFormer/data/base_data/SMPL_NEUTRAL.pkl"
+SMPL_PATH = str(REPO / "AnysoleWorkspace/assets/third_party/smpl/SMPL_NEUTRAL.pkl")
 
 GT_GRAY = "#b0b0b0"
 WHAM_RED = "#d62728"

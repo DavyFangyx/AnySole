@@ -107,50 +107,51 @@ def unit_manifest() -> dict[str, dict]:
 
 
 def write_fold_manifests() -> dict[str, Path]:
-    """Per-fold manifest overrides with the main-model cell frame set.
+    """Per-fold manifest overrides from the pinned protocol frame lists.
 
     The cell scores only complete 20-frame windows that are also inside the
     SMPL support (frames outside support are dropped at the *start*, and gaps
     are cut).  The generic manifest ``valid_frame_indices`` does not carry
     those exclusions, so using it would score the baselines on a different
-    frame population than the main model (e.g. S11102: 300 vs 280).  We copy
-    the manifest and replace ``valid_frame_indices`` with the cell's
-    ``frame_ids`` for the fold's test sessions; evaluation then uses exactly
-    the cell population.
+    frame population than the main model (e.g. S11102: 300 vs 280).
+
+    2026-11-24 cleanup: the V7 cells that originally carried the frame lists
+    are retired.  The pinned frame population was frozen into the fold
+    manifests themselves (``frame_ids_pinned=true``); this regenerates each
+    manifest in place from those pinned entries — no cell read.
     """
-    cells = ROOT / "results/cells"
     base_rows = []
     with (WORKSPACE / "protocol/manifests/session_manifest.jsonl").open(encoding="utf-8") as handle:
         base_rows = [json.loads(line) for line in handle if line.strip()]
-    by_id = {row["session_id"]: row for row in base_rows}
     paths = {}
     for fold in FOLDS:
-        cell = CELL_OF_FOLD[fold]
-        metrics_path = cells / cell / "metrics/test.json"
-        if not metrics_path.is_file():
-            raise FileNotFoundError("missing main-model cell metrics: %s" % metrics_path)
-        payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-        frame_ids = {
-            str(entry["session_id"]): [int(v) for v in entry["frame_ids"]]
-            for entry in payload["evaluation_contract"]["sessions"]
-        }
+        output = SPLITS / ("%s_manifest.jsonl" % fold)
+        pinned = {}
+        if output.is_file():
+            for line in output.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if row.get("frame_ids_pinned") == "true":
+                    pinned[row["session_id"]] = json.loads(row["valid_frame_indices"])
         with (SPLITS / ("%s.csv" % fold)).open(encoding="utf-8-sig", newline="") as handle:
             fold_sessions = [row[fold].strip() for row in csv.DictReader(handle)
                              if (row.get(fold) or "").strip()]
-        missing = [sid for sid in fold_sessions if sid not in frame_ids]
+        missing = [sid for sid in fold_sessions if sid not in pinned]
         if missing:
-            raise ValueError("cell %s lacks sessions: %s" % (cell, missing[:5]))
-        output = SPLITS / ("%s_manifest.jsonl" % fold)
+            raise ValueError(
+                "pinned manifest %s lacks test sessions (frame lists were frozen "
+                "there by a previous run): %s" % (output.name, missing[:5]))
         with output.open("w", encoding="utf-8") as handle:
             for row in base_rows:
                 copy = dict(row)
-                if copy["session_id"] in frame_ids:
-                    copy["valid_frame_indices"] = json.dumps(frame_ids[copy["session_id"]])
+                if copy["session_id"] in pinned:
+                    copy["valid_frame_indices"] = json.dumps(pinned[copy["session_id"]])
                     copy["frame_ids_pinned"] = "true"
                 handle.write(json.dumps(copy, ensure_ascii=False) + "\n")
         paths[fold] = output
-        log("manifest %s: %d sessions pinned to cell %s frame_ids"
-            % (output.name, len(fold_sessions), cell))
+        log("manifest %s: %d sessions pinned from frozen frame lists"
+            % (output.name, len(fold_sessions)))
     return paths
 
 
