@@ -76,7 +76,7 @@ from d_test3_contact import (  # noqa: E402
     SENSOR_COLS,
     SENSOR_ROWS,
 )
-from d_test4_baseline_tactile import (  # noqa: E402  D4 布局口径（2026-10-06 用户裁定参照）
+from utils.d4_panel_layout import (  # noqa: E402  D4 布局口径（2026-10-06 用户裁定参照）
     BG,
     DOWNSCALE,
     GAP,

@@ -25,8 +25,8 @@ import sys
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]  # legacy/ -> repo root
-SCRIPT_DIR = Path(__file__).resolve().parent.parent  # legacy/: utils lives in script/
+REPO_ROOT = Path(__file__).resolve().parents[2]  # script/ -> repo root
+SCRIPT_DIR = Path(__file__).resolve().parent  # utils lives in script/
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 # The BVH-era Step2Motion export helper ships with the Baselines tree
