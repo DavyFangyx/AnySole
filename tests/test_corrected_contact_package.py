@@ -76,21 +76,18 @@ class CorrectedContactTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Cannot load pinned"):
                 workspace_adapter.load_contact_label(self.session, contact_package.CORRECTED_CONTACT_METHOD)
 
-    def test_registry_has_separate_paths_and_validation_only(self):
+    def test_registry_current_screen_uses_default_contact_method(self):
+        # 清理批次 3（2026-11-24）：统一 V7_Cv1-7 状态法包线与 tafix 修正法
+        # 包线已退役；当前 V7_Cv7 通道 cells 走默认 f6_soft 接触法。
         from configs.z_gen.model_registry import MODELS
-        from configs.z_gen.common import EXPERIMENTS
-        # 当前线（10-29）：V7_CvN = SMPL24 状态法包（当前默认）；
-        # V7_CvN_tafix = SMPL24 修正法包参照线——独立 contact 目录、
-        # 训练 cell 即评估 cell（val+test），无终评分隔。
-        for base in ["V7_Cv%d" % i for i in range(1, 8)]:
-            current, corrected = MODELS[base + "_s1"], MODELS[base + "_tafix_s1"]
-            self.assertEqual(current["contact_method"], contact_package.SMPL24_STATE_CONTACT_METHOD)
-            self.assertEqual(corrected["contact_method"], contact_package.SMPL24_CORRECTED_CONTACT_METHOD)
-            self.assertEqual(corrected["name"], current["name"])
-            self.assertEqual(corrected["eval_splits"], ["val", "test"])
-            self.assertEqual(corrected["train_args"]["final_eval_split"], "none")
-            self.assertEqual(corrected["which"], "last")
-        self.assertEqual(len(EXPERIMENTS["v7_tafix_train"]["MODEL_IDS"]), 21)
+        v7_cells = [n for n in MODELS if n.startswith("V7_Cv7_")]
+        self.assertTrue(v7_cells)
+        for key in v7_cells:
+            self.assertIn(MODELS[key]["contact_method"],
+                          ("f6_soft_time_accel_state_smpl24_v1",
+                           "f6_soft_time_accel_smpl24_v1"))
+            self.assertIn(MODELS[key]["which"], ("last", "best"))
+        self.assertFalse(any("tafix" in n for n in MODELS))
 
 
 if __name__ == "__main__":

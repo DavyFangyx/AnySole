@@ -88,6 +88,7 @@ partial。只清点、只记录，未执行任何 add/commit/移动；解跟踪�
 2. **FT 训练源码**：`results/diagnostics/20261112_v8_gate_frozen/` 下 `finetune_router_enum.py`、`finetune_router_random.py`（FT 主训练脚本；同目录另有 `finetune_router_enum_std.py` 与多个门控实验 `train_*.py`），依赖 `train_router_gate.py`、`train_tgate_win_hb.py`。注意：`20261114_imu_ft_ablation{,_v2}/` 仅存消融权重与日志，无 Python 源码。
 3. **E2/E5/E6/E9 最终表图生成与评测记录**：`results/diagnostics/20261111_final_protocol/`、`20261111_halfplane_occ/`、`20261114_imu_eval_v2_all/`（主模型评测输入记录，引用 FT ckpt 路径）、`20261119_q10_unified_eval/`、`20261120_q14_tex_*` 等（被 `results_display/script/` 消费）。
 4. **BiFoot 航向变体源码**：`results/diagnostics/20261115_imu_yaw_branch/bifoot_yaw_train.py`——被已跟踪的 `results_display/script/bifoot_yaw_tb_metrics.py`（L20 `from bifoot_yaw_train import clip_arrays, infer_starts, _pad`）直接导入，必须入恢复方案。
+5. **Q14 纹理 demo 预览生成脚本**：`.tmp_scripts/q14_tex_demo.py`——磁盘存在但未跟踪（目录被忽略），复用 `occlude_lower_strip` 同款 recipe，输出到 `results/diagnostics/20261120_q14_tex_occlusion/demo`。E5/E9 demo 主生成链为已跟踪的 `results_display/script/{smpl_9part_viz,e5_demo_teaser,e9_vision_touch_strip}.py` 与 `.tmp_scripts/e5_demo_*.py`，另有 `results/diagnostics/20261111_final_protocol/e9_tta_final.py`、`e9_teaser_scene_model.py`（E9 teaser 组合面板，见 §B.3 目录条目）。
 
 ### C. 需独立包（权重/结果/图表/环境/数据校验，不进 git，已由现有 ignore 覆盖）
 

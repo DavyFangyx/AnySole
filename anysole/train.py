@@ -64,12 +64,6 @@ from anysole.utils.geometry import (
     ar2_to_world, compose_rot6d, f2_to_world, fk_pose6d,
     rot6d_to_rotmat, rot_root6d)
 from anysole.utils.metrics import pa_mpjpe
-from anysole.utils.constraints import apply_v3e_constraints
-from anysole.utils.constraints_g import apply_v3g_constraints
-from anysole.utils.constraints_h import apply_v3h
-from anysole.models.common.model_v3f import _split_state, sample_v3f
-from anysole.models.common.model_v3h import apply_foot_residual
-from anysole.models.common.model_v5_1 import v5_1_z_src
 from anysole.data.occ_mix import (
     P_NULLV_DEFAULT,
     P_T_DEFAULT,
@@ -1248,99 +1242,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _evaluate_v3f(model, diffusion, loader, config, device):
-    """V3_Fv1 val dashboard: the three conditions are sampler switches.
-
-    VT2M = V cond + T guidance + refinement; V2M = V cond only; T2M =
-    unconditional (V zeroed) + T guidance + refinement.  The T stream is
-    live under every condition (the contact head reads the real stream).
-    """
-    result = {}
-    sample_steps = int(config["diffusion_sample_steps"])
-    with torch.inference_mode():
-        for config_value, config_name in zip((CONFIG_VT, CONFIG_V, CONFIG_T), CONFIG_NAMES):
-            totals = {"mpjpe": 0.0, "root_ate": 0.0, "n": 0,
-                      "tp": 0, "fp": 0, "fn": 0, "tn": 0,
-                      "foot_slide_sum": 0.0, "foot_slide_n": 0}
-            tau0_mpjpe = 0.0
-            first_batch = True
-            for raw_batch in loader:
-                batch = move_batch(raw_batch, device)
-                bsz = batch["pose_gt"].shape[0]
-                v_feat = batch["V_feat"].clone()
-                if config_value == CONFIG_T:
-                    v_feat.zero_()
-                anchor = batch["trans_anchor"][:, None, :]
-                out = sample_v3f(
-                    model, v_feat, batch["T_raw"], batch["T_phys"],
-                    anchor=anchor, floor_y=batch["floor_y"],
-                    offsets=batch["offsets"], parents=batch["parents"],
-                    use_t=config_value != CONFIG_V,
-                    refine=config_value != CONFIG_V,
-                    diffusion=diffusion, steps=sample_steps, device=device)
-                pred_pose = out["x0_hat"]
-                pred_trans = out["trans_hat"] + anchor
-                gt_trans = batch["trans_gt"] + anchor
-                pred_kp = fk_pose6d(pred_pose, pred_trans, batch["offsets"], batch["parents"])
-                totals["mpjpe"] += float(torch.linalg.vector_norm(
-                    pred_kp - batch["kp_gt"], dim=-1).mean().item()) * bsz * 1000.0
-                if first_batch:
-                    # tau=0 clean-input reconstruction (the ckpt_best tracker):
-                    # x_tau = the clean normalized state, denoised at tau=0.
-                    x0_n = model.denoiser.normalize(torch.cat(
-                        [batch["pose_gt"], batch["trans_gt"], batch["contact_gt"]], dim=-1))
-                    zero = torch.zeros(bsz, device=device, dtype=torch.long)
-                    out0 = model(v_feat, batch["T_raw"], batch["T_phys"], x0_n, zero)
-                    pose0 = _split_state(model.denoiser.unnormalize(out0["x0_hat"]))[0]
-                    kp0 = fk_pose6d(pose0, gt_trans, batch["offsets"], batch["parents"])
-                    tau0_mpjpe = float(torch.linalg.vector_norm(
-                        kp0 - batch["kp_gt"], dim=-1).mean().item()) * 1000.0
-                    first_batch = False
-                pred_rel = pred_trans - pred_trans[:, :1]
-                gt_rel = gt_trans - gt_trans[:, :1]
-                totals["root_ate"] += float(torch.linalg.vector_norm(
-                    pred_rel - gt_rel, dim=-1).mean().item()) * bsz
-                # The contact row measures the T contact head itself (the
-                # guidance/refinement input), the V3_Ev1 convention.
-                pred_contact = torch.sigmoid(out["contact_logits"]) > 0.5
-                gt_contact = batch["contact_gt"] > 0.5
-                totals["tp"] += int((pred_contact & gt_contact).sum().item())
-                totals["fp"] += int((pred_contact & ~gt_contact).sum().item())
-                totals["fn"] += int((~pred_contact & gt_contact).sum().item())
-                totals["tn"] += int((~pred_contact & ~gt_contact).sum().item())
-                foot = pred_kp[:, :, FOOT_JOINTS, :][:, :, :, [0, 2]]
-                speed = torch.linalg.vector_norm(foot[:, 1:] - foot[:, :-1], dim=-1) * 1000.0
-                slide = speed[pred_contact[:, 1:]]
-                if slide.numel():
-                    totals["foot_slide_sum"] += float(slide.sum().item())
-                    totals["foot_slide_n"] += int(slide.numel())
-                totals["n"] += bsz
-            count = max(totals["n"], 1)
-            p = totals["tp"] / max(totals["tp"] + totals["fp"], 1)
-            r = totals["tp"] / max(totals["tp"] + totals["fn"], 1)
-            air_recall = totals["tn"] / max(totals["tn"] + totals["fp"], 1)
-            result.update({
-                f"val/mpjpe/{config_name}": totals["mpjpe"] / count,
-                f"val/root_ate/{config_name}": totals["root_ate"] / count,
-                f"val/contact_f1/{config_name}": 2 * p * r / max(p + r, 1e-8),
-                f"val/contact_recall/{config_name}": r,
-                f"val/air_recall/{config_name}": air_recall,
-                f"val/contact_balanced_acc/{config_name}": 0.5 * (r + air_recall),
-                f"val/foot_slide/{config_name}": totals["foot_slide_sum"] / max(totals["foot_slide_n"], 1),
-                f"val/tau0_mpjpe/{config_name}": tau0_mpjpe})
-    result["val/gap_mpjpe_dropT"] = result["val/mpjpe/V"] - result["val/mpjpe/VT"]
-    result["val/gap_mpjpe_dropV"] = result["val/mpjpe/T"] - result["val/mpjpe/VT"]
-    return result
-
-
 def _evaluate(model, diffusion, loader, config, device):
     """Return the epoch-level VT/V/T metrics used by the training dashboard."""
-    # V3_Fv1 has no pose_head — route before the first pose_head access
-    # (the pos_mode probe below would raise AttributeError).  The model
-    # attribute is the source of truth (the caller's config may not carry
-    # the v3f flag, e.g. the yaml config alone).
-    if getattr(model, "v3f", False):
-        return _evaluate_v3f(model, diffusion, loader, config, device)
     pos_mode = getattr(model.pose_head, "repr", "6d") == "pos"
     regress_mode = str(config.get("modal")) == MODEL_ANYSOLEV2
     v3e_mode = bool(config.get("v3e"))
@@ -1368,7 +1271,7 @@ def _evaluate(model, diffusion, loader, config, device):
                 v_kw = {"V_hmr": batch.get("V_hmr")} if str(config.get("v_input", "hrnet")) == "hmr_gvhmr" else {}
                 if regress_mode:
                     # F0b: single forward, no DDIM sampling.
-                    z_kw = {"z_src": v5_1_z_src(config_value)} if v5_1_mode else {}
+                    z_kw = {}
                     out = model(v_feat, t_raw, t_phys, cid, batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw,
                     prev_ctx=batch.get("ctx"), prev_state=batch.get("prev_state"),
                     causal=bool(getattr(model, "ar", False) or getattr(model, "ar2", False)),
@@ -1429,63 +1332,7 @@ def _evaluate(model, diffusion, loader, config, device):
                     pred_pose = rot_root6d(R_a[:, None, :, :], out["x0_hat"])
                     v_w = torch.einsum("bij,btj->bti", R_a, out["v_hat"])
                     pred_trans = torch.cumsum(v_w, dim=1) / float(FPS) + anchor
-                if v3e_mode:
-                    # V3_Ev1: the three dashboard conditions are three readouts
-                    # of one forward — raw V pose, constraint-processed VT,
-                    # T pose prior.  The forward itself ignores config_id.
-                    if config_value == CONFIG_VT:
-                        pred_pose, pred_trans = apply_v3e_constraints(
-                            out["x0_hat"], out["trans_hat"] + anchor,
-                            batch["floor_y"],
-                            batch["offsets"], batch["parents"])
-                    elif config_value == CONFIG_V:
-                        pred_pose, pred_trans = out["x0_hat"], out["trans_hat"] + anchor
-                    else:
-                        pred_pose, pred_trans = out["x0_prior"], out["trans_prior"] + anchor
-                elif v3g_mode:
-                    # V3_Gv1: VT = 分部观测层 on the V stream; V = raw carrier
-                    # (= E); T = the T prior + 观测层 (observation-only sanity).
-                    # floor_src stays the registered default "gt" (E v2.1 口径).
-                    if config_value == CONFIG_VT:
-                        pred_pose, pred_trans = apply_v3g_constraints(
-                            out["x0_hat"], out["trans_hat"] + anchor,
-                            out["contact_logits"],
-                            batch["offsets"], batch["parents"],
-                            floor_y=batch["floor_y"])
-                    elif config_value == CONFIG_V:
-                        pred_pose, pred_trans = out["x0_hat"], out["trans_hat"] + anchor
-                    else:
-                        pred_pose, pred_trans = apply_v3g_constraints(
-                            out["x0_prior"], out["trans_prior"] + anchor,
-                            out["contact_logits"],
-                            batch["offsets"], batch["parents"],
-                            floor_y=batch["floor_y"])
-                elif v3h_mode:
-                    # V3_Hv1: VT = 残差通道 on the V stream; V = raw V tower;
-                    # T = null-V 先验 + 残差通道 (H 无 T 塔——同一 V 塔、V 已
-                    # 在上游零化)。floor_src stays the registered default
-                    # "gt" (E v2.1 口径)。V3_Hv3：VT/T 行先应用一阶足部
-                    # 残差（V2M 行不应用——零税）。
-                    pose_vt = apply_foot_residual(
-                        out["x0_hat"], out["foot_res"],
-                        landing=str(getattr(model, "res_landing", "foot"))) if out.get("foot_res") is not None else out["x0_hat"]
-                    if config_value == CONFIG_VT:
-                        pred_pose, pred_trans = apply_v3h(
-                            bool(getattr(model, "no_anchor", False)),
-                            pose_vt, out["trans_hat"] + anchor,
-                            out["contact_logits"],
-                            batch["offsets"], batch["parents"],
-                            floor_y=batch["floor_y"])
-                    elif config_value == CONFIG_V:
-                        pred_pose, pred_trans = out["x0_hat"], out["trans_hat"] + anchor
-                    else:
-                        pred_pose, pred_trans = apply_v3h(
-                            bool(getattr(model, "no_anchor", False)),
-                            pose_vt, out["trans_hat"] + anchor,
-                            out["contact_logits"],
-                            batch["offsets"], batch["parents"],
-                            floor_y=batch["floor_y"])
-                elif v4_1_mode:
+                if v4_1_mode:
                     # V4_Av1: V2M = V 载体（修正不应用）；VT2M = V + pos_corr
                     # 软骨架（下方 FK 块按条件应用）；T2M = 先验 + pos_corr_prior。
                     if config_value == CONFIG_VT:
@@ -1582,7 +1429,7 @@ def _evaluate(model, diffusion, loader, config, device):
                 gt_rel = gt_trans - gt_trans[:, :1]
                 totals["root_ate"] += float(torch.linalg.vector_norm(pred_rel - gt_rel, dim=-1).mean().item()) * n
                 if not pos_mode:
-                    if (v3e_mode or v3g_mode or v3h_mode or v5_1_mode or v4_1_mode) and config_value == CONFIG_VT and out.get("contact_logits") is not None:
+                    if v4_1_mode and config_value == CONFIG_VT and out.get("contact_logits") is not None:
                         # V3_Ev1/G/H/V5_Av1: the val dashboard contact row measures
                         # the T contact head itself (the residual/observation
                         # layer's gate input / G 配方接触头).

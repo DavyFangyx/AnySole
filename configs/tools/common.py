@@ -243,6 +243,10 @@ def build_registry() -> dict[str, Any]:
         requires = [str(item) for item in spec.get("REQUIRES", [])]
         model_ids = []
         for model_id in spec["MODEL_IDS"]:
+            if model_id not in MODELS:
+                # 清理批次 3（2026-11-24）：退役家族不再注册，跳过并显式记录。
+                print("[retired] %s for %s: no longer registered" % (model_id, experiment_id))
+                continue
             provides = MODELS[model_id].get("provides", ())
             missing = [cap for cap in requires if cap not in provides]
             if missing:

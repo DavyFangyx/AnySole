@@ -67,12 +67,6 @@ from anysole.data.smpl_io import (
     smpl_vertices_from_archive_params,
 )
 from anysole.eval import _sample_x_t_init, _session_window_groups, _tactile_corr
-from anysole.utils.constraints import apply_v3e_constraints
-from anysole.utils.constraints_g import apply_v3g_constraints
-from anysole.utils.constraints_h import apply_v3h
-from anysole.models.common.model_v3h import apply_foot_residual
-from anysole.models.common.model_v3f import sample_v3f
-from anysole.models.common.model_v5_1 import v5_1_z_src
 from anysole.utils.geometry import (
     ar2_to_world, compose_rot6d, f2_to_world, fk_pose6d, heading_from_root_np,
     rot6d_to_rotmat, rot6d_to_rotmat_np, rotmat_to_6d, rotmat_to_6d_np,
@@ -178,6 +172,10 @@ METRIC_DISPLAY_NAMES = {
     "root_mae_selfanchor_mm": "MeanRootPositionError",
     "anchor_err_mm": "AnchorErr",
     "anchor_seam_jump_mm": "AnchorSeamJump",
+    # 2026-11-24：物理列自锚版 = 默认读数（与自锚 Global 同一世界轨迹，
+    # 08 §3.3）；吃锚版仍带（GT Anchored）后缀留作诊断。
+    "foot_sliding_selfanchor_mm": "FootSliding",
+    "ground_pen_selfanchor_mm": "GroundPen",
 }
 # 吃锚列后缀（全角括号，与 2026-11-05 用户裁定一致）；旧文件的后缀
 # " (anchored)" 在读取层兼容。
@@ -204,6 +202,7 @@ ANCHOR_FREE_METRIC_KEYS = frozenset({
     "root_abs_rmse_selfanchor_mm", "root_mae_selfanchor_mm",
     "anchor_err_mm", "anchor_seam_jump_mm",
     "ground_pen_gt_mm",
+    "foot_sliding_selfanchor_mm", "ground_pen_selfanchor_mm",
 })
 
 
@@ -582,6 +581,18 @@ def _session_metrics(seq: dict, tw: int, forward_axis: int, config_value: int,
             jump = np.linalg.norm(
                 pred_self_np[seams, 0] - pred_self_np[seams - 1, 0], axis=-1)
             accum.add_median("anchor_seam_jump_mm", jump, 1000.0)
+        # 2026-11-24：物理列自锚版（08 §3.3 —— 与自锚 Global 同一世界
+        # 轨迹；floor 沿用 dataset 的会话统一 GT p5）。
+        _floor_self = float(seq["floor_y"].reshape(1)[0].detach().cpu().item())
+        _fs_v, _fs_c = foot_sliding_joints(
+            pred_self_np[:, ANKLE_FOOT_JOINTS], gt_np[:, ANKLE_FOOT_JOINTS],
+            times_np)
+        if _fs_c:
+            accum.add_scalar("foot_sliding_selfanchor_mm", _fs_v, _fs_c)
+        accum.add_scalar(
+            "ground_pen_selfanchor_mm",
+            ground_penetration(pred_self_np, _floor_self)["ground_pen_mean_mm"],
+            T)
     # 无锚未对齐 ATE（2026-11-01 用户裁定）：链式拼接 trans_hat（减去各自窗口
     # GT 锚）从 GT 起点出发——当前锚协议模型的无锚协议数字（与基线对等口径）。
     if T >= 2:
@@ -895,18 +906,6 @@ def _evaluate_config(
     v_hmr_mode = str(getattr(model, "v_input", "hrnet")) == "hmr_gvhmr"
     # F2a: heading/tilt representation.
     f2_repr = bool(getattr(model, "f2_repr", False))
-    # V3_Ev1: the three conditions are three readouts of one forward.
-    v3e_mode = bool(getattr(model, "v3e", False))
-    # V3_Gv1: same protocol; the observation layer replaces E's constraints.
-    v3g_mode = bool(getattr(model, "v3g", False))
-    # V3_Hv1: same protocol; the residual channels replace E's constraints,
-    # and the T2M row is the null-V prior (V zeroed upstream) + channels.
-    v3h_mode = bool(getattr(model, "v3h", False))
-    # V3_Fv1: the three conditions are sampler switches on one prior.
-    v3f_mode = bool(getattr(model, "v3f", False))
-    # V5_Av1: the three conditions are z-source readouts of one forward
-    # (z_src 开关 + T 流三条件恒定); 无推理侧约束层（无锚-几何组件）。
-    v5_1_mode = bool(getattr(model, "v5_1", False))
     # V4_Av1: 同一前向三种读出（config_id 被忽略，E/G 同款）; V2M = V
     # 载体（修正不应用）、VT2M = V + pos_corr 软骨架（seq 层应用）、
     # T2M = 先验 + pos_corr_prior。
@@ -1013,12 +1012,7 @@ def _evaluate_config(
                     np.stack(tile_anchors)).float().to(device)
             config_id = torch.full((bsz,), config_value, device=device, dtype=torch.long)
             v_feat, t_raw, t_phys, t_s2m = condition_inputs(batch, config_id)
-            if v3f_mode:
-                # T stays live under every condition (the contact head reads
-                # the real stream); condition_inputs already zeroed V for
-                # T2M — exactly the unconditional pass.
-                t_raw, t_phys = batch["T_raw"], batch["T_phys"]
-            if v5_1_mode or v4_1_mode:
+            if v4_1_mode:
                 # V5_Av1/V4_Av1：T 流输入三条件恒定（g_T/接触头/XAttn 恒读
                 # 真实压力）。
                 t_raw, t_phys = batch["T_raw"], batch["T_phys"]
@@ -1042,20 +1036,8 @@ def _evaluate_config(
                     history=batch.get("obs_history")
                 )
             v_kw = {"V_hmr": batch.get("V_hmr")} if v_hmr_mode else {}
-            if v3f_mode:
-                out = sample_v3f(
-                    model, v_feat, t_raw, t_phys,
-                    anchor=batch["trans_anchor"][:, None, :],
-                    floor_y=batch["floor_y"],
-                    offsets=batch["offsets"], parents=batch["parents"],
-                    use_t=config_value != CONFIG_V,
-                    refine=config_value != CONFIG_V,
-                    diffusion=diffusion, steps=sample_steps, eta=0.0,
-                    device=device)
-                pred_pose = out["x0_hat"]
-                v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
-            elif regress_mode:
-                z_kw = {"z_src": v5_1_z_src(config_value, z_src_override)} if v5_1_mode else {}
+            if regress_mode:
+                z_kw = {}
                 out = model(v_feat, t_raw, t_phys, config_id,
                             batch.get("session_id"), T_s2m=t_s2m, **v_kw, **z_kw,
                             **model_observation_kwargs(batch))
@@ -1078,7 +1060,7 @@ def _evaluate_config(
             # 常数（头不训、损失掩码——压力读不出绝对位置）。旁路，不替换
             # 下面的现役 anchor。AnchorErr 按窗累加（跨会话池化 = 窗均值）。
             anchor_trans_self = None
-            if not v3f_mode and out.get("anchor_trans") is not None:
+            if out.get("anchor_trans") is not None:
                 if config_value == CONFIG_T:
                     anchor_trans_self = model.anchor_mean.to(
                         dtype=out["anchor_trans"].dtype,
@@ -1090,8 +1072,7 @@ def _evaluate_config(
                     torch.linalg.vector_norm(
                         anchor_trans_self - batch["trans_anchor"], dim=-1),
                     1000.0)
-            if not v3f_mode:
-                v3e_contact = None
+            v3e_contact = None
             if v7_mode and config_value != CONFIG_V:
                 # V7（2026-10-25 预检项）：接触头指标直读 contact_logits
                 # （T 在场行）；V-only 行 T 分支硬关闭、接触头读零输入 →
@@ -1107,72 +1088,6 @@ def _evaluate_config(
                 pred_pose = rot_root6d(R_a[:, None, :, :], out["x0_hat"])
                 v_w = torch.einsum("bij,btj->bti", R_a, out["v_hat"])
                 pred_trans_w = torch.cumsum(v_w, dim=1) / float(FPS) + anchor
-                v4_1_corr = None
-            elif v3e_mode:
-                # V3_Ev1 condition selection: VT = constraint layer on the
-                # full forward, V = raw V pose, T = the T pose prior.
-                if config_value == CONFIG_VT:
-                    pred_pose, pred_trans_w = apply_v3e_constraints(
-                        out["x0_hat"], out["trans_hat"] + anchor,
-                        batch["floor_y"],
-                        batch["offsets"], batch["parents"])
-                    v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
-                elif config_value == CONFIG_V:
-                    pred_pose, pred_trans_w = out["x0_hat"], out["trans_hat"] + anchor
-                else:
-                    pred_pose, pred_trans_w = out["x0_prior"], out["trans_prior"] + anchor
-            elif v3g_mode:
-                # V3_Gv1 condition selection: VT = 分部观测层 on the V stream,
-                # V = raw carrier (= E), T = T prior + 观测层.  floor_src
-                # stays the registered default "gt" (E v2.1 口径).
-                if config_value == CONFIG_VT:
-                    pred_pose, pred_trans_w = apply_v3g_constraints(
-                        out["x0_hat"], out["trans_hat"] + anchor,
-                        out["contact_logits"],
-                        batch["offsets"], batch["parents"],
-                        floor_y=batch["floor_y"])
-                    v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
-                elif config_value == CONFIG_V:
-                    pred_pose, pred_trans_w = out["x0_hat"], out["trans_hat"] + anchor
-                else:
-                    pred_pose, pred_trans_w = apply_v3g_constraints(
-                        out["x0_prior"], out["trans_prior"] + anchor,
-                        out["contact_logits"],
-                        batch["offsets"], batch["parents"],
-                        floor_y=batch["floor_y"])
-            elif v3h_mode:
-                # V3_Hv1 condition selection: VT = 残差通道 on the V stream,
-                # V = raw V tower, T = null-V 先验 + 残差通道 (H 无 T 塔——
-                # 同一 V 塔、V 已由 condition_inputs 零化).  floor_src stays
-                # the registered default "gt" (E v2.1 口径).
-                # V3_Hv3：VT/T 行先应用一阶足部残差（V2M 行不应用）。
-                pose_vt = apply_foot_residual(
-                    out["x0_hat"], out["foot_res"],
-                    landing=str(getattr(model, "res_landing", "foot"))) if out.get("foot_res") is not None else out["x0_hat"]
-                if config_value == CONFIG_VT:
-                    pred_pose, pred_trans_w = apply_v3h(
-                        bool(getattr(model, "no_anchor", False)),
-                        pose_vt, out["trans_hat"] + anchor,
-                        out["contact_logits"],
-                        batch["offsets"], batch["parents"],
-                        floor_y=batch["floor_y"])
-                    v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
-                elif config_value == CONFIG_V:
-                    pred_pose, pred_trans_w = out["x0_hat"], out["trans_hat"] + anchor
-                else:
-                    pred_pose, pred_trans_w = apply_v3h(
-                        bool(getattr(model, "no_anchor", False)),
-                        pose_vt, out["trans_hat"] + anchor,
-                        out["contact_logits"],
-                        batch["offsets"], batch["parents"],
-                        floor_y=batch["floor_y"])
-            elif v5_1_mode:
-                # V5_Av1 condition selection: 三行直接读 z_src 选定的读出
-                # （前向已按条件切换；无推理侧约束层——无锚-几何组件，
-                # 穿透/Global 行只作报告）。VT 行接触读数 = G 配方接触头。
-                if config_value == CONFIG_VT:
-                    v3e_contact = torch.sigmoid(out["contact_logits"]) > 0.5
-                pred_pose, pred_trans_w = out["x0_hat"], out["trans_hat"] + anchor
                 v4_1_corr = None
             elif v4_1_mode:
                 # V4_Av1 condition selection: 三读出 + 修正分支开关。
@@ -1229,7 +1144,7 @@ def _evaluate_config(
                                     if out.get("pos_corr") is not None else None)
                 seq = {
                     "pred_pose": pred_pose.reshape(-1, pred_pose.shape[-1]),
-                    "pred_trans": (pred_trans_w if (v3e_mode or v3g_mode or v3h_mode or v5_1_mode or v4_1_mode)
+                    "pred_trans": (pred_trans_w if v4_1_mode
                                    else out["trans_hat"] + anchor).reshape(-1, 3),
                     # 修改 08：自锚轨迹（同一 trans_hat，常数换成锚头输出）。
                     "pred_trans_self": (

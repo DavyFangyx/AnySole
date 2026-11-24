@@ -27,7 +27,7 @@
   d. \(\mathrm{spatial}\)：相邻格压力差（横向+纵向）的空间梯度均值
   e. \(\mathrm{temporal}\)：力值的帧间差分
 
-- IMU \(T_{\mathrm{imu}}\in\mathbb{R}^{T\times 12}\)：双足 IMU 通道（世界系去重力加速度 + 局部系角速度）。
+- IMU \(T_{\mathrm{imu}}\in\mathbb{R}^{T\times 12}\)：双足 IMU 通道（传感器局部系含重力比力，g 单位 + 局部系角速度，rad/s）。
 12 = 6（左足）+ 6（右足），每足为 acc3 + gyro3。
 
 输出为 SMPL-24 运动：

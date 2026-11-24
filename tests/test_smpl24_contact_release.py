@@ -35,20 +35,16 @@ class Smpl24ContactReleaseTests(unittest.TestCase):
   with self.assertRaisesRegex(p.ContactPackageError,'changed dependency'):self.reader().load(self.session)
  def test_new_package_cannot_load_as_historical_method(self):
   with self.assertRaises(p.ContactPackageError):p.ContactLabelPackage(self.root,method=p.STATE_CONTACT_METHOD)
- def test_registry_current_screen_has_seven_unified_models(self):
+ def test_registry_current_screen_has_no_retired_families(self):
+  # 清理批次 3（2026-11-24）：当前屏幕 = V8_IMU 族 + V8_Cv5（无 IMU 消融）
+  # + V7_Cv7 通道 cells；统一 V7_Cv1-7 状态包线与门控组（T/LR/TLR）已退役。
   from configs.z_gen.model_registry import MODELS
-  from configs.z_gen.common import EXPERIMENTS
-  ids=[i for i in EXPERIMENTS['v7_train']['MODEL_IDS'] if re.fullmatch(r'V7_Cv[1-7]_s1',i)];self.assertEqual(len(ids),7)
-  for i,key in enumerate(ids,1):
-   m=MODELS[key];self.assertEqual(m['name'],'V7_Cv%d'%i);self.assertEqual(m['which'],'last');self.assertEqual(m['contact_method'],p.SMPL24_STATE_CONTACT_METHOD);self.assertEqual(m['eval_splits'],['val','test']);self.assertEqual(m['train_args']['smpl_support_policy'],'exclude')
-  # 门控组（2026-10-30 V7_C门控修改方案 §8.2）：T/LR/TLR s1 与 Cv5 同包
-  # 同配方（B 基线一致性——contact 包 / split / 有效帧 / SMPL 策略）。
-  for key in ('V7_Cv5T_s1','V7_Cv5LR_s1','V7_Cv5TLR_s1'):
-   m=MODELS[key]
-   self.assertEqual(m['name'],key[:-3]);self.assertEqual(m['which'],'last')
-   self.assertEqual(m['contact_method'],p.SMPL24_STATE_CONTACT_METHOD)
-   self.assertEqual(m['eval_splits'],['val','test'])
-   self.assertEqual(m['train_args']['smpl_support_policy'],'exclude')
+  names=list(MODELS)
+  self.assertTrue(any(n.startswith('V8_IMU_Residual') for n in names))
+  self.assertTrue(any(n.startswith('V7_Cv7_') for n in names))
+  for n in names:
+   self.assertFalse(re.fullmatch(r'V7_Cv[1-6](_.*)?',n),n)
+   self.assertFalse(n.startswith(('V7_Cv5T','V7_Cv5LR','V7_Cv5TLR','V3_','V4_','V5_','F0','F2','F4')),n)
  def test_cli_default_option(self):
   with patch.object(adapter,'build_one',return_value=[]) as make:
    adapter.main(['--session','demo']);self.assertIsNone(make.call_args.kwargs['label_method'])

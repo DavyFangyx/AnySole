@@ -61,6 +61,18 @@ T_KEYS = {
     "FootSliding（GT Anchored）": "FootSliding",
 }
 
+# 定位信息分组：自主定位 → GT 初始化 → 测试集校准 → 动捕定位辅助
+LOC_INFO = {
+    "GVHMR": "测试集校准（世界系注册拟合平移）",
+    "MMVP (FPP-Net + PoseTransOpt)": "测试集校准（世界系注册拟合平移）",
+    "WHAM": "测试集校准（世界系注册拟合平移）",
+    "Step2Motion": "GT 初始化（首帧位置锚）",
+    "MotionPRO": "动捕定位辅助（输入含真实定位）",
+    "V8_IMU_Residual": "",
+}
+V8_LOC = {"U@V": "自主定位", "U@T": "GT 初始化（首帧位置锚）", "U@VT": "自主定位"}
+GROUP_ORDER = {"自主定位": 0, "GT 初始化": 1, "测试集校准": 2, "动捕定位辅助": 3}
+
 
 def ms(values):
     values = [v for v in values if v is not None]
@@ -98,14 +110,47 @@ def load_baselines() -> list[dict]:
         # 基线 root_ate_mm 已是 Mean Root Position Error（逐帧平均），
         # 旧表列名 traj_ATE；改写到统一表头。
         row["Mean Root Position Error (mm)"] = row.get("traj_ATE", "")
+        row["定位信息"] = LOC_INFO.get(row["模型"], "")
         rows.append(row)
+    return rows
+
+
+def load_q10_motionpro() -> dict | None:
+    """MotionPRO U@VT 行改用 Q10 统一四折值（钉定帧 + solver），不再沿用
+    旧树 77.235（session 全有效帧、无尾裁旧评估器）。"""
+    p = (REPO / "results_display/Etest_crossfit_physimu_vgate"
+         / "E2_MainPerformance" / "detail" / "Q10_unified_baselines.csv")
+    if not p.is_file():
+        return None
+    for row in csv.DictReader(p.open(encoding="utf-8-sig")):
+        if row.get("模型") == "MotionPRO U@VT" and row.get("折") == "mean±std":
+            return row
+    return None
+
+
+def apply_q10_motionpro(rows: list[dict]) -> list[dict]:
+    q10 = load_q10_motionpro()
+    if q10 is None:
+        return rows
+    for row in rows:
+        if row["模型"] != "MotionPRO":
+            continue
+        row["PA-MPJPE"] = q10["PA-MPJPE"]
+        row["MPJPE"] = q10["MPJPE"]
+        row["GlobalMPJPE"] = q10["GlobalMPJPE"]
+        row["Mean Root Position Error (mm)"] = q10["traj_ATE"]
+        row["RootOrientationDrift"] = q10["RootOrientationDrift"]
+        row["GroundPen"] = q10["GroundPen"]
+        row["FootSliding"] = q10["FootSliding"]
+        row["定位信息"] = LOC_INFO["MotionPRO"]
     return rows
 
 
 def build_main_rows(tb: dict | None) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for mode, label in MODES:
-        rec = {"模型": "V8_IMU_Residual", "条件": label, "n": 4}
+        rec = {"模型": "V8_IMU_Residual", "条件": label, "n": 4,
+               "定位信息": V8_LOC[label]}
         for key, header in MAIN:
             if mode == "T2M" and tb is not None:
                 tkey = T_KEYS.get(key, key)
@@ -120,12 +165,16 @@ def build_main_rows(tb: dict | None) -> dict[str, dict]:
 
 def write_main_table(main_rows: dict[str, dict]) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    fields = ["模型", "条件", "n"] + [header for _, header in MAIN]
+    fields = ["模型", "条件", "n", "定位信息"] + [header for _, header in MAIN]
     rows = []
-    baseline_rows = load_baselines()
+    baseline_rows = apply_q10_motionpro(load_baselines())
     for label in ("U@V", "U@T", "U@VT"):
-        rows.extend([r for r in baseline_rows if r.get("条件") == label])
-        rows.append(main_rows[label])
+        block = [r for r in baseline_rows if r.get("条件") == label]
+        block.append(main_rows[label])
+        # 自主定位 → GT 初始化 → 测试集校准 → 动捕定位辅助
+        block.sort(key=lambda r: GROUP_ORDER.get(
+            (r.get("定位信息") or "").split("（")[0], 9))
+        rows.extend(block)
     path = OUT / "Main_Table1_E2_MeanRootPositionError.csv"
     with path.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")

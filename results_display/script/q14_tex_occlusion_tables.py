@@ -29,7 +29,7 @@ Q14 = (REPO / "results_display" / "Etest_crossfit_physimu_vgate" / "Supplement"
        / "tex_occlusion")
 
 FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
-LEVELS = ("020", "050", "090")
+LEVELS = ("010", "020", "030", "040", "050", "060", "070", "080", "090")
 ASSETS = ("wood", "fabric", "crate")
 CONFIGS = ("V2M", "VT2M")
 
@@ -38,12 +38,19 @@ MAIN_METRICS = ["PA-MPJPE", "MPJPE", "GlobalMPJPE", "MPJPE_anklefoot",
 BASELINE_METRICS = ["pa_mpjpe_mm", "global_mpjpe_mm", "ankle_foot_mpjpe"]
 
 
-def cell_metrics(model: str, fold: str, suffix: str) -> dict | None:
-    path = CELLS / ("%s_%s_s1%s" % (model, fold, suffix)) / "metrics" / "overlap_s10" / "test.json"
-    if not path.is_file():
-        return None
-    data = json.loads(path.read_text())
-    return data.get("metrics", {})
+def main_model_metrics(cond: str, fold: str) -> dict | None:
+    """Paper main model V8_IMU_Residual per-condition fold JSON
+    (formal eval layout: results/diagnostics/<root>/V8_IMU_Residual/<cond>/<fold>.json)."""
+    roots = [
+        REPO / "results/diagnostics/20261114_imu_eval_v2_all",     # black reference
+        REPO / "results/diagnostics/20261120_q14_tex_eval_v8imu",  # tex variants
+    ]
+    for root in roots:
+        path = root / "V8_IMU_Residual" / cond / ("%s.json" % fold)
+        if path.is_file():
+            data = json.loads(path.read_text())
+            return data.get("metrics", {})
+    return None
 
 
 def mean_std(values: list) -> str:
@@ -77,9 +84,8 @@ def main() -> int:
             for metric in MAIN_METRICS:
                 black, tex = [], []
                 for fold in FOLDS:
-                    bm = cell_metrics(args.model, fold, "_evalocc%s" % lvl)
-                    tm = cell_metrics(args.model, fold,
-                                      "_evalocc%s_tex_%s" % (lvl, asset))
+                    bm = main_model_metrics("occ%s" % lvl, fold)
+                    tm = main_model_metrics("occ%s_tex_%s" % (lvl, asset), fold)
                     if bm and metric in bm["VT2M"]:
                         black.append(bm["VT2M"][metric])
                     if tm and metric in tm["VT2M"]:
@@ -99,14 +105,12 @@ def main() -> int:
     # ---- scene: gray vs concrete (same split, clean pairing) ----
     rows = []
     for metric in MAIN_METRICS:
-        for label, suf_clean, suf_occ in (
-                ("scene_clean", "_evalsceneclean", "_evalsceneclean"),
-                ("gray", "_evalsceneclean", "_evalscene"),
-                ("concrete", "_evalsceneclean", "_evalscenetex")):
+        for label, cond in (("scene_clean", "sceneocc_clean"),
+                            ("gray", "sceneocc"),
+                            ("concrete", "scene_tex")):
             vals = []
             for fold in FOLDS:
-                cm = cell_metrics(args.model, fold, suf_clean)
-                om = cell_metrics(args.model, fold, suf_occ)
+                om = main_model_metrics(cond, fold)
                 if om and metric in om["VT2M"]:
                     vals.append(om["VT2M"][metric])
             rows.append({"label": label, "config": "VT2M", "metric": metric,
