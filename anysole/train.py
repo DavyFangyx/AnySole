@@ -1190,7 +1190,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--wandb_run_name", default=None,
                         help="Monitoring run name override (default: <model>_<stage>_<fold>). "
                              "Lets several cells sharing one model_name stay distinguishable.")
-    parser.add_argument("--wandb_experiment_tag", default=None, help="Batch tag used by Wandb_Analyzer to group runs.")
+    parser.add_argument("--wandb_experiment_tag", default=None, help="Batch tag used by the monitor backend to group runs.")
     parser.add_argument("--monitor_backend", choices=("wandb", "swanlab"), default=None,
                         help="Online monitoring backend used when --wandb_mode != disabled.")
     parser.add_argument("--swanlab_workspace", default=None,
@@ -1992,7 +1992,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("validation disabled: %s" % exc)
     monitor_run = None
     if str(config.get("wandb_mode", "disabled")) != "disabled":
-        # Identity fields consumed by Wandb_Analyzer: experiment_tag groups a
+        # Identity fields consumed by the monitor backend: experiment_tag groups a
         # training batch, run_kind/model/stage/fold decide the raw/ directory
         # tree. Single-stage, non-cross-validation runs use stage=single,
         # fold=fold0.
@@ -2006,7 +2006,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "stage": "single",
             "fold": "fold0",
         }
-        # run 名默认 = model_stage_fold（Wandb_Analyzer 口径）。model_name 决定
+        # run 名默认 = model_stage_fold（监控后端口径）。model_name 决定
         # ckpt 路径不可改，但同一 model_name 的多个 cell（不同 split/obs_context）
         # 在监控页上会同名难辨 —— wandb_run_name 显式覆盖，不写即旧行为不变。
         monitor_name = str(config.get("wandb_run_name") or "%s_%s_%s" % (
@@ -2926,8 +2926,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             # above the converged range (loss_total 30 -> 0.1, loss_pose 1.5 ->
             # 0.01), which stretches the raw charts' y-axis and hides
             # convergence.  When set, clip the train losses in place under
-            # their original names so the wandb view stays within 0-cap and
-            # Wandb_Analyzer picks up the clipped series directly.
+            # their original names so the monitor view stays within 0-cap and
+            # picks up the clipped series directly.
             loss_cap = config.get("loss_cap")
             if loss_cap is not None:
                 for key in ("loss_total", "loss_pose", "loss_traj", "loss_con", "loss_kp", "loss_pos",
