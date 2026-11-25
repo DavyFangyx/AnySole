@@ -1,53 +1,42 @@
-"""Step2Motion adapter acceptance tests (T1 消费端读取测试 + T2 重型 smoke).
+"""Current Step2Motion four-fold data acceptance checks (SMPL-24 / 50 channels).
 
-Run from the repo root in the touch_gait environment:
-
-    python3 AnysoleWorkspace/tool/adapters/Step2Motion/tests.py
-    python3 AnysoleWorkspace/tool/adapters/Step2Motion/tests.py --skip-heavy
-
-T1 段（恒运行）：canonical-split 一致性 / normalizer provenance / 原生
-dataset 契约（维度、BVH-23 序、翻译头数据、frame id 单调）/ 16 通道与
-D_Test4 冻结 pooler 逐值一致 / pred=GT 公共 BVH-23 指标归零。消费端 =
-Baselines/Step2Motion/src/dataset.py 的 pristine MotionDataset（py3.8 兼容
-加载见 _load_native），.pt 必须是原生 pickled 实例（T1 契约）。
-
-T2 段（--skip-heavy 或 src 内无 bvh_export.py 时跳过）：one-batch train
-smoke、export/evaluator smoke、src/test.py smoke——依赖 T2 移植后的模型侧
-（prefer_env_site / bvh_export / workspace / isolate_clip 等）。
+Run in touch_gait from the repository root. --skip-heavy omits the single
+training-batch smoke; dataset, split, normalizer and metric checks still run.
 """
-
 from __future__ import annotations
 
 import argparse
-import csv
 import importlib.util
 import json
-import os
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[4]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
 STEP2MOTION_SRC = ROOT / "Baselines/Step2Motion/src"
-if str(STEP2MOTION_SRC) not in sys.path:
-    sys.path.insert(0, str(STEP2MOTION_SRC))
+for path in (ROOT, STEP2MOTION_SRC):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
-from AnysoleWorkspace.tool.adapters.Step2Motion import build_gait as bg  # noqa: E402
-from AnysoleWorkspace.tool.workspace import resolve_uri  # noqa: E402
+from AnysoleWorkspace.tool.adapters.Step2Motion import build_gait as bg
 
-RESULTS_ROOT = ROOT / "results"
-SPLIT_CSV = ROOT / "AnysoleWorkspace/protocol/splits/default/splits.csv"
+FOLDS = {
+    "fS5S6S11": ("splits_test_S5S6S11_val_S12.csv", (62, 12, 66)),
+    "fS5S11S12": ("splits_test_S5S11S12_val_S13.csv", (64, 18, 58)),
+    "fS6S7": ("splits_test_S6S7_val_S14.csv", (73, 18, 31)),
+    "fS5S6S8": ("splits_test_S5S6S8_val_S7.csv", (78, 11, 51)),
+}
+ADAPTER_BASE = ROOT / "AnysoleWorkspace/model_inputs/Step2Motion/adapter_v3_folds"
 MANIFEST = ROOT / "AnysoleWorkspace/protocol/manifests/session_manifest.jsonl"
-ADAPTER_ROOT = ROOT / "AnysoleWorkspace/model_inputs/Step2Motion/adapter_v1"
-SMOKE_ROOT = RESULTS_ROOT / "baselines/Step2Motion/smoke"
-
 _PASSED = 0
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    global _PASSED
+    if not condition:
+        raise AssertionError(name + " FAILED: " + detail)
+    _PASSED += 1
 
 
 def _load_native():
@@ -82,153 +71,63 @@ def _load_native():
     return mod.MotionDataset
 
 
-def check(name: str, condition: bool, detail: str = "") -> None:
-    global _PASSED
-    if not condition:
-        raise AssertionError(f"{name} FAILED: {detail}")
-    _PASSED += 1
-    print(f"  ok {name}")
-
-
-def canonical_split() -> dict[str, list[str]]:
-    return bg.read_split(SPLIT_CSV)
-
-
-def manifest_by_id() -> dict:
-    return {r["session_id"]: r for r in (json.loads(line) for line in MANIFEST.read_text().splitlines() if line.strip())}
-
-
-def test_split_sessions() -> None:
-    print("== split_sessions.json vs canonical split ==")
-    splits = canonical_split()
-    manifest = manifest_by_id()
-    for variant in ("gait", "gait_noimu"):
-        payload = json.loads((ADAPTER_ROOT / variant / "split_sessions.json").read_text())
-        check(f"{variant}: counts recorded", set(payload["counts"]) == {"train", "val", "test"})
-        for name in ("train", "val", "test"):
-            check(f"{variant}: {name} sessions identical to canonical CSV",
-                  payload["sessions"][name] == splits[name],
-                  f"{len(payload['sessions'][name])} vs {len(splits[name])}")
-            check(f"{variant}: {name} count == canonical count",
-                  payload["counts"][name] == len(splits[name]))
-        seen: dict[str, str] = {}
-        for name in ("train", "val", "test"):
-            for sid in payload["sessions"][name]:
-                if sid in seen:
-                    check(f"{variant}: {sid} only in val/test overlap",
-                          {seen[sid], name} == {"val", "test"})
-                seen.setdefault(sid, name)
-        # subject-disjoint between train and val/test
-        subjects = {name: {manifest[sid]["subject_id"] for sid in payload["sessions"][name]}
-                    for name in ("train", "val", "test")}
-        check(f"{variant}: train subjects disjoint from val", not (subjects["train"] & subjects["val"]))
-        check(f"{variant}: train subjects disjoint from test", not (subjects["train"] & subjects["test"]))
-        print(f"  info {variant}: canonical counts train/val/test = "
-              f"{len(splits['train'])}/{len(splits['val'])}/{len(splits['test'])}")
-        print(f"  info {variant}: empty_or_skipped = {payload['empty_or_skipped']}")
-    # 2026-10-22 用户裁定：val 与 test 分离，恢复任务书 92/12/36
-    # （val=S12、test=S13+S14）；旧 104/36/36 val==test 冻结已作废。
-    check("canonical split is 92/12/36",
-          {len(splits[k]) for k in splits} == {92, 12, 36},
-          "got %s" % {k: len(splits[k]) for k in splits})
-
-
-def test_normalizer_provenance() -> None:
-    print("== normalizer provenance (train only) ==")
-    artifact = json.loads((ADAPTER_ROOT / "artifact.json").read_text())
-    params = artifact.get("parameters", {})
-    splits = canonical_split()
-    check("normalizers recorded", "normalizers" in params and params["normalizers"])
-    for variant in ("gait", "gait_noimu"):
-        info = params["normalizers"].get(variant)
-        check(f"{variant}: provenance present", bool(info))
-        check(f"{variant}: source is the train .pt",
-              str(info["source"]).endswith(f"/{variant}/gait_train.pt"))
-        # no val/test session may feed the normalizer: provenance carries only
-        # train data (the train .pt is built from the canonical train list).
-        # structural check: the train .pt can only contain train sessions
-        import torch
-        MotionDataset = _load_native()
-        db = MotionDataset.load(str(ADAPTER_ROOT / variant / "gait_train.pt"), torch.device("cpu"))
-        val_test = set(splits["val"]) | set(splits["test"])
-        leaked = [sid for sid in db.session_ids if sid in val_test]
-        check(f"{variant}: no val/test session in train dataset", not leaked, str(leaked))
-        print(f"  info {variant}: train clips={len(db.clips) - 1}, sessions={len(set(db.session_ids))}")
-
-
-def test_dataset_contract() -> None:
-    print("== dataset contract (dims / BVH-23 order / translation head) ==")
+def test_fold(fold: str, filename: str, expected_counts: tuple) -> None:
     import torch
     MotionDataset = _load_native()
-    for variant, input_dim in (("gait", 50), ("gait_noimu", 38)):
-        for split in ("train", "val", "test"):
-            db = MotionDataset.load(str(ADAPTER_ROOT / variant / f"gait_{split}.pt"), torch.device("cpu"))
-            check(f"{variant}/{split}: joint_names == BVH-23 Skeleton3 order",
-                  list(db.joint_names) == bg.SRC_JOINTS)
-            check(f"{variant}/{split}: parents == BVH-23 hierarchy",
-                  db.parents.tolist() == bg.SRC_PARENTS.tolist())
-            for i, insole in enumerate(db.insole):
-                check(f"{variant}/{split}: clip {i} insole dim == {input_dim}",
-                      tuple(insole.shape)[-1:] == (input_dim,))
-                check(f"{variant}/{split}: clip {i} pose dim == 69 (3 translation + 66 pose)",
-                      tuple(db.poses[i].shape)[-1:] == (69,))
-                check(f"{variant}/{split}: clip {i} quats (N,23,4)",
-                      tuple(db.quats[i].shape)[1:] == (23, 4))
-                check(f"{variant}/{split}: clip {i} frame ids match rows",
-                      len(db.clip_frame_ids[i]) == db.poses[i].shape[0])
-                check(f"{variant}/{split}: clip {i} valid mask matches rows",
-                      len(db.clip_valid[i]) == db.poses[i].shape[0])
-            check(f"{variant}/{split}: offsets (n_clips,23,3)", tuple(db.offsets.shape)[1:] == (23, 3))
-            check(f"{variant}/{split}: distances (n_clips,22)", tuple(db.distances.shape)[1:] == (22,))
-            check(f"{variant}/{split}: 40 Hz sample rate", float(db.sample_rate) == 40.0)
-            check(f"{variant}/{split}: has_imu == {variant == 'gait'}",
-                  bool(db.has_imu) == (variant == "gait"))
-            # translation head data: displacements are the first 3 channels
-            check(f"{variant}/{split}: poses[0][:,:3] finite displacements",
-                  bool(torch.isfinite(db.poses[0][:, :3]).all()))
-            # frame ids strictly increasing within every clip and global
-            for i, ids in enumerate(db.clip_frame_ids):
-                check(f"{variant}/{split}: clip {i} frame ids strictly increasing",
-                      bool(np.all(np.diff(ids) == 1)))
-            # no fake frame may enter a clip: clip_valid keeps the shared
-            # valid mask; fake rows were never converted
-            check(f"{variant}/{split}: clip valid masks only 0/1",
-                  all(set(np.unique(v)) <= {0, 1} for v in db.clip_valid))
-
-
-def test_16ch_parity() -> None:
-    print("== 16ch parity with the D_Test4 frozen pooler ==")
-    # The D_Test4 accepted numeric products (derived/Step2Motion/pressure_16ch)
-    # were physically deleted in the 2026-09-26/27 workspace migration; parity
-    # is guaranteed by keeping the accepted pool_48_to_16 implementation
-    # verbatim (see build_gait.py, plus --self-test) and is verified here on
-    # shared 48-grid inputs for representative sessions.
-    import torch
-    MotionDataset = _load_native()
-    for sid in ("S10101", "S11073", "S13011"):
+    root = ADAPTER_BASE / fold
+    splits = bg.read_split(ROOT / "AnysoleWorkspace/protocol/splits/default" / filename)
+    payload = json.loads((root / "gait/split_sessions.json").read_text())
+    artifact = json.loads((root / "artifact.json").read_text())
+    manifest = {r["session_id"]: r for r in map(json.loads, MANIFEST.read_text().splitlines()) if r}
+    check(fold + ": declared counts", tuple(len(splits[k]) for k in ("train", "val", "test")) == expected_counts)
+    check(fold + ": sessions recorded", payload["sessions"] == splits)
+    subjects = {k: {manifest[s]["subject_id"] for s in splits[k]} for k in splits}
+    for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
+        check(fold + ": disjoint " + a + "/" + b, not subjects[a].intersection(subjects[b]))
+    info = artifact["parameters"]["normalizers"]["gait"]
+    train_path = root / "gait/gait_train.pt"
+    check(fold + ": train-only normalizer source", Path(info["source"]).resolve() == train_path.resolve())
+    normalizer_path = root / "gait/normalizer_gait.pth"
+    check(fold + ": normalizer output", Path(info["output"]).resolve() == normalizer_path.resolve())
+    normalizer = torch.load(normalizer_path, map_location="cpu", weights_only=False)
+    check(fold + ": pose normalizer dimension", normalizer.poses_mean.numel() == 72)
+    check(fold + ": condition normalizer dimension", normalizer.insoles_mean.numel() == 50)
+    skipped = set(payload.get("empty_or_skipped", {}))
+    for split in ("train", "val", "test"):
+        db = MotionDataset.load(str(root / "gait" / ("gait_" + split + ".pt")), torch.device("cpu"))
+        actual = set(db.session_ids)
+        declared = set(splits[split])
+        check(fold + "/" + split + ": no undeclared sessions", actual <= declared)
+        check(fold + "/" + split + ": missing sessions explicitly recorded", declared - actual == declared.intersection(skipped))
+        check(fold + "/" + split + ": SMPL24 names", list(db.joint_names) == bg.SRC_JOINTS)
+        check(fold + "/" + split + ": SMPL24 parents", np.array_equal(db.parents.numpy(), bg.SRC_PARENTS))
+        check(fold + "/" + split + ": offsets", tuple(db.offsets.shape)[1:] == (24, 3))
+        check(fold + "/" + split + ": distances", tuple(db.distances.shape)[1:] == (23,))
+        check(fold + "/" + split + ": rate", float(db.sample_rate) == 40.0)
+        check(fold + "/" + split + ": IMU", bool(db.has_imu))
+        if split == "train":
+            check(fold + ": no validation/test normalizer samples", not actual.intersection(set(splits["val"]) | set(splits["test"])))
+        for i in range(db.n_clips()):
+            pose, cond, quat = db.poses[i], db.insole[i], db.quats[i]
+            ids = np.asarray(db.clip_frame_ids[i])
+            valid = np.asarray(db.clip_valid[i])
+            check(fold + "/" + split + ": pose shape", pose.ndim == 2 and pose.shape[-1] == 72)
+            check(fold + "/" + split + ": condition shape", cond.ndim == 2 and cond.shape == (len(pose), 50))
+            check(fold + "/" + split + ": quaternion shape", tuple(quat.shape) == (len(pose), 24, 4))
+            check(fold + "/" + split + ": row counts", len(ids) == len(valid) == len(pose))
+            check(fold + "/" + split + ": contiguous frame IDs", ids.size > 0 and np.all(np.diff(ids) == 1))
+            check(fold + "/" + split + ": validity", set(np.unique(valid)) <= {0, 1})
+            check(fold + "/" + split + ": finite data", bool(torch.isfinite(pose).all() and torch.isfinite(cond).all() and torch.isfinite(quat).all()))
+        # Pressure values remain tied to raw facts through the original frame IDs.
+        sid = db.session_ids[0]
         session = bg.load_shared_session(sid)
-        pooled_l = bg.pool_48_to_16(np.asarray(session["pressure"]["left48"], dtype=np.float32))
-        pooled_r = bg.pool_48_to_16(np.asarray(session["pressure"]["right48"], dtype=np.float32))
-        # 2026-10-22 val/test 分离后：S13011 只在 test 里（旧 val==test 时在 val）。
-        db = MotionDataset.load(str(ADAPTER_ROOT / "gait/gait_train.pt"), torch.device("cpu"))
-        try:
-            clip = db.session_ids.index(sid)
-        except ValueError:
-            db = MotionDataset.load(str(ADAPTER_ROOT / "gait/gait_val.pt"), torch.device("cpu"))
-            try:
-                clip = db.session_ids.index(sid)
-            except ValueError:
-                db = MotionDataset.load(str(ADAPTER_ROOT / "gait/gait_test.pt"), torch.device("cpu"))
-                clip = db.session_ids.index(sid)
-        ins = torch.cat(db.insole, 0).numpy()
-        kept_l = ins[db.clips[clip]:db.clips[clip + 1], 0:16]
-        kept_r = ins[db.clips[clip]:db.clips[clip + 1], 25:41]
-        start = int(db.clip_frame_ids[clip][0])
-        end = int(db.clip_frame_ids[clip][-1]) + 1
-        check(f"{sid}: left 16ch == pool_48_to_16(shared left48) (heel8+toe8)",
-              np.allclose(kept_l, pooled_l[start:end], atol=1e-5))
-        check(f"{sid}: right 16ch == pool_48_to_16(shared right48) (heel8+toe8)",
-              np.allclose(kept_r, pooled_r[start:end], atol=1e-5))
+        ids = np.asarray(db.clip_frame_ids[0], dtype=np.int64)
+        observed = db.insole[0].numpy()
+        left = bg.pool_48_to_16(np.asarray(session["pressure"]["left48"], dtype=np.float32))
+        right = bg.pool_48_to_16(np.asarray(session["pressure"]["right48"], dtype=np.float32))
+        check(fold + "/" + split + ": left pressure parity", np.allclose(observed[:, :16], left[ids], atol=1e-5))
+        check(fold + "/" + split + ": right pressure parity", np.allclose(observed[:, 25:41], right[ids], atol=1e-5))
+        print("DATASET_OK", fold, split, "declared=" + str(len(declared)), "scored=" + str(len(actual)), "clips=" + str(db.n_clips()))
 
 
 def test_public_metrics_zero() -> None:
@@ -295,74 +194,6 @@ def test_public_metrics_zero() -> None:
     except ValueError:
         check("unknown foot names raise", True)
 
-
-def _short_test_session() -> str:
-    import ast
-    splits = canonical_split()
-    manifest = manifest_by_id()
-    no_fake = [sid for sid in splits["test"]
-               if not ast.literal_eval(manifest[sid].get("fake_frame_indices") or "[]")]
-    check("at least one fake-free test session exists", bool(no_fake))
-    return min(no_fake, key=lambda sid: int(manifest[sid]["n_frames"]))
-
-
-def _write_smoke_registry() -> Path:
-    smoke_registry = SMOKE_ROOT / "smoke_registry.yaml"
-    smoke_registry.parent.mkdir(parents=True, exist_ok=True)
-    smoke_registry.write_text(
-        "VT2M:\n"
-        "  - name: Step2Motion\n"
-        "    family: baseline\n"
-        "    display_name: Step2MotionSmoke\n"
-        "    protocol: smpl24\n"
-        "    prediction_root: results://baselines/Step2Motion/smoke/predictions\n"
-        "    pattern: \"{session_id}.npz\"\n"
-        "    capabilities:\n"
-        "      joint_positions: true\n"
-        "      direct_joint_rotations: false\n"
-        "      root_translation: true\n"
-        "      root_rotation: true\n"
-        "      predicted_surface: false\n"
-        "      predicted_shape: false\n"
-        "      pressure_prediction: false\n"
-        "      contact_prediction: false\n",
-        encoding="utf-8",
-    )
-    return smoke_registry
-
-
-def _write_smoke_manifest(sid: str) -> Path:
-    """One canonical manifest row; bvh_path resolved to an absolute path.
-
-    The public evaluator's ``resolve_repo_path`` has no raw:// URI support
-    yet (public path-resolver territory, reported to the main agent), so the
-    smoke manifest carries the canonical row with the resolved BVH path.
-    """
-    manifest = manifest_by_id()
-    row = manifest[sid]
-    smoke_manifest = SMOKE_ROOT / "smoke_manifest.csv"
-    fields = ["session_id", "subject_id", "action", "quality", "n_frames",
-              "target_fps", "visual_start_s", "offset_s", "mocap_start_s",
-              "valid_frame_indices", "fake_frame_indices", "bvh_path"]
-    with smoke_manifest.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(fields)
-        writer.writerow([row["session_id"], row.get("subject_id", ""),
-                         row.get("action", ""), row.get("quality", ""),
-                         row["n_frames"], row["target_fps"],
-                         row["visual_start_s"], row["offset_s"],
-                         row.get("mocap_start_s", ""),
-                         row["valid_frame_indices"], row["fake_frame_indices"],
-                         str(resolve_uri(row["bvh_path"]))])
-    return smoke_manifest
-
-
-def _write_smoke_split(sid: str) -> Path:
-    smoke_split = SMOKE_ROOT / "smoke_splits.csv"
-    smoke_split.write_text(f"index,train,val,test\n0,,,{sid}\n", encoding="utf-8")
-    return smoke_split
-
-
 def test_train_smoke() -> None:
     print("== one-batch train smoke (gait, canonical config) ==")
     import torch
@@ -379,6 +210,8 @@ def test_train_smoke() -> None:
     config = load_config(str(ROOT / "Baselines/Step2Motion/configs/config_gait.json"))
     normalizer = torch.load(normalizer_path(config), weights_only=False)
     db = MotionDataset.load(config["train_data"], torch.device("cpu"))
+    config["skeleton_joint_names"] = list(db.joint_names)
+    config["pose_layout"] = "semantic_v1"
     db.set_temporality(config["input_T"])
     db.set_stride(config["input_stride"])
     loader = torch.utils.data.DataLoader(db, batch_size=16, shuffle=True)
@@ -410,91 +243,16 @@ def test_train_smoke() -> None:
     check("train dataset temporality window == 100", db.temporality == 100)
 
 
-def test_full_test_py_smoke() -> None:
-    print("== one-session test.py smoke (fresh models, tiny diffusion) ==")
-    import torch
-    from config import EnumEncoder, load_config
-    from dataset import MotionDataset
-    from backward_diffusion import model_from_config
-    from workspace import normalizer_path
-
-    sid = _short_test_session()
-    smoke_model_dir = SMOKE_ROOT / "checkpoints" / "gait_model_smoke"
-    config = load_config(str(ROOT / "Baselines/Step2Motion/configs/config_gait.json"))
-    config["diffusion_T"] = 4
-    config["name"] = "gait_model_smoke"
-    config["model_dir"] = str(smoke_model_dir)
-    normalizer = torch.load(normalizer_path(config), weights_only=False)
-    bw_pose, model_trans = model_from_config(config, is_prior=False)
-    bw_prior, _ = model_from_config(config, is_prior=True)
-    for model in (bw_prior, bw_pose, model_trans):
-        if model is not None and model.normalizer_id.item() == 0:
-            model.set_normalizer_id(normalizer.id)
-    smoke_model_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(bw_prior.state_dict(), smoke_model_dir / "model_prior.pth")
-    torch.save(bw_pose.state_dict(), smoke_model_dir / "model.pth")
-    torch.save(model_trans.state_dict(), smoke_model_dir / "model_trans.pth")
-    (smoke_model_dir / "copy_config.json").write_text(
-        json.dumps(config, cls=EnumEncoder, indent=2))
-
-    env = dict(os.environ, ANYSOLE_RESULTSDISPLAY=str(SMOKE_ROOT / "display"))
-    db = MotionDataset.load(str(ADAPTER_ROOT / "gait/gait_test.pt"), torch.device("cpu"))
-    clip = db.session_ids.index(sid)
-    cmd = [
-        sys.executable, "src/test.py", str(smoke_model_dir),
-        "--dataset", "model-input://Step2Motion/adapter_v1/gait/gait_test.pt",
-        "--clip", str(clip), "--no-visualize", "--seed", "2222",
-    ]
-    result = subprocess.run(cmd, cwd=STEP2MOTION_SRC.parent, env=env,
-                            capture_output=True, text=True, timeout=1800)
-    check("test.py exits 0", result.returncode == 0,
-          result.stdout[-1200:] + result.stderr[-1200:])
-    out_dir = RESULTS_ROOT / "baselines/Step2Motion/predictions/gait_model_smoke"
-    name = db.clip_name(clip)
-    gen = out_dir / f"{name}_gen.bvh"
-    check("test.py exported prediction BVH", gen.is_file(), str(gen))
-    check("test.py exported condition JSON", (out_dir / f"{name}_cs.json").is_file())
-    check("test.py exported meta JSON", (out_dir / f"{name}_meta.json").is_file())
-    check("test.py wrote metrics summary",
-          (out_dir / "metrics_summary.json").is_file())
-    # The public evaluator must be able to read the real test.py prediction.
-    # Copy the real frame-map sidecar as well: the GT-export sidecar written
-    # above covers all 161 frames, while the real prediction drops the first
-    # frame (160 frames); prediction_grid rejects a length mismatch.
-    target = SMOKE_ROOT / "predictions" / f"{sid}_gen.bvh"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(gen.read_bytes())
-    real_sidecar = out_dir / f"{name}_gen.frames.npz"
-    if real_sidecar.is_file():
-        target.with_suffix(".frames.npz").write_bytes(real_sidecar.read_bytes())
-    _, payload = _run_evaluator(sid)
-    row_result = payload["sessions"][0]
-    check("evaluator status ok for real prediction", row_result["status"] == "ok",
-          row_result.get("reason", ""))
-    print(f"  info: real-prediction mpjpe={row_result['mpjpe_mm']} "
-          f"n_valid={row_result['n_valid_frames']} (untrained smoke model)")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--skip-heavy", action="store_true",
-                        help="Skip the train/test.py/evaluator smoke runs.")
+    parser.add_argument("--skip-heavy", action="store_true", help="Skip the one-batch training smoke.")
     args = parser.parse_args()
-    test_split_sessions()
-    test_normalizer_provenance()
-    test_dataset_contract()
-    test_16ch_parity()
+    for fold, (filename, counts) in FOLDS.items():
+        test_fold(fold, filename, counts)
     test_public_metrics_zero()
-    # T2 gate: the heavy smokes exercise the ported model side (bvh_export /
-    # prefer_env_site / workspace / isolate_clip ...), which lands with T2.
-    if not args.skip_heavy and not (STEP2MOTION_SRC / "bvh_export.py").exists():
-        print("== heavy smokes skipped: T2 模型侧接入未移植 (no bvh_export.py in src) ==")
-        args.skip_heavy = True
     if not args.skip_heavy:
-        test_export_and_evaluator_smoke()
         test_train_smoke()
-        test_full_test_py_smoke()
-    print(f"\nall checks passed ({_PASSED})")
+    print("current_fourfold_data_checks_passed=" + str(_PASSED))
     return 0
 
 

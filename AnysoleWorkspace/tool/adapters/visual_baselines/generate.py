@@ -552,8 +552,8 @@ def main() -> int:
     parser.add_argument("--skip-existing", action="store_true",
                         help="skip sessions whose native result already exists")
     args = parser.parse_args()
-    if args.gpu not in (1, 2, 3, 4):
-        raise SystemExit(f"--gpu must be one of (1, 2, 3, 4), got {args.gpu}")
+    if args.gpu not in (1, 2, 3, 4, 5, 6, 7):
+        raise SystemExit(f"--gpu must be one of (1, 2, 3, 4, 5, 6, 7), got {args.gpu}")
     kind, level, fill = parse_degrade(args.degrade)
     manifest = {}
     for line in (WORKSPACE / "protocol/manifests" / "session_manifest.jsonl").open(

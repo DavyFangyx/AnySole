@@ -3,7 +3,7 @@
 
 Degradation only touches the visual frontend (``feature_hrnet.pth``, 2048-d);
 pressure / smpl / contact / keypoints stay bit-identical to the clean
-``adapter_v3_bvh24`` tree (symlinked).  The degradation recipes are shared
+``adapter_v4_anysolebbox`` tree (symlinked).  The degradation recipes are shared
 with the V8 E5 axes:
 
   occ   ``anysole.data.extract_hrnet.occlude_lower_strip`` (bbox-bottom strip,
@@ -15,11 +15,11 @@ with the V8 E5 axes:
 
 Output trees (one per level)::
 
-  model_inputs/MotionPRO/adapter_v3_bvh24_occNNN/cam3/<date>/<sub>/<sid>/
-  model_inputs/MotionPRO/adapter_v3_bvh24_gap_rNNN/cam3/...
-  model_inputs/MotionPRO/adapter_v3_bvh24_scene/cam3/...
+  model_inputs/MotionPRO/adapter_v4_anysolebbox_occNNN/cam3/<date>/<sub>/<sid>/
+  model_inputs/MotionPRO/adapter_v4_anysolebbox_gap_rNNN/cam3/...
+  model_inputs/MotionPRO/adapter_v4_anysolebbox_scene/cam3/...
 
-Sessions = the four-fold test union (98 sessions, E5 评估会话集) for occ/gap;
+Sessions = the four-fold test union excluding zero-coverage S12102 (97 sessions) for occ/gap;
 the sceneocc split session set for scene.  Session paths that are already
 built are skipped unless --force.
 
@@ -63,6 +63,7 @@ from anysole.data.make_scene_occ_cache import (  # noqa: E402
 V3_BASE = WORKSPACE / "model_inputs/MotionPRO/adapter_v3_bvh24/cam3"
 V4_BASE = WORKSPACE / "model_inputs/MotionPRO/adapter_v4_anysolebbox/cam3"
 BASE = V3_BASE
+# Imported helpers also build the clean v4 tree from v3; main() selects v4 for E5.
 V1 = WORKSPACE / "model_inputs/MotionPRO/adapter_v1/cam3"
 # 2026-11-12 裁定：遮挡条带锚到 V8/WHAM/GVHMR 共用的 AnySole bbox_cam3，
 # 保证退化画面逐位一致；v4 基座连 crop 也用 AnySole bbox（--crop-anysole）。
@@ -329,8 +330,8 @@ def main() -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--build", choices=("occ", "occ-tex", "gap", "scene",
                                            "scene-tex", "all"), default="all")
-    parser.add_argument("--base", choices=("v3", "v4"), default="v3",
-                        help="clean feature base tree (v4 = AnySole-bbox features)")
+    parser.add_argument("--base", choices=("v3", "v4"), default="v4",
+                        help="clean feature base tree (default: current v4 AnySole-bbox features)")
     parser.add_argument("--crop-anysole", action="store_true",
                         help="crop with the AnySole bbox (v4 pipeline)")
     parser.add_argument("--level", default="",
@@ -350,7 +351,7 @@ def main() -> int:
 
     global BASE, CROP_ANYSOLE
     BASE = V4_BASE if args.base == "v4" else V3_BASE
-    CROP_ANYSOLE = args.crop_anysole
+    CROP_ANYSOLE = args.crop_anysole or args.base == "v4"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = None
     if args.build in ("occ", "occ-tex", "scene", "scene-tex", "all"):

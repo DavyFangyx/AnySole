@@ -69,7 +69,10 @@ def wham_raw_row(level):
     level_dir = LEVEL_TO_BASELINE_DIR.get(level)
     if level_dir is None:
         return None
-    ff = (BASE_ROOT / "WHAM" / "predictions" / f"e5_ft_{level_dir}"
+    # 零样本四折版（2026-11-24，eval_zs/fourfold_zs：现役单次预测按四折
+    # split 分组逐折评估，钉定帧 + solver，与 GVHMR Q10 同协议；clean 与
+    # scene_clean 的逐会话 npz 未保存，回落单次 pooled 并保留待办）。
+    ff = (BASE_ROOT / "WHAM" / "predictions" / level_dir
           / "metrics" / "fourfold_summary.json")
     row = {"模型": "WHAM @V", "档位": level, "行": "@V",
            "定位信息": LOC_INFO["WHAM @V"]}

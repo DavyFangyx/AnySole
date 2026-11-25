@@ -1,32 +1,20 @@
 #!/usr/bin/env python3
-"""Step2Motion adapter_v3: identical to adapter_v2 except the IMU block.
+"""Build current four-fold Step2Motion inputs: SMPL-24 targets and 50-dim conditions.
 
-The 50-dim insole layout, pressure pooling, clip policy, pose targets and
-normalizer contract are unchanged (``build_gait.py`` stays untouched).  Only
-the acc/gyro channels are read from the virtual instep IMU facts produced by
-``workspace/virtual_imu/build_instep.py``:
+Shared construction functions come from build_gait.py; no adapter_v2 data
+directory is read. IMU channels come from shared/facts/virtual_imu, with the
+existing mount rotation, left-foot channel convention and world-acceleration
+slots preserved.
 
-    AnysoleWorkspace/shared/facts/virtual_imu/<date>/<sid>/imu_instep.npz
+Every build requires its fold CSV and output root, for example:
 
-The facts store the physical sensor-frame measurements (mount rotation ``M``
-applied, no left-foot y flip).  This adapter applies the legacy left y flip
-exactly like ``build_gait.synthesize_imu`` and writes the world acceleration
-from the facts into the native ``is_acceleration_world=True`` slots.  The
-per-frame sensor quaternions (including ``M``) are exposed through
-``dataset.quat_lIMU`` / ``quat_rIMU``, so local <-> world stays consistent.
+    python -m AnysoleWorkspace.tool.adapters.Step2Motion.build_gait_v3 \\
+      --splits-csv AnysoleWorkspace/protocol/splits/default/splits_test_S5S6S11_val_S12.csv \\
+      --out-root AnysoleWorkspace/model_inputs/Step2Motion/adapter_v3_folds/fS5S6S11
 
-Reads the linked AnysoleWorkspace (splits / shared facts / BVH) read-only and
-writes everything under this project's own workspace:
-
-    AnysoleWorkspace/model_inputs/Step2Motion/adapter_v3/gait/{gait_train,gait_val,gait_test}.pt
-    AnysoleWorkspace/model_inputs/Step2Motion/adapter_v3/gait/normalizer_gait.pth
-    AnysoleWorkspace/model_inputs/Step2Motion/adapter_v3/gait/split_sessions.json
-    AnysoleWorkspace/model_inputs/Step2Motion/adapter_v3/{artifact.json,pressure_ranges.csv}
-
-Run (gait repo root, touch_gait env):
-
-    python3 workspace/virtual_imu/build_gait_v3.py
-    python3 workspace/virtual_imu/build_gait_v3.py --sessions S10103
+Each output contains gait train/val/test datasets, a train-only normalizer,
+split_sessions.json, artifact.json and pressure_ranges.csv. --self-test does
+not require an output root and does not construct datasets.
 """
 
 from __future__ import annotations
@@ -51,7 +39,7 @@ from AnysoleWorkspace.tool.artifacts import sha256_file, write_artifact  # noqa:
 from AnysoleWorkspace.tool.workspace import WORKSPACE, canonical_uri  # noqa: E402
 
 ADAPTER_VERSION = "adapter_v3"
-OUTPUT_ROOT = WORKSPACE / "model_inputs" / "Step2Motion" / ADAPTER_VERSION
+OUTPUT_ROOT = WORKSPACE / "model_inputs" / "Step2Motion" / "adapter_v3_folds"
 INPUT_ROOT = OUTPUT_ROOT
 VIRTUAL_IMU_ROOT = WORKSPACE / "shared/facts/virtual_imu"
 TARGET_HZ = v2.TARGET_HZ
@@ -66,14 +54,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-frames", type=int, default=v2.MIN_FRAMES)
     parser.add_argument("--virtual-imu-root", default=str(VIRTUAL_IMU_ROOT),
                         help="directory containing <date>/<sid>/imu_instep.npz")
-    parser.add_argument("--out-root", default=str(OUTPUT_ROOT),
-                        help="adapter_v3 output root (default: workspace/virtual_imu/adapter_v3)")
+    parser.add_argument("--out-root", default=None,
+                        help="explicit per-fold output root under adapter_v3_folds")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--splits-csv", default=str(v2.SPLIT_CSV),
-                        help="split CSV (default: canonical splits.csv; "
-                             "four-fold LSO uses the per-fold CSV)")
-    return parser.parse_args()
+    parser.add_argument("--splits-csv", default=None,
+                        help="explicit train/val/test CSV for the selected fold")
+    args = parser.parse_args()
+    if not args.self_test and (not args.out_root or not args.splits_csv):
+        parser.error("current inputs require --splits-csv and --out-root for the selected fold")
+    return args
 
 
 def virtual_imu_path(session: dict) -> Path:
@@ -364,12 +354,12 @@ def run_self_test() -> None:
 def main() -> int:
     global VIRTUAL_IMU_ROOT, INPUT_ROOT, OUTPUT_ROOT
     args = parse_args()
-    VIRTUAL_IMU_ROOT = Path(args.virtual_imu_root)
-    INPUT_ROOT = Path(args.out_root)
-    OUTPUT_ROOT = INPUT_ROOT
     if args.self_test:
         run_self_test()
         return 0
+    VIRTUAL_IMU_ROOT = Path(args.virtual_imu_root)
+    INPUT_ROOT = Path(args.out_root)
+    OUTPUT_ROOT = INPUT_ROOT
     splits = v2.read_split(Path(args.splits_csv))
     if args.sessions:
         wanted = {value.strip() for value in args.sessions.split(",") if value.strip()}
@@ -426,8 +416,8 @@ def main() -> int:
                 "time_axis": "shared frames.npz mocap_time_s",
                 "normalizers": normalizers,
             },
-            source_artifacts=[canonical_uri(v2.SPLIT_CSV), str(VIRTUAL_IMU_ROOT)],
-            source_hashes={"split_csv": sha256_file(v2.SPLIT_CSV)},
+            source_artifacts=[canonical_uri(Path(args.splits_csv)), str(VIRTUAL_IMU_ROOT)],
+            source_hashes={"split_csv": sha256_file(Path(args.splits_csv))},
             consumers=["Baselines/Step2Motion"],
         )
         write_pressure_ranges(splits, errors)

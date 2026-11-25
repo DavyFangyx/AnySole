@@ -998,4 +998,7 @@ def write_pressure_ranges(splits: dict[str, list[str]], errors: dict) -> None:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        "This module provides shared Step2Motion construction functions. "
+        "Use build_gait_v3.py with --splits-csv and --out-root for the selected fold."
+    )

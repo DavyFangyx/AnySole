@@ -10,7 +10,8 @@ AnysoleWorkspace/
 │   └── config/                                   # foot_sensor_layout + 标定/offset 软链→正典
 ├── protocol/
 │   ├── manifests/session_manifest.{csv,jsonl}
-│   ├── splits/default/splits.csv                # 由参数生成（92/12/36，val≠test）
+│   ├── splits/default/                          # 当前四折 train/val/test 划分
+│   ├── splits/crossfit_woS13/                   # 四折评分会话与钉定帧
 │   ├── schemas/
 │   └── calibration/
 ├── shared/
@@ -54,11 +55,6 @@ python3 AnysoleWorkspace/tool/build_raw_index.py \
 # 从 raw、session 索引和触觉最终记录构建公共 manifest
 python3 AnysoleWorkspace/tool/build_manifest.py --fps 40 --camera cam3 --cam 1,2,4
 # --cam 1,2,4（或 all）：另写 per-camera jsonl（cam3 = 主 manifest，不再另写）
-# 生成 split（当前 train/val/test = 92/12/36；--val 缺省取 test 前一个 subject）
-python3 AnysoleWorkspace/tool/build_manifest.py split \
-  --manifest AnysoleWorkspace/protocol/manifests/session_manifest.jsonl \
-  --test S13,S14 --val S12
-
 # 构建公共 shared facts
 python3 AnysoleWorkspace/tool/build_shared.py --facts-only --cam 1,2,3,4 --force
 # --cam 1,2,3,4：cam3 读主 manifest，其余读 session_manifest_cam{N}.jsonl；--mmvp-only 仅支持 cam3
@@ -73,7 +69,7 @@ python3 AnysoleWorkspace/tool/workspace.py doctor
 python3 AnysoleWorkspace/tool/frame_stats.py --dates 20260804,20260807,20260808,20260810
 ```
 
-split 由 `build_manifest.py split` 生成（`--val` 缺省取 test 前一个 subject，val≠test）；manifest 只登记 session 元数据，模型直接读取 `protocol/splits/default/splits.csv`。
+正式训练读取 `protocol/splits/default/` 的四折 CSV，基线评测读取 `protocol/splits/crossfit_woS13/` 的对应会话与钉定帧；常规数据构建不重写这些协议文件。
 触觉质量标注（A/B/C/D）登记在 manifest 的 `pressure_quality_class` / `pressure_quality_reason` 两列，作为排除依据
 （C/D 一律不进入管线、S9 整组排除等），详见 `protocol/splits/default/README.md`。
 
@@ -103,32 +99,34 @@ python3 AnysoleWorkspace/tool/adapters/AnySole/build_hrnet_bbox.py --cam 1,2,3,4
 ### MotionPRO
 
 ```bash
-# 生成 MotionPRO 私有人体框（mmdet 只在 bbox_scan）
-/data/fangyuxuan/miniconda3/envs/bbox_scan/bin/python -m lib.util.gen_bbox --cam-id 3 --skip-existing
-# 生成 MotionPRO 私有图像特征
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m lib.util.gen_image_feature --cam-id 3 --skip-existing
-# 生成 MotionPRO 私有关键点缓存
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m lib.util.gen_kps --cam-id 3 --skip-existing
-# 推荐：一条命令跑完三步链（bbox 子进程自动切 bbox_scan 解释器）
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/MotionPRO/run_visual_chain.py --cuda-device 6 --cam-id 1,2,3,4
-
-# 触觉依赖产物：虚拟毯 pressure.npz + soft-f6 contact.npy
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/MotionPRO/adapter.py --split train --force
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/MotionPRO/adapter.py --split val --force
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/MotionPRO/adapter.py --split test --force
+# 从当前 v4 基座生成正式 occ/gap/scene 输入
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m AnysoleWorkspace.tool.adapters.MotionPRO.build_e5_variants --base v4 --crop-anysole --build all
+# 生成 Q14 纹理遮挡输入（替换 wood 为 fabric 或 crate）
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m AnysoleWorkspace.tool.adapters.MotionPRO.build_e5_variants --base v4 --crop-anysole --build occ-tex --asset wood
+# 生成 Q14 纹理立柱输入
+/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python -m AnysoleWorkspace.tool.adapters.MotionPRO.build_e5_variants --base v4 --crop-anysole --build scene-tex
 ```
 
-输出位于 `model_inputs/MotionPRO/`；dual-sole raster 和 soft-f6 也只能从 `shared/facts/pressure_48.npz` 生成（视觉链三条与压力无关，压力改动后无需重跑）。
+正式输入为 `model_inputs/MotionPRO/adapter_v4_anysolebbox*`；当前 v4 基座仍链接 `adapter_v3_bvh24` 的数据和 `adapter_v1` 的 bbox，这两个基础目录继续保留，本节命令仅构建其退化变体。
 
 ### Step2Motion
 
 ```bash
-# 生成 Step2Motion 原生 BVH/16 通道输入 + normalizer
-# facts（pressure_48.npz）重建后必须重跑（输入含 16 通道压力条件）
-/data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/Step2Motion/build_gait.py
+# 按当前四折划分生成 SMPL-24 目标、50维条件与各折 train-only normalizer
+for gait_pair in \
+  fS5S6S11:splits_test_S5S6S11_val_S12.csv \
+  fS5S11S12:splits_test_S5S11S12_val_S13.csv \
+  fS6S7:splits_test_S6S7_val_S14.csv \
+  fS5S6S8:splits_test_S5S6S8_val_S7.csv; do
+  gait_fold=${gait_pair%%:*}
+  gait_split=${gait_pair#*:}
+  /data/fangyuxuan/miniconda3/envs/touch_gait/bin/python AnysoleWorkspace/tool/adapters/Step2Motion/build_gait_v3.py \
+    --splits-csv "AnysoleWorkspace/protocol/splits/default/$gait_split" \
+    --out-root "AnysoleWorkspace/model_inputs/Step2Motion/adapter_v3_folds/$gait_fold"
+done
 ```
 
-输出位于 `model_inputs/Step2Motion/adapter_v1/{gait, gait_noimu}/`（含 train/val/test `.pt`、train-only normalizer、`split_sessions.json`）。
+输出位于 `model_inputs/Step2Motion/adapter_v3_folds/<fold>/gait/`，输入依赖当前 shared facts 与 virtual_imu，BVH24 仅作为读取格式。
 
 ### MMVP 方法族（FPP-Net / PoseTransOpt / pressure_toolkit）
 
@@ -157,27 +155,13 @@ python3 AnysoleWorkspace/tool/adapters/mmvp_series/posetransopt/build_inputs.py 
 conda activate mmvp
 python3 AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/build_inputs.py --split all --cam 1,2,3,4
 
-# 行走地面 ROI 审计（输出 results_display/DataTest/D6Test_floor/）
-python3 AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/floor_audit.py
-'''
-1. 每个候选 ROI 拟合一张平面，算残差（点离平面 RMS mm）——小 = 该区域是一张平地面；
-2. 对比旧口径：算棋盘格平面与拟合地面的偏移（1.29–1.45m）与法向夹角（140–145°）——证明旧适配器把棋盘格当地面是错的。
-3. 9 个候选是脚本里预设的,不是自动搜出来的
-'''
-# 依赖深度文件 + 底部中央带 ROI 生成行走地面（floor）；
-# 四日期审计最优 ROI 为 lower_narrow（868,1178,568,1055），显式指定：
+# 依赖当前深度文件，按固定 ROI 生成行走地面
 python3 AnysoleWorkspace/tool/adapters/mmvp_series/pressure_tookit/build_inputs.py --split all --floor-roi 868,1178,568,1055
---sessions S5011
-# 质量在 session_reports/<date>/<subject>/<session>.json 的 floor.residual_mm看
 ```
 
 输出分别位于 `model_inputs/FPP-Net/adapter_v1/`、`model_inputs/PoseTransOpt/adapter_v1/`、`model_inputs/pressure_toolkit/v1/` 和 `shared/frontends/`（`rtmpose_halpe26/v1`、`cliff_hr48/v1`、`depthpro/v1`、`human_masks/sam31/v1`）；31×11 压力统一读取 `shared/representations/tactile/mmvp_31x11/v1/`。cam1/2/4 的中间量以 `cam{N}` 子目录或 `_cam{N}` 文件名落同层，cam3 路径与文件名不变。
 
 MMVP 31×11 是 pressure_toolkit/FPP-Net 共用的过程表示，不被 AnySole 或 Step2Motion 读取。
-
-### D_Test4
-
-D_Test4 读取 shared representation 和各模型已经生成的 `model_inputs`，查看触觉适配到异构传感器上。
 
 ### Human-mask bbox frontend（独立产物）
 
