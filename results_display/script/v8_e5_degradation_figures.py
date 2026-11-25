@@ -160,6 +160,15 @@ def baseline_series(model: str, variants: list[str], metric: str):
             if entry and entry.get("n_folds", 0) >= 4:
                 means.append(float(entry["mean"])); stds.append(float(entry["std"])); continue
             means.append(float("nan")); stds.append(float("nan")); continue
+        # WHAM（2026-11-25）：零样本四折（钉定帧 + solver，
+        # e5_<variant>/metrics/fourfold_summary.json），不使用 WHAM_OFFSETS
+        # 分数常数平移（08 §4.2）。
+        p = root / variant / "metrics" / "fourfold_summary.json"
+        if p.is_file():
+            entry = json.loads(p.read_text(encoding="utf-8")).get(key)
+            if entry and entry.get("n_folds", 0) >= 4:
+                means.append(float(entry["mean"])); stds.append(float(entry["std"])); continue
+            means.append(float("nan")); stds.append(float("nan")); continue
         p = root / variant / "eval_motion" / "metrics" / "test_comparison.json"
         if not p.is_file():
             means.append(float("nan")); stds.append(float("nan")); continue
@@ -172,8 +181,6 @@ def baseline_series(model: str, variants: list[str], metric: str):
         means.append(float(value) if value is not None else float("nan"))
         stds.append(float("nan"))
     arr = np.asarray(means)
-    if model == "WHAM":
-        arr = arr + WHAM_OFFSETS.get(metric, 0.0)
     arr_std = np.asarray(stds) if np.isfinite(stds).any() else None
     return arr, arr_std
 

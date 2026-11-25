@@ -43,6 +43,16 @@ OUT = (REPO / "results_display/Etest_crossfit_physimu_vgate/Supplement/"
        "03_视觉缺失下的轨迹补全/Q9：MotionPRO 长-短任务表现差异/实验结果")
 HALF_MANI = REPO / "results/diagnostics/20261111_halfplane_occ/manifests"
 SCENE_MANI = REPO / "results/diagnostics/20261107_e5_sceneocc_full/manifests"
+# 2026-11-25：归档任务把 sceneocc_full 移入 _trash/20261124；优先原路径，
+# 缺失时回落 _trash（活依赖，见 09 §6.2 常驻依赖原则）。
+if not SCENE_MANI.is_dir():
+    _alt = REPO / "_trash/20261124/results_diagnostics/20261107_e5_sceneocc_full/manifests"
+    if _alt.is_dir():
+        SCENE_MANI = _alt
+if not HALF_MANI.is_dir():
+    _alt2 = REPO / "_trash/20261124/results_diagnostics/20261111_halfplane_occ/manifests"
+    if _alt2.is_dir():
+        HALF_MANI = _alt2
 
 ARMS = ["MotionPRO", "Step2Motion", "BiFoot", "BiFoot-TTA", "BiFoot-Ramp"]
 ACTIONS = ["03", "04", "05", "09"]
@@ -70,12 +80,14 @@ def pooled(per_action: dict, ns: dict, arm: str) -> float:
 
 
 def read_summary(path: str) -> dict:
-    """Read published pooled summary: row1 = title, row2 = 方法,03,04,05,09,pooled 3D."""
+    """Read published summary: row1 = title, row2 = 方法,定位信息,03,04,05,09,
+    记录等权 mean（fold-session RMS）(2026-11-24 起；旧格式无定位信息列、
+    末列名 pooled 3D，兼容读取)。"""
     with open(path, encoding="utf-8-sig") as f:
         lines = [ln for ln in csv.reader(f)]
     header, data = lines[1], lines[2:]
-    assert header == ["方法", "03", "04", "05", "09", "pooled 3D"], header
-    return {r[0]: float(r[-1]) for r in data}
+    pooled = header[-1]
+    return {r[0]: float(r[-1]) for r in data if r and r[0]}
 
 
 def main() -> None:

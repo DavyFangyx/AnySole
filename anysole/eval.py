@@ -458,7 +458,38 @@ def _load_model(checkpoint: dict, config: dict, device: torch.device) -> AnySole
                 "checkpoint config has no model_name; registered-model "
                 "checkpoints must record it (train --model-name writes it)"
             )
-        entry = get_builder(model_name)
+        # 2026-11-25：V8_IMU 改名前的旧 ckpt 记录旧 model_name；归一化到
+        # registry 现行名（模块与结构未变，仅名字迁移）。DecoderOnly /
+        # CleanOnly 与 enum 基座共用同一 model_name（仅训练范围不同），
+        # 结构一致，同样归一到 woAdapt 条目。
+        _legacy_map = (
+            ("V8_Cv7_PhysIMU_NoEnum_", "V8_IMU_Residual_woEnum_"),
+            ("V8_Cv7_PhysIMU_Router_Frozen", "V8_IMU_Router"),
+            ("V8_Cv7_PhysIMU_Gate", "V8_IMU_DualGate"),
+            ("V8_Cv7_PhysIMU_", "V8_IMU_Residual_woAdapt_"),
+            ("V8_Cv5_PhysIMU_", "V8_IMU_TGate_"),
+            # Cv5 基座（raw108 触觉）的旧名；v8_cv5 条目保持 raw108 结构。
+            ("V7_Cv5SD2_", "V8_Cv5_"),
+        )
+        for _old, _new in _legacy_map:
+            if model_name.startswith(_old):
+                model_name = _new + model_name[len(_old):]
+                break
+        # 旧命名偶带随机种子尾缀（如 woEnum_fS5S6S11_s1）。
+        if "_s1" in model_name:
+            model_name = model_name.replace("_s1", "")
+        try:
+            entry = get_builder(model_name)
+        except Exception:
+            # 试点条目只有 fS5S6S11 折；其它折回落无折基础条目
+            # （结构与试点同 module）。
+            import re as _re
+            _base = _re.sub(r"_(fS5S6S11|fS5S11S12|fS6S7|fS5S6S8)$", "", model_name)
+            if _base != model_name:
+                entry = get_builder(_base)
+                model_name = _base
+            else:
+                raise
         # 2026-11-01 回填：Ctx4/Ctx5 旧 ckpt 的 STRUCTURE 曾漏 v7_ctx3
         # （隐含键——模型 build 侧 ctx3 已生效，权重语义正确；entry 补键
         # 后旧 ckpt 校验不匹配）。回填后再比较。

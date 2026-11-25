@@ -8,7 +8,7 @@ REPO = Path(__file__).resolve().parents[2]
 SRC = REPO / "results/diagnostics/20261114_imu_eval_v2_all/V8_IMU_Residual/clean"
 MEANROOT = REPO / "results/diagnostics/20261119_e2_meanroot/V8_IMU_Residual/clean"
 REV_20261124 = REPO / "results/diagnostics/20261124_e5_meanroot_selfphys/V8_IMU_Residual/clean"
-OLD = REPO / "results_display/Etest_crossfit_v8/E2_MainPerformance/Main_Table1_E2_MainPerformance.csv"
+OLD = REPO / "results_display/backup/Etest_crossfit_v8/E2_MainPerformance/Main_Table1_E2_MainPerformance.csv"
 OUT = REPO / "results_display/Etest_crossfit_physimu_vgate/E2_MainPerformance"
 FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
 MODES = (("V2M", "U@V"), ("T2M", "U@T"), ("VT2M", "U@VT"))
@@ -26,11 +26,11 @@ LOC_INFO = {
     "GVHMR": "测试集校准（世界系注册拟合平移）",
     "MMVP (FPP-Net + PoseTransOpt)": "测试集校准（世界系注册拟合平移）",
     "WHAM": "测试集校准（世界系注册拟合平移）",
-    "Step2Motion": "GT 初始化（首帧位置锚）",
+    "Step2Motion": "GT 初始化（首帧位置单锚）",
     "MotionPRO": "动捕定位辅助（输入含真实定位）",
     "V8_IMU_Residual": "",  # 按条件填写
 }
-V8_LOC = {"U@V": "自主定位", "U@T": "GT 初始化（首帧位置锚）", "U@VT": "自主定位"}
+V8_LOC = {"U@V": "自主定位", "U@T": "GT 初始化（首帧位置+yaw 单锚）", "U@VT": "自主定位"}
 GROUP_ORDER = {"自主定位": 0, "GT 初始化": 1, "测试集校准": 2, "动捕定位辅助": 3}
 
 def ms(vals):
@@ -91,6 +91,64 @@ def apply_q10_motionpro(rows):
     return rows
 
 
+def apply_rerun(rows):
+    """MMVP/Step2Motion/WHAM 行改用 2026-11-25 钉定帧重评产物（全部列）：
+    折级钉定帧 manifest + canonical solver（solver 已修正物理口径），
+    与 GVHMR/MotionPRO 的 Q10 统一协议同款。Step2Motion GroundPen 在评估
+    入口为 nan（solver 直调有值，入口差异待查）→ 该列回填历史值并标注。
+    """
+    import math
+
+    def fourfold(model, key):
+        vals = []
+        for f in FOLDS:
+            p = (REPO / "results/baselines" / model / "metrics"
+                 / f"{f}_20261125_phys_rerun_comparison.json")
+            if not p.is_file():
+                return None
+            s = json.loads(p.read_text())["summary"]
+            v = s.get(key)
+            if v is None or not (isinstance(v, (int, float))):
+                return None
+            if not math.isfinite(float(v)):
+                return None
+            vals.append(float(v))
+        if len(vals) < 4:
+            return None
+        return "%.3f±%.3f" % (statistics.mean(vals), statistics.pstdev(vals))
+
+    COL_MAP = (("PA-MPJPE", "pa_mpjpe_mm"), ("MPJPE", "mpjpe_mm"),
+               ("GlobalMPJPE", "global_mpjpe_mm"),
+               ("平均根位置误差 (mm)", "root_ate_mm"),
+               ("Mean Root Position Error (mm)", "root_ate_mm"),
+               ("RootOrientationDrift", "root_orientation_drift_deg"),
+               ("GroundPen", "ground_pen_mm"), ("FootSliding", "foot_sliding_mm"))
+
+    for r in rows:
+        if r["模型"] == "MMVP (FPP-Net + PoseTransOpt)":
+            src = lambda key: fourfold("VP-MoCap", key)
+        elif r["模型"] == "Step2Motion":
+            src = lambda key: fourfold("Step2Motion", key)
+        elif r["模型"] == "WHAM":
+            p = (REPO / "results/baselines/WHAM/predictions/e5_clean"
+                 / "metrics" / "fourfold_summary.json")
+            if not p.is_file():
+                continue
+            d = json.loads(p.read_text())
+
+            def src(key):
+                e = d.get(key)
+                return ("%.3f±%.3f" % (e["mean"], e["std"])
+                        if e and e.get("n_folds", 0) >= 4 else None)
+        else:
+            continue
+        for col, key in COL_MAP:
+            v = src(key)
+            if v:
+                r[col] = v
+    return rows
+
+
 def meanroot_value(mode, fold, key):
     p = MEANROOT / ("%s.json" % fold)
     if not p.is_file():
@@ -145,7 +203,7 @@ def main():
                 continue
             rec[label] = fmt([eval_value(f, mode, key) for f in FOLDS])
         res_rows[cond_label] = rec
-    base_rows = apply_q10_motionpro(load_baselines())
+    base_rows = apply_rerun(apply_q10_motionpro(load_baselines()))
     rows = []
     for cond_label in ("U@V", "U@T", "U@VT"):
         block = [r for r in base_rows if r.get("条件") == cond_label]
@@ -207,7 +265,8 @@ def main():
                 if label == "平均根位置误差 (mm)" and mode != "T2M":
                     rec[label] = meanroot_value(mode, f, "MeanRootPositionError")
                     continue
-                rec[label] = d.get(key)
+                # 与主表同源：20261124 重评树优先（物理列取自锚版）。
+                rec[label] = eval_value(f, mode, key)
             per.append(rec)
     pf = ["模型", "条件", "fold", "定位信息"] + [x for _, x in DETAIL]
     pp = OUT / "detail" / "E2_MainPerformance_perFold.csv"

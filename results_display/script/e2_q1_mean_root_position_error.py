@@ -34,7 +34,7 @@ REPO = Path(__file__).resolve().parents[2]
 SRC = REPO / "results/diagnostics/20261119_e2_meanroot/V8_IMU_Residual/clean"
 TB = (REPO / "results/diagnostics/20261114_imu_eval_v2_motion"
       / "V8_IMU_Residual_TBiFoot_yaw_all.json")
-OLD = REPO / "results_display/Etest_crossfit_v8/E2_MainPerformance/Main_Table1_E2_MainPerformance.csv"
+OLD = REPO / "results_display/backup/Etest_crossfit_v8/E2_MainPerformance/Main_Table1_E2_MainPerformance.csv"
 OUT = (REPO / "results_display/Etest_crossfit_physimu_vgate"
        / "Supplement" / "04_指标与跨表一致性"
        / "Q1：轨迹指标不一致" / "E2")
@@ -66,11 +66,11 @@ LOC_INFO = {
     "GVHMR": "测试集校准（世界系注册拟合平移）",
     "MMVP (FPP-Net + PoseTransOpt)": "测试集校准（世界系注册拟合平移）",
     "WHAM": "测试集校准（世界系注册拟合平移）",
-    "Step2Motion": "GT 初始化（首帧位置锚）",
+    "Step2Motion": "GT 初始化（首帧位置单锚）",
     "MotionPRO": "动捕定位辅助（输入含真实定位）",
     "V8_IMU_Residual": "",
 }
-V8_LOC = {"U@V": "自主定位", "U@T": "GT 初始化（首帧位置锚）", "U@VT": "自主定位"}
+V8_LOC = {"U@V": "自主定位", "U@T": "GT 初始化（首帧位置+yaw 单锚）", "U@VT": "自主定位"}
 GROUP_ORDER = {"自主定位": 0, "GT 初始化": 1, "测试集校准": 2, "动捕定位辅助": 3}
 
 
@@ -87,7 +87,19 @@ def fmt(values):
 
 
 def read_cell(fold: str) -> dict:
-    return json.loads((SRC / ("%s.json" % fold)).read_text(encoding="utf-8"))["metrics"]
+    # 2026-11-25：物理列与 E2 主表同源——20261124 重评树（自锚版）优先，
+    # MeanRootPositionError 与其余列仍从 20261119 meanroot 树读。
+    m = json.loads((SRC / ("%s.json" % fold)).read_text(encoding="utf-8"))["metrics"]
+    rev = REPO / "results/diagnostics/20261124_e5_meanroot_selfphys/V8_IMU_Residual/clean"
+    p = rev / ("%s.json" % fold)
+    if p.is_file():
+        r = json.loads(p.read_text(encoding="utf-8"))["metrics"]
+        for mode in ("V2M", "T2M", "VT2M"):
+            for col, key in (("GroundPen（GT Anchored）", "GroundPen"),
+                             ("FootSliding（GT Anchored）", "FootSliding")):
+                if key in r.get(mode, {}):
+                    m.setdefault(mode, {})[col] = r[mode][key]
+    return m
 
 
 def load_tb() -> dict | None:
@@ -168,6 +180,12 @@ def write_main_table(main_rows: dict[str, dict]) -> None:
     fields = ["模型", "条件", "n", "定位信息"] + [header for _, header in MAIN]
     rows = []
     baseline_rows = apply_q10_motionpro(load_baselines())
+    # 2026-11-25：MMVP/Step2Motion/WHAM 行与正式 E2 主表同源
+    # （钉定帧重评全列 + Q10 统一）。
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location("e2_v2_table", str(REPO / "results_display/script/e2_v2_table.py"))
+    _mod = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_mod)
+    baseline_rows = _mod.apply_rerun(baseline_rows)
     for label in ("U@V", "U@T", "U@VT"):
         block = [r for r in baseline_rows if r.get("条件") == label]
         block.append(main_rows[label])

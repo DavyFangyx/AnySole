@@ -8,7 +8,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 REPO = Path(__file__).resolve().parents[2]
-EV = REPO / "results/diagnostics/20261114_imu_eval_v2"
+EV = REPO / "results/diagnostics/20261125_e4_selfphys"
+EV_OLD = REPO / "results/diagnostics/20261114_imu_eval_v2"
 EV_ALL = REPO / "results/diagnostics/20261114_imu_eval_v2_all"
 OUT = REPO / "results_display/Etest_crossfit_physimu_vgate/E4_ComponentAblation"
 FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
@@ -24,7 +25,8 @@ METRICS = (("PA-MPJPE", "PA-MPJPE (mm)"),
 SURFACE, INK, MUTED = "#fcfcfb", "#0b0b0b", "#52514e"
 
 def _path(model, cond, fold):
-    for root in (EV, EV_ALL):
+    # 2026-11-25 重评树优先（自锚物理列），旧树回落（occ100/gap 补充点）。
+    for root in (EV, EV_OLD, EV_ALL):
         p = root / model / cond / ("%s.json" % fold)
         if p.is_file():
             return p
@@ -35,7 +37,13 @@ def value(model, cond, fold, key):
     if p is None:
         return None
     d = json.loads(p.read_text())
-    return d.get("metrics", {}).get("VT2M", {}).get(key)
+    m = d.get("metrics", {}).get("VT2M", {})
+    # 物理列优先自锚版（08 §3.3）；旧树无该字段时回落 GT Anchored。
+    if key == "GroundPen（GT Anchored）" and "GroundPen" in m:
+        return m.get("GroundPen")
+    if key == "FootSliding（GT Anchored）" and "FootSliding" in m:
+        return m.get("FootSliding")
+    return m.get(key)
 
 def ms(model, cond, key):
     vals = [value(model, cond, f, key) for f in FOLDS]

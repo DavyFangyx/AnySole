@@ -9,7 +9,8 @@ import csv, json, statistics
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-EVAL = REPO / "results/diagnostics/20261114_imu_eval_v2"
+EVAL = REPO / "results/diagnostics/20261125_e4_selfphys"
+EVAL_OLD = REPO / "results/diagnostics/20261114_imu_eval_v2"
 OUT = REPO / "results_display/Etest_crossfit_physimu_vgate/E4_ComponentAblation"
 FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
 CONDS = ("clean", "occ020", "occ050", "occ090", "sceneocc")
@@ -36,13 +37,22 @@ TRAINING = (
 )
 
 def read_metric(model, cond, fold, key):
+    # 2026-11-25 重评树优先（含自锚物理列），旧 EV 树回落。
     p = EVAL / model / cond / ("%s.json" % fold)
     if not p.is_file():
-        p = EVAL / model / cond / ("%s_brief.json" % fold)
+        p = EVAL_OLD / model / cond / ("%s.json" % fold)
+        if not p.is_file():
+            p = EVAL_OLD / model / cond / ("%s_brief.json" % fold)
     if not p.is_file():
         return None
     d = json.loads(p.read_text())
-    return d.get("metrics", {}).get("VT2M", {}).get(key)
+    m = d.get("metrics", {}).get("VT2M", {})
+    # 物理列优先自锚版（08 §3.3）；旧树无该字段时回落 GT Anchored。
+    if key == "GroundPen（GT Anchored）" and "GroundPen" in m:
+        return m.get("GroundPen")
+    if key == "FootSliding（GT Anchored）" and "FootSliding" in m:
+        return m.get("FootSliding")
+    return m.get(key)
 
 def agg(vals):
     vals = [v for v in vals if v is not None]

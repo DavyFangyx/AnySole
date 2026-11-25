@@ -6,7 +6,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 EVAL = REPO / "results/diagnostics/20261114_imu_eval_v2_all/V8_IMU_Residual"
-OLD = REPO / "results_display/Etest_crossfit_v8"
+OLD = REPO / "results_display/backup/Etest_crossfit_v8"
 OUT = REPO / "results_display/Etest_crossfit_physimu_vgate"
 FOLDS = ("fS5S6S11", "fS5S11S12", "fS6S7", "fS5S6S8")
 TBI_PATH = (REPO / "results/diagnostics/20261114_imu_eval_v2_motion"
@@ -37,10 +37,10 @@ LOC_INFO = {
     "MotionPRO @VT": "动捕定位辅助（输入含真实定位）",
     "V8_IMU_Residual @V": "自主定位",
     "V8_IMU_Residual @VT": "自主定位",
-    "V8_IMU_Residual @T": "GT 初始化（首帧位置锚）",
+    "V8_IMU_Residual @T": "GT 初始化（首帧位置+yaw 单锚）",
     "V8_IMU_Residual": "",  # Main_Table1 的 V2M/T2M/VT2M 行
 }
-V8_LOC = {"V2M": "自主定位", "T2M": "GT 初始化（首帧位置锚）", "VT2M": "自主定位"}
+V8_LOC = {"V2M": "自主定位", "T2M": "GT 初始化（首帧位置+yaw 单锚）", "VT2M": "自主定位"}
 GROUP_ORDER = {"自主定位": 0, "GT 初始化": 1, "测试集校准": 2, "动捕定位辅助": 3}
 
 # Q10 统一四折（2026-11-19）：GVHMR 基线行改用钉定帧 + canonical solver 的
@@ -356,6 +356,18 @@ def baseline_rows(csv_path, level):
         row["MPJRE"] = mpjre
         row["PA-MPJPE_anklefoot"] = baseline_anklefoot_pa(model, level)
         row["定位信息"] = LOC_INFO.get(row["模型"], "")
+        if model == "MotionPRO":
+            # 物理列改用 2026-11-25 重评 fourfold_summary（solver 修正后）。
+            ff = (BASE_ROOT / "MotionPRO" / "predictions"
+                  / LEVEL_TO_BASELINE_DIR.get(level, "") / "metrics"
+                  / "fourfold_summary.json")
+            if ff.is_file():
+                d = json.loads(ff.read_text(encoding="utf-8"))
+                for col, key in (("GroundPen", "ground_pen_mm"),
+                                 ("FootSliding", "foot_sliding_mm")):
+                    e = d.get(key)
+                    if e and e.get("n_folds", 0) >= 4:
+                        row[col] = "%.3f±%.3f" % (e["mean"], e["std"])
         out.append(row)
     return out
 
